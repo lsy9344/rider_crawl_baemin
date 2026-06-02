@@ -27,8 +27,11 @@ class AppConfig:
         load_dotenv()
         return cls(
             coupang_eats_url=os.getenv(
-                "COUPANG_EATS_URL",
-                "https://partner.coupangeats.com/page/rider-performance",
+                "BAEMIN_DELIVERY_HISTORY_URL",
+                os.getenv(
+                    "COUPANG_EATS_URL",
+                    "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
+                ),
             ),
             browser_mode=os.getenv("BROWSER_MODE", "cdp"),
             cdp_url=os.getenv("CDP_URL", "http://127.0.0.1:9222"),

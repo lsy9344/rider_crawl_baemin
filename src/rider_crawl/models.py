@@ -23,4 +23,6 @@ class CurrentScreenSnapshot:
     dinner_peak_count: float
     non_peak_count: float
     active_riders: int
+    reject_rate: float | None = None
+    cancel_rate: float | None = None
 

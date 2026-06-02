@@ -18,7 +18,10 @@ def test_build_mac_chrome_command_uses_cdp_port_and_dedicated_profile(tmp_path):
     assert "--remote-debugging-port=9222" in command
     assert user_data_arg == f"--user-data-dir={(tmp_path / 'runtime' / 'chrome-cdp-profile').resolve()}"
     assert Path(user_data_arg.removeprefix("--user-data-dir=")).is_absolute()
-    assert command[-1] == "https://partner.coupangeats.com/page/rider-performance"
+    assert (
+        command[-1]
+        == "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
+    )
 
 
 def test_build_mac_chrome_command_resolves_relative_default_profile_path():
@@ -60,7 +63,7 @@ def test_prepare_mac_chrome_wraps_command_failure(tmp_path):
 
 def _config(tmp_path: Path) -> AppConfig:
     return AppConfig(
-        coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        coupang_eats_url="https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=tmp_path / "browser",
@@ -77,7 +80,7 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _config_with_relative_log_dir() -> AppConfig:
     return AppConfig(
-        coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        coupang_eats_url="https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=Path("runtime/browser-profile"),

@@ -21,6 +21,7 @@ class UiSettings:
     send_enabled: bool
     send_only_on_change: bool
     interval_minutes: int
+    refresh_interval_seconds: int
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
@@ -28,8 +29,11 @@ class UiSettings:
     @classmethod
     def defaults(cls) -> "UiSettings":
         return cls(
-            performance_url="https://partner.coupangeats.com/page/rider-performance",
-            peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+            performance_url=(
+                "https://deliverycenter.baemin.com/delivery/history?"
+                "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
+            ),
+            peak_dashboard_url="",
             browser_mode="cdp",
             cdp_url="http://127.0.0.1:9222",
             browser_user_data_dir=Path("runtime/browser-profile"),
@@ -39,6 +43,7 @@ class UiSettings:
             send_enabled=False,
             send_only_on_change=False,
             interval_minutes=35,
+            refresh_interval_seconds=20,
             timezone="Asia/Seoul",
             run_lock_timeout_seconds=900,
             page_timeout_seconds=60000,
@@ -73,6 +78,8 @@ class UiSettingsStore:
         defaults = UiSettings.defaults()
         data = asdict(defaults)
         data.update(raw)
+        if "refresh_interval_seconds" not in raw and "interval_minutes" in raw:
+            data["refresh_interval_seconds"] = int(raw["interval_minutes"]) * 60
         data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
         data["log_dir"] = Path(data["log_dir"])
         return UiSettings(**data)

@@ -4,7 +4,7 @@ from rider_crawl.config import AppConfig
 
 
 def test_app_config_reads_environment_values(monkeypatch):
-    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/performance")
+    monkeypatch.setenv("BAEMIN_DELIVERY_HISTORY_URL", "https://example.test/delivery/history")
     monkeypatch.setenv("BROWSER_USER_DATA_DIR", "C:\\rider_crawl\\browser-profile")
     monkeypatch.setenv("HEADLESS", "true")
     monkeypatch.setenv("KAKAO_CHAT_NAME", "실적봇_의정부남부")
@@ -17,7 +17,7 @@ def test_app_config_reads_environment_values(monkeypatch):
 
     config = AppConfig.from_env()
 
-    assert config.coupang_eats_url == "https://example.test/performance"
+    assert config.coupang_eats_url == "https://example.test/delivery/history"
     assert config.browser_mode == "cdp"
     assert config.cdp_url == "http://127.0.0.1:9222"
     assert config.browser_user_data_dir == Path("C:\\rider_crawl\\browser-profile")
@@ -34,6 +34,7 @@ def test_app_config_reads_environment_values(monkeypatch):
 def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     for key in (
         "COUPANG_EATS_URL",
+        "BAEMIN_DELIVERY_HISTORY_URL",
         "BROWSER_USER_DATA_DIR",
         "HEADLESS",
         "KAKAO_CHAT_NAME",
@@ -49,6 +50,10 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     config = AppConfig.from_env()
 
     assert config.send_enabled is False
+    assert (
+        config.coupang_eats_url
+        == "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
+    )
     assert config.browser_mode == "cdp"
     assert config.cdp_url == "http://127.0.0.1:9222"
     assert config.kakao_chat_name == ""

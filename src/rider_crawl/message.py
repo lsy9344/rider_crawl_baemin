@@ -14,7 +14,9 @@ def render_current_screen_message(snapshot: CurrentScreenSnapshot) -> str:
             "",
             f"완료 : {_format_count(snapshot.completed_count)}건",
             f"거절/무시 : {_format_count(snapshot.rejected_ignored_count)}건",
+            *(_rate_line("거절율", snapshot.reject_rate)),
             f"취소 : {_format_count(snapshot.cancelled_count)}건",
+            *(_rate_line("취소율", snapshot.cancel_rate)),
             f"점심피크 : {_format_count(snapshot.lunch_peak_count)}건",
             f"저녁피크 : {_format_count(snapshot.dinner_peak_count)}건",
             f"논피크 : {_format_count(snapshot.non_peak_count)}건",
@@ -27,3 +29,9 @@ def _format_count(value: float | int) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+def _rate_line(label: str, value: float | None) -> list[str]:
+    if value is None:
+        return []
+    return [f"{label} : {_format_count(value)}%"]

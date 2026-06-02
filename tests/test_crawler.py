@@ -65,6 +65,14 @@ def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
     assert crawler.fetch_page_html(config) == "cdp-html"
 
 
+def test_fetch_page_html_via_cdp_uses_crawl4ai_cdp_fetcher(tmp_path, monkeypatch):
+    config = _config(tmp_path, browser_mode="cdp")
+
+    monkeypatch.setattr(crawler, "fetch_page_html_via_crawl4ai_cdp", lambda _config: "baemin-html")
+
+    assert crawler.fetch_page_html_via_cdp(config) == "baemin-html"
+
+
 def test_fetch_page_html_keeps_persistent_context_as_fallback(tmp_path, monkeypatch):
     config = _config(tmp_path, browser_mode="persistent")
 

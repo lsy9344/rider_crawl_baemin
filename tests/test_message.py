@@ -41,3 +41,33 @@ def test_render_current_screen_message_matches_spec_order():
             "수행중인인원 : 5명",
         ]
     )
+
+
+def test_render_current_screen_message_includes_calculated_rates_when_available():
+    snapshot = CurrentScreenSnapshot(
+        center_name="배민 배달현황",
+        date_label="",
+        shift_label="배달현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at="14:02",
+        available_current=1,
+        available_total=20,
+        waiting_count=19,
+        online_riders=1,
+        rejected_ignored_count=2,
+        cancelled_count=1,
+        completed_count=9,
+        sequence_violation_count=0,
+        lunch_peak_count=7,
+        dinner_peak_count=0,
+        non_peak_count=2,
+        active_riders=1,
+        reject_rate=16.7,
+        cancel_rate=8.3,
+    )
+
+    message = render_current_screen_message(snapshot)
+
+    assert "거절율 : 16.7%" in message
+    assert "취소율 : 8.3%" in message

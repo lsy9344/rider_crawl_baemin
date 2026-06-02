@@ -1,2 +1,2 @@
-"""Coupang Eats rider performance crawler."""
+"""Baemin delivery history crawler."""
 

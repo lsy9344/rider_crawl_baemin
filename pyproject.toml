@@ -1,11 +1,11 @@
 [project]
 name = "rider-crawl"
 version = "0.1.0"
-description = "Coupang Eats rider performance crawler and KakaoTalk text bot"
+description = "Baemin delivery history crawler and KakaoTalk text bot"
 requires-python = ">=3.10"
 dependencies = [
+  "crawl4ai==0.8.7",
   "playwright==1.60.0",
-  "scrapling==0.4.8",
   "python-dotenv>=1.1.0",
   "pyperclip>=1.9.0",
   "pyautogui>=0.9.54",

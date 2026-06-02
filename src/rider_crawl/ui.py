@@ -21,7 +21,11 @@ def default_settings_path() -> Path:
 
 
 def coerce_settings(values: dict[str, Any]) -> UiSettings:
-    interval_minutes = _positive_int(values["interval_minutes"], "실행 간격")
+    interval_minutes = _positive_int(
+        values.get("interval_minutes", UiSettings.defaults().interval_minutes),
+        "실행 간격",
+    )
+    refresh_interval_seconds = _positive_int(values.get("refresh_interval_seconds", "20"), "새로고침 간격")
     page_timeout_seconds = _positive_int(values["page_timeout_seconds"], "페이지 타임아웃")
     run_lock_timeout_seconds = _positive_int(values["run_lock_timeout_seconds"], "중복 실행 락 타임아웃")
 
@@ -37,6 +41,7 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         send_enabled=bool(values["send_enabled"]),
         send_only_on_change=bool(values["send_only_on_change"]),
         interval_minutes=interval_minutes,
+        refresh_interval_seconds=refresh_interval_seconds,
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=run_lock_timeout_seconds,
         page_timeout_seconds=page_timeout_seconds,
@@ -66,7 +71,7 @@ class RiderBotUi:
         self.worker: threading.Thread | None = None
         self.send_supported = platform.system() == "Windows"
 
-        self.root.title("쿠팡이츠 실시간 실적봇")
+        self.root.title("배민 배달현황 실적봇")
         self.root.geometry("900x760")
         self.root.minsize(780, 680)
 
@@ -87,6 +92,7 @@ class RiderBotUi:
             "log_dir": StringVar(value=str(settings.log_dir)),
             "kakao_chat_name": StringVar(value=settings.kakao_chat_name),
             "interval_minutes": StringVar(value=str(settings.interval_minutes)),
+            "refresh_interval_seconds": StringVar(value=str(settings.refresh_interval_seconds)),
             "page_timeout_seconds": StringVar(value=str(settings.page_timeout_seconds)),
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
             "headless": BooleanVar(value=settings.headless),
@@ -103,12 +109,12 @@ class RiderBotUi:
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(3, weight=1)
 
-        title = ttk.Label(outer, text="쿠팡이츠 실시간 실적봇", font=("", 18, "bold"))
+        title = ttk.Label(outer, text="배민 배달현황 실적봇", font=("", 18, "bold"))
         title.grid(row=0, column=0, sticky="w")
 
         subtitle = ttk.Label(
             outer,
-            text="로그인된 쿠팡이츠 페이지를 읽고 카카오톡 단체방에 텍스트 실적을 보냅니다.",
+            text="로그인된 배민 배달현황 페이지를 읽고 카카오톡 단체방에 텍스트 실적을 보냅니다.",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(4, 14))
 
@@ -121,13 +127,13 @@ class RiderBotUi:
         frame.columnconfigure(1, weight=1)
 
         rows = [
-            ("실적 URL", "performance_url"),
-            ("피크 대시보드 URL", "peak_dashboard_url"),
+            ("배달현황 URL", "performance_url"),
+            ("보조 URL", "peak_dashboard_url"),
             ("CDP 주소", "cdp_url"),
             ("앱 전용 브라우저 프로필 경로", "browser_user_data_dir"),
             ("로그 경로", "log_dir"),
             ("카카오톡 채팅방명", "kakao_chat_name"),
-            ("실행 간격(분)", "interval_minutes"),
+            ("새로고침 간격(초)", "refresh_interval_seconds"),
             ("페이지 타임아웃(ms)", "page_timeout_seconds"),
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
         ]
@@ -163,12 +169,12 @@ class RiderBotUi:
         ttk.Label(
             checklist,
             text=(
-                "1. 쿠팡이츠 링크는 로그인된 상태로 열려 있어야 합니다.\n"
+                "1. 배민 배달현황 링크는 로그인된 상태로 열려 있어야 합니다.\n"
                 "2. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
                 "3. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
                 "4. 카카오톡 PC 앱을 로그인하고 대상 단체방명을 고유하게 맞추세요.\n"
                 "5. 처음에는 카카오톡 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
-                "6. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 간격으로 반복됩니다."
+                "6. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 새로고침 간격으로 반복됩니다."
             ),
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -248,7 +254,7 @@ class RiderBotUi:
 
         self.stop_event = threading.Event()
         scheduler = BotScheduler(
-            interval_minutes=settings.interval_minutes,
+            interval_seconds=settings.refresh_interval_seconds,
             run_job=lambda: self._run_once_background(settings),
         )
         self.worker = threading.Thread(
@@ -276,7 +282,7 @@ class RiderBotUi:
         except Exception as exc:  # UI boundary: surface errors to the operator.
             self.messages.put(("error", str(exc)))
             return
-        self.messages.put(("result", (result, settings.interval_minutes)))
+        self.messages.put(("result", (result, settings.refresh_interval_seconds)))
 
     def _poll_messages(self) -> None:
         while True:
@@ -291,12 +297,12 @@ class RiderBotUi:
                 self.status_var.set("오류")
                 self._append_preview(f"[오류]\n{payload}\n")
             elif kind == "result":
-                result, interval_minutes = payload
-                self._show_result(result, interval_minutes)
+                result, refresh_interval_seconds = payload
+                self._show_result(result, refresh_interval_seconds)
 
         self.root.after(200, self._poll_messages)
 
-    def _show_result(self, result: RunResult, interval_minutes: int) -> None:
+    def _show_result(self, result: RunResult, refresh_interval_seconds: int) -> None:
         if result.skipped:
             status = "중복 메시지 건너뜀"
         elif result.sent:
@@ -305,7 +311,7 @@ class RiderBotUi:
             status = "메시지 생성 완료"
 
         self.status_var.set(status)
-        self.next_run_var.set((datetime.now() + timedelta(minutes=interval_minutes)).strftime("%H:%M:%S"))
+        self.next_run_var.set((datetime.now() + timedelta(seconds=refresh_interval_seconds)).strftime("%H:%M:%S"))
         self._append_preview(f"[{datetime.now().strftime('%H:%M:%S')}] {status}\n{result.message}\n\n")
 
     def _read_settings(self) -> UiSettings:

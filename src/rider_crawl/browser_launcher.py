@@ -36,8 +36,8 @@ def prepare_mac_chrome(
         raise BrowserLaunchError("Chrome 실행 실패: Google Chrome 설치와 CDP 주소를 확인하세요.") from exc
 
     return (
-        "Chrome 실행 요청 완료. 열린 Chrome 창에서 쿠팡이츠에 로그인하고 "
-        "실적 페이지가 보이는 상태로 두세요."
+        "Chrome 실행 요청 완료. 열린 Chrome 창에서 배민에 로그인하고 "
+        "배달현황 페이지가 보이는 상태로 두세요."
     )
 
 
