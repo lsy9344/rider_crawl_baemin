@@ -21,12 +21,16 @@ def test_run_once_dry_run_builds_message_without_sending(tmp_path):
         completed_count=102.4,
         sequence_violation_count=0,
         lunch_peak_count=60.6,
+        afternoon_non_peak_count=41.8,
         dinner_peak_count=0,
+        dinner_non_peak_count=0,
         non_peak_count=41.8,
         active_riders=5,
     )
     config = AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        baemin_center_name="",
+        baemin_center_id="",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=tmp_path / "browser-profile",
@@ -49,4 +53,5 @@ def test_run_once_dry_run_builds_message_without_sending(tmp_path):
     assert result.sent is False
     assert sent_messages == []
     assert "⏰ 14:02 기준" in result.message
-    assert "완료 : 102.4건" in result.message
+    assert "오전오후피크 : 60.6건" in result.message
+    assert "오후논피크 : 41.8건" in result.message

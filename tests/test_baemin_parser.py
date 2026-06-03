@@ -76,6 +76,8 @@ def test_parse_baemin_delivery_history_html_accepts_live_thead_summary_row():
     assert table.summary["아침점심피크"] == "7"
     assert snapshot.completed_count == 9
     assert snapshot.lunch_peak_count == 7
+    assert snapshot.afternoon_non_peak_count == 2
+    assert snapshot.dinner_non_peak_count == 0
     assert snapshot.non_peak_count == 2
 
 
@@ -94,8 +96,11 @@ def test_baemin_delivery_history_to_snapshot_uses_summary_row_for_existing_messa
     assert snapshot.rejected_ignored_count == 3
     assert snapshot.cancelled_count == 3
     assert snapshot.lunch_peak_count == 18
+    assert snapshot.afternoon_non_peak_count == 12
     assert snapshot.dinner_peak_count == 4
+    assert snapshot.dinner_non_peak_count == 2
     assert snapshot.non_peak_count == 14
+    assert snapshot.reject_rate == 15.8
 
 
 def test_parse_current_screen_html_accepts_baemin_delivery_history_page():

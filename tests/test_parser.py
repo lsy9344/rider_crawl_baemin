@@ -30,7 +30,9 @@ def test_parse_current_screen_html_extracts_summary_fields():
     assert snapshot.completed_count == 102.4
     assert snapshot.sequence_violation_count == 0
     assert snapshot.lunch_peak_count == 60.6
+    assert snapshot.afternoon_non_peak_count == 41.8
     assert snapshot.dinner_peak_count == 0
+    assert snapshot.dinner_non_peak_count == 0
     assert snapshot.non_peak_count == 41.8
     assert snapshot.active_riders == 5
 

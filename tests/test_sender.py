@@ -21,6 +21,8 @@ def test_send_kakao_text_refuses_non_windows_runtime(tmp_path):
 def _config(tmp_path, *, chat_name: str) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        baemin_center_name="",
+        baemin_center_id="",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=tmp_path / "browser",

@@ -13,7 +13,7 @@ def test_coerce_settings_builds_ui_settings_from_form_values(tmp_path):
             "browser_user_data_dir": str(tmp_path / "browser"),
             "log_dir": str(tmp_path / "logs"),
             "kakao_chat_name": " 실적봇_의정부남부 ",
-            "interval_minutes": "35",
+            "interval_minutes": "12",
             "page_timeout_seconds": "60000",
             "run_lock_timeout_seconds": "900",
             "headless": True,
@@ -29,13 +29,12 @@ def test_coerce_settings_builds_ui_settings_from_form_values(tmp_path):
     assert settings.browser_user_data_dir == Path(tmp_path / "browser")
     assert settings.log_dir == Path(tmp_path / "logs")
     assert settings.kakao_chat_name == "실적봇_의정부남부"
-    assert settings.interval_minutes == 35
-    assert settings.refresh_interval_seconds == 20
+    assert settings.interval_minutes == 12
     assert settings.send_enabled is False
     assert settings.send_only_on_change is True
 
 
-def test_coerce_settings_accepts_refresh_interval_without_legacy_minute_field(tmp_path):
+def test_coerce_settings_uses_default_message_interval_when_field_is_missing(tmp_path):
     settings = coerce_settings(
         {
             "performance_url": "https://example.test/rider",
@@ -45,7 +44,6 @@ def test_coerce_settings_accepts_refresh_interval_without_legacy_minute_field(tm
             "browser_user_data_dir": str(tmp_path / "browser"),
             "log_dir": str(tmp_path / "logs"),
             "kakao_chat_name": "실적봇",
-            "refresh_interval_seconds": "45",
             "page_timeout_seconds": "60000",
             "run_lock_timeout_seconds": "900",
             "headless": False,
@@ -54,7 +52,6 @@ def test_coerce_settings_accepts_refresh_interval_without_legacy_minute_field(tm
         }
     )
 
-    assert settings.refresh_interval_seconds == 45
     assert settings.interval_minutes == 35
 
 
@@ -76,9 +73,9 @@ def test_coerce_settings_rejects_bad_interval():
                 "send_enabled": False,
                 "send_only_on_change": False,
             }
-        )
+    )
     except ValueError as exc:
-        assert "실행 간격" in str(exc)
+        assert "메세지 전송 간격" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 

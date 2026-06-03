@@ -148,10 +148,14 @@ def parse_baemin_delivery_history_html(html: str) -> BaeminDeliveryHistoryTable:
     parser = _HtmlTableParser()
     parser.feed(html)
 
+    parsed_tables: list[BaeminDeliveryHistoryTable] = []
     for table in parser.tables:
         parsed = _parse_baemin_table(table)
         if parsed is not None:
-            return parsed
+            parsed_tables.append(parsed)
+
+    if parsed_tables:
+        return _merge_baemin_tables(parsed_tables)
 
     raise MissingPerformanceDataError("배민 배달현황 테이블을 찾지 못했습니다")
 
@@ -168,6 +172,8 @@ def baemin_delivery_history_to_snapshot(table: BaeminDeliveryHistoryTable) -> Cu
     completed_count = _required_number(totals, "완료")
     rejected_count = _required_number(totals, "거절")
     cancelled_count = _required_number(totals, "배차취소") + _required_number(totals, "배달취소(라이더귀책)")
+    afternoon_non_peak_count = _required_number(totals, "오후논피크")
+    dinner_non_peak_count = _required_number(totals, "심야논피크")
     delivery_event_count = completed_count + rejected_count + cancelled_count
 
     return CurrentScreenSnapshot(
@@ -187,10 +193,12 @@ def baemin_delivery_history_to_snapshot(table: BaeminDeliveryHistoryTable) -> Cu
         sequence_violation_count=0,
         lunch_peak_count=_required_number(totals, "아침점심피크"),
         dinner_peak_count=_required_number(totals, "저녁피크"),
-        non_peak_count=_required_number(totals, "오후논피크") + _required_number(totals, "심야논피크"),
+        non_peak_count=afternoon_non_peak_count + dinner_non_peak_count,
         active_riders=online_riders,
-        reject_rate=_rate(rejected_count, delivery_event_count),
+        reject_rate=_rate(rejected_count + cancelled_count, delivery_event_count),
         cancel_rate=_rate(cancelled_count, delivery_event_count),
+        afternoon_non_peak_count=afternoon_non_peak_count,
+        dinner_non_peak_count=dinner_non_peak_count,
     )
 
 
@@ -209,6 +217,8 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
     if not heading_match or not update_match or not available_match:
         raise MissingPerformanceDataError("required performance summary text was not found")
 
+    non_peak_count = parse_count(_required_number_after("논피크", normalized))
+
     return CurrentScreenSnapshot(
         center_name=(heading_match.group("center") if heading_match else center_match.group("center")).strip(),
         date_label=_extract_date_label(normalized),
@@ -226,8 +236,9 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
         sequence_violation_count=parse_count(_required_number_after("순서 미준수", normalized)),
         lunch_peak_count=parse_count(_required_number_after("점심피크", normalized)),
         dinner_peak_count=parse_count(_required_number_after("저녁피크", normalized)),
-        non_peak_count=parse_count(_required_number_after("논피크", normalized)),
+        non_peak_count=non_peak_count,
         active_riders=len(re.findall(r"\b배달중\b", normalized)),
+        afternoon_non_peak_count=non_peak_count,
     )
 
 
@@ -298,6 +309,35 @@ def _parse_baemin_table(table: list[list[str]]) -> BaeminDeliveryHistoryTable | 
                 riders.append(mapped)
         return BaeminDeliveryHistoryTable(headers=headers, summary=summary, riders=riders)
     return None
+
+
+def _merge_baemin_tables(tables: list[BaeminDeliveryHistoryTable]) -> BaeminDeliveryHistoryTable:
+    headers = tables[0].headers
+    summary = _sum_baemin_summaries(headers, [table.summary for table in tables if table.summary])
+    riders = [rider for table in tables for rider in table.riders]
+    return BaeminDeliveryHistoryTable(headers=headers, summary=summary, riders=riders)
+
+
+def _sum_baemin_summaries(headers: list[str], summaries: list[dict[str, str] | None]) -> dict[str, str] | None:
+    if not summaries:
+        return None
+
+    totals: dict[str, str] = {}
+    for header in headers:
+        values = [summary.get(header, "") for summary in summaries if summary is not None]
+        numeric_values = []
+        for value in values:
+            try:
+                numeric_values.append(parse_count(value))
+            except ValueError:
+                numeric_values = []
+                break
+        if numeric_values:
+            total = sum(numeric_values)
+            totals[header] = str(int(total) if isinstance(total, float) and total.is_integer() else total)
+        else:
+            totals[header] = values[0] if values else ""
+    return totals
 
 
 def _baemin_header_map(row: list[str]) -> dict[str, int]:

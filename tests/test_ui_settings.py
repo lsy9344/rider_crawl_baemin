@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
@@ -15,7 +16,6 @@ def test_ui_settings_defaults_are_safe_for_first_run():
     assert settings.cdp_url == "http://127.0.0.1:9222"
     assert settings.kakao_chat_name == ""
     assert settings.interval_minutes == 35
-    assert settings.refresh_interval_seconds == 20
     assert settings.send_enabled is False
     assert settings.send_only_on_change is False
 
@@ -25,7 +25,6 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     settings = UiSettings.defaults()
     settings.kakao_chat_name = "실적봇_의정부남부"
     settings.interval_minutes = 20
-    settings.refresh_interval_seconds = 30
     settings.send_enabled = True
     settings.browser_mode = "persistent"
     settings.cdp_url = "http://127.0.0.1:9333"
@@ -36,14 +35,13 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     loaded = store.load()
     assert loaded.kakao_chat_name == "실적봇_의정부남부"
     assert loaded.interval_minutes == 20
-    assert loaded.refresh_interval_seconds == 30
     assert loaded.send_enabled is True
     assert loaded.browser_mode == "persistent"
     assert loaded.cdp_url == "http://127.0.0.1:9333"
     assert loaded.browser_user_data_dir == Path("C:/rider_crawl/browser-profile")
 
 
-def test_ui_settings_load_migrates_legacy_minute_interval_to_refresh_seconds(tmp_path):
+def test_ui_settings_load_keeps_legacy_minute_interval(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(
         """
@@ -58,7 +56,23 @@ def test_ui_settings_load_migrates_legacy_minute_interval_to_refresh_seconds(tmp
     loaded = UiSettingsStore(path).load()
 
     assert loaded.interval_minutes == 35
-    assert loaded.refresh_interval_seconds == 2100
+
+
+def test_ui_settings_load_migrates_legacy_refresh_seconds_to_message_minutes(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://partner.coupangeats.com/page/rider-performance",
+          "refresh_interval_seconds": 125
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.interval_minutes == math.ceil(125 / 60)
 
 
 def test_ui_settings_convert_to_app_config(tmp_path):

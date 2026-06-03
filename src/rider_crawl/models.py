@@ -25,4 +25,5 @@ class CurrentScreenSnapshot:
     active_riders: int
     reject_rate: float | None = None
     cancel_rate: float | None = None
-
+    afternoon_non_peak_count: float = 0
+    dinner_non_peak_count: float = 0

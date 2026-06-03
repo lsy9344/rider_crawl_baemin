@@ -1,3 +1,5 @@
+import asyncio
+
 from rider_crawl.config import AppConfig
 from rider_crawl import crawler
 from rider_crawl.crawler import crawl_current_screen
@@ -36,6 +38,8 @@ def test_crawl_current_screen_parses_html_from_injected_fetcher(tmp_path):
     )
     config = AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        baemin_center_name="",
+        baemin_center_id="",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=tmp_path / "browser",
@@ -124,9 +128,19 @@ def test_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
     assert browser.closed is False
 
 
+def test_click_baemin_refresh_button_clicks_real_refresh_button():
+    page = _FakeAsyncPage()
+
+    asyncio.run(crawler._click_baemin_refresh_button(page))
+
+    assert page.clicked_button_name == "새로고침"
+
+
 def _config(tmp_path, *, browser_mode: str) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        baemin_center_name="",
+        baemin_center_id="",
         browser_mode=browser_mode,
         cdp_url="http://127.0.0.1:9222",
         browser_user_data_dir=tmp_path / "browser",
@@ -171,3 +185,25 @@ class _FakeBrowser:
 class _FakeContext:
     def __init__(self, pages: list[_FakePage]) -> None:
         self.pages = pages
+
+
+class _FakeAsyncPage:
+    def __init__(self) -> None:
+        self.clicked_button_name: str | None = None
+
+    def get_by_role(self, role: str, *, name: str, exact: bool):
+        assert role == "button"
+        assert exact is True
+        return _FakeAsyncButton(self, name)
+
+    async def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeAsyncButton:
+    def __init__(self, page: _FakeAsyncPage, name: str) -> None:
+        self.page = page
+        self.name = name
+
+    async def click(self, **_kwargs):
+        self.page.clicked_button_name = self.name

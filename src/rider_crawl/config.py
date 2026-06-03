@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 @dataclass(frozen=True)
 class AppConfig:
     coupang_eats_url: str
+    baemin_center_name: str
+    baemin_center_id: str
     browser_mode: str
     cdp_url: str
     browser_user_data_dir: Path
@@ -33,6 +35,8 @@ class AppConfig:
                     "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
                 ),
             ),
+            baemin_center_name=os.getenv("BAEMIN_CENTER_NAME", "표준서울마포B이츠앤홀딩스3"),
+            baemin_center_id=os.getenv("BAEMIN_CENTER_ID", "DP2605181318"),
             browser_mode=os.getenv("BROWSER_MODE", "cdp"),
             cdp_url=os.getenv("CDP_URL", "http://127.0.0.1:9222"),
             browser_user_data_dir=Path(os.getenv("BROWSER_USER_DATA_DIR", "runtime/browser-profile")),

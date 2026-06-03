@@ -4,25 +4,19 @@ from .models import CurrentScreenSnapshot
 
 
 def render_current_screen_message(snapshot: CurrentScreenSnapshot) -> str:
-    return "\n".join(
-        [
-            "[실시간 실적봇]",
-            f"⏰ {snapshot.updated_at} 기준",
-            "",
-            f"{snapshot.shift_label} : {snapshot.available_current}명/{snapshot.available_total}명",
-            f"대기 : {snapshot.waiting_count}명",
-            "",
-            f"완료 : {_format_count(snapshot.completed_count)}건",
-            f"거절/무시 : {_format_count(snapshot.rejected_ignored_count)}건",
-            *(_rate_line("거절율", snapshot.reject_rate)),
-            f"취소 : {_format_count(snapshot.cancelled_count)}건",
-            *(_rate_line("취소율", snapshot.cancel_rate)),
-            f"점심피크 : {_format_count(snapshot.lunch_peak_count)}건",
-            f"저녁피크 : {_format_count(snapshot.dinner_peak_count)}건",
-            f"논피크 : {_format_count(snapshot.non_peak_count)}건",
-            f"수행중인인원 : {snapshot.active_riders}명",
-        ]
-    )
+    lines = [
+        "[실시간 실적봇]",
+        f"⏰ {snapshot.updated_at} 기준",
+        "",
+        f"오전오후피크 : {_format_count(snapshot.lunch_peak_count)}건",
+        f"오후논피크 : {_format_count(snapshot.afternoon_non_peak_count)}건",
+        f"저녁피크 : {_format_count(snapshot.dinner_peak_count)}건",
+        f"저녁논피크 : {_format_count(snapshot.dinner_non_peak_count)}건",
+    ]
+    rate_lines = _rate_line("거절율", snapshot.reject_rate)
+    if rate_lines:
+        lines.extend(["", *rate_lines])
+    return "\n".join(lines)
 
 
 def _format_count(value: float | int) -> str:

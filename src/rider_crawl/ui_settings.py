@@ -12,6 +12,8 @@ from .config import AppConfig
 class UiSettings:
     performance_url: str
     peak_dashboard_url: str
+    baemin_center_name: str
+    baemin_center_id: str
     browser_mode: str
     cdp_url: str
     browser_user_data_dir: Path
@@ -21,7 +23,6 @@ class UiSettings:
     send_enabled: bool
     send_only_on_change: bool
     interval_minutes: int
-    refresh_interval_seconds: int
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
@@ -34,6 +35,8 @@ class UiSettings:
                 "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
             ),
             peak_dashboard_url="",
+            baemin_center_name="표준서울마포B이츠앤홀딩스3",
+            baemin_center_id="DP2605181318",
             browser_mode="cdp",
             cdp_url="http://127.0.0.1:9222",
             browser_user_data_dir=Path("runtime/browser-profile"),
@@ -43,7 +46,6 @@ class UiSettings:
             send_enabled=False,
             send_only_on_change=False,
             interval_minutes=35,
-            refresh_interval_seconds=20,
             timezone="Asia/Seoul",
             run_lock_timeout_seconds=900,
             page_timeout_seconds=60000,
@@ -52,6 +54,8 @@ class UiSettings:
     def to_app_config(self) -> AppConfig:
         return AppConfig(
             coupang_eats_url=self.performance_url,
+            baemin_center_name=self.baemin_center_name,
+            baemin_center_id=self.baemin_center_id,
             browser_mode=self.browser_mode,
             cdp_url=self.cdp_url,
             browser_user_data_dir=self.browser_user_data_dir,
@@ -77,9 +81,10 @@ class UiSettingsStore:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         defaults = UiSettings.defaults()
         data = asdict(defaults)
+        if "interval_minutes" not in raw and "refresh_interval_seconds" in raw:
+            data["interval_minutes"] = _seconds_to_minutes(int(raw["refresh_interval_seconds"]))
         data.update(raw)
-        if "refresh_interval_seconds" not in raw and "interval_minutes" in raw:
-            data["refresh_interval_seconds"] = int(raw["interval_minutes"]) * 60
+        data.pop("refresh_interval_seconds", None)
         data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
         data["log_dir"] = Path(data["log_dir"])
         return UiSettings(**data)
@@ -97,3 +102,7 @@ def _to_jsonable(settings: UiSettings) -> dict[str, Any]:
     data["browser_user_data_dir"] = str(settings.browser_user_data_dir)
     data["log_dir"] = str(settings.log_dir)
     return data
+
+
+def _seconds_to_minutes(seconds: int) -> int:
+    return max(1, (seconds + 59) // 60)
