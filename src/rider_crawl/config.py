@@ -25,6 +25,7 @@ class AppConfig:
     page_timeout_seconds: int
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_message_thread_id: str = ""
     messenger_name: str = "telegram"
     crawl_name: str = ""
     state_subdir: str = ""
@@ -55,6 +56,7 @@ class AppConfig:
             page_timeout_seconds=int(os.getenv("PAGE_TIMEOUT_SECONDS", "60000")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            telegram_message_thread_id=os.getenv("TELEGRAM_MESSAGE_THREAD_ID", ""),
             messenger_name=os.getenv("MESSENGER_NAME", "telegram"),
             crawl_name=os.getenv("CRAWL_NAME", ""),
             state_subdir=os.getenv("STATE_SUBDIR", ""),

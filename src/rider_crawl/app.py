@@ -32,7 +32,7 @@ def run_once(
 
     with RunLock(config.state_dir / "run.lock", stale_timeout_seconds=config.run_lock_timeout_seconds):
         snapshot = crawl(config)
-        message = render_current_screen_message(snapshot)
+        message = render_current_screen_message(snapshot, source_label=config.crawl_name)
         message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
 
         if config.send_only_on_change and _is_duplicate(config, message_hash):

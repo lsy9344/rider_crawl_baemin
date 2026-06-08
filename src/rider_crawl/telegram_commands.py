@@ -37,9 +37,11 @@ class RiderCancelMatch:
 
 
 FetchHtml = Callable[[AppConfig], str]
-SendText = Callable[[AppConfig, str], None]
-HandleText = Callable[[str], object]
+SendText = Callable[..., None]
+HandleText = Callable[[str, str, int | None], object]
 GetUpdates = Callable[..., list[dict]]
+LogEvent = Callable[[str], None]
+TelegramTarget = tuple[str, str]
 
 
 def parse_rider_lookup_command(text: str) -> RiderLookupCommand | None:
@@ -117,41 +119,84 @@ class TelegramCommandProcessor:
         self,
         configs: list[AppConfig],
         *,
-        bot_config: AppConfig,
+        bot_config: AppConfig | None = None,
         fetch_html: FetchHtml | None = None,
         send_text: SendText | None = None,
         lock: threading.Lock | None = None,
+        locks_by_chat_id: dict[str, threading.Lock] | None = None,
+        locks_by_target: dict[TelegramTarget, threading.Lock] | None = None,
+        log_event: LogEvent | None = None,
     ) -> None:
         self.configs = configs
         self.bot_config = bot_config
         self.fetch_html = fetch_html or _fetch_page_html
         self.send_text = send_text or _send_telegram_text
-        self.lock = lock or threading.Lock()
+        self.log_event = log_event or (lambda _message: None)
+        self.config_by_target = {
+            _config_target(config): config
+            for config in configs
+            if _config_target(config)[0]
+        }
+        if locks_by_target is not None:
+            self.locks_by_target = {
+                (_normalize_chat_id(chat_id), _normalize_thread_id(thread_id)): lock
+                for (chat_id, thread_id), lock in locks_by_target.items()
+                if _normalize_chat_id(chat_id)
+            }
+        elif locks_by_chat_id is not None:
+            self.locks_by_target = {
+                (_normalize_chat_id(chat_id), ""): lock
+                for chat_id, lock in locks_by_chat_id.items()
+                if _normalize_chat_id(chat_id)
+            }
+        elif lock is not None:
+            self.locks_by_target = {target: lock for target in self.config_by_target}
+        else:
+            self.locks_by_target = {target: threading.Lock() for target in self.config_by_target}
+        for target in self.config_by_target:
+            self.locks_by_target.setdefault(target, threading.Lock())
 
-    def handle_text(self, text: str) -> bool:
+    def handle_text(self, chat_id: str, text: str, message_thread_id: int | None = None) -> bool:
         command = parse_rider_lookup_command(text)
         if command is None:
             return False
 
-        self.send_text(self.bot_config, "조회 중입니다.")
-        with self.lock:
-            matches = self._lookup(command)
-        self.send_text(self.bot_config, _render_lookup_reply(command, matches))
+        normalized_chat_id = _normalize_chat_id(chat_id)
+        target = (normalized_chat_id, _normalize_thread_id(message_thread_id))
+        config = self.config_by_target.get(target)
+        if config is None:
+            self.log_event(f"텔레그램 대상 미매칭: {_target_label(target)}")
+            return False
+
+        source = _source_label(config, self.configs.index(config))
+        self.log_event(f"{source} 텔레그램 명령 수신: !{command.name}{command.phone_last4}")
+        self.send_text(config, "조회 중입니다.", message_thread_id=message_thread_id)
+        try:
+            with self.locks_by_target[target]:
+                self.log_event(f"{source} 명령 조회 시작")
+                matches = self._lookup(config, command)
+                self.log_event(f"{source} 명령 조회 완료")
+        except Exception as exc:
+            self.log_event(f"{source} 명령 조회 오류: {exc}")
+            self.send_text(config, "조회 중 오류가 발생했습니다.", message_thread_id=message_thread_id)
+            return True
+
+        self.send_text(config, _render_lookup_reply(command, matches), message_thread_id=message_thread_id)
         return True
 
-    def _lookup(self, command: RiderLookupCommand) -> list[RiderCancelMatch]:
+    def _lookup(self, config: AppConfig, command: RiderLookupCommand) -> list[RiderCancelMatch]:
         matches: list[RiderCancelMatch] = []
-        for index, config in enumerate(self.configs):
-            if not config.coupang_eats_url.strip():
-                continue
-            html = self.fetch_html(config)
-            table = parse_baemin_delivery_history_html(html)
-            for stats in find_rider_cancel_stats(
-                table.riders,
-                name=command.name,
-                phone_last4=command.phone_last4,
-            ):
-                matches.append(RiderCancelMatch(source_label=_source_label(config, index), stats=stats))
+        if not config.coupang_eats_url.strip():
+            return matches
+        html = self.fetch_html(config)
+        table = parse_baemin_delivery_history_html(html)
+        index = self.configs.index(config)
+        for stats in find_rider_cancel_stats(
+            table.riders,
+            name=command.name,
+            phone_last4=command.phone_last4,
+        ):
+            matches.append(RiderCancelMatch(source_label=_source_label(config, index), stats=stats))
         return matches
 
 
@@ -178,17 +223,15 @@ class TelegramUpdatePoller:
         )
         for update in updates:
             update_id = update.get("update_id")
+            message = update.get("message")
+            if isinstance(message, dict):
+                text = message.get("text")
+                chat_id = _message_chat_id(message)
+                message_thread_id = _message_thread_id(message)
+                if isinstance(text, str) and chat_id:
+                    self.handle_text(chat_id, text, message_thread_id)
             if isinstance(update_id, int):
                 self.next_update_id = max(self.next_update_id or 0, update_id + 1)
-
-            message = update.get("message")
-            if not isinstance(message, dict):
-                continue
-            if not _message_matches_chat(message, self.config.telegram_chat_id):
-                continue
-            text = message.get("text")
-            if isinstance(text, str):
-                self.handle_text(text)
 
     def run_loop(self, *, stop_event) -> None:
         while not stop_event.is_set():
@@ -241,16 +284,37 @@ def _source_label(config: AppConfig, index: int) -> str:
     return config.crawl_name.strip() or config.baemin_center_name.strip() or f"크롤링{index + 1}"
 
 
+def _normalize_chat_id(chat_id: object) -> str:
+    return str(chat_id or "").strip()
+
+
+def _normalize_thread_id(message_thread_id: object) -> str:
+    return str(message_thread_id or "").strip()
+
+
+def _config_target(config: AppConfig) -> TelegramTarget:
+    return (_normalize_chat_id(config.telegram_chat_id), _normalize_thread_id(config.telegram_message_thread_id))
+
+
+def _target_label(target: TelegramTarget) -> str:
+    chat_id, thread_id = target
+    if not chat_id:
+        return "<empty>"
+    if thread_id:
+        return f"{chat_id}/{thread_id}"
+    return chat_id
+
+
 def _fetch_page_html(config: AppConfig) -> str:
     from .crawler import fetch_page_html
 
     return fetch_page_html(config)
 
 
-def _send_telegram_text(config: AppConfig, message: str) -> None:
+def _send_telegram_text(config: AppConfig, message: str, *, message_thread_id: int | None = None) -> None:
     from .sender import send_telegram_text
 
-    send_telegram_text(config, message)
+    send_telegram_text(config, message, message_thread_id=message_thread_id)
 
 
 def _get_telegram_updates(config: AppConfig, *, offset: int | None, timeout_seconds: int) -> list[dict]:
@@ -260,7 +324,16 @@ def _get_telegram_updates(config: AppConfig, *, offset: int | None, timeout_seco
 
 
 def _message_matches_chat(message: dict, chat_id: str) -> bool:
+    return _message_chat_id(message) == chat_id.strip()
+
+
+def _message_chat_id(message: dict) -> str:
     chat = message.get("chat")
     if not isinstance(chat, dict):
-        return False
-    return str(chat.get("id", "")).strip() == chat_id.strip()
+        return ""
+    return str(chat.get("id", "")).strip()
+
+
+def _message_thread_id(message: dict) -> int | None:
+    value = message.get("message_thread_id")
+    return value if isinstance(value, int) else None

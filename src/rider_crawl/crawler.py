@@ -223,7 +223,10 @@ async def _click_first_visible_text(page: Any, *texts: str) -> None:
 
 
 async def _click_baemin_refresh_button(page: Any) -> None:
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError:
+        PlaywrightTimeoutError = TimeoutError
 
     await page.get_by_role("button", name="새로고침", exact=True).click(timeout=5_000)
     try:

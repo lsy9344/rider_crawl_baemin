@@ -21,6 +21,7 @@ class UiSettings:
     kakao_chat_name: str
     telegram_bot_token: str
     telegram_chat_id: str
+    telegram_message_thread_id: str
     messenger_name: str
     log_dir: Path
     send_enabled: bool
@@ -47,6 +48,7 @@ class UiSettings:
             kakao_chat_name="",
             telegram_bot_token="",
             telegram_chat_id="",
+            telegram_message_thread_id="",
             messenger_name="telegram",
             log_dir=Path("logs"),
             send_enabled=False,
@@ -80,6 +82,7 @@ class UiSettings:
             kakao_chat_name=self.kakao_chat_name,
             telegram_bot_token=self.telegram_bot_token,
             telegram_chat_id=self.telegram_chat_id,
+            telegram_message_thread_id=self.telegram_message_thread_id,
             messenger_name=self.messenger_name,
             log_dir=self.log_dir,
             send_enabled=self.send_enabled,

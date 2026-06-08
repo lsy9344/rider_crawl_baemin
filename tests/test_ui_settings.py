@@ -20,6 +20,7 @@ def test_ui_settings_defaults_are_safe_for_first_run():
     assert settings.send_only_on_change is False
     assert settings.telegram_bot_token == ""
     assert settings.telegram_chat_id == ""
+    assert settings.telegram_message_thread_id == ""
 
 
 def test_ui_settings_save_and_load_round_trip(tmp_path):
@@ -33,6 +34,7 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     settings.browser_user_data_dir = Path("C:/rider_crawl/browser-profile")
     settings.telegram_bot_token = "token"
     settings.telegram_chat_id = "-100123"
+    settings.telegram_message_thread_id = "77"
 
     store.save(settings)
 
@@ -45,6 +47,7 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     assert loaded.browser_user_data_dir == Path("C:/rider_crawl/browser-profile")
     assert loaded.telegram_bot_token == "token"
     assert loaded.telegram_chat_id == "-100123"
+    assert loaded.telegram_message_thread_id == "77"
 
 
 def test_ui_settings_load_all_migrates_single_settings_to_nine_tabs(tmp_path):
@@ -66,6 +69,7 @@ def test_ui_settings_load_all_migrates_single_settings_to_nine_tabs(tmp_path):
     assert settings[0].performance_url == "https://example.test/delivery/history"
     assert settings[0].telegram_bot_token == "token"
     assert settings[0].telegram_chat_id == "-100123"
+    assert settings[0].telegram_message_thread_id == ""
     assert settings[0].cdp_url == "http://127.0.0.1:9222"
     assert settings[1].performance_url == ""
     assert settings[1].cdp_url == "http://127.0.0.1:9223"
@@ -77,6 +81,7 @@ def test_ui_settings_save_all_and_load_all_round_trip(tmp_path):
     settings = UiSettingsStore(tmp_path / "missing.json").load_all()
     settings[0].telegram_bot_token = "token"
     settings[0].telegram_chat_id = "-100123"
+    settings[0].telegram_message_thread_id = "77"
     settings[1].performance_url = "https://example.test/second"
     settings[1].browser_user_data_dir = Path("runtime/browser-profile-2")
 
@@ -86,6 +91,7 @@ def test_ui_settings_save_all_and_load_all_round_trip(tmp_path):
     assert len(loaded) == 9
     assert loaded[0].telegram_bot_token == "token"
     assert loaded[0].telegram_chat_id == "-100123"
+    assert loaded[0].telegram_message_thread_id == "77"
     assert loaded[1].performance_url == "https://example.test/second"
     assert loaded[1].browser_user_data_dir == Path("runtime/browser-profile-2")
 
@@ -136,6 +142,7 @@ def test_ui_settings_convert_to_app_config(tmp_path):
     settings.send_only_on_change = True
     settings.telegram_bot_token = "token"
     settings.telegram_chat_id = "-100123"
+    settings.telegram_message_thread_id = "77"
 
     config = settings.to_app_config()
 
@@ -149,3 +156,4 @@ def test_ui_settings_convert_to_app_config(tmp_path):
     assert config.send_only_on_change is True
     assert config.telegram_bot_token == "token"
     assert config.telegram_chat_id == "-100123"
+    assert config.telegram_message_thread_id == "77"

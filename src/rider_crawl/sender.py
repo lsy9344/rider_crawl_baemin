@@ -31,18 +31,25 @@ def send_telegram_text(
     config: AppConfig,
     message: str,
     *,
+    message_thread_id: int | None = None,
     urlopen: UrlOpen = default_urlopen,
     timeout_seconds: int = 10,
 ) -> None:
     _required_telegram_bot_token(config)
+    payload: dict[str, object] = {
+        "chat_id": _required_telegram_chat_id(config),
+        "text": message,
+        "disable_web_page_preview": "true",
+    }
+    target_thread_id = message_thread_id
+    if target_thread_id is None:
+        target_thread_id = _optional_telegram_message_thread_id(config)
+    if target_thread_id is not None:
+        payload["message_thread_id"] = target_thread_id
     _telegram_api_request(
         config,
         "sendMessage",
-        {
-            "chat_id": _required_telegram_chat_id(config),
-            "text": message,
-            "disable_web_page_preview": "true",
-        },
+        payload,
         urlopen=urlopen,
         timeout_seconds=timeout_seconds,
     )
@@ -118,6 +125,16 @@ def _required_telegram_chat_id(config: AppConfig) -> str:
     if not chat_id:
         raise TelegramSendError("TELEGRAM_CHAT_ID is required before sending")
     return chat_id
+
+
+def _optional_telegram_message_thread_id(config: AppConfig) -> int | None:
+    raw = config.telegram_message_thread_id.strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise TelegramSendError("TELEGRAM_MESSAGE_THREAD_ID must be a number") from exc
 
 
 def send_kakao_text(

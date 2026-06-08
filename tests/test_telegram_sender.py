@@ -25,6 +25,36 @@ def test_send_telegram_text_posts_send_message_request(tmp_path):
     assert payload["disable_web_page_preview"] == ["true"]
 
 
+def test_send_telegram_text_includes_configured_message_thread_id(tmp_path):
+    calls: list[tuple[str, bytes]] = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.data))
+        return _FakeResponse({"ok": True, "result": {"message_id": 10}})
+
+    config = _config(tmp_path, telegram_message_thread_id="77")
+
+    send_telegram_text(config, "hello", urlopen=fake_urlopen)
+
+    payload = parse_qs(calls[0][1].decode("utf-8"))
+    assert payload["message_thread_id"] == ["77"]
+
+
+def test_send_telegram_text_can_override_message_thread_id_for_replies(tmp_path):
+    calls: list[tuple[str, bytes]] = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.data))
+        return _FakeResponse({"ok": True, "result": {"message_id": 10}})
+
+    config = _config(tmp_path, telegram_message_thread_id="77")
+
+    send_telegram_text(config, "hello", message_thread_id=88, urlopen=fake_urlopen)
+
+    payload = parse_qs(calls[0][1].decode("utf-8"))
+    assert payload["message_thread_id"] == ["88"]
+
+
 def test_send_telegram_text_requires_token_and_chat_id(tmp_path):
     config = _config(tmp_path, token="", chat_id="")
 
@@ -63,7 +93,13 @@ class _FakeResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def _config(tmp_path, *, token: str = "secret-token", chat_id: str = "-100123") -> AppConfig:
+def _config(
+    tmp_path,
+    *,
+    token: str = "secret-token",
+    chat_id: str = "-100123",
+    telegram_message_thread_id: str = "",
+) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://deliverycenter.baemin.com/delivery/history",
         baemin_center_name="",
@@ -81,4 +117,5 @@ def _config(tmp_path, *, token: str = "secret-token", chat_id: str = "-100123") 
         page_timeout_seconds=60000,
         telegram_bot_token=token,
         telegram_chat_id=chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
     )
