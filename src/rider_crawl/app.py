@@ -56,12 +56,12 @@ def _write_last_hash(config: AppConfig, message_hash: str) -> None:
 
 
 def _crawl_snapshot(config: AppConfig) -> CurrentScreenSnapshot:
-    from .crawler import crawl_current_screen
+    from .platforms import crawl_snapshot
 
-    return crawl_current_screen(config)
+    return crawl_snapshot(config)
 
 
 def _send_message(config: AppConfig, message: str) -> None:
-    from .sender import send_kakao_text
+    from .messengers import dispatch_text_message
 
-    send_kakao_text(config, message)
+    dispatch_text_message(config, message)
