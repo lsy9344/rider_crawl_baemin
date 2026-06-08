@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from rider_crawl.browser_launcher import BrowserLaunchError, build_mac_chrome_command, prepare_mac_chrome
+from rider_crawl.browser_launcher import (
+    BrowserLaunchError,
+    build_mac_chrome_command,
+    build_windows_chrome_command,
+    prepare_chrome,
+    prepare_mac_chrome,
+)
 from rider_crawl.config import AppConfig
 
 
@@ -16,7 +22,7 @@ def test_build_mac_chrome_command_uses_cdp_port_and_dedicated_profile(tmp_path):
     assert command[:4] == ["open", "-na", "Google Chrome", "--args"]
     assert "--remote-debugging-address=127.0.0.1" in command
     assert "--remote-debugging-port=9222" in command
-    assert user_data_arg == f"--user-data-dir={(tmp_path / 'runtime' / 'chrome-cdp-profile').resolve()}"
+    assert user_data_arg == f"--user-data-dir={(tmp_path / 'browser').resolve()}"
     assert Path(user_data_arg.removeprefix("--user-data-dir=")).is_absolute()
     assert (
         command[-1]
@@ -30,7 +36,20 @@ def test_build_mac_chrome_command_resolves_relative_default_profile_path():
     command = build_mac_chrome_command(config)
     user_data_arg = next(arg for arg in command if arg.startswith("--user-data-dir="))
 
-    assert user_data_arg == f"--user-data-dir={(Path('runtime') / 'chrome-cdp-profile').resolve()}"
+    assert user_data_arg == f"--user-data-dir={(Path('runtime') / 'browser-profile').resolve()}"
+
+
+def test_build_windows_chrome_command_uses_cdp_port_profile_and_baemin_url(tmp_path):
+    config = _config(tmp_path)
+
+    command = build_windows_chrome_command(config, chrome_path="chrome.exe")
+    user_data_arg = next(arg for arg in command if arg.startswith("--user-data-dir="))
+
+    assert command[0] == "chrome.exe"
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert "--remote-debugging-port=9222" in command
+    assert user_data_arg == f"--user-data-dir={(tmp_path / 'browser').resolve()}"
+    assert command[-1] == config.coupang_eats_url
 
 
 def test_prepare_mac_chrome_runs_open_command_and_creates_profile_dir(tmp_path):
@@ -44,7 +63,22 @@ def test_prepare_mac_chrome_runs_open_command_and_creates_profile_dir(tmp_path):
     )
 
     assert calls == [(build_mac_chrome_command(config), True)]
-    assert (tmp_path / "runtime" / "chrome-cdp-profile").is_dir()
+    assert (tmp_path / "browser").is_dir()
+    assert "Chrome 실행 요청 완료" in message
+
+
+def test_prepare_chrome_runs_windows_command_and_creates_profile_dir(tmp_path):
+    calls = []
+    config = _config(tmp_path)
+
+    message = prepare_chrome(
+        config,
+        platform_name="Windows",
+        run_command=lambda command, check: calls.append((command, check)),
+    )
+
+    assert calls == [(build_windows_chrome_command(config), False)]
+    assert (tmp_path / "browser").is_dir()
     assert "Chrome 실행 요청 완료" in message
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "rider-crawl"
 version = "0.1.0"
-description = "Baemin delivery history crawler and KakaoTalk text bot"
+description = "Baemin delivery history crawler and Telegram text bot"
 requires-python = ">=3.10"
 dependencies = [
   "crawl4ai==0.8.7",

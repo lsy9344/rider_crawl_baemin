@@ -11,13 +11,30 @@ from tkinter import ttk
 from typing import Any
 
 from .app import RunResult, run_once
-from .browser_launcher import BrowserLaunchError, prepare_mac_chrome
+from .browser_launcher import BrowserLaunchError, prepare_chrome
 from .scheduler import BotScheduler
+from .telegram_commands import TelegramCommandProcessor, TelegramUpdatePoller
 from .ui_settings import UiSettings, UiSettingsStore
+
+
+DEFAULT_WINDOW_GEOMETRY = "900x900"
+MIN_WINDOW_HEIGHT = 780
+PREVIEW_TEXT_HEIGHT = 24
 
 
 def default_settings_path() -> Path:
     return Path("runtime/state/ui_settings.json")
+
+
+def active_crawling_settings(settings_list: list[UiSettings]) -> list[tuple[int, UiSettings]]:
+    return [(index, settings) for index, settings in enumerate(settings_list) if settings.performance_url.strip()]
+
+
+def app_configs_from_settings(indexed_settings: list[tuple[int, UiSettings]]):
+    return [
+        settings.to_app_config(crawl_name=f"크롤링{index + 1}", state_subdir=f"crawling{index + 1}")
+        for index, settings in indexed_settings
+    ]
 
 
 def coerce_settings(values: dict[str, Any]) -> UiSettings:
@@ -38,6 +55,9 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         browser_user_data_dir=Path(str(values["browser_user_data_dir"]).strip()),
         headless=bool(values["headless"]),
         kakao_chat_name=str(values["kakao_chat_name"]).strip(),
+        telegram_bot_token=str(values.get("telegram_bot_token", "")).strip(),
+        telegram_chat_id=str(values.get("telegram_chat_id", "")).strip(),
+        messenger_name=str(values.get("messenger_name", "telegram")).strip() or "telegram",
         log_dir=Path(str(values["log_dir"]).strip()),
         send_enabled=bool(values["send_enabled"]),
         send_only_on_change=bool(values["send_only_on_change"]),
@@ -49,7 +69,7 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
 
 
 def disable_unsupported_send(settings: UiSettings, *, platform_name: str | None = None) -> bool:
-    if (platform_name or platform.system()) == "Windows" or not settings.send_enabled:
+    if settings.messenger_name != "kakao" or (platform_name or platform.system()) == "Windows" or not settings.send_enabled:
         return False
     settings.send_enabled = False
     return True
@@ -65,17 +85,21 @@ class RiderBotUi:
     def __init__(self, root: Tk, store: UiSettingsStore) -> None:
         self.root = root
         self.store = store
-        self.settings = store.load()
+        self.settings_tabs = store.load_all()
+        self.settings = self.settings_tabs[0]
         self.messages: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.stop_event: threading.Event | None = None
-        self.worker: threading.Thread | None = None
-        self.send_supported = platform.system() == "Windows"
+        self.workers: list[threading.Thread] = []
+        self.telegram_worker: threading.Thread | None = None
+        self.settings_notebook: ttk.Notebook | None = None
+        self.crawl_lock = threading.Lock()
 
         self.root.title("배민 배달현황 실적봇")
-        self.root.geometry("900x760")
-        self.root.minsize(780, 680)
+        self.root.geometry(DEFAULT_WINDOW_GEOMETRY)
+        self.root.minsize(780, MIN_WINDOW_HEIGHT)
 
-        self.vars = self._build_vars(self.settings)
+        self.vars_by_tab = [self._build_vars(settings) for settings in self.settings_tabs]
+        self.vars = self.vars_by_tab[0]
         self.status_var = StringVar(value="대기 중")
         self.next_run_var = StringVar(value="-")
 
@@ -91,11 +115,14 @@ class RiderBotUi:
             "browser_user_data_dir": StringVar(value=str(settings.browser_user_data_dir)),
             "log_dir": StringVar(value=str(settings.log_dir)),
             "kakao_chat_name": StringVar(value=settings.kakao_chat_name),
+            "telegram_bot_token": StringVar(value=settings.telegram_bot_token),
+            "telegram_chat_id": StringVar(value=settings.telegram_chat_id),
+            "messenger_name": StringVar(value=settings.messenger_name),
             "interval_minutes": StringVar(value=str(settings.interval_minutes)),
             "page_timeout_seconds": StringVar(value=str(settings.page_timeout_seconds)),
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
             "headless": BooleanVar(value=settings.headless),
-            "send_enabled": BooleanVar(value=settings.send_enabled if self.send_supported else False),
+            "send_enabled": BooleanVar(value=settings.send_enabled),
             "send_only_on_change": BooleanVar(value=settings.send_only_on_change),
         }
 
@@ -113,7 +140,7 @@ class RiderBotUi:
 
         subtitle = ttk.Label(
             outer,
-            text="로그인된 배민 배달현황 페이지를 읽고 카카오톡 단체방에 텍스트 실적을 보냅니다.",
+            text="로그인된 배민 배달현황 페이지를 읽고 텔레그램 그룹방에 텍스트 실적을 보냅니다.",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(4, 14))
 
@@ -123,38 +150,52 @@ class RiderBotUi:
 
     def _build_settings(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.LabelFrame(parent, text="설정", padding=14)
-        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
+        notebook = ttk.Notebook(frame)
+        notebook.grid(row=0, column=0, sticky="ew")
+        self.settings_notebook = notebook
+
+        for index, tab_vars in enumerate(self.vars_by_tab):
+            tab = ttk.Frame(notebook, padding=10)
+            tab.columnconfigure(1, weight=1)
+            self._build_settings_fields(tab, tab_vars)
+            notebook.add(tab, text=f"크롤링{index + 1}")
+
+        notebook.bind("<<NotebookSelected>>", lambda _event: self._sync_selected_vars())
+        return frame
+
+    def _build_settings_fields(self, frame: ttk.Frame, tab_vars: dict[str, StringVar | BooleanVar]) -> None:
         rows = [
             ("배달현황 URL", "performance_url"),
             ("보조 URL", "peak_dashboard_url"),
             ("CDP 주소", "cdp_url"),
             ("앱 전용 브라우저 프로필 경로", "browser_user_data_dir"),
+            ("텔레그램 봇 토큰", "telegram_bot_token"),
+            ("텔레그램 채팅방 ID", "telegram_chat_id"),
             ("로그 경로", "log_dir"),
-            ("카카오톡 채팅방명", "kakao_chat_name"),
+            ("카카오톡 채팅방명(기존)", "kakao_chat_name"),
             ("메세지 전송 간격(분)", "interval_minutes"),
             ("페이지 타임아웃(ms)", "page_timeout_seconds"),
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
         ]
         for row, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-            ttk.Entry(frame, textvariable=self.vars[key]).grid(row=row, column=1, sticky="ew", pady=4)
+            ttk.Entry(frame, textvariable=tab_vars[key]).grid(row=row, column=1, sticky="ew", pady=4)
 
         checks = ttk.Frame(frame)
         checks.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(checks, text="브라우저 연결").grid(row=0, column=0, padx=(0, 8))
         ttk.Combobox(
             checks,
-            textvariable=self.vars["browser_mode"],
+            textvariable=tab_vars["browser_mode"],
             values=("cdp", "persistent"),
             state="readonly",
             width=12,
         ).grid(row=0, column=1, padx=(0, 18))
-        ttk.Checkbutton(checks, text="Headless", variable=self.vars["headless"]).grid(row=0, column=2, padx=(0, 18))
-        send_state = "normal" if self.send_supported else "disabled"
-        ttk.Checkbutton(checks, text="카카오톡 전송", variable=self.vars["send_enabled"], state=send_state).grid(row=0, column=3, padx=(0, 18))
-        ttk.Checkbutton(checks, text="변경 시에만 전송", variable=self.vars["send_only_on_change"]).grid(row=0, column=4)
-        return frame
+        ttk.Checkbutton(checks, text="Headless", variable=tab_vars["headless"]).grid(row=0, column=2, padx=(0, 18))
+        ttk.Checkbutton(checks, text="텔레그램 전송", variable=tab_vars["send_enabled"]).grid(row=0, column=3, padx=(0, 18))
+        ttk.Checkbutton(checks, text="변경 시에만 전송", variable=tab_vars["send_only_on_change"]).grid(row=0, column=4)
 
     def _build_runtime(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
@@ -171,10 +212,10 @@ class RiderBotUi:
                 "1. 배민 배달현황 링크는 로그인된 상태로 열려 있어야 합니다.\n"
                 "2. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
                 "3. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
-                "4. 보낼 카카오톡 단체방을 더블클릭해서 채팅방 창을 따로 띄우세요.\n"
-                "5. 그 채팅방 입력칸을 한 번 클릭해 커서가 깜박이게 두고, 창을 최소화하지 마세요.\n"
-                "6. 앱의 [카카오톡 채팅방명]에는 채팅방 창 제목을 똑같이 적습니다.\n"
-                "7. 처음에는 카카오톡 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
+                "4. 텔레그램 봇 토큰과 그룹방 chat_id를 입력하세요.\n"
+                "5. 그룹방에서 !이름1234 명령을 받으려면 BotFather privacy mode를 끄거나 봇을 관리자로 넣으세요.\n"
+                "6. 여러 계정은 탭마다 다른 CDP 포트와 브라우저 프로필 경로를 사용하세요.\n"
+                "7. 처음에는 텔레그램 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
                 "8. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 메세지 전송 간격으로 반복됩니다."
             ),
             justify="left",
@@ -200,7 +241,7 @@ class RiderBotUi:
         frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
 
-        ttk.Button(frame, text="앱 실행 준비하기(mac)", command=self.prepare_app_clicked).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(frame, text="Chrome 준비하기", command=self.prepare_app_clicked).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(frame, text="설정 저장", command=self.save_settings).grid(row=0, column=2, padx=(8, 0))
         ttk.Button(frame, text="1회 실행", command=self.run_once_clicked).grid(row=0, column=3, padx=(8, 0))
         self.start_button = ttk.Button(frame, text="시작", command=self.start)
@@ -211,28 +252,32 @@ class RiderBotUi:
 
     def save_settings(self) -> UiSettings | None:
         try:
-            settings = self._read_settings()
+            settings_tabs = self._read_all_settings()
         except ValueError as exc:
             messagebox.showerror("설정 오류", str(exc))
             return None
 
-        if disable_unsupported_send(settings):
-            self.vars["send_enabled"].set(False)
-            self._append_preview("[안내]\n카카오톡 전송은 Windows에서만 지원되어 macOS에서는 미리보기로 실행합니다.\n")
+        for index, settings in enumerate(settings_tabs):
+            if disable_unsupported_send(settings):
+                self.vars_by_tab[index]["send_enabled"].set(False)
+                self._append_preview("[안내]\n카카오톡 전송은 Windows에서만 지원되어 미리보기로 실행합니다.\n")
 
-        self.store.save(settings)
-        self.settings = settings
+        self.store.save_all(settings_tabs)
+        self.settings_tabs = settings_tabs
+        selected_index = self._selected_tab_index()
+        self.settings = settings_tabs[selected_index]
         self.status_var.set("설정 저장됨")
-        return settings
+        return self.settings
 
     def prepare_app_clicked(self) -> None:
-        self.vars["browser_mode"].set("cdp")
+        selected_index = self._selected_tab_index()
+        self.vars_by_tab[selected_index]["browser_mode"].set("cdp")
         settings = self.save_settings()
         if settings is None:
             return
 
         try:
-            message = prepare_mac_chrome(settings.to_app_config())
+            message = prepare_chrome(settings.to_app_config(crawl_name=f"크롤링{selected_index + 1}", state_subdir=f"crawling{selected_index + 1}"))
         except BrowserLaunchError as exc:
             self.status_var.set("준비 오류")
             self._append_preview(f"[준비 오류]\n{exc}\n")
@@ -246,27 +291,38 @@ class RiderBotUi:
         if settings is None:
             return
 
-        threading.Thread(target=self._run_once_background, args=(settings,), daemon=True).start()
+        threading.Thread(target=self._run_once_background, args=(self._selected_tab_index(), settings), daemon=True).start()
 
     def start(self) -> None:
-        settings = self.save_settings()
-        if settings is None:
+        if self.save_settings() is None:
+            return
+
+        active_settings = active_crawling_settings(self.settings_tabs)
+        if not active_settings:
+            self.status_var.set("활성 탭 없음")
+            self._append_preview("[안내]\n배달현황 URL이 입력된 탭이 없습니다.\n")
             return
 
         self.stop_event = threading.Event()
-        scheduler = BotScheduler(
-            interval_minutes=settings.interval_minutes,
-            run_job=lambda: self._run_once_background(settings),
-        )
-        self.worker = threading.Thread(
-            target=scheduler.run_loop,
-            kwargs={"stop_event": self.stop_event},
-            daemon=True,
-        )
+        self.workers = []
+        for index, settings in active_settings:
+            scheduler = BotScheduler(
+                interval_minutes=settings.interval_minutes,
+                run_job=lambda tab_index=index, tab_settings=settings: self._run_once_background(tab_index, tab_settings),
+            )
+            worker = threading.Thread(
+                target=scheduler.run_loop,
+                kwargs={"stop_event": self.stop_event},
+                daemon=True,
+            )
+            self.workers.append(worker)
+
+        self._start_telegram_listener(active_settings)
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status_var.set("실행 중")
-        self.worker.start()
+        for worker in self.workers:
+            worker.start()
 
     def stop(self) -> None:
         if self.stop_event:
@@ -276,14 +332,15 @@ class RiderBotUi:
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
 
-    def _run_once_background(self, settings: UiSettings) -> None:
-        self.messages.put(("status", "실행 중"))
+    def _run_once_background(self, tab_index: int, settings: UiSettings) -> None:
+        self.messages.put(("status", f"크롤링{tab_index + 1} 실행 중"))
         try:
-            result = run_once(settings.to_app_config())
+            with self.crawl_lock:
+                result = run_once(settings.to_app_config(crawl_name=f"크롤링{tab_index + 1}", state_subdir=f"crawling{tab_index + 1}"))
         except Exception as exc:  # UI boundary: surface errors to the operator.
             self.messages.put(("error", str(exc)))
             return
-        self.messages.put(("result", (result, settings.interval_minutes)))
+        self.messages.put(("result", (tab_index, result, settings.interval_minutes)))
 
     def _poll_messages(self) -> None:
         while True:
@@ -298,12 +355,12 @@ class RiderBotUi:
                 self.status_var.set("오류")
                 self._append_preview(f"[오류]\n{payload}\n")
             elif kind == "result":
-                result, interval_minutes = payload
-                self._show_result(result, interval_minutes)
+                tab_index, result, interval_minutes = payload
+                self._show_result(tab_index, result, interval_minutes)
 
         self.root.after(200, self._poll_messages)
 
-    def _show_result(self, result: RunResult, interval_minutes: int) -> None:
+    def _show_result(self, tab_index: int, result: RunResult, interval_minutes: int) -> None:
         if result.skipped:
             status = "중복 메시지 건너뜀"
         elif result.sent:
@@ -313,14 +370,58 @@ class RiderBotUi:
 
         self.status_var.set(status)
         self.next_run_var.set((datetime.now() + timedelta(minutes=interval_minutes)).strftime("%H:%M:%S"))
-        self._append_preview(f"[{datetime.now().strftime('%H:%M:%S')}] {status}\n{result.message}\n\n")
+        self._append_preview(f"[{datetime.now().strftime('%H:%M:%S')}] 크롤링{tab_index + 1} {status}\n{result.message}\n\n")
 
     def _read_settings(self) -> UiSettings:
+        return self._read_all_settings()[self._selected_tab_index()]
+
+    def _read_all_settings(self) -> list[UiSettings]:
+        return [self._read_settings_from_vars(tab_vars) for tab_vars in self.vars_by_tab]
+
+    def _read_settings_from_vars(self, tab_vars: dict[str, StringVar | BooleanVar]) -> UiSettings:
         values = {
             key: variable.get()
-            for key, variable in self.vars.items()
+            for key, variable in tab_vars.items()
         }
         return coerce_settings(values)
+
+    def _selected_tab_index(self) -> int:
+        if self.settings_notebook is None:
+            return 0
+        try:
+            return int(self.settings_notebook.index("current"))
+        except Exception:
+            return 0
+
+    def _sync_selected_vars(self) -> None:
+        self.vars = self.vars_by_tab[self._selected_tab_index()]
+
+    def _start_telegram_listener(self, active_settings: list[tuple[int, UiSettings]]) -> None:
+        configs = app_configs_from_settings(active_settings)
+        bot_config = next(
+            (config for config in configs if config.telegram_bot_token.strip() and config.telegram_chat_id.strip()),
+            None,
+        )
+        if bot_config is None or self.stop_event is None:
+            self._append_preview("[안내]\n텔레그램 봇 토큰과 채팅방 ID가 없어 명령 감지를 시작하지 않습니다.\n")
+            return
+
+        processor = TelegramCommandProcessor(configs, bot_config=bot_config, lock=self.crawl_lock)
+        poller = TelegramUpdatePoller(bot_config, handle_text=processor.handle_text)
+        self.telegram_worker = threading.Thread(
+            target=self._telegram_poll_loop,
+            args=(poller, self.stop_event),
+            daemon=True,
+        )
+        self.telegram_worker.start()
+
+    def _telegram_poll_loop(self, poller: TelegramUpdatePoller, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                poller.poll_once()
+            except Exception as exc:
+                self.messages.put(("error", f"텔레그램 명령 감지 오류: {exc}"))
+                stop_event.wait(5)
 
     def _append_preview(self, text: str) -> None:
         self.preview.configure(state="normal")
@@ -359,5 +460,5 @@ def _positive_int(raw: Any, label: str) -> int:
 def _make_text(parent: ttk.Frame):
     from tkinter import Text
 
-    widget = Text(parent, height=14, wrap="word", state="disabled")
+    widget = Text(parent, height=PREVIEW_TEXT_HEIGHT, wrap="word", state="disabled")
     return widget

@@ -4,11 +4,13 @@ from rider_crawl.config import AppConfig
 
 from .base import Messenger
 from .kakao import KakaoMessenger
+from .telegram import TelegramMessenger
 
-DEFAULT_MESSENGER_NAME = "kakao"
+DEFAULT_MESSENGER_NAME = "telegram"
 
 _MESSENGERS: dict[str, Messenger] = {
-    DEFAULT_MESSENGER_NAME: KakaoMessenger(),
+    "kakao": KakaoMessenger(),
+    "telegram": TelegramMessenger(),
 }
 
 
@@ -23,5 +25,5 @@ def get_messenger(name: str = DEFAULT_MESSENGER_NAME) -> Messenger:
         raise ValueError(f"unsupported messenger: {name}") from exc
 
 
-def dispatch_text_message(config: AppConfig, message: str, *, messenger_name: str = DEFAULT_MESSENGER_NAME) -> None:
-    get_messenger(messenger_name).send_text(config, message)
+def dispatch_text_message(config: AppConfig, message: str, *, messenger_name: str | None = None) -> None:
+    get_messenger(messenger_name or config.messenger_name or DEFAULT_MESSENGER_NAME).send_text(config, message)

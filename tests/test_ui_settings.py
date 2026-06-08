@@ -18,6 +18,8 @@ def test_ui_settings_defaults_are_safe_for_first_run():
     assert settings.interval_minutes == 35
     assert settings.send_enabled is False
     assert settings.send_only_on_change is False
+    assert settings.telegram_bot_token == ""
+    assert settings.telegram_chat_id == ""
 
 
 def test_ui_settings_save_and_load_round_trip(tmp_path):
@@ -29,6 +31,8 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     settings.browser_mode = "persistent"
     settings.cdp_url = "http://127.0.0.1:9333"
     settings.browser_user_data_dir = Path("C:/rider_crawl/browser-profile")
+    settings.telegram_bot_token = "token"
+    settings.telegram_chat_id = "-100123"
 
     store.save(settings)
 
@@ -39,6 +43,51 @@ def test_ui_settings_save_and_load_round_trip(tmp_path):
     assert loaded.browser_mode == "persistent"
     assert loaded.cdp_url == "http://127.0.0.1:9333"
     assert loaded.browser_user_data_dir == Path("C:/rider_crawl/browser-profile")
+    assert loaded.telegram_bot_token == "token"
+    assert loaded.telegram_chat_id == "-100123"
+
+
+def test_ui_settings_load_all_migrates_single_settings_to_nine_tabs(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history",
+          "telegram_bot_token": "token",
+          "telegram_chat_id": "-100123"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    settings = UiSettingsStore(path).load_all()
+
+    assert len(settings) == 9
+    assert settings[0].performance_url == "https://example.test/delivery/history"
+    assert settings[0].telegram_bot_token == "token"
+    assert settings[0].telegram_chat_id == "-100123"
+    assert settings[0].cdp_url == "http://127.0.0.1:9222"
+    assert settings[1].performance_url == ""
+    assert settings[1].cdp_url == "http://127.0.0.1:9223"
+    assert settings[8].cdp_url == "http://127.0.0.1:9230"
+
+
+def test_ui_settings_save_all_and_load_all_round_trip(tmp_path):
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].telegram_bot_token = "token"
+    settings[0].telegram_chat_id = "-100123"
+    settings[1].performance_url = "https://example.test/second"
+    settings[1].browser_user_data_dir = Path("runtime/browser-profile-2")
+
+    store.save_all(settings)
+
+    loaded = store.load_all()
+    assert len(loaded) == 9
+    assert loaded[0].telegram_bot_token == "token"
+    assert loaded[0].telegram_chat_id == "-100123"
+    assert loaded[1].performance_url == "https://example.test/second"
+    assert loaded[1].browser_user_data_dir == Path("runtime/browser-profile-2")
 
 
 def test_ui_settings_load_keeps_legacy_minute_interval(tmp_path):
@@ -85,6 +134,8 @@ def test_ui_settings_convert_to_app_config(tmp_path):
     settings.log_dir = tmp_path / "logs"
     settings.send_enabled = True
     settings.send_only_on_change = True
+    settings.telegram_bot_token = "token"
+    settings.telegram_chat_id = "-100123"
 
     config = settings.to_app_config()
 
@@ -96,3 +147,5 @@ def test_ui_settings_convert_to_app_config(tmp_path):
     assert config.log_dir == tmp_path / "logs"
     assert config.send_enabled is True
     assert config.send_only_on_change is True
+    assert config.telegram_bot_token == "token"
+    assert config.telegram_chat_id == "-100123"

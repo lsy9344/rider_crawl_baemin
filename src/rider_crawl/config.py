@@ -23,6 +23,11 @@ class AppConfig:
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    messenger_name: str = "telegram"
+    crawl_name: str = ""
+    state_subdir: str = ""
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -48,6 +53,11 @@ class AppConfig:
             timezone=os.getenv("TIMEZONE", "Asia/Seoul"),
             run_lock_timeout_seconds=int(os.getenv("RUN_LOCK_TIMEOUT_SECONDS", "900")),
             page_timeout_seconds=int(os.getenv("PAGE_TIMEOUT_SECONDS", "60000")),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            messenger_name=os.getenv("MESSENGER_NAME", "telegram"),
+            crawl_name=os.getenv("CRAWL_NAME", ""),
+            state_subdir=os.getenv("STATE_SUBDIR", ""),
         )
 
     @property
@@ -58,7 +68,8 @@ class AppConfig:
 
     @property
     def state_dir(self) -> Path:
-        return self.runtime_dir / "state"
+        base = self.runtime_dir / "state"
+        return base / self.state_subdir if self.state_subdir else base
 
 
 def _env_bool(name: str, *, default: bool) -> bool:

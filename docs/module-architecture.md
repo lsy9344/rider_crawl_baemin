@@ -1,7 +1,8 @@
 # Module Architecture
 
-This project keeps the current Baemin crawling and KakaoTalk sending behavior,
-but the runtime boundary is now organized around two extension points.
+This project keeps the current Baemin crawling behavior and sends messages
+through a pluggable messenger transport. The runtime boundary is organized
+around two extension points.
 
 ## Runtime Flow
 
@@ -31,11 +32,13 @@ configuration selection only where needed.
 `rider_crawl.messengers` owns outgoing message transport selection.
 
 - `messengers.base.Messenger` defines the text sending contract.
-- `messengers.kakao.KakaoMessenger` is the default implementation.
+- `messengers.telegram.TelegramMessenger` is the default implementation.
+- `messengers.kakao.KakaoMessenger` remains available for the legacy
+  KakaoTalk PC app automation path.
 - The legacy `sender.py` module stays in place for KakaoTalk UI automation and
   existing imports.
 
-When Telegram, Discord, or another messenger is added, create a messenger
+When Discord or another messenger is added, create a messenger
 adapter that implements `send_text`, register it with `register_messenger`, and
 then add settings/env selection without changing `app.run_once`.
 
@@ -43,6 +46,6 @@ then add settings/env selection without changing `app.run_once`.
 
 - Existing public modules (`app.py`, `crawler.py`, `parser.py`, `sender.py`,
   `message.py`, `ui.py`, `ui_settings.py`) are intentionally preserved.
-- The default behavior is still Baemin crawling plus KakaoTalk sending.
+- The default behavior is Baemin crawling plus Telegram Bot API sending.
 - Build output directories (`build/`, `dist/`) should not be modified as part
   of architecture work.

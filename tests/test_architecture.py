@@ -21,11 +21,20 @@ def test_baemin_platform_crawls_snapshot_with_injected_crawler(tmp_path):
     assert platform.crawl_snapshot(config) is snapshot
 
 
-def test_default_messenger_registry_resolves_kakao_sender():
+def test_default_messenger_registry_resolves_telegram_sender():
     from rider_crawl.messengers import DEFAULT_MESSENGER_NAME, get_messenger
-    from rider_crawl.messengers.kakao import KakaoMessenger
+    from rider_crawl.messengers.telegram import TelegramMessenger
 
     messenger = get_messenger(DEFAULT_MESSENGER_NAME)
+
+    assert isinstance(messenger, TelegramMessenger)
+
+
+def test_kakao_messenger_can_still_be_resolved_explicitly():
+    from rider_crawl.messengers import get_messenger
+    from rider_crawl.messengers.kakao import KakaoMessenger
+
+    messenger = get_messenger("kakao")
 
     assert isinstance(messenger, KakaoMessenger)
 

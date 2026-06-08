@@ -19,6 +19,9 @@ class UiSettings:
     browser_user_data_dir: Path
     headless: bool
     kakao_chat_name: str
+    telegram_bot_token: str
+    telegram_chat_id: str
+    messenger_name: str
     log_dir: Path
     send_enabled: bool
     send_only_on_change: bool
@@ -42,6 +45,9 @@ class UiSettings:
             browser_user_data_dir=Path("runtime/browser-profile"),
             headless=False,
             kakao_chat_name="",
+            telegram_bot_token="",
+            telegram_chat_id="",
+            messenger_name="telegram",
             log_dir=Path("logs"),
             send_enabled=False,
             send_only_on_change=False,
@@ -51,7 +57,18 @@ class UiSettings:
             page_timeout_seconds=60000,
         )
 
-    def to_app_config(self) -> AppConfig:
+    @classmethod
+    def default_for_tab(cls, tab_index: int) -> "UiSettings":
+        settings = cls.defaults()
+        if tab_index <= 1:
+            return settings
+
+        settings.performance_url = ""
+        settings.cdp_url = f"http://127.0.0.1:{9221 + tab_index}"
+        settings.browser_user_data_dir = Path(f"runtime/browser-profile-{tab_index}")
+        return settings
+
+    def to_app_config(self, *, crawl_name: str = "", state_subdir: str = "") -> AppConfig:
         return AppConfig(
             coupang_eats_url=self.performance_url,
             baemin_center_name=self.baemin_center_name,
@@ -61,12 +78,17 @@ class UiSettings:
             browser_user_data_dir=self.browser_user_data_dir,
             headless=self.headless,
             kakao_chat_name=self.kakao_chat_name,
+            telegram_bot_token=self.telegram_bot_token,
+            telegram_chat_id=self.telegram_chat_id,
+            messenger_name=self.messenger_name,
             log_dir=self.log_dir,
             send_enabled=self.send_enabled,
             send_only_on_change=self.send_only_on_change,
             timezone=self.timezone,
             run_lock_timeout_seconds=self.run_lock_timeout_seconds,
             page_timeout_seconds=self.page_timeout_seconds,
+            crawl_name=crawl_name,
+            state_subdir=state_subdir,
         )
 
 
@@ -79,15 +101,27 @@ class UiSettingsStore:
             return UiSettings.defaults()
 
         raw = json.loads(self.path.read_text(encoding="utf-8"))
-        defaults = UiSettings.defaults()
-        data = asdict(defaults)
-        if "interval_minutes" not in raw and "refresh_interval_seconds" in raw:
-            data["interval_minutes"] = _seconds_to_minutes(int(raw["refresh_interval_seconds"]))
-        data.update(raw)
-        data.pop("refresh_interval_seconds", None)
-        data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
-        data["log_dir"] = Path(data["log_dir"])
-        return UiSettings(**data)
+        if isinstance(raw, dict) and isinstance(raw.get("crawlings"), list) and raw["crawlings"]:
+            raw = raw["crawlings"][0]
+        return _settings_from_mapping(raw, UiSettings.defaults())
+
+    def load_all(self, *, max_tabs: int = 9) -> list[UiSettings]:
+        if not self.path.exists():
+            return [UiSettings.default_for_tab(index) for index in range(1, max_tabs + 1)]
+
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and isinstance(raw.get("crawlings"), list):
+            items = [item for item in raw["crawlings"] if isinstance(item, dict)]
+        elif isinstance(raw, dict):
+            items = [raw]
+        else:
+            items = []
+
+        settings: list[UiSettings] = []
+        for index in range(1, max_tabs + 1):
+            source = items[index - 1] if index - 1 < len(items) else {}
+            settings.append(_settings_from_mapping(source, UiSettings.default_for_tab(index)))
+        return settings
 
     def save(self, settings: UiSettings) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,12 +130,29 @@ class UiSettingsStore:
             encoding="utf-8",
         )
 
+    def save_all(self, settings: list[UiSettings]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"crawlings": [_to_jsonable(item) for item in settings]}
+        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def _to_jsonable(settings: UiSettings) -> dict[str, Any]:
     data = asdict(settings)
     data["browser_user_data_dir"] = str(settings.browser_user_data_dir)
     data["log_dir"] = str(settings.log_dir)
     return data
+
+
+def _settings_from_mapping(raw: dict[str, Any], defaults: UiSettings) -> UiSettings:
+    data = asdict(defaults)
+    if "interval_minutes" not in raw and "refresh_interval_seconds" in raw:
+        data["interval_minutes"] = _seconds_to_minutes(int(raw["refresh_interval_seconds"]))
+    for key, value in raw.items():
+        if key in data:
+            data[key] = value
+    data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
+    data["log_dir"] = Path(data["log_dir"])
+    return UiSettings(**data)
 
 
 def _seconds_to_minutes(seconds: int) -> int:

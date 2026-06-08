@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import platform
 import time
 from datetime import datetime
+from typing import Any, Callable
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen as default_urlopen
 
 from .config import AppConfig
 
@@ -14,6 +18,106 @@ _KAKAO_DIAGNOSTICS: list[str] = []
 
 class KakaoSendError(RuntimeError):
     """Raised when KakaoTalk text delivery cannot be attempted safely."""
+
+
+class TelegramSendError(RuntimeError):
+    """Raised when Telegram Bot API delivery cannot be attempted safely."""
+
+
+UrlOpen = Callable[..., Any]
+
+
+def send_telegram_text(
+    config: AppConfig,
+    message: str,
+    *,
+    urlopen: UrlOpen = default_urlopen,
+    timeout_seconds: int = 10,
+) -> None:
+    _required_telegram_bot_token(config)
+    _telegram_api_request(
+        config,
+        "sendMessage",
+        {
+            "chat_id": _required_telegram_chat_id(config),
+            "text": message,
+            "disable_web_page_preview": "true",
+        },
+        urlopen=urlopen,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def get_telegram_updates(
+    config: AppConfig,
+    *,
+    offset: int | None = None,
+    timeout_seconds: int = 30,
+    urlopen: UrlOpen = default_urlopen,
+) -> list[dict[str, Any]]:
+    payload: dict[str, str | int] = {
+        "timeout": timeout_seconds,
+        "allowed_updates": json.dumps(["message"]),
+    }
+    if offset is not None:
+        payload["offset"] = offset
+
+    result = _telegram_api_request(
+        config,
+        "getUpdates",
+        payload,
+        urlopen=urlopen,
+        timeout_seconds=timeout_seconds + 5,
+    )
+    if not isinstance(result, list):
+        raise TelegramSendError("Telegram getUpdates response result must be a list")
+    return [update for update in result if isinstance(update, dict)]
+
+
+def _telegram_api_request(
+    config: AppConfig,
+    method: str,
+    payload: dict[str, object],
+    *,
+    urlopen: UrlOpen,
+    timeout_seconds: int,
+) -> object:
+    token = _required_telegram_bot_token(config)
+    request = Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        data=urlencode(payload).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except Exception as exc:
+        raise TelegramSendError(f"Telegram Bot API request failed: {method}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise TelegramSendError("Telegram Bot API response was not valid JSON") from exc
+
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        description = data.get("description") if isinstance(data, dict) else body
+        raise TelegramSendError(f"Telegram Bot API error: {description}")
+    return data.get("result")
+
+
+def _required_telegram_bot_token(config: AppConfig) -> str:
+    token = config.telegram_bot_token.strip()
+    if not token:
+        raise TelegramSendError("TELEGRAM_BOT_TOKEN is required before sending")
+    return token
+
+
+def _required_telegram_chat_id(config: AppConfig) -> str:
+    chat_id = config.telegram_chat_id.strip()
+    if not chat_id:
+        raise TelegramSendError("TELEGRAM_CHAT_ID is required before sending")
+    return chat_id
 
 
 def send_kakao_text(

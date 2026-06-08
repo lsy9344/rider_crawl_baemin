@@ -14,6 +14,9 @@ def test_app_config_reads_environment_values(monkeypatch):
     monkeypatch.setenv("TIMEZONE", "Asia/Seoul")
     monkeypatch.setenv("RUN_LOCK_TIMEOUT_SECONDS", "120")
     monkeypatch.setenv("PAGE_TIMEOUT_SECONDS", "30000")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100123")
+    monkeypatch.setenv("MESSENGER_NAME", "telegram")
 
     config = AppConfig.from_env()
 
@@ -29,6 +32,9 @@ def test_app_config_reads_environment_values(monkeypatch):
     assert config.timezone == "Asia/Seoul"
     assert config.run_lock_timeout_seconds == 120
     assert config.page_timeout_seconds == 30000
+    assert config.telegram_bot_token == "token"
+    assert config.telegram_chat_id == "-100123"
+    assert config.messenger_name == "telegram"
 
 
 def test_app_config_defaults_to_safe_dry_run(monkeypatch):
@@ -44,6 +50,9 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
         "TIMEZONE",
         "RUN_LOCK_TIMEOUT_SECONDS",
         "PAGE_TIMEOUT_SECONDS",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "MESSENGER_NAME",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -58,3 +67,6 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     assert config.cdp_url == "http://127.0.0.1:9222"
     assert config.kakao_chat_name == ""
     assert config.log_dir == Path("logs")
+    assert config.telegram_bot_token == ""
+    assert config.telegram_chat_id == ""
+    assert config.messenger_name == "telegram"

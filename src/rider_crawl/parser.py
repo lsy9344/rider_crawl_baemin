@@ -342,8 +342,8 @@ def _sum_baemin_summaries(headers: list[str], summaries: list[dict[str, str] | N
 
 def _baemin_header_map(row: list[str]) -> dict[str, int]:
     header_map = {header: index for index, header in enumerate(row)}
-    required = {"이름", "운행상태", "완료"}
-    if required.issubset(header_map):
+    has_status = "운행상태" in header_map or "수행상태" in header_map
+    if {"이름", "완료"}.issubset(header_map) and has_status:
         return header_map
     return {}
 
