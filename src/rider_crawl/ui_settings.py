@@ -66,6 +66,8 @@ class UiSettings:
             return settings
 
         settings.performance_url = ""
+        settings.baemin_center_name = ""
+        settings.baemin_center_id = ""
         settings.cdp_url = f"http://127.0.0.1:{9221 + tab_index}"
         settings.browser_user_data_dir = Path(f"runtime/browser-profile-{tab_index}")
         return settings

@@ -1,10 +1,15 @@
+import threading
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from rider_crawl.config import AppConfig
 from rider_crawl.parser import parse_baemin_delivery_history_html
 from rider_crawl.telegram_commands import (
     TelegramUpdatePoller,
     TelegramCommandProcessor,
+    _default_offset_store_path,
     calculate_cancel_rate,
     find_rider_cancel_stats,
     parse_rider_lookup_command,
@@ -149,6 +154,32 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_thread(tmp_pa
     assert sent[1] == ("크롤링2", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.", 88)
 
 
+def test_telegram_command_processor_normalizes_configured_thread_id(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
+        <th>배차취소</th><th>배달취소(라이더귀책)</th>
+        <th>오전피크</th><th>오후논피크</th><th>저녁피크</th><th>야간논피크</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>50</td><td>0</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      </tbody>
+    </table>
+    """
+    sent: list[tuple[str, int | None]] = []
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123", message_thread_id="077")],
+        fetch_html=lambda _config: html,
+        send_text=lambda _config, message, *, message_thread_id=None: sent.append((message, message_thread_id)),
+    )
+
+    handled = processor.handle_text("-100123", "!홍길동1234", message_thread_id=77)
+
+    assert handled is True
+    assert sent[0] == ("조회 중입니다.", 77)
+
+
 def test_telegram_command_processor_logs_unmatched_chat_without_replying(tmp_path):
     logs: list[str] = []
     sent: list[str] = []
@@ -183,6 +214,16 @@ def test_telegram_command_processor_logs_unmatched_thread_without_replying(tmp_p
     assert logs == ["텔레그램 대상 미매칭: -100111/88"]
 
 
+def test_telegram_command_processor_rejects_duplicate_targets(tmp_path):
+    configs = [
+        _config(tmp_path, crawl_name="크롤링1", chat_id="-100123", message_thread_id="077"),
+        _config(tmp_path, crawl_name="크롤링2", chat_id="-100123", message_thread_id="77"),
+    ]
+
+    with pytest.raises(ValueError, match="텔레그램 대상이 중복"):
+        TelegramCommandProcessor(configs)
+
+
 def test_telegram_update_poller_routes_matching_chat_text_and_advances_offset(tmp_path):
     handled: list[tuple[str, str, int | None]] = []
     requested_offsets: list[int | None] = []
@@ -203,6 +244,7 @@ def test_telegram_update_poller_routes_matching_chat_text_and_advances_offset(tm
         config,
         handle_text=lambda chat_id, text, message_thread_id=None: handled.append((chat_id, text, message_thread_id)),
         get_updates=fake_get_updates,
+        offset_store_path=tmp_path / "telegram.offset",
     )
 
     poller.poll_once()
@@ -227,6 +269,7 @@ def test_telegram_update_poller_does_not_advance_offset_when_handler_fails(tmp_p
         get_updates=lambda *_args, **_kwargs: [
             {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
         ],
+        offset_store_path=tmp_path / "telegram.offset",
     )
 
     try:
@@ -236,6 +279,280 @@ def test_telegram_update_poller_does_not_advance_offset_when_handler_fails(tmp_p
 
     assert calls == 1
     assert poller.next_update_id is None
+
+
+def test_telegram_update_poller_skips_successful_higher_update_after_lower_update_fails(tmp_path):
+    config = _config(tmp_path, crawl_name="크롤링1")
+    requested_offsets: list[int | None] = []
+    handled_chat_ids: list[str] = []
+    handle_lock = threading.Lock()
+    lower_update_failed = False
+
+    def fake_get_updates(received_config, *, offset, timeout_seconds):
+        assert received_config is config
+        requested_offsets.append(offset)
+        return [
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+        ]
+
+    def handle_text(chat_id, text, message_thread_id=None):
+        nonlocal lower_update_failed
+        with handle_lock:
+            handled_chat_ids.append(chat_id)
+            should_fail = chat_id == "-100111" and not lower_update_failed
+            if should_fail:
+                lower_update_failed = True
+        if should_fail:
+            raise RuntimeError("lower update failed")
+
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=handle_text,
+        get_updates=fake_get_updates,
+        offset_store_path=tmp_path / "telegram.offset",
+    )
+
+    with pytest.raises(RuntimeError, match="lower update failed"):
+        poller.poll_once()
+
+    assert handled_chat_ids.count("-100111") == 1
+    assert handled_chat_ids.count("-100222") == 1
+    assert poller.next_update_id != 12
+
+    poller.poll_once()
+
+    assert requested_offsets[1] != 12
+    assert handled_chat_ids.count("-100111") == 2
+    assert handled_chat_ids.count("-100222") == 1
+    assert poller.next_update_id == 12
+
+
+def test_telegram_update_poller_persists_completed_higher_update_when_lower_update_fails(tmp_path):
+    config = _config(tmp_path, crawl_name="크롤링1")
+    offset_path = tmp_path / "telegram.offset"
+    handled_chat_ids: list[str] = []
+
+    def get_updates(*_args, **_kwargs):
+        return [
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+        ]
+
+    def handle_text(chat_id, text, message_thread_id=None):
+        handled_chat_ids.append(chat_id)
+        if chat_id == "-100111":
+            raise RuntimeError("lower update failed")
+
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=handle_text,
+        get_updates=get_updates,
+        offset_store_path=offset_path,
+    )
+
+    with pytest.raises(RuntimeError, match="lower update failed"):
+        poller.poll_once()
+
+    restarted = TelegramUpdatePoller(
+        config,
+        handle_text=handle_text,
+        get_updates=get_updates,
+        offset_store_path=offset_path,
+    )
+    with pytest.raises(RuntimeError, match="lower update failed"):
+        restarted.poll_once()
+
+    assert handled_chat_ids.count("-100111") == 2
+    assert handled_chat_ids.count("-100222") == 1
+
+
+def test_telegram_update_poller_persists_offset_after_successful_handler(tmp_path):
+    handled: list[tuple[str, str, int | None]] = []
+    offset_path = tmp_path / "telegram.offset"
+    config = _config(tmp_path, crawl_name="크롤링1")
+
+    def fake_get_updates(received_config, *, offset, timeout_seconds):
+        assert received_config is config
+        assert offset is None
+        return [{"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}]
+
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=lambda chat_id, text, message_thread_id=None: handled.append((chat_id, text, message_thread_id)),
+        get_updates=fake_get_updates,
+        offset_store_path=offset_path,
+    )
+
+    poller.poll_once()
+    restarted = TelegramUpdatePoller(
+        config,
+        handle_text=lambda *_args, **_kwargs: None,
+        get_updates=lambda *_args, **_kwargs: [],
+        offset_store_path=offset_path,
+    )
+
+    assert handled == [("-100123", "!홍길동1234", None)]
+    assert offset_path.read_text(encoding="utf-8") == "11"
+    assert restarted.next_update_id == 11
+
+
+def test_telegram_update_poller_reloads_offset_after_lock_is_acquired(tmp_path):
+    offset_path = tmp_path / "telegram.offset"
+    config = _config(tmp_path, crawl_name="크롤링1")
+    requested_offsets: list[int | None] = []
+
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=lambda *_args, **_kwargs: None,
+        get_updates=lambda _config, *, offset, timeout_seconds: requested_offsets.append(offset) or [],
+        offset_store_path=offset_path,
+    )
+    offset_path.write_text("21", encoding="utf-8")
+
+    poller.poll_once()
+
+    assert requested_offsets == [21]
+    assert poller.next_update_id == 21
+
+
+def test_telegram_update_poller_completes_unhandled_lookup_command(tmp_path):
+    offset_path = tmp_path / "telegram.offset"
+    config = _config(tmp_path, crawl_name="크롤링1")
+    handled: list[tuple[str, str]] = []
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=lambda chat_id, text, message_thread_id=None: handled.append((chat_id, text)) or False,
+        get_updates=lambda *_args, **_kwargs: [
+            {"update_id": 10, "message": {"chat": {"id": "-100999"}, "text": "!홍길동1234"}}
+        ],
+        offset_store_path=offset_path,
+    )
+
+    poller.poll_once()
+
+    assert handled == [("-100999", "!홍길동1234")]
+    assert poller.next_update_id == 11
+    assert offset_path.read_text(encoding="utf-8") == "11"
+
+
+def test_telegram_update_poller_recovers_offset_when_completed_sidecar_exists(tmp_path):
+    offset_path = tmp_path / "telegram.offset"
+    completed_path = Path(f"{offset_path}.completed.json")
+    completed_path.write_text("[10]", encoding="utf-8")
+    config = _config(tmp_path, crawl_name="크롤링1")
+    handled: list[str] = []
+
+    poller = TelegramUpdatePoller(
+        config,
+        handle_text=lambda chat_id, text, message_thread_id=None: handled.append(chat_id),
+        get_updates=lambda *_args, **_kwargs: [
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+        ],
+        offset_store_path=offset_path,
+    )
+
+    poller.poll_once()
+
+    assert handled == []
+    assert poller.next_update_id == 11
+    assert offset_path.read_text(encoding="utf-8") == "11"
+
+
+def test_telegram_update_poller_does_not_advance_offset_when_final_reply_fails(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
+        <th>배차취소</th><th>배달취소(라이더귀책)</th>
+        <th>오전피크</th><th>오후논피크</th><th>저녁피크</th><th>야간논피크</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>50</td><td>0</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      </tbody>
+    </table>
+    """
+    logs: list[str] = []
+    sent: list[str] = []
+    offset_path = tmp_path / "telegram.offset"
+
+    def fake_send_text(_config, message, *, message_thread_id=None):
+        sent.append(message)
+        if message != "조회 중입니다.":
+            raise RuntimeError("temporary send failure")
+
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")],
+        fetch_html=lambda _config: html,
+        send_text=fake_send_text,
+        log_event=logs.append,
+    )
+    poller = TelegramUpdatePoller(
+        _config(tmp_path, crawl_name="크롤링1", chat_id="-100123"),
+        handle_text=processor.handle_text,
+        get_updates=lambda *_args, **_kwargs: [
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+        ],
+        offset_store_path=offset_path,
+    )
+
+    with pytest.raises(RuntimeError, match="temporary send failure"):
+        poller.poll_once()
+
+    assert sent[0] == "조회 중입니다."
+    assert poller.next_update_id is None
+    assert not offset_path.exists()
+    assert any("최종 답장 전송 오류" in message for message in logs)
+
+
+def test_telegram_update_poller_handles_updates_in_same_batch_concurrently(tmp_path):
+    barrier = threading.Barrier(2, timeout=1)
+    handled: list[str] = []
+
+    def handle_text(chat_id: str, text: str, message_thread_id=None):
+        barrier.wait()
+        handled.append(chat_id)
+
+    poller = TelegramUpdatePoller(
+        _config(tmp_path, crawl_name="크롤링1"),
+        handle_text=handle_text,
+        get_updates=lambda *_args, **_kwargs: [
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+        ],
+        offset_store_path=tmp_path / "telegram.offset",
+    )
+
+    poller.poll_once()
+
+    assert sorted(handled) == ["-100111", "-100222"]
+    assert poller.next_update_id == 12
+
+
+def test_telegram_update_poller_uses_offset_file_lock(tmp_path):
+    offset_path = tmp_path / "telegram.offset"
+    lock_path = tmp_path / "telegram.offset.lock"
+    lock_path.write_text("not-a-timestamp", encoding="utf-8")
+    calls = []
+
+    poller = TelegramUpdatePoller(
+        _config(tmp_path, crawl_name="크롤링1"),
+        handle_text=lambda *_args, **_kwargs: None,
+        get_updates=lambda *_args, **_kwargs: calls.append("called") or [],
+        offset_store_path=offset_path,
+    )
+
+    with pytest.raises(RuntimeError, match="run lock is already held"):
+        poller.poll_once()
+
+    assert calls == []
+
+
+def test_default_offset_store_path_depends_on_token_not_first_tab_log_dir(tmp_path):
+    first = replace(_config(tmp_path, crawl_name="크롤링1"), log_dir=tmp_path / "first" / "logs")
+    second = replace(_config(tmp_path, crawl_name="크롤링2"), log_dir=tmp_path / "second" / "logs")
+
+    assert _default_offset_store_path(first) == _default_offset_store_path(second)
 
 
 def _config(

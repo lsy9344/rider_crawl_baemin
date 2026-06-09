@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .config import AppConfig
@@ -30,7 +31,7 @@ def run_once(
     config.log_dir.mkdir(parents=True, exist_ok=True)
     config.state_dir.mkdir(parents=True, exist_ok=True)
 
-    with RunLock(config.state_dir / "run.lock", stale_timeout_seconds=config.run_lock_timeout_seconds):
+    with RunLock(_run_lock_path(config), stale_timeout_seconds=config.run_lock_timeout_seconds):
         snapshot = crawl(config)
         message = render_current_screen_message(snapshot, source_label=config.crawl_name)
         message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
@@ -47,12 +48,63 @@ def run_once(
 
 
 def _is_duplicate(config: AppConfig, message_hash: str) -> bool:
-    path = config.state_dir / "last_message.sha256"
+    path = _last_message_hash_path(config)
     return path.exists() and path.read_text(encoding="utf-8").strip() == message_hash
 
 
 def _write_last_hash(config: AppConfig, message_hash: str) -> None:
-    (config.state_dir / "last_message.sha256").write_text(message_hash, encoding="utf-8")
+    _last_message_hash_path(config).write_text(message_hash, encoding="utf-8")
+
+
+def _last_message_hash_path(config: AppConfig) -> Path:
+    scope_hash = hashlib.sha256(_message_scope_key(config).encode("utf-8")).hexdigest()[:16]
+    return config.state_dir / f"last_message.{scope_hash}.sha256"
+
+
+def _run_lock_path(config: AppConfig) -> Path:
+    scope_hash = hashlib.sha256(_run_scope_key(config).encode("utf-8")).hexdigest()[:16]
+    return config.runtime_dir / "state" / "run_locks" / f"run.{scope_hash}.lock"
+
+
+def _run_scope_key(config: AppConfig) -> str:
+    return "\n".join(
+        [
+            config.browser_mode.strip(),
+            config.cdp_url.strip(),
+            str(config.browser_user_data_dir.expanduser().resolve()).casefold(),
+        ]
+    )
+
+
+def _message_scope_key(config: AppConfig) -> str:
+    messenger_name = config.messenger_name.strip() or "telegram"
+    parts = [
+        messenger_name,
+        config.coupang_eats_url.strip(),
+        config.baemin_center_name.strip(),
+        config.baemin_center_id.strip(),
+    ]
+    if messenger_name == "telegram":
+        parts.extend(
+            [
+                config.telegram_bot_token.strip(),
+                config.telegram_chat_id.strip(),
+                _normalize_telegram_thread_id(config.telegram_message_thread_id),
+            ]
+        )
+    elif messenger_name == "kakao":
+        parts.append(config.kakao_chat_name.strip())
+    return "\n".join(parts)
+
+
+def _normalize_telegram_thread_id(raw: object) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(int(value))
+    except ValueError:
+        return value
 
 
 def _crawl_snapshot(config: AppConfig) -> CurrentScreenSnapshot:

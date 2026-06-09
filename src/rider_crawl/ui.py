@@ -36,6 +36,7 @@ def active_crawling_settings(settings_list: list[UiSettings]) -> list[tuple[int,
 
 def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     active_settings = active_crawling_settings(settings_list)
+    _validate_active_baemin_center_identity(active_settings)
     _validate_unique_active_value(
         active_settings,
         label="CDP 주소",
@@ -73,8 +74,9 @@ def telegram_configs_by_token(configs: list[AppConfig]) -> dict[str, list[AppCon
 
 
 def coerce_settings(values: dict[str, Any]) -> UiSettings:
+    defaults = UiSettings.defaults()
     interval_minutes = _positive_int(
-        values.get("interval_minutes", UiSettings.defaults().interval_minutes),
+        values.get("interval_minutes", defaults.interval_minutes),
         "메세지 전송 간격",
     )
     page_timeout_seconds = _positive_int(values["page_timeout_seconds"], "페이지 타임아웃")
@@ -84,8 +86,8 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
     return UiSettings(
         performance_url=str(values["performance_url"]).strip(),
         peak_dashboard_url=str(values["peak_dashboard_url"]).strip(),
-        baemin_center_name=UiSettings.defaults().baemin_center_name,
-        baemin_center_id=UiSettings.defaults().baemin_center_id,
+        baemin_center_name=str(values.get("baemin_center_name", defaults.baemin_center_name)).strip(),
+        baemin_center_id=str(values.get("baemin_center_id", defaults.baemin_center_id)).strip(),
         browser_mode=str(values["browser_mode"]).strip(),
         cdp_url=str(values["cdp_url"]).strip(),
         browser_user_data_dir=Path(str(values["browser_user_data_dir"]).strip()),
@@ -93,7 +95,7 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         kakao_chat_name=str(values["kakao_chat_name"]).strip(),
         telegram_bot_token=str(values.get("telegram_bot_token", "")).strip(),
         telegram_chat_id=str(values.get("telegram_chat_id", "")).strip(),
-        telegram_message_thread_id=str(values.get("telegram_message_thread_id", "")).strip(),
+        telegram_message_thread_id=_normalize_telegram_thread_id(values.get("telegram_message_thread_id", "")),
         messenger_name=messenger_name,
         log_dir=Path(str(values["log_dir"]).strip()),
         send_enabled=bool(values["send_enabled"]),
@@ -133,6 +135,7 @@ class RiderBotUi:
             index: threading.Lock() for index in range(len(self.settings_tabs))
         }
         self.kakao_send_lock = threading.Lock()
+        self.telegram_send_locks: dict[str, threading.Lock] = {}
 
         self.root.title("배민 배달현황 실적봇")
         self.root.geometry(DEFAULT_WINDOW_GEOMETRY)
@@ -150,6 +153,8 @@ class RiderBotUi:
         return {
             "performance_url": StringVar(value=settings.performance_url),
             "peak_dashboard_url": StringVar(value=settings.peak_dashboard_url),
+            "baemin_center_name": StringVar(value=settings.baemin_center_name),
+            "baemin_center_id": StringVar(value=settings.baemin_center_id),
             "browser_mode": StringVar(value=settings.browser_mode),
             "cdp_url": StringVar(value=settings.cdp_url),
             "browser_user_data_dir": StringVar(value=str(settings.browser_user_data_dir)),
@@ -210,6 +215,8 @@ class RiderBotUi:
         rows = [
             ("배달현황 URL", "performance_url"),
             ("보조 URL", "peak_dashboard_url"),
+            ("배민 센터명", "baemin_center_name"),
+            ("배민 센터 ID", "baemin_center_id"),
             ("CDP 주소", "cdp_url"),
             ("앱 전용 브라우저 프로필 경로", "browser_user_data_dir"),
             ("텔레그램 봇 토큰", "telegram_bot_token"),
@@ -357,6 +364,10 @@ class RiderBotUi:
         threading.Thread(target=self._run_once_background, args=(self._selected_tab_index(), settings), daemon=True).start()
 
     def start(self) -> None:
+        if self._has_live_workers():
+            self.status_var.set("중지 처리 중")
+            return
+
         if self.save_settings() is None:
             return
 
@@ -397,42 +408,42 @@ class RiderBotUi:
             self.stop_event.set()
         self.status_var.set("중지 요청됨")
         self.next_run_var.set("-")
-        self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        self._refresh_run_controls()
 
     def _run_once_background(
         self,
         tab_index: int,
         settings: UiSettings,
         stop_event: threading.Event | None = None,
-    ) -> None:
+    ) -> bool:
         if _stop_requested(stop_event):
             self.messages.put(("status", f"크롤링{tab_index + 1} 중지됨"))
-            return
+            return False
         label = f"크롤링{tab_index + 1}"
         tab_lock = self._crawl_lock_for_tab(tab_index)
         if not tab_lock.acquire(blocking=False):
             self.messages.put(("status", f"{label} 이미 실행 중, 건너뜀"))
             self.messages.put(("log", f"{label} 이미 실행 중, 건너뜀"))
-            return
+            return True
 
         self.messages.put(("status", f"{label} 실행 중"))
         self.messages.put(("log", f"{label} 시작"))
         try:
             if _stop_requested(stop_event):
                 self.messages.put(("status", f"{label} 중지됨"))
-                return
+                return False
             result = run_once(
                 settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
                 send_message=self._send_message_with_kakao_lock,
             )
         except Exception as exc:  # UI boundary: surface errors to the operator.
             self.messages.put(("error", f"{label} 오류: {exc}"))
-            return
+            return True
         finally:
             tab_lock.release()
         self.messages.put(("log", f"{label} 완료"))
         self.messages.put(("result", (tab_index, result, settings.interval_minutes)))
+        return True
 
     def _crawl_lock_for_tab(self, tab_index: int) -> threading.Lock:
         if not hasattr(self, "crawl_locks_by_tab"):
@@ -440,17 +451,44 @@ class RiderBotUi:
         return self.crawl_locks_by_tab.setdefault(tab_index, threading.Lock())
 
     def _send_message_with_kakao_lock(self, config: AppConfig, message: str) -> None:
+        label = config.crawl_name.strip() or "크롤링"
+        if config.messenger_name == "telegram":
+            lock = self._telegram_send_lock_for(config)
+            self.messages.put(("log", f"{label} 텔레그램 전송 대기"))
+            with lock:
+                dispatch_text_message(config, message)
+            self.messages.put(("log", f"{label} 텔레그램 전송 완료"))
+            return
+
         if config.messenger_name != "kakao":
             dispatch_text_message(config, message)
             return
 
-        label = config.crawl_name.strip() or "크롤링"
         if not hasattr(self, "kakao_send_lock"):
             self.kakao_send_lock = threading.Lock()
         self.messages.put(("log", f"{label} 카카오톡 전송 대기"))
         with self.kakao_send_lock:
             dispatch_text_message(config, message)
         self.messages.put(("log", f"{label} 카카오톡 전송 완료"))
+
+    def _telegram_send_lock_for(self, config: AppConfig) -> threading.Lock:
+        if not hasattr(self, "telegram_send_locks"):
+            self.telegram_send_locks = {}
+        token = config.telegram_bot_token.strip()
+        return self.telegram_send_locks.setdefault(token, threading.Lock())
+
+    def _send_telegram_command_reply_with_lock(
+        self,
+        config: AppConfig,
+        message: str,
+        *,
+        message_thread_id: int | None = None,
+    ) -> None:
+        from .sender import send_telegram_text
+
+        lock = self._telegram_send_lock_for(config)
+        with lock:
+            send_telegram_text(config, message, message_thread_id=message_thread_id)
 
     def _poll_messages(self) -> None:
         while True:
@@ -470,6 +508,8 @@ class RiderBotUi:
                 tab_index, result, interval_minutes = payload
                 self._show_result(tab_index, result, interval_minutes)
 
+        if self.stop_event is not None and self.stop_event.is_set():
+            self._refresh_run_controls()
         self.root.after(200, self._poll_messages)
 
     def _show_result(self, tab_index: int, result: RunResult, interval_minutes: int) -> None:
@@ -481,7 +521,8 @@ class RiderBotUi:
             status = "메시지 생성 완료"
 
         self.status_var.set(status)
-        self.next_run_var.set((datetime.now() + timedelta(minutes=interval_minutes)).strftime("%H:%M:%S"))
+        next_run_time = (datetime.now() + timedelta(minutes=interval_minutes)).strftime("%H:%M:%S")
+        self.next_run_var.set(f"크롤링{tab_index + 1} {next_run_time}")
         self._append_preview(f"[{datetime.now().strftime('%H:%M:%S')}] 크롤링{tab_index + 1} {status}\n{result.message}\n\n")
 
     def _read_settings(self) -> UiSettings:
@@ -525,6 +566,7 @@ class RiderBotUi:
             processor = TelegramCommandProcessor(
                 token_configs,
                 locks_by_target=locks_by_target,
+                send_text=self._send_telegram_command_reply_with_lock,
                 log_event=lambda message: self.messages.put(("log", message)),
             )
             poller = TelegramUpdatePoller(token_configs[0], handle_text=processor.handle_text)
@@ -545,6 +587,26 @@ class RiderBotUi:
                 self.messages.put(("error", f"텔레그램 명령 감지 오류: {exc}"))
                 stop_event.wait(5)
 
+    def _has_live_workers(self) -> bool:
+        workers = list(getattr(self, "workers", [])) + list(getattr(self, "telegram_workers", []))
+        return any(worker.is_alive() for worker in workers)
+
+    def _refresh_run_controls(self) -> None:
+        if not hasattr(self, "start_button") or not hasattr(self, "stop_button"):
+            return
+
+        stopping = self.stop_event is not None and self.stop_event.is_set()
+        if stopping and self._has_live_workers():
+            self.start_button.configure(state="disabled")
+            self.stop_button.configure(state="disabled")
+            return
+
+        if stopping:
+            self.workers = []
+            self.telegram_workers = []
+        self.start_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+
     def _append_preview(self, text: str) -> None:
         self.preview.configure(state="normal")
         self.preview.insert("end", text)
@@ -553,8 +615,7 @@ class RiderBotUi:
 
 
 def run_cli_once() -> None:
-    settings = UiSettingsStore(default_settings_path()).load()
-    result = run_once(settings.to_app_config())
+    result = run_once(AppConfig.from_env())
     if not result.sent:
         print(result.message)
 
@@ -607,6 +668,16 @@ def _validate_unique_active_value(
         seen[value] = index
 
 
+def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        if settings.baemin_center_name.strip() or settings.baemin_center_id.strip():
+            continue
+        raise ValueError(
+            f"크롤링{index + 1} 배민 센터명 또는 배민 센터 ID를 입력하세요. "
+            "여러 배민 아이디는 탭마다 센터 정보를 확인할 수 있어야 합니다."
+        )
+
+
 def _cdp_port_key(settings: UiSettings) -> object:
     if settings.browser_mode != "cdp":
         return None
@@ -625,7 +696,17 @@ def _telegram_target_key(settings: UiSettings | AppConfig) -> tuple[str, str] | 
     chat_id = settings.telegram_chat_id.strip()
     if not chat_id:
         return None
-    return (chat_id, settings.telegram_message_thread_id.strip())
+    return (chat_id, _normalize_telegram_thread_id(settings.telegram_message_thread_id))
+
+
+def _normalize_telegram_thread_id(raw: object) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(int(value))
+    except ValueError:
+        return value
 
 
 def _stop_requested(stop_event: threading.Event | None) -> bool:

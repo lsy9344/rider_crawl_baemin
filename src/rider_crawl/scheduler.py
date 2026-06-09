@@ -16,9 +16,10 @@ class BotScheduler:
     def __init__(
         self,
         *,
-        run_job: Callable[[], None],
+        run_job: Callable[[], object],
         interval_minutes: int | None = None,
         interval_seconds: int | None = None,
+        retry_seconds: int = 5,
     ) -> None:
         if interval_seconds is None:
             if interval_minutes is None:
@@ -28,7 +29,10 @@ class BotScheduler:
             interval_seconds = interval_minutes * 60
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be greater than zero")
+        if retry_seconds <= 0:
+            raise ValueError("retry_seconds must be greater than zero")
         self._interval_seconds = interval_seconds
+        self._retry_seconds = retry_seconds
         self.run_job = run_job
 
     @property
@@ -41,6 +45,7 @@ class BotScheduler:
             return
 
         while True:
-            self.run_job()
-            if event.wait(self.interval_seconds):
+            result = self.run_job()
+            wait_seconds = self._retry_seconds if result is False else self.interval_seconds
+            if event.wait(wait_seconds):
                 break

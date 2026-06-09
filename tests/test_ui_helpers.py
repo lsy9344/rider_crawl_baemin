@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from rider_crawl import ui
 from rider_crawl.app import RunResult
 from rider_crawl.ui import (
     DEFAULT_WINDOW_GEOMETRY,
@@ -31,11 +32,31 @@ def test_messenger_options_expose_telegram_and_kakao_for_ui():
     assert MESSENGER_OPTIONS == (("telegram", "텔레그램"), ("kakao", "카카오톡"))
 
 
+def test_run_cli_once_uses_environment_config(monkeypatch, tmp_path, capsys):
+    config = _app_config(tmp_path)
+    received = []
+
+    monkeypatch.setattr(ui.AppConfig, "from_env", classmethod(lambda cls: config))
+    monkeypatch.setattr(
+        ui,
+        "run_once",
+        lambda received_config: received.append(received_config)
+        or RunResult(message="preview", sent=False, skipped=False, message_hash="hash"),
+    )
+
+    ui.run_cli_once()
+
+    assert received == [config]
+    assert capsys.readouterr().out == "preview\n"
+
+
 def test_coerce_settings_builds_ui_settings_from_form_values(tmp_path):
     settings = coerce_settings(
         {
             "performance_url": " https://example.test/rider ",
             "peak_dashboard_url": " https://example.test/dashboard ",
+            "baemin_center_name": " 강남센터 ",
+            "baemin_center_id": " DP123 ",
             "browser_mode": "cdp",
             "cdp_url": " http://127.0.0.1:9222 ",
             "browser_user_data_dir": str(tmp_path / "browser"),
@@ -56,6 +77,8 @@ def test_coerce_settings_builds_ui_settings_from_form_values(tmp_path):
 
     assert settings.performance_url == "https://example.test/rider"
     assert settings.peak_dashboard_url == "https://example.test/dashboard"
+    assert settings.baemin_center_name == "강남센터"
+    assert settings.baemin_center_id == "DP123"
     assert settings.browser_mode == "cdp"
     assert settings.cdp_url == "http://127.0.0.1:9222"
     assert settings.browser_user_data_dir == Path(tmp_path / "browser")
@@ -130,6 +153,18 @@ def test_validate_active_tab_isolation_rejects_duplicate_browser_profiles(tmp_pa
 
     with pytest.raises(ValueError, match="프로필"):
         validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_rejects_active_tab_without_baemin_center_identity(tmp_path):
+    settings = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="배민 센터"):
+        validate_active_tab_isolation([settings])
 
 
 def test_validate_active_tab_isolation_ignores_inactive_tabs(tmp_path):
@@ -212,6 +247,30 @@ def test_validate_active_tab_isolation_allows_same_chat_id_with_unique_thread_id
     )
 
     validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_rejects_same_chat_id_with_equivalent_thread_ids(tmp_path):
+    first = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_bot_token="same-token",
+        telegram_chat_id="-100123",
+        telegram_message_thread_id="077",
+    )
+    second = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_bot_token="same-token",
+        telegram_chat_id="-100123",
+        telegram_message_thread_id="77",
+    )
+
+    with pytest.raises(ValueError, match="텔레그램 채팅방 ID"):
+        validate_active_tab_isolation([first, second])
 
 
 def test_validate_active_tab_isolation_rejects_duplicate_active_telegram_chat_ids(tmp_path):
@@ -364,6 +423,34 @@ def test_different_tabs_can_enter_run_once_concurrently(tmp_path, monkeypatch):
     assert sorted(entered) == ["크롤링1", "크롤링2"]
 
 
+def test_start_is_blocked_while_previous_workers_are_still_stopping(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.workers = [_FakeThread(alive=True)]
+    ui.telegram_workers = []
+    ui.status_var = _FakeVar()
+    save_calls = []
+    monkeypatch.setattr(ui, "save_settings", lambda: save_calls.append("saved"))
+
+    ui.start()
+
+    assert save_calls == []
+    assert ui.status_var.value == "중지 처리 중"
+
+
+def test_show_result_labels_next_run_with_tab_index():
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.status_var = _FakeVar()
+    ui.next_run_var = _FakeVar()
+    appended: list[str] = []
+    ui._append_preview = appended.append
+
+    ui._show_result(1, RunResult(message="message", sent=True, skipped=False, message_hash="hash"), 35)
+
+    assert ui.status_var.value == "전송 완료"
+    assert ui.next_run_var.value.startswith("크롤링2 ")
+
+
 def test_same_tab_run_is_skipped_when_already_running(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()
@@ -374,11 +461,12 @@ def test_same_tab_run_is_skipped_when_already_running(tmp_path, monkeypatch):
     monkeypatch.setattr("rider_crawl.ui.run_once", lambda config, **_kwargs: calls.append(config))
 
     try:
-        ui._run_once_background(0, _settings(tmp_path))
+        result = ui._run_once_background(0, _settings(tmp_path))
     finally:
         ui.crawl_locks_by_tab[0].release()
 
     assert calls == []
+    assert result is True
     assert ("status", "크롤링1 이미 실행 중, 건너뜀") in list(ui.messages.queue)
 
 
@@ -410,6 +498,65 @@ def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
     assert ("log", "크롤링1 카카오톡 전송 완료") in messages
 
 
+def test_telegram_send_uses_common_lock_per_bot_token(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.telegram_send_locks = {"token": threading.Lock()}
+    sent: list[str] = []
+    finished = threading.Event()
+    config = _settings(tmp_path).to_app_config(crawl_name="크롤링1", state_subdir="crawling1")
+    monkeypatch.setattr("rider_crawl.ui.dispatch_text_message", lambda received, message: sent.append(received.crawl_name))
+
+    ui.telegram_send_locks["token"].acquire()
+    worker = threading.Thread(
+        target=lambda: (ui._send_message_with_kakao_lock(config, "hello"), finished.set()),
+        daemon=True,
+    )
+    worker.start()
+    time.sleep(0.05)
+    assert finished.is_set() is False
+
+    ui.telegram_send_locks["token"].release()
+    worker.join(1)
+
+    assert finished.is_set() is True
+    assert sent == ["크롤링1"]
+    messages = list(ui.messages.queue)
+    assert ("log", "크롤링1 텔레그램 전송 대기") in messages
+    assert ("log", "크롤링1 텔레그램 전송 완료") in messages
+
+
+def test_telegram_command_reply_uses_common_lock_per_bot_token(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.telegram_send_locks = {"token": threading.Lock()}
+    sent: list[tuple[str, int | None]] = []
+    finished = threading.Event()
+    config = _settings(tmp_path).to_app_config(crawl_name="크롤링1", state_subdir="crawling1")
+    monkeypatch.setattr(
+        "rider_crawl.sender.send_telegram_text",
+        lambda _config, message, *, message_thread_id=None: sent.append((message, message_thread_id)),
+    )
+
+    ui.telegram_send_locks["token"].acquire()
+    worker = threading.Thread(
+        target=lambda: (
+            ui._send_telegram_command_reply_with_lock(config, "hello", message_thread_id=77),
+            finished.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+    time.sleep(0.05)
+    assert finished.is_set() is False
+
+    ui.telegram_send_locks["token"].release()
+    worker.join(1)
+
+    assert finished.is_set() is True
+    assert sent == [("hello", 77)]
+
+
 def test_coerce_settings_uses_default_message_interval_when_field_is_missing(tmp_path):
     settings = coerce_settings(
         {
@@ -429,6 +576,31 @@ def test_coerce_settings_uses_default_message_interval_when_field_is_missing(tmp
     )
 
     assert settings.interval_minutes == 35
+
+
+def test_coerce_settings_normalizes_telegram_thread_id(tmp_path):
+    settings = coerce_settings(
+        {
+            "performance_url": "https://example.test/rider",
+            "peak_dashboard_url": "",
+            "browser_mode": "cdp",
+            "cdp_url": "http://127.0.0.1:9222",
+            "browser_user_data_dir": str(tmp_path / "browser"),
+            "log_dir": str(tmp_path / "logs"),
+            "kakao_chat_name": "",
+            "telegram_bot_token": "token",
+            "telegram_chat_id": "-100123",
+            "telegram_message_thread_id": "077",
+            "interval_minutes": "35",
+            "page_timeout_seconds": "60000",
+            "run_lock_timeout_seconds": "900",
+            "headless": False,
+            "send_enabled": True,
+            "send_only_on_change": False,
+        }
+    )
+
+    assert settings.telegram_message_thread_id == "77"
 
 
 def test_coerce_settings_rejects_bad_interval():
@@ -601,6 +773,8 @@ def _settings(
         {
             "performance_url": performance_url,
             "peak_dashboard_url": "",
+            "baemin_center_name": "센터",
+            "baemin_center_id": "DP123",
             "browser_mode": browser_mode,
             "cdp_url": cdp_url,
             "browser_user_data_dir": str(browser_user_data_dir or tmp_path / "browser"),
@@ -618,3 +792,46 @@ def _settings(
             "send_only_on_change": False,
         }
     )
+
+
+def _app_config(tmp_path: Path):
+    from rider_crawl.config import AppConfig
+
+    return AppConfig(
+        coupang_eats_url="https://example.test/delivery/history",
+        baemin_center_name="강남센터",
+        baemin_center_id="DP123",
+        browser_mode="cdp",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser",
+        headless=False,
+        kakao_chat_name="",
+        log_dir=tmp_path / "logs",
+        send_enabled=False,
+        send_only_on_change=False,
+        timezone="Asia/Seoul",
+        run_lock_timeout_seconds=900,
+        page_timeout_seconds=60000,
+        telegram_bot_token="token",
+        telegram_chat_id="-100123",
+        telegram_message_thread_id="77",
+        messenger_name="telegram",
+        crawl_name="크롤링2",
+        state_subdir="crawling2",
+    )
+
+
+class _FakeThread:
+    def __init__(self, *, alive: bool) -> None:
+        self.alive = alive
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+class _FakeVar:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value

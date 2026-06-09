@@ -1,5 +1,9 @@
+import threading
+from dataclasses import replace
+
 from rider_crawl.app import run_once
 from rider_crawl.config import AppConfig
+from rider_crawl.lock import LockAlreadyHeldError
 from rider_crawl.models import CurrentScreenSnapshot
 
 
@@ -69,7 +73,163 @@ def test_run_once_includes_crawl_name_when_present(tmp_path):
     assert "[크롤링2]" in result.message
 
 
-def _config(tmp_path, *, crawl_name: str = "") -> AppConfig:
+def test_run_once_sends_again_when_telegram_target_changes(tmp_path):
+    sent_targets: list[str] = []
+    first = _config(
+        tmp_path,
+        send_enabled=True,
+        send_only_on_change=True,
+        telegram_bot_token="token",
+        telegram_chat_id="-100111",
+    )
+    second = _config(
+        tmp_path,
+        send_enabled=True,
+        send_only_on_change=True,
+        telegram_bot_token="token",
+        telegram_chat_id="-100222",
+    )
+
+    run_once(
+        first,
+        crawl_snapshot=lambda _config: _snapshot(),
+        send_message=lambda config, _message: sent_targets.append(config.telegram_chat_id),
+    )
+    result = run_once(
+        second,
+        crawl_snapshot=lambda _config: _snapshot(),
+        send_message=lambda config, _message: sent_targets.append(config.telegram_chat_id),
+    )
+
+    assert result.sent is True
+    assert result.skipped is False
+    assert sent_targets == ["-100111", "-100222"]
+
+
+def test_run_once_skips_duplicate_when_telegram_thread_id_format_changes(tmp_path):
+    sent_threads: list[str] = []
+    first = _config(
+        tmp_path,
+        send_enabled=True,
+        send_only_on_change=True,
+        telegram_bot_token="token",
+        telegram_chat_id="-100111",
+        telegram_message_thread_id="77",
+    )
+    second = _config(
+        tmp_path,
+        send_enabled=True,
+        send_only_on_change=True,
+        telegram_bot_token="token",
+        telegram_chat_id="-100111",
+        telegram_message_thread_id="077",
+    )
+
+    run_once(
+        first,
+        crawl_snapshot=lambda _config: _snapshot(),
+        send_message=lambda config, _message: sent_threads.append(config.telegram_message_thread_id),
+    )
+    result = run_once(
+        second,
+        crawl_snapshot=lambda _config: _snapshot(),
+        send_message=lambda config, _message: sent_threads.append(config.telegram_message_thread_id),
+    )
+
+    assert result.sent is False
+    assert result.skipped is True
+    assert sent_threads == ["77"]
+
+
+def test_run_once_allows_parallel_runs_for_different_browser_scopes(tmp_path):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    first = _config(tmp_path)
+    second = replace(
+        first,
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser-profile-2",
+    )
+
+    def slow_crawl(_config):
+        first_started.set()
+        release_first.wait(timeout=2)
+        return _snapshot()
+
+    def run_first():
+        try:
+            run_once(first, crawl_snapshot=slow_crawl, send_message=lambda _config, _message: None)
+        finally:
+            first_finished.set()
+
+    worker = threading.Thread(target=run_first)
+    worker.start()
+    assert first_started.wait(timeout=1)
+
+    try:
+        result = run_once(second, crawl_snapshot=lambda _config: _snapshot(), send_message=lambda _config, _message: None)
+    finally:
+        release_first.set()
+        worker.join(timeout=2)
+
+    assert first_finished.is_set()
+    assert result.skipped is False
+
+
+def test_run_once_blocks_parallel_runs_for_same_browser_scope_even_with_different_state_subdirs(tmp_path):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    first = _config(tmp_path)
+    second = replace(
+        first,
+        coupang_eats_url="https://example.test/other",
+        baemin_center_name="다른센터",
+        baemin_center_id="DP999",
+        state_subdir="crawling2",
+    )
+
+    def slow_crawl(_config):
+        first_started.set()
+        release_first.wait(timeout=2)
+        return _snapshot()
+
+    def run_first():
+        try:
+            run_once(first, crawl_snapshot=slow_crawl, send_message=lambda _config, _message: None)
+        finally:
+            first_finished.set()
+
+    worker = threading.Thread(target=run_first)
+    worker.start()
+    assert first_started.wait(timeout=1)
+
+    try:
+        try:
+            run_once(second, crawl_snapshot=lambda _config: _snapshot(), send_message=lambda _config, _message: None)
+        except LockAlreadyHeldError:
+            blocked = True
+        else:
+            blocked = False
+    finally:
+        release_first.set()
+        worker.join(timeout=2)
+
+    assert first_finished.is_set()
+    assert blocked is True
+
+
+def _config(
+    tmp_path,
+    *,
+    crawl_name: str = "",
+    send_enabled: bool = False,
+    send_only_on_change: bool = False,
+    telegram_bot_token: str = "",
+    telegram_chat_id: str = "",
+    telegram_message_thread_id: str = "",
+) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
         baemin_center_name="",
@@ -80,11 +240,14 @@ def _config(tmp_path, *, crawl_name: str = "") -> AppConfig:
         headless=False,
         kakao_chat_name="",
         log_dir=tmp_path / "logs",
-        send_enabled=False,
-        send_only_on_change=False,
+        send_enabled=send_enabled,
+        send_only_on_change=send_only_on_change,
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=900,
         page_timeout_seconds=60000,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
         crawl_name=crawl_name,
     )
 

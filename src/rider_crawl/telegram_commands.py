@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable
 
 from .config import AppConfig
+from .lock import RunLock
 from .parser import parse_baemin_delivery_history_html, parse_count
 
 
@@ -34,6 +39,12 @@ class RiderCancelStats:
 class RiderCancelMatch:
     source_label: str
     stats: RiderCancelStats
+
+
+@dataclass(frozen=True)
+class _UpdateHandlingResult:
+    update_id: int | None
+    error: Exception | None = None
 
 
 FetchHtml = Callable[[AppConfig], str]
@@ -132,11 +143,7 @@ class TelegramCommandProcessor:
         self.fetch_html = fetch_html or _fetch_page_html
         self.send_text = send_text or _send_telegram_text
         self.log_event = log_event or (lambda _message: None)
-        self.config_by_target = {
-            _config_target(config): config
-            for config in configs
-            if _config_target(config)[0]
-        }
+        self.config_by_target = _config_by_unique_target(configs)
         if locks_by_target is not None:
             self.locks_by_target = {
                 (_normalize_chat_id(chat_id), _normalize_thread_id(thread_id)): lock
@@ -178,10 +185,18 @@ class TelegramCommandProcessor:
                 self.log_event(f"{source} 명령 조회 완료")
         except Exception as exc:
             self.log_event(f"{source} 명령 조회 오류: {exc}")
-            self.send_text(config, "조회 중 오류가 발생했습니다.", message_thread_id=message_thread_id)
+            try:
+                self.send_text(config, "조회 중 오류가 발생했습니다.", message_thread_id=message_thread_id)
+            except Exception as send_exc:
+                self.log_event(f"{source} 오류 답장 전송 오류: {send_exc}")
+                raise
             return True
 
-        self.send_text(config, _render_lookup_reply(command, matches), message_thread_id=message_thread_id)
+        try:
+            self.send_text(config, _render_lookup_reply(command, matches), message_thread_id=message_thread_id)
+        except Exception as exc:
+            self.log_event(f"{source} 최종 답장 전송 오류: {exc}")
+            raise
         return True
 
     def _lookup(self, config: AppConfig, command: RiderLookupCommand) -> list[RiderCancelMatch]:
@@ -208,21 +223,73 @@ class TelegramUpdatePoller:
         handle_text: HandleText,
         get_updates: GetUpdates | None = None,
         timeout_seconds: int = 30,
+        offset_store_path: Path | None = None,
     ) -> None:
         self.config = config
         self.handle_text = handle_text
         self.get_updates = get_updates or _get_telegram_updates
         self.timeout_seconds = timeout_seconds
-        self.next_update_id: int | None = None
+        self.offset_store_path = offset_store_path or _default_offset_store_path(config)
+        self.next_update_id: int | None = _read_update_offset(self.offset_store_path)
+        self.completed_store_path = _completed_updates_store_path(self.offset_store_path)
+        self._completed_update_ids: set[int] = _read_completed_update_ids(self.completed_store_path)
 
     def poll_once(self) -> None:
+        with RunLock(
+            _offset_lock_store_path(self.offset_store_path),
+            stale_timeout_seconds=max(60, self.timeout_seconds + 10),
+        ):
+            self._reload_offset_state()
+            self._poll_once_unlocked()
+
+    def _poll_once_unlocked(self) -> None:
         updates = self.get_updates(
             self.config,
             offset=self.next_update_id,
             timeout_seconds=self.timeout_seconds,
         )
-        for update in updates:
-            update_id = update.get("update_id")
+        if not updates:
+            return
+
+        updates_to_handle = [
+            update for update in updates if self._update_id(update) not in self._completed_update_ids
+        ]
+        if not updates_to_handle:
+            self._advance_offset_after_completed_updates()
+            return
+
+        max_workers = min(len(updates_to_handle), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self._handle_update, update) for update in updates_to_handle]
+            results = [future.result() for future in futures]
+
+        errors: list[_UpdateHandlingResult] = []
+        completed_changed = False
+        for result in results:
+            if result.error is not None:
+                errors.append(result)
+            elif result.update_id is not None:
+                self._completed_update_ids.add(result.update_id)
+                completed_changed = True
+
+        if completed_changed:
+            _write_completed_update_ids(self.completed_store_path, self._completed_update_ids)
+
+        if errors:
+            failed_update_ids = [result.update_id for result in errors if result.update_id is not None]
+            if failed_update_ids:
+                self._advance_offset_before(min(failed_update_ids))
+            raise errors[0].error
+
+        self._advance_offset_after_completed_updates()
+
+    def run_loop(self, *, stop_event) -> None:
+        while not stop_event.is_set():
+            self.poll_once()
+
+    def _handle_update(self, update: dict) -> _UpdateHandlingResult:
+        normalized_update_id = self._update_id(update)
+        try:
             message = update.get("message")
             if isinstance(message, dict):
                 text = message.get("text")
@@ -230,12 +297,41 @@ class TelegramUpdatePoller:
                 message_thread_id = _message_thread_id(message)
                 if isinstance(text, str) and chat_id:
                     self.handle_text(chat_id, text, message_thread_id)
-            if isinstance(update_id, int):
-                self.next_update_id = max(self.next_update_id or 0, update_id + 1)
+        except Exception as exc:
+            return _UpdateHandlingResult(normalized_update_id, exc)
+        return _UpdateHandlingResult(normalized_update_id)
 
-    def run_loop(self, *, stop_event) -> None:
-        while not stop_event.is_set():
-            self.poll_once()
+    def _reload_offset_state(self) -> None:
+        self.next_update_id = _read_update_offset(self.offset_store_path)
+        self._completed_update_ids = _read_completed_update_ids(self.completed_store_path)
+
+    def _advance_offset_before(self, blocked_update_id: int) -> None:
+        completed_before_blocker = [
+            update_id for update_id in self._completed_update_ids if update_id < blocked_update_id
+        ]
+        if not completed_before_blocker:
+            return
+        self._set_next_update_id(max(completed_before_blocker) + 1)
+
+    def _advance_offset_after_completed_updates(self) -> None:
+        if not self._completed_update_ids:
+            return
+        self._set_next_update_id(max(self._completed_update_ids) + 1)
+
+    def _set_next_update_id(self, next_update_id: int) -> None:
+        if self.next_update_id is not None and next_update_id <= self.next_update_id:
+            return
+        self.next_update_id = next_update_id
+        _write_update_offset(self.offset_store_path, self.next_update_id)
+        self._completed_update_ids = {
+            update_id for update_id in self._completed_update_ids if update_id >= self.next_update_id
+        }
+        _write_completed_update_ids(self.completed_store_path, self._completed_update_ids)
+
+    @staticmethod
+    def _update_id(update: dict) -> int | None:
+        update_id = update.get("update_id")
+        return update_id if isinstance(update_id, int) else None
 
 
 def _render_lookup_reply(command: RiderLookupCommand, matches: list[RiderCancelMatch]) -> str:
@@ -289,11 +385,29 @@ def _normalize_chat_id(chat_id: object) -> str:
 
 
 def _normalize_thread_id(message_thread_id: object) -> str:
-    return str(message_thread_id or "").strip()
+    value = str(message_thread_id or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(int(value))
+    except ValueError:
+        return value
 
 
 def _config_target(config: AppConfig) -> TelegramTarget:
     return (_normalize_chat_id(config.telegram_chat_id), _normalize_thread_id(config.telegram_message_thread_id))
+
+
+def _config_by_unique_target(configs: list[AppConfig]) -> dict[TelegramTarget, AppConfig]:
+    config_by_target: dict[TelegramTarget, AppConfig] = {}
+    for config in configs:
+        target = _config_target(config)
+        if not target[0]:
+            continue
+        if target in config_by_target:
+            raise ValueError(f"텔레그램 대상이 중복되었습니다: {_target_label(target)}")
+        config_by_target[target] = config
+    return config_by_target
 
 
 def _target_label(target: TelegramTarget) -> str:
@@ -321,6 +435,56 @@ def _get_telegram_updates(config: AppConfig, *, offset: int | None, timeout_seco
     from .sender import get_telegram_updates
 
     return get_telegram_updates(config, offset=offset, timeout_seconds=timeout_seconds)
+
+
+def _default_offset_store_path(config: AppConfig) -> Path:
+    token_hash = hashlib.sha256(config.telegram_bot_token.strip().encode("utf-8")).hexdigest()[:16]
+    return Path("runtime") / "state" / "telegram_offsets" / f"{token_hash}.txt"
+
+
+def _completed_updates_store_path(offset_store_path: Path) -> Path:
+    return Path(f"{offset_store_path}.completed.json")
+
+
+def _offset_lock_store_path(offset_store_path: Path) -> Path:
+    return Path(f"{offset_store_path}.lock")
+
+
+def _read_update_offset(path: Path) -> int | None:
+    try:
+        value = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _write_update_offset(path: Path, offset: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(offset), encoding="utf-8")
+
+
+def _read_completed_update_ids(path: Path) -> set[int]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(raw, list):
+        return set()
+
+    completed: set[int] = set()
+    for value in raw:
+        try:
+            update_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if update_id > 0:
+            completed.add(update_id)
+    return completed
+
+
+def _write_completed_update_ids(path: Path, update_ids: set[int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(update_ids)), encoding="utf-8")
 
 
 def _message_matches_chat(message: dict, chat_id: str) -> bool:

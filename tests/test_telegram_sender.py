@@ -1,4 +1,5 @@
 import json
+from urllib.error import HTTPError
 from urllib.parse import parse_qs
 
 import pytest
@@ -55,6 +56,91 @@ def test_send_telegram_text_can_override_message_thread_id_for_replies(tmp_path)
     assert payload["message_thread_id"] == ["88"]
 
 
+def test_send_telegram_text_retries_after_telegram_rate_limit(tmp_path):
+    calls: list[tuple[str, bytes]] = []
+    sleeps: list[float] = []
+    responses = [
+        _FakeResponse(
+            {
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests",
+                "parameters": {"retry_after": 2},
+            }
+        ),
+        _FakeResponse({"ok": True, "result": {"message_id": 10}}),
+    ]
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.data))
+        return responses.pop(0)
+
+    send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=sleeps.append)
+
+    assert len(calls) == 2
+    assert sleeps == [2]
+
+
+def test_send_telegram_text_does_not_retry_ambiguous_transport_failure(tmp_path):
+    calls = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        raise OSError("response lost after request")
+
+    with pytest.raises(TelegramSendError, match="request failed"):
+        send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=sleeps.append)
+
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_send_telegram_text_does_not_retry_after_response_read_failure(tmp_path):
+    calls = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        return _UnreadableResponse()
+
+    with pytest.raises(TelegramSendError, match="response could not be read"):
+        send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=lambda _seconds: None)
+
+    assert calls == 1
+
+
+def test_send_telegram_text_reads_retry_after_from_http_error(tmp_path):
+    calls = 0
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs=None,
+                fp=_FakeBytesResponse(
+                    {
+                        "ok": False,
+                        "error_code": 429,
+                        "description": "Too Many Requests",
+                        "parameters": {"retry_after": 3},
+                    }
+                ),
+            )
+        return _FakeResponse({"ok": True, "result": {"message_id": 10}})
+
+    send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=sleeps.append)
+
+    assert calls == 2
+    assert sleeps == [3]
+
+
 def test_send_telegram_text_requires_token_and_chat_id(tmp_path):
     config = _config(tmp_path, token="", chat_id="")
 
@@ -91,6 +177,25 @@ class _FakeResponse:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
+
+
+class _FakeBytesResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class _UnreadableResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def read(self) -> bytes:
+        raise OSError("socket closed after response")
 
 
 def _config(

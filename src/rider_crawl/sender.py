@@ -5,6 +5,7 @@ import platform
 import time
 from datetime import datetime
 from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen as default_urlopen
 
@@ -23,6 +24,17 @@ class KakaoSendError(RuntimeError):
 class TelegramSendError(RuntimeError):
     """Raised when Telegram Bot API delivery cannot be attempted safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
 
 UrlOpen = Callable[..., Any]
 
@@ -34,6 +46,8 @@ def send_telegram_text(
     message_thread_id: int | None = None,
     urlopen: UrlOpen = default_urlopen,
     timeout_seconds: int = 10,
+    retry_attempts: int = 3,
+    sleep: Callable[[float], object] = time.sleep,
 ) -> None:
     _required_telegram_bot_token(config)
     payload: dict[str, object] = {
@@ -46,13 +60,22 @@ def send_telegram_text(
         target_thread_id = _optional_telegram_message_thread_id(config)
     if target_thread_id is not None:
         payload["message_thread_id"] = target_thread_id
-    _telegram_api_request(
-        config,
-        "sendMessage",
-        payload,
-        urlopen=urlopen,
-        timeout_seconds=timeout_seconds,
-    )
+
+    attempts = max(1, retry_attempts)
+    for attempt in range(attempts):
+        try:
+            _telegram_api_request(
+                config,
+                "sendMessage",
+                payload,
+                urlopen=urlopen,
+                timeout_seconds=timeout_seconds,
+            )
+            return
+        except TelegramSendError as exc:
+            if attempt >= attempts - 1 or not _should_retry_telegram_send(exc):
+                raise
+            sleep(_telegram_retry_delay(exc, attempt))
 
 
 def get_telegram_updates(
@@ -97,10 +120,18 @@ def _telegram_api_request(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            body = response.read().decode("utf-8")
+        response = urlopen(request, timeout=timeout_seconds)
+    except HTTPError as exc:
+        body = _read_response_body(exc)
+        raise _telegram_error_from_response(method, body, status_code=exc.code) from exc
     except Exception as exc:
         raise TelegramSendError(f"Telegram Bot API request failed: {method}") from exc
+
+    try:
+        with response:
+            body = response.read().decode("utf-8")
+    except Exception as exc:
+        raise TelegramSendError(f"Telegram Bot API response could not be read: {method}") from exc
 
     try:
         data = json.loads(body)
@@ -108,9 +139,57 @@ def _telegram_api_request(
         raise TelegramSendError("Telegram Bot API response was not valid JSON") from exc
 
     if not isinstance(data, dict) or data.get("ok") is not True:
-        description = data.get("description") if isinstance(data, dict) else body
-        raise TelegramSendError(f"Telegram Bot API error: {description}")
+        raise _telegram_error_from_response(method, body)
     return data.get("result")
+
+
+def _read_response_body(response: object) -> str:
+    try:
+        return response.read().decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _telegram_error_from_response(method: str, body: str, *, status_code: int | None = None) -> TelegramSendError:
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return TelegramSendError(
+            f"Telegram Bot API request failed: {method}",
+            retryable=status_code == 429,
+            retry_after_seconds=None,
+        )
+
+    description = data.get("description") if isinstance(data, dict) else body
+    retry_after = _telegram_retry_after_seconds(data)
+    retryable = status_code == 429 or retry_after is not None or data.get("error_code") == 429
+    return TelegramSendError(
+        f"Telegram Bot API error: {description}",
+        retryable=retryable,
+        retry_after_seconds=retry_after,
+    )
+
+
+def _telegram_retry_after_seconds(data: object) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    parameters = data.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    retry_after = parameters.get("retry_after")
+    if isinstance(retry_after, int) and retry_after >= 0:
+        return retry_after
+    return None
+
+
+def _should_retry_telegram_send(exc: TelegramSendError) -> bool:
+    return exc.retryable or exc.retry_after_seconds is not None
+
+
+def _telegram_retry_delay(exc: TelegramSendError, attempt: int) -> float:
+    if exc.retry_after_seconds is not None:
+        return exc.retry_after_seconds
+    return float(attempt + 1)
 
 
 def _required_telegram_bot_token(config: AppConfig) -> str:
@@ -243,7 +322,7 @@ def _find_or_open_kakao_chat_window(chat_name: str) -> object:
         _record_kakao_diagnostic(f"lookup_chat_title_error={exc}")
         try:
             _record_kakao_diagnostic("lookup=last_successful_handle")
-            return _focus_last_kakao_chat_window()
+            return _focus_last_kakao_chat_window(chat_name)
         except KakaoSendError as last_exc:
             _record_kakao_diagnostic(f"lookup_last_handle_error={last_exc}")
             _open_kakao_chat_window_from_main(chat_name)
@@ -271,7 +350,7 @@ def _remember_kakao_chat_window(window: object) -> None:
         _record_kakao_diagnostic(f"remembered_handle={handle}")
 
 
-def _focus_last_kakao_chat_window() -> object:
+def _focus_last_kakao_chat_window(chat_name: str) -> object:
     if _LAST_KAKAO_CHAT_HANDLE is None:
         raise KakaoSendError("remembered KakaoTalk chat window was not found")
 
@@ -281,6 +360,8 @@ def _focus_last_kakao_chat_window() -> object:
             continue
         try:
             if not _is_kakao_window(window):
+                continue
+            if not _window_matches_kakao_chat_name(window, chat_name):
                 continue
             _bring_window_to_front(window)
         except Exception:
@@ -300,6 +381,11 @@ def _window_from_handle(handle: int, backend: str) -> object | None:
         return Desktop(backend=backend).window(handle=handle)
     except Exception:
         return None
+
+
+def _window_matches_kakao_chat_name(window: object, chat_name: str) -> bool:
+    title = _window_title(window)
+    return bool(chat_name and (title == chat_name or chat_name in title))
 
 
 def _focus_kakao_message_window() -> object:

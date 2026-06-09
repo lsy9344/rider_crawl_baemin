@@ -23,6 +23,16 @@ def test_ui_settings_defaults_are_safe_for_first_run():
     assert settings.telegram_message_thread_id == ""
 
 
+def test_additional_tab_defaults_do_not_inherit_first_center():
+    settings = UiSettings.default_for_tab(2)
+
+    assert settings.performance_url == ""
+    assert settings.baemin_center_name == ""
+    assert settings.baemin_center_id == ""
+    assert settings.cdp_url == "http://127.0.0.1:9223"
+    assert settings.browser_user_data_dir == Path("runtime/browser-profile-2")
+
+
 def test_ui_settings_save_and_load_round_trip(tmp_path):
     store = UiSettingsStore(tmp_path / "settings.json")
     settings = UiSettings.defaults()

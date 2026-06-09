@@ -36,6 +36,17 @@ def test_scheduler_can_run_with_second_interval_for_baemin_refresh_loop():
     assert stop_event.waited == [20, 20]
 
 
+def test_scheduler_retries_soon_when_job_reports_skipped_run():
+    calls: list[int] = []
+    stop_event = FakeStopEvent([False, False, True])
+    scheduler = BotScheduler(interval_minutes=35, retry_seconds=5, run_job=lambda: calls.append(len(calls) + 1) or False)
+
+    scheduler.run_loop(stop_event=stop_event)
+
+    assert calls == [1, 2]
+    assert stop_event.waited == [5, 5]
+
+
 def test_scheduler_does_not_run_when_stopped_before_start():
     calls: list[int] = []
     stop_event = FakeStopEvent([True])
