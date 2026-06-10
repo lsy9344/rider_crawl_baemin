@@ -33,6 +33,24 @@ def test_messenger_options_expose_telegram_and_kakao_for_ui():
     assert MESSENGER_OPTIONS == (("telegram", "텔레그램"), ("kakao", "카카오톡"))
 
 
+def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
+    states = ui._messenger_field_states("telegram")
+
+    assert states["telegram_bot_token"] == "normal"
+    assert states["telegram_chat_id"] == "normal"
+    assert states["telegram_message_thread_id"] == "normal"
+    assert states["kakao_chat_name"] == "disabled"
+
+
+def test_messenger_field_states_enable_only_kakao_inputs_for_kakao():
+    states = ui._messenger_field_states("kakao")
+
+    assert states["telegram_bot_token"] == "disabled"
+    assert states["telegram_chat_id"] == "disabled"
+    assert states["telegram_message_thread_id"] == "disabled"
+    assert states["kakao_chat_name"] == "normal"
+
+
 def test_run_cli_once_uses_environment_config(monkeypatch, tmp_path, capsys):
     config = _app_config(tmp_path)
     received = []

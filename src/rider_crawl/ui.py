@@ -27,6 +27,9 @@ MIN_WINDOW_HEIGHT = 780
 PREVIEW_TEXT_HEIGHT = 24
 MESSENGER_OPTIONS = (("telegram", "텔레그램"), ("kakao", "카카오톡"))
 TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
+TELEGRAM_FIELD_KEYS = ("telegram_bot_token", "telegram_chat_id", "telegram_message_thread_id")
+KAKAO_FIELD_KEYS = ("kakao_chat_name",)
+MESSENGER_FIELD_KEYS = TELEGRAM_FIELD_KEYS + KAKAO_FIELD_KEYS
 
 
 def default_settings_path() -> Path:
@@ -240,9 +243,13 @@ class RiderBotUi:
             ("페이지 타임아웃(ms)", "page_timeout_seconds"),
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
         ]
+        entry_widgets = {}
         for row, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-            ttk.Entry(frame, textvariable=tab_vars[key]).grid(row=row, column=1, sticky="ew", pady=4)
+            entry = ttk.Entry(frame, textvariable=tab_vars[key])
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            if key in MESSENGER_FIELD_KEYS:
+                entry_widgets[key] = entry
 
         checks = ttk.Frame(frame)
         checks.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -276,6 +283,20 @@ class RiderBotUi:
             sticky="w",
             pady=(8, 0),
         )
+        self._bind_messenger_field_states(tab_vars, entry_widgets)
+
+    def _bind_messenger_field_states(
+        self,
+        tab_vars: dict[str, StringVar | BooleanVar],
+        entry_widgets: dict[str, object],
+    ) -> None:
+        messenger_var = tab_vars["messenger_name"]
+
+        def update_states(*_args: object) -> None:
+            _apply_messenger_field_states(entry_widgets, str(messenger_var.get()))
+
+        messenger_var.trace_add("write", update_states)
+        update_states()
 
     def _build_runtime(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
@@ -696,6 +717,23 @@ def _messenger_name(raw: Any) -> str:
     if value not in valid_names:
         raise ValueError("전송 방식은 텔레그램 또는 카카오톡만 선택하세요")
     return value
+
+
+def _messenger_field_states(messenger_name: str) -> dict[str, str]:
+    value = messenger_name.strip() or "telegram"
+    telegram_state = "normal" if value == "telegram" else "disabled"
+    kakao_state = "normal" if value == "kakao" else "disabled"
+    return {
+        **{key: telegram_state for key in TELEGRAM_FIELD_KEYS},
+        **{key: kakao_state for key in KAKAO_FIELD_KEYS},
+    }
+
+
+def _apply_messenger_field_states(entry_widgets: dict[str, object], messenger_name: str) -> None:
+    for key, state in _messenger_field_states(messenger_name).items():
+        widget = entry_widgets.get(key)
+        if widget is not None:
+            widget.configure(state=state)
 
 
 def _validate_unique_active_value(
