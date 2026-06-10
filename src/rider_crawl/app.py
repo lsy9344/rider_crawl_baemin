@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .config import AppConfig
 from .lock import RunLock
@@ -67,13 +68,28 @@ def _run_lock_path(config: AppConfig) -> Path:
 
 
 def _run_scope_key(config: AppConfig) -> str:
+    browser_mode = config.browser_mode.strip()
+    if browser_mode == "cdp":
+        return "\n".join([browser_mode, _cdp_endpoint_key(config.cdp_url)])
+
     return "\n".join(
         [
-            config.browser_mode.strip(),
-            config.cdp_url.strip(),
+            browser_mode,
             str(config.browser_user_data_dir.expanduser().resolve()).casefold(),
         ]
     )
+
+
+def _cdp_endpoint_key(cdp_url: str) -> str:
+    value = cdp_url.strip()
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").casefold()
+    if host == "localhost":
+        host = "127.0.0.1"
+    if parsed.port is None:
+        return value.casefold()
+    scheme = (parsed.scheme or "http").casefold()
+    return f"{scheme}://{host}:{parsed.port}"
 
 
 def _message_scope_key(config: AppConfig) -> str:

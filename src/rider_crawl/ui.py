@@ -4,6 +4,7 @@ import argparse
 import platform
 import queue
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, messagebox
@@ -16,6 +17,7 @@ from .browser_launcher import BrowserLaunchError, prepare_chrome
 from .config import AppConfig
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
+from .sender import TelegramSendError
 from .telegram_commands import TelegramCommandProcessor, TelegramUpdatePoller
 from .ui_settings import UiSettings, UiSettingsStore
 
@@ -24,6 +26,7 @@ DEFAULT_WINDOW_GEOMETRY = "900x900"
 MIN_WINDOW_HEIGHT = 780
 PREVIEW_TEXT_HEIGHT = 24
 MESSENGER_OPTIONS = (("telegram", "텔레그램"), ("kakao", "카카오톡"))
+TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
 
 
 def default_settings_path() -> Path:
@@ -37,6 +40,7 @@ def active_crawling_settings(settings_list: list[UiSettings]) -> list[tuple[int,
 def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     active_settings = active_crawling_settings(settings_list)
     _validate_active_baemin_center_identity(active_settings)
+    _validate_active_telegram_required(active_settings)
     _validate_unique_active_value(
         active_settings,
         label="CDP 주소",
@@ -136,6 +140,7 @@ class RiderBotUi:
         }
         self.kakao_send_lock = threading.Lock()
         self.telegram_send_locks: dict[str, threading.Lock] = {}
+        self.telegram_last_send_monotonic: dict[str, float] = {}
 
         self.root.title("배민 배달현황 실적봇")
         self.root.geometry(DEFAULT_WINDOW_GEOMETRY)
@@ -436,6 +441,9 @@ class RiderBotUi:
                 settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
                 send_message=self._send_message_with_kakao_lock,
             )
+        except TelegramSendError as exc:
+            self.messages.put(("error", f"{label} 텔레그램 전송 오류: {exc}"))
+            return False
         except Exception as exc:  # UI boundary: surface errors to the operator.
             self.messages.put(("error", f"{label} 오류: {exc}"))
             return True
@@ -456,7 +464,11 @@ class RiderBotUi:
             lock = self._telegram_send_lock_for(config)
             self.messages.put(("log", f"{label} 텔레그램 전송 대기"))
             with lock:
-                dispatch_text_message(config, message)
+                self._wait_for_telegram_send_slot(config)
+                try:
+                    dispatch_text_message(config, message)
+                finally:
+                    self._remember_telegram_send_time(config)
             self.messages.put(("log", f"{label} 텔레그램 전송 완료"))
             return
 
@@ -488,7 +500,31 @@ class RiderBotUi:
 
         lock = self._telegram_send_lock_for(config)
         with lock:
-            send_telegram_text(config, message, message_thread_id=message_thread_id)
+            self._wait_for_telegram_send_slot(config)
+            try:
+                send_telegram_text(config, message, message_thread_id=message_thread_id)
+            finally:
+                self._remember_telegram_send_time(config)
+
+    def _wait_for_telegram_send_slot(self, config: AppConfig) -> None:
+        if not hasattr(self, "telegram_last_send_monotonic"):
+            self.telegram_last_send_monotonic = {}
+        token = config.telegram_bot_token.strip()
+        if not token:
+            return
+        previous = self.telegram_last_send_monotonic.get(token)
+        if previous is None:
+            return
+        wait_seconds = TELEGRAM_SEND_MIN_INTERVAL_SECONDS - (time.monotonic() - previous)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _remember_telegram_send_time(self, config: AppConfig) -> None:
+        if not hasattr(self, "telegram_last_send_monotonic"):
+            self.telegram_last_send_monotonic = {}
+        token = config.telegram_bot_token.strip()
+        if token:
+            self.telegram_last_send_monotonic[token] = time.monotonic()
 
     def _poll_messages(self) -> None:
         while True:
@@ -676,6 +712,16 @@ def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, Ui
             f"크롤링{index + 1} 배민 센터명 또는 배민 센터 ID를 입력하세요. "
             "여러 배민 아이디는 탭마다 센터 정보를 확인할 수 있어야 합니다."
         )
+
+
+def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        if settings.messenger_name != "telegram" or not settings.send_enabled:
+            continue
+        if not settings.telegram_bot_token.strip():
+            raise ValueError(f"크롤링{index + 1} 텔레그램 봇 토큰을 입력하세요.")
+        if not settings.telegram_chat_id.strip():
+            raise ValueError(f"크롤링{index + 1} 텔레그램 채팅방 ID를 입력하세요.")
 
 
 def _cdp_port_key(settings: UiSettings) -> object:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import threading
@@ -49,7 +50,7 @@ class _UpdateHandlingResult:
 
 FetchHtml = Callable[[AppConfig], str]
 SendText = Callable[..., None]
-HandleText = Callable[[str, str, int | None], object]
+HandleText = Callable[..., object]
 GetUpdates = Callable[..., list[dict]]
 LogEvent = Callable[[str], None]
 TelegramTarget = tuple[str, str]
@@ -163,7 +164,14 @@ class TelegramCommandProcessor:
         for target in self.config_by_target:
             self.locks_by_target.setdefault(target, threading.Lock())
 
-    def handle_text(self, chat_id: str, text: str, message_thread_id: int | None = None) -> bool:
+    def handle_text(
+        self,
+        chat_id: str,
+        text: str,
+        message_thread_id: int | None = None,
+        *,
+        send_progress: bool = True,
+    ) -> bool:
         command = parse_rider_lookup_command(text)
         if command is None:
             return False
@@ -177,7 +185,8 @@ class TelegramCommandProcessor:
 
         source = _source_label(config, self.configs.index(config))
         self.log_event(f"{source} 텔레그램 명령 수신: !{command.name}{command.phone_last4}")
-        self.send_text(config, "조회 중입니다.", message_thread_id=message_thread_id)
+        if send_progress:
+            self.send_text(config, "조회 중입니다.", message_thread_id=message_thread_id)
         try:
             with self.locks_by_target[target]:
                 self.log_event(f"{source} 명령 조회 시작")
@@ -233,6 +242,8 @@ class TelegramUpdatePoller:
         self.next_update_id: int | None = _read_update_offset(self.offset_store_path)
         self.completed_store_path = _completed_updates_store_path(self.offset_store_path)
         self._completed_update_ids: set[int] = _read_completed_update_ids(self.completed_store_path)
+        self.started_store_path = _started_updates_store_path(self.offset_store_path)
+        self._started_update_ids: set[int] = _read_completed_update_ids(self.started_store_path)
 
     def poll_once(self) -> None:
         with RunLock(
@@ -258,9 +269,26 @@ class TelegramUpdatePoller:
             self._advance_offset_after_completed_updates()
             return
 
+        already_started_ids = set(self._started_update_ids)
+        started_changed = False
+        for update in updates_to_handle:
+            update_id = self._update_id(update)
+            if update_id is not None and update_id not in self._started_update_ids:
+                self._started_update_ids.add(update_id)
+                started_changed = True
+        if started_changed:
+            _write_completed_update_ids(self.started_store_path, self._started_update_ids)
+
         max_workers = min(len(updates_to_handle), 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._handle_update, update) for update in updates_to_handle]
+            futures = [
+                executor.submit(
+                    self._handle_update,
+                    update,
+                    send_progress=self._update_id(update) not in already_started_ids,
+                )
+                for update in updates_to_handle
+            ]
             results = [future.result() for future in futures]
 
         errors: list[_UpdateHandlingResult] = []
@@ -287,7 +315,7 @@ class TelegramUpdatePoller:
         while not stop_event.is_set():
             self.poll_once()
 
-    def _handle_update(self, update: dict) -> _UpdateHandlingResult:
+    def _handle_update(self, update: dict, *, send_progress: bool = True) -> _UpdateHandlingResult:
         normalized_update_id = self._update_id(update)
         try:
             message = update.get("message")
@@ -296,7 +324,13 @@ class TelegramUpdatePoller:
                 chat_id = _message_chat_id(message)
                 message_thread_id = _message_thread_id(message)
                 if isinstance(text, str) and chat_id:
-                    self.handle_text(chat_id, text, message_thread_id)
+                    _call_handle_text(
+                        self.handle_text,
+                        chat_id,
+                        text,
+                        message_thread_id,
+                        send_progress=send_progress,
+                    )
         except Exception as exc:
             return _UpdateHandlingResult(normalized_update_id, exc)
         return _UpdateHandlingResult(normalized_update_id)
@@ -304,6 +338,7 @@ class TelegramUpdatePoller:
     def _reload_offset_state(self) -> None:
         self.next_update_id = _read_update_offset(self.offset_store_path)
         self._completed_update_ids = _read_completed_update_ids(self.completed_store_path)
+        self._started_update_ids = _read_completed_update_ids(self.started_store_path)
 
     def _advance_offset_before(self, blocked_update_id: int) -> None:
         completed_before_blocker = [
@@ -327,6 +362,10 @@ class TelegramUpdatePoller:
             update_id for update_id in self._completed_update_ids if update_id >= self.next_update_id
         }
         _write_completed_update_ids(self.completed_store_path, self._completed_update_ids)
+        self._started_update_ids = {
+            update_id for update_id in self._started_update_ids if update_id >= self.next_update_id
+        }
+        _write_completed_update_ids(self.started_store_path, self._started_update_ids)
 
     @staticmethod
     def _update_id(update: dict) -> int | None:
@@ -343,6 +382,28 @@ def _render_lookup_reply(command: RiderLookupCommand, matches: list[RiderCancelM
         labels = ", ".join(match.source_label for match in matches)
         reply = f"{reply}\n중복 발견: {labels}"
     return reply
+
+
+def _call_handle_text(
+    handle_text: HandleText,
+    chat_id: str,
+    text: str,
+    message_thread_id: int | None,
+    *,
+    send_progress: bool,
+) -> object:
+    try:
+        signature = inspect.signature(handle_text)
+    except (TypeError, ValueError):
+        return handle_text(chat_id, text, message_thread_id)
+    parameters = signature.parameters.values()
+    accepts_progress = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "send_progress"
+        for parameter in parameters
+    )
+    if accepts_progress:
+        return handle_text(chat_id, text, message_thread_id, send_progress=send_progress)
+    return handle_text(chat_id, text, message_thread_id)
 
 
 def _cell(row: dict[str, str], *names: str) -> str:
@@ -444,6 +505,10 @@ def _default_offset_store_path(config: AppConfig) -> Path:
 
 def _completed_updates_store_path(offset_store_path: Path) -> Path:
     return Path(f"{offset_store_path}.completed.json")
+
+
+def _started_updates_store_path(offset_store_path: Path) -> Path:
+    return Path(f"{offset_store_path}.started.json")
 
 
 def _offset_lock_store_path(offset_store_path: Path) -> Path:

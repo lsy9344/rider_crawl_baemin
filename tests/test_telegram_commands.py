@@ -505,6 +505,49 @@ def test_telegram_update_poller_does_not_advance_offset_when_final_reply_fails(t
     assert any("최종 답장 전송 오류" in message for message in logs)
 
 
+def test_telegram_update_poller_does_not_repeat_progress_reply_after_final_reply_fails(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
+        <th>배차취소</th><th>배달취소(라이더귀책)</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>50</td><td>0</td><td>1</td><td>1</td></tr>
+      </tbody>
+    </table>
+    """
+    sent: list[str] = []
+    offset_path = tmp_path / "telegram.offset"
+
+    def fake_send_text(_config, message, *, message_thread_id=None):
+        sent.append(message)
+        if message != "조회 중입니다.":
+            raise RuntimeError("temporary send failure")
+
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")],
+        fetch_html=lambda _config: html,
+        send_text=fake_send_text,
+    )
+    poller = TelegramUpdatePoller(
+        _config(tmp_path, crawl_name="크롤링1", chat_id="-100123"),
+        handle_text=processor.handle_text,
+        get_updates=lambda *_args, **_kwargs: [
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+        ],
+        offset_store_path=offset_path,
+    )
+
+    with pytest.raises(RuntimeError, match="temporary send failure"):
+        poller.poll_once()
+    with pytest.raises(RuntimeError, match="temporary send failure"):
+        poller.poll_once()
+
+    assert sent.count("조회 중입니다.") == 1
+    assert poller.next_update_id is None
+
+
 def test_telegram_update_poller_handles_updates_in_same_batch_concurrently(tmp_path):
     barrier = threading.Barrier(2, timeout=1)
     handled: list[str] = []

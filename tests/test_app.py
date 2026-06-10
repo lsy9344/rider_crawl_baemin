@@ -220,6 +220,47 @@ def test_run_once_blocks_parallel_runs_for_same_browser_scope_even_with_differen
     assert blocked is True
 
 
+def test_run_once_blocks_parallel_cdp_runs_even_when_profile_paths_differ(tmp_path):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    first = _config(tmp_path)
+    second = replace(
+        first,
+        browser_user_data_dir=tmp_path / "other-browser-profile",
+        state_subdir="crawling2",
+    )
+
+    def slow_crawl(_config):
+        first_started.set()
+        release_first.wait(timeout=2)
+        return _snapshot()
+
+    def run_first():
+        try:
+            run_once(first, crawl_snapshot=slow_crawl, send_message=lambda _config, _message: None)
+        finally:
+            first_finished.set()
+
+    worker = threading.Thread(target=run_first)
+    worker.start()
+    assert first_started.wait(timeout=1)
+
+    try:
+        try:
+            run_once(second, crawl_snapshot=lambda _config: _snapshot(), send_message=lambda _config, _message: None)
+        except LockAlreadyHeldError:
+            blocked = True
+        else:
+            blocked = False
+    finally:
+        release_first.set()
+        worker.join(timeout=2)
+
+    assert first_finished.is_set()
+    assert blocked is True
+
+
 def _config(
     tmp_path,
     *,

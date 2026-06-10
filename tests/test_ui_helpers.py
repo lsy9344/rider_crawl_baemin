@@ -7,6 +7,7 @@ import pytest
 
 from rider_crawl import ui
 from rider_crawl.app import RunResult
+from rider_crawl.sender import TelegramSendError
 from rider_crawl.ui import (
     DEFAULT_WINDOW_GEOMETRY,
     MESSENGER_OPTIONS,
@@ -323,6 +324,30 @@ def test_validate_active_tab_isolation_ignores_duplicate_chat_ids_for_non_telegr
     validate_active_tab_isolation([telegram, kakao, disabled])
 
 
+def test_validate_active_tab_isolation_rejects_enabled_telegram_without_token(tmp_path):
+    settings = _settings(
+        tmp_path,
+        telegram_bot_token="",
+        telegram_chat_id="-100123",
+        send_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="텔레그램 봇 토큰"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_enabled_telegram_without_chat_id(tmp_path):
+    settings = _settings(
+        tmp_path,
+        telegram_bot_token="token",
+        telegram_chat_id="",
+        send_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="텔레그램 채팅방 ID"):
+        validate_active_tab_isolation([settings])
+
+
 def test_telegram_configs_by_token_groups_duplicate_tokens_once(tmp_path):
     first = _settings(
         tmp_path,
@@ -470,6 +495,24 @@ def test_same_tab_run_is_skipped_when_already_running(tmp_path, monkeypatch):
     assert ("status", "크롤링1 이미 실행 중, 건너뜀") in list(ui.messages.queue)
 
 
+def test_telegram_send_failure_requests_scheduler_retry(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_send_locks = {}
+    settings = _settings(tmp_path)
+
+    def failing_run_once(_config, **_kwargs):
+        raise TelegramSendError("rate limited", retryable=True)
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    result = ui._run_once_background(0, settings)
+
+    assert result is False
+    assert any(kind == "error" and "rate limited" in payload for kind, payload in list(ui.messages.queue))
+
+
 def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()
@@ -524,6 +567,31 @@ def test_telegram_send_uses_common_lock_per_bot_token(tmp_path, monkeypatch):
     messages = list(ui.messages.queue)
     assert ("log", "크롤링1 텔레그램 전송 대기") in messages
     assert ("log", "크롤링1 텔레그램 전송 완료") in messages
+
+
+def test_telegram_send_waits_between_messages_for_same_bot_token(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.telegram_send_locks = {}
+    ui.telegram_last_send_monotonic = {"token": 100.0}
+    sent: list[str] = []
+    sleeps: list[float] = []
+    now = [100.25]
+    config = _settings(tmp_path).to_app_config(crawl_name="크롤링1", state_subdir="crawling1")
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("rider_crawl.ui.dispatch_text_message", lambda received, message: sent.append(received.crawl_name))
+    monkeypatch.setattr("rider_crawl.ui.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("rider_crawl.ui.time.sleep", fake_sleep)
+
+    ui._send_message_with_kakao_lock(config, "hello")
+
+    assert sent == ["크롤링1"]
+    assert sleeps == [0.75]
+    assert ui.telegram_last_send_monotonic["token"] == 101.0
 
 
 def test_telegram_command_reply_uses_common_lock_per_bot_token(tmp_path, monkeypatch):
