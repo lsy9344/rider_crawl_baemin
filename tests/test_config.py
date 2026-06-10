@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from rider_crawl.config import AppConfig
+import pytest
+
+from rider_crawl.config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 
 
 def test_app_config_reads_environment_values(monkeypatch):
@@ -104,12 +106,82 @@ def test_app_config_reads_coupang_environment_values(monkeypatch):
     monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
     monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/rider-performance")
     monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
+    monkeypatch.setenv("BAEMIN_CENTER_NAME", "쿠팡강남센터")
 
     config = AppConfig.from_env()
 
     assert config.platform_name == "coupang"
     assert config.coupang_eats_url == "https://example.test/rider-performance"
     assert config.peak_dashboard_url == "https://example.test/peak-dashboard"
+    # 쿠팡 탭은 BAEMIN_CENTER_NAME을 기대 센터/상점명으로 재사용한다.
+    assert config.baemin_center_name == "쿠팡강남센터"
+
+
+def test_app_config_coupang_requires_center_name(monkeypatch):
+    # 쿠팡에서 BAEMIN_CENTER_NAME 미설정이면 배민 기본값을 넣지 않고 설정 오류를 낸다.
+    monkeypatch.delenv("PERFORMANCE_URL", raising=False)
+    monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
+    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/rider-performance")
+    monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
+    monkeypatch.delenv("BAEMIN_CENTER_NAME", raising=False)
+
+    with pytest.raises(ValueError, match="BAEMIN_CENTER_NAME"):
+        AppConfig.from_env()
+
+
+def test_app_config_coupang_rejects_default_baemin_center_name(monkeypatch):
+    # 플랫폼만 쿠팡으로 바꾸고 배민 기본 센터명을 그대로 두면 크롤링이 항상 실패하므로
+    # 실행 전에 설정 오류로 막는다.
+    monkeypatch.delenv("PERFORMANCE_URL", raising=False)
+    monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
+    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/rider-performance")
+    monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
+    monkeypatch.setenv("BAEMIN_CENTER_NAME", DEFAULT_BAEMIN_CENTER_NAME)
+
+    with pytest.raises(ValueError, match="배민 기본값"):
+        AppConfig.from_env()
+
+
+def _config_with_log_dir(log_dir: str) -> AppConfig:
+    return AppConfig(
+        coupang_eats_url="https://example.test/history",
+        baemin_center_name="",
+        baemin_center_id="",
+        browser_mode="cdp",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=Path("browser"),
+        headless=False,
+        kakao_chat_name="",
+        log_dir=Path(log_dir),
+        send_enabled=False,
+        send_only_on_change=False,
+        timezone="Asia/Seoul",
+        run_lock_timeout_seconds=900,
+        page_timeout_seconds=60000,
+    )
+
+
+def test_runtime_dir_defaults_to_cwd_runtime_for_default_log_dir():
+    # 기본값(LOG_DIR=logs)에서는 종전과 동일하게 cwd의 ``runtime``을 쓴다.
+    assert _config_with_log_dir("logs").runtime_dir == Path("runtime")
+
+
+def test_runtime_dir_sits_next_to_named_logs_dir():
+    config = _config_with_log_dir("C:/rider_crawl/logs")
+    assert config.runtime_dir == Path("C:/rider_crawl/runtime")
+
+
+def test_custom_log_dirs_get_isolated_runtime_dirs():
+    # 커스텀 로그 경로로 계정을 나누면 runtime(lock/last-hash)도 계정별로 분리돼야
+    # 한다. 예전에는 log_dir.name != "logs"이면 둘 다 cwd ``runtime``으로 떨어져
+    # lock/hash가 섞였다.
+    first = _config_with_log_dir("C:/acct1/custom-log")
+    second = _config_with_log_dir("C:/acct2/custom-log")
+
+    assert first.runtime_dir == Path("C:/acct1/runtime")
+    assert second.runtime_dir == Path("C:/acct2/runtime")
+    assert first.runtime_dir != second.runtime_dir
+    assert first.state_dir != second.state_dir
 
 
 def test_app_config_defaults_to_baemin_platform(monkeypatch):
@@ -147,8 +219,11 @@ def test_app_config_coupang_platform_uses_coupang_defaults(monkeypatch):
     monkeypatch.delenv("PERFORMANCE_URL", raising=False)
     monkeypatch.delenv("COUPANG_EATS_URL", raising=False)
     monkeypatch.delenv("PEAK_DASHBOARD_URL", raising=False)
+    monkeypatch.setenv("BAEMIN_CENTER_NAME", "쿠팡강남센터")
 
     config = AppConfig.from_env()
 
     assert config.coupang_eats_url == "https://partner.coupangeats.com/page/rider-performance"
     assert config.peak_dashboard_url == "https://partner.coupangeats.com/page/peak-dashboard"
+    # 쿠팡에서는 배민 센터 ID 기본값을 넣지 않는다(쿠팡 탭에서 사용하지 않음).
+    assert config.baemin_center_id == ""

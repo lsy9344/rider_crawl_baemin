@@ -826,6 +826,19 @@ def test_show_result_labels_next_run_with_tab_index():
     assert ui.next_run_var.value.startswith("크롤링2 ")
 
 
+def test_show_result_makes_disabled_send_visible():
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.status_var = _FakeVar()
+    ui.next_run_var = _FakeVar()
+    appended: list[str] = []
+    ui._append_preview = appended.append
+
+    ui._show_result(1, RunResult(message="message", sent=False, skipped=False, message_hash="hash"), 35)
+
+    assert ui.status_var.value == "메시지 생성 완료(전송 꺼짐)"
+    assert "크롤링2 메시지 생성 완료(전송 꺼짐)" in appended[0]
+
+
 def test_same_tab_run_is_skipped_when_already_running(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()
@@ -878,6 +891,56 @@ def test_kakao_send_failure_requests_scheduler_retry(tmp_path, monkeypatch):
 
     # Kakao failures retry soon like Telegram, not after the full interval.
     assert result is False
+    assert any(
+        kind == "error" and "카카오톡 전송 오류" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
+
+
+def test_ambiguous_telegram_failure_skips_fast_retry(tmp_path, monkeypatch):
+    # 요청이 텔레그램에 도달했는지 불확실한 실패(응답 읽기 실패 등)는 5초 후 빠른
+    # 재시도로 같은 메시지를 다시 보내면 안 된다. run_once가 깔끔한 성공에서만 마지막
+    # 해시를 기록하므로, 빠른 재시도는 중복 전송이 된다. 정규 주기까지 기다리도록 한다.
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_send_locks = {}
+    settings = _settings(tmp_path)
+
+    def failing_run_once(_config, **_kwargs):
+        raise TelegramSendError(
+            "Telegram Bot API response could not be read: sendMessage",
+            ambiguous=True,
+        )
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    result = ui._run_once_background(0, settings)
+
+    # True asks the scheduler to wait the full interval, not fast-retry.
+    assert result is True
+    assert any(
+        kind == "error" and "텔레그램 전송 오류" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
+
+
+def test_ambiguous_kakao_failure_skips_fast_retry(tmp_path, monkeypatch):
+    # Enter는 눌렀지만 전송 결과를 확인하지 못한 카카오 실패도 빠른 재시도로 중복
+    # 전송하지 않도록 정규 주기까지 기다린다.
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    settings = _settings(tmp_path, messenger_name="kakao", kakao_chat_name="실적봇_A")
+
+    def failing_run_once(_config, **_kwargs):
+        raise KakaoSendError("전송 결과를 확인하지 못했습니다", ambiguous=True)
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    result = ui._run_once_background(0, settings)
+
+    assert result is True
     assert any(
         kind == "error" and "카카오톡 전송 오류" in payload
         for kind, payload in list(ui.messages.queue)

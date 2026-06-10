@@ -1901,6 +1901,11 @@ Expected: all pass.
 
 - Do not close user Chrome after connecting through CDP for Coupang. The reference project intentionally leaves it open.
 - Do not make Baemin center validation apply to Coupang tabs.
+  - **Amendment (2026-06-10):** superseded for the *center name* only. Coupang
+    tabs now require an **expected center/shop name** (reusing the `배민 센터명`
+    field) so the crawler can exact-match it against the on-screen center and
+    refuse to send another account's data. The Baemin center **ID** still does not
+    apply to Coupang. See the Acceptance Criteria amendment for the rationale.
 - Do not make `peak_dashboard_url` required for Baemin tabs.
 - Do not remove legacy `COUPANG_EATS_URL`; tests and older `.env` files may still use it.
 - Do not add `scrapling` unless tests prove the fallback parser cannot handle the fixture. The reference code already works without it.
@@ -1916,6 +1921,19 @@ The implementation is complete when:
 - UI exposes `배민` and `쿠팡이츠` platform selection per tab.
 - Existing Baemin tests still pass without expected-output changes except where constructor defaults need new fields.
 - A Coupang tab can run without Baemin center name or center ID.
+  - **Amendment (2026-06-10, intentional requirement change):** a Coupang tab no
+    longer runs without a center value. The `배민 센터명` field is reused as the
+    **expected Coupang center/shop name** and is now **required** for active
+    Coupang tabs (UI save and `--once` CLI both reject an empty value or the
+    Baemin default). Baemin center **ID** remains unused for Coupang. This was
+    added because a Coupang account is determined only by the CDP port and the
+    logged-in Chrome profile; if those are mis-wired, the crawler could send
+    another Coupang account's performance as if it were correct. The crawler
+    skips center validation when the expected name is empty, so requiring it at
+    save/run time guarantees the exact-match check always runs. See
+    `config._require_coupang_center`, `ui._validate_coupang_expected_center`, and
+    `crawler._validate_coupang_center`. The original acceptance line above is kept
+    for history; the binding behavior is this amendment.
 - A Coupang tab requires `peak_dashboard_url`.
 - `platforms.get_platform("coupang")` resolves to `CoupangEatsPlatform`.
 - `app._crawl_snapshot()` passes `config.platform_name` to the platform registry.

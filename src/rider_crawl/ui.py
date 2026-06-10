@@ -5,6 +5,7 @@ import platform
 import queue
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, messagebox
@@ -14,7 +15,7 @@ from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
 from .browser_launcher import BrowserLaunchError, prepare_chrome
-from .config import AppConfig
+from .config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
 from .sender import KakaoSendError, TelegramSendError
@@ -235,8 +236,8 @@ class RiderBotUi:
         rows = [
             ("실적/배달현황 URL", "performance_url"),
             ("보조 URL(쿠팡 피크 대시보드)", "peak_dashboard_url"),
-            ("배민 센터명", "baemin_center_name"),
-            ("배민 센터 ID", "baemin_center_id"),
+            ("센터명(배민 센터명 / 쿠팡 기대 센터·상점명)", "baemin_center_name"),
+            ("배민 센터 ID(쿠팡 미사용)", "baemin_center_id"),
             ("CDP 주소", "cdp_url"),
             ("앱 전용 브라우저 프로필 경로", "browser_user_data_dir"),
             ("텔레그램 봇 토큰", "telegram_bot_token"),
@@ -327,7 +328,8 @@ class RiderBotUi:
             text=(
                 "1. 플랫폼을 배민 또는 쿠팡이츠로 선택하세요. 플랫폼별로 입력 항목이 다릅니다.\n"
                 "2. 배민은 로그인된 배달현황 페이지를, 쿠팡이츠는 rider-performance와 peak-dashboard를 열어두세요.\n"
-                "3. 쿠팡이츠 탭은 보조 URL(쿠팡 피크 대시보드)을, 배민 탭은 센터 정보를 입력하세요.\n"
+                "3. 쿠팡이츠 탭은 보조 URL(쿠팡 피크 대시보드)을 입력하세요. 센터명 칸은 배민은 센터명, "
+                "쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
                 "5. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
                 "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
@@ -487,20 +489,28 @@ class RiderBotUi:
                 send_message=self._send_message_with_kakao_lock,
             )
         except TelegramSendError as exc:
+            # Transient send failures (rate limit, brief network blip) retry soon
+            # by returning False. But when the failure is ambiguous (the request
+            # may have reached Telegram and the message could already be sent), a
+            # fast retry would re-send every 5s, because run_once only records the
+            # last hash after a clean success. Wait the full interval there so the
+            # operator can intervene instead of double-sending.
             self.messages.put(("error", f"{label} 텔레그램 전송 오류: {exc}"))
-            return False
+            return _send_failure_requests_retry(exc)
         except KakaoSendError as exc:
             # Transient KakaoTalk failures (window briefly closed, focus stolen)
             # should retry soon like Telegram, not wait the full interval. The
             # kakao_send_lock is released by its `with` block on the exception,
-            # so a fast retry here does not block other tabs' sends.
+            # so a fast retry here does not block other tabs' sends. But when the
+            # failure is ambiguous (Enter pressed, result unconfirmed) the message
+            # may already be delivered, so skip the fast retry to avoid double-send.
             self.messages.put(("error", f"{label} 카카오톡 전송 오류: {exc}"))
-            return False
+            return _send_failure_requests_retry(exc)
         except Exception as exc:  # UI boundary: surface errors to the operator.
             # 크롤링/파싱/플랫폼 오류(일시적 페이지 로딩 실패 등)도 텔레그램/카카오
             # 전송 오류처럼 빠른 재시도 경로(False 반환)를 타게 한다. True를 반환하면
             # 스케줄러가 다음 정규 주기까지 기다려 일시 장애 복구가 늦어진다.
-            self.messages.put(("error", f"{label} 오류: {exc}"))
+            self._append_run_error(f"{label} 실행 중 예외", exc, log_dir=settings.log_dir)
             return False
         finally:
             tab_lock.release()
@@ -592,7 +602,7 @@ class RiderBotUi:
                 self.status_var.set(str(payload))
             elif kind == "error":
                 self.status_var.set("오류")
-                self._append_preview(f"[오류]\n{payload}\n")
+                self._append_preview(f"[오류]\n{payload}\n", tag="error")
             elif kind == "log":
                 self._append_preview(f"[로그]\n{payload}\n")
             elif kind == "result":
@@ -609,7 +619,7 @@ class RiderBotUi:
         elif result.sent:
             status = "전송 완료"
         else:
-            status = "메시지 생성 완료"
+            status = "메시지 생성 완료(전송 꺼짐)"
 
         self.status_var.set(status)
         next_run_time = (datetime.now() + timedelta(minutes=interval_minutes)).strftime("%H:%M:%S")
@@ -675,7 +685,7 @@ class RiderBotUi:
             try:
                 poller.poll_once()
             except Exception as exc:
-                self.messages.put(("error", f"텔레그램 명령 감지 오류: {exc}"))
+                self._append_run_error("텔레그램 명령 감지", exc, log_dir=self.settings.log_dir)
                 stop_event.wait(5)
 
     def _has_live_workers(self) -> bool:
@@ -698,11 +708,39 @@ class RiderBotUi:
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
 
-    def _append_preview(self, text: str) -> None:
+    def _append_preview(self, text: str, *, tag: str | None = None) -> None:
         self.preview.configure(state="normal")
-        self.preview.insert("end", text)
+        if tag is None:
+            self.preview.insert("end", text)
+        else:
+            self.preview.insert("end", text, tag)
         self.preview.see("end")
         self.preview.configure(state="disabled")
+
+    def _append_run_error(self, prefix: str, exc: Exception, *, log_dir: Path) -> None:
+        detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+        log_path = self._write_run_error_log(prefix, detail, log_dir=log_dir)
+        if log_path is None:
+            self.messages.put(("error", f"{prefix}: {exc}\n{detail}"))
+        else:
+            self.messages.put(("error", f"{prefix}: {exc}\n상세 로그: {log_path}"))
+
+    def _write_run_error_log(self, prefix: str, detail: str, *, log_dir: Path) -> Path | None:
+        target_dir = log_dir if log_dir else Path("logs")
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            path = target_dir / "run_errors.log"
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            message = (
+                f"[{ts}] {prefix}\n"
+                f"{detail}\n"
+                "----------------------------------------\n"
+            )
+            with path.open("a", encoding="utf-8") as file:
+                file.write(message)
+            return path
+        except Exception:
+            return None
 
 
 def run_cli_once() -> None:
@@ -856,12 +894,6 @@ def _validate_active_coupang_urls(indexed_settings: list[tuple[int, UiSettings]]
         _validate_coupang_expected_center(index, settings)
 
 
-# 쿠팡 탭이 기대 센터명으로 재사용하는 기본 배민 센터명. 이 값이 그대로 남아 있으면
-# "플랫폼만 쿠팡으로 바꾼" 상태이므로, 크롤링 단계에서 쿠팡 센터 검증이 실패한다.
-# UI 저장 단계에서 미리 막아 "저장은 됐는데 크롤링이 안 되는" 상태를 방지한다.
-_DEFAULT_BAEMIN_CENTER_NAME = UiSettings.defaults().baemin_center_name
-
-
 def _validate_coupang_expected_center(index: int, settings: UiSettings) -> None:
     # 쿠팡 계정/센터/상점은 CDP 포트와 Chrome 프로필 로그인으로만 결정되므로, 포트나
     # 프로필이 꼬이면 다른 쿠팡 계정 실적을 정상처럼 전송할 수 있다. 크롤러는 기대
@@ -877,7 +909,7 @@ def _validate_coupang_expected_center(index: int, settings: UiSettings) -> None:
         )
     # 배민 기본 센터명이 그대로 남아 있으면 쿠팡 화면 센터명과 절대 일치하지 않아
     # 크롤링이 항상 실패한다. 저장 단계에서 실제 쿠팡 센터명으로 바꾸도록 막는다.
-    if center_name == _DEFAULT_BAEMIN_CENTER_NAME:
+    if center_name == DEFAULT_BAEMIN_CENTER_NAME:
         raise ValueError(
             f"크롤링{index + 1} 쿠팡 탭의 기대 센터/상점명이 배민 기본값입니다. "
             "실제 쿠팡 센터/상점명으로 바꿔 입력하세요."
@@ -953,6 +985,18 @@ def _normalize_telegram_thread_id(raw: object) -> str:
 
 def _stop_requested(stop_event: threading.Event | None) -> bool:
     return bool(stop_event is not None and stop_event.is_set())
+
+
+def _send_failure_requests_retry(exc: Exception) -> bool:
+    """Return what ``_run_once_background`` should return for a send failure.
+
+    ``False`` asks the scheduler for a fast (5s) retry; ``True`` lets it wait the
+    full interval. Non-ambiguous failures (message visibly not delivered) take the
+    fast path. Ambiguous failures — the message may already have been sent and the
+    last hash was not recorded — must skip the fast retry to avoid double-sending.
+    """
+
+    return bool(getattr(exc, "ambiguous", False))
 
 
 def _make_text(parent: ttk.Frame):

@@ -30,6 +30,11 @@ _PEAK_DASHBOARD_HTML_WITH_CENTER = _PEAK_DASHBOARD_HTML.replace(
     "<main>\n  <h1>제이앤에이치플러스 의정부남부</h1>",
 )
 
+_PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY = _PEAK_DASHBOARD_HTML.replace(
+    "<p>배정 물량</p>",
+    "<h2>실시간 오늘의 실적</h2>\n  <p>배정 물량</p>",
+)
+
 # 실제 선택 센터(헤딩)는 다른데, 드롭다운/option 등 부수 텍스트에 기대 센터명이 있는
 # 경우. 헤딩 exact 비교가 아니라 전체 텍스트 contains로 검증하면 잘못 통과한다.
 _PEAK_DASHBOARD_HTML_OTHER_CENTER_HEADING = _PEAK_DASHBOARD_HTML.replace(
@@ -110,17 +115,32 @@ def test_coupang_crawl_performance_snapshot_rejects_unexpected_center(tmp_path):
         )
 
 
-def test_coupang_crawl_performance_snapshot_rejects_peak_html_without_center_heading(tmp_path):
-    # 피크 HTML에 센터 헤딩(h1)이 없으면(섹션 h2만 있음) 센터를 확인하지 못해 막는다.
+def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_heading(tmp_path):
+    # 피크 HTML에 센터 헤딩(h1)이 없으면 피크 쪽 추가 검증은 건너뛴다.
+    # 실적 페이지 센터 검증은 이미 통과한 상태다.
     performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
-    with pytest.raises(RuntimeError, match="헤딩과 일치하지 않습니다"):
-        crawl_performance_snapshot(
-            config,
-            fetch_performance_html=lambda _config: performance_html,
-            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
-        )
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_section_headings_without_center(tmp_path):
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
 
 
 def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_matches(tmp_path):

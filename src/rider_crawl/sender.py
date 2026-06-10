@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import time
 from datetime import datetime
 from typing import Any, Callable
@@ -13,12 +14,26 @@ from .config import AppConfig
 
 KAKAO_SEND_VERIFY_TIMEOUT_SECONDS = 2.0
 KAKAO_SEND_VERIFY_INTERVAL_SECONDS = 0.1
+KAKAO_TRUNCATED_PREFIX_MIN_CHARS = 40
+KAKAO_ORDERED_MATCH_MIN_LINES = 5
 _LAST_KAKAO_CHAT_HANDLE_BY_CHAT: dict[str, int] = {}
 _KAKAO_DIAGNOSTICS: list[str] = []
 
 
 class KakaoSendError(RuntimeError):
-    """Raised when KakaoTalk text delivery cannot be attempted safely."""
+    """Raised when KakaoTalk text delivery cannot be attempted safely.
+
+    ``ambiguous`` marks failures where the send may already have reached the
+    chat: Enter was pressed but the result could not be confirmed (input value
+    unreadable). Such failures must NOT be retried automatically on the fast
+    5-second path, or the same message can be sent twice. Pre-send failures
+    (window/focus/clear/paste verification) leave ``ambiguous`` False because
+    the message was visibly never delivered, so a fast retry is safe.
+    """
+
+    def __init__(self, message: str, *, ambiguous: bool = False) -> None:
+        super().__init__(message)
+        self.ambiguous = ambiguous
 
 
 class KakaoUnsafeSelectionError(KakaoSendError):
@@ -32,7 +47,17 @@ class KakaoUnsafeSelectionError(KakaoSendError):
 
 
 class TelegramSendError(RuntimeError):
-    """Raised when Telegram Bot API delivery cannot be attempted safely."""
+    """Raised when Telegram Bot API delivery cannot be attempted safely.
+
+    ``retryable`` marks "definitely not delivered" failures (e.g. rate limit)
+    where re-sending soon is safe. ``ambiguous`` marks failures where the request
+    may have reached Telegram but the outcome could not be confirmed (the POST
+    raised after sending, or the response could not be read). An ambiguous send
+    must NOT be retried automatically on the fast path, or the same message can be
+    delivered twice, because run_once only records the last hash after a clean
+    success. The two flags are independent: a rate limit is retryable and not
+    ambiguous; a lost response is ambiguous and not retryable.
+    """
 
     def __init__(
         self,
@@ -40,10 +65,12 @@ class TelegramSendError(RuntimeError):
         *,
         retryable: bool = False,
         retry_after_seconds: int | None = None,
+        ambiguous: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.ambiguous = ambiguous
 
 
 UrlOpen = Callable[..., Any]
@@ -135,13 +162,26 @@ def _telegram_api_request(
         body = _read_response_body(exc)
         raise _telegram_error_from_response(method, body, status_code=exc.code) from exc
     except Exception as exc:
-        raise TelegramSendError(f"Telegram Bot API request failed: {method}") from exc
+        # The POST raised without a usable HTTP response. The request bytes may
+        # still have reached Telegram (e.g. the connection dropped while reading
+        # the reply), so for sendMessage the delivery is ambiguous. Mark it so the
+        # caller does not fast-retry and double-send the same message.
+        raise TelegramSendError(
+            f"Telegram Bot API request failed: {method}",
+            ambiguous=method == "sendMessage",
+        ) from exc
 
     try:
         with response:
             body = response.read().decode("utf-8")
     except Exception as exc:
-        raise TelegramSendError(f"Telegram Bot API response could not be read: {method}") from exc
+        # Telegram accepted and processed the request, but the response body could
+        # not be read. For sendMessage the message was almost certainly delivered,
+        # so this is ambiguous and must not be fast-retried.
+        raise TelegramSendError(
+            f"Telegram Bot API response could not be read: {method}",
+            ambiguous=method == "sendMessage",
+        ) from exc
 
     try:
         data = json.loads(body)
@@ -285,7 +325,12 @@ def send_kakao_text(
         pyautogui.press("enter")
         _wait_for_message_input_to_clear(message_input)
     except KakaoSendError as exc:
-        raise KakaoSendError(_error_with_kakao_diagnostics(exc, config)) from exc
+        # Preserve the ``ambiguous`` flag through diagnostic re-wrapping so the UI
+        # still knows an Enter-pressed-but-unconfirmed send must not be fast-retried.
+        raise KakaoSendError(
+            _error_with_kakao_diagnostics(exc, config),
+            ambiguous=getattr(exc, "ambiguous", False),
+        ) from exc
 
 
 def _clear_message_input(control: object, pyautogui: object) -> None:
@@ -886,9 +931,12 @@ def _wait_for_message_input_to_clear(control: object) -> None:
     if result is None:
         # 전송 후 입력값을 읽을 수 없으면 전송 성공 여부를 확인할 수 없다. 읽기 실패를
         # 성공으로 처리하면 마지막 해시가 기록되어 재전송 기회가 사라지므로 실패 처리한다.
+        # 단, Enter는 이미 눌렀으므로 실제로 전송됐을 수 있다(ambiguous). 5초 후 빠른
+        # 재시도로 같은 메시지를 또 보내지 않도록 ambiguous로 표시한다.
         raise KakaoSendError(
             "카카오톡 입력창 내용을 읽을 수 없어 전송 결과를 확인하지 못했습니다. "
-            "전송 성공으로 처리하지 않습니다."
+            "전송 성공으로 처리하지 않습니다.",
+            ambiguous=True,
         )
 
     raise KakaoSendError(
@@ -922,10 +970,23 @@ def _message_input_matches(control: object, message: str, *, match_exact: bool) 
     if value is None:
         return None
 
-    normalized_value = _normalize_input_text(value)
+    normalized_value = _normalize_message_input_value(control, value)
     normalized_message = _normalize_input_text(message)
     if match_exact:
-        return normalized_value == normalized_message
+        exact = normalized_value == normalized_message
+        prefix = _is_long_message_prefix(normalized_value, normalized_message)
+        ordered = _has_ordered_message_lines(normalized_value, normalized_message)
+        markers = _has_bot_message_markers(normalized_value, normalized_message)
+        if not (exact or prefix or ordered or markers):
+            # 어떤 매처도 통과하지 못한 첫 사례를 진단에 남긴다. 값/메시지 길이와 각
+            # 매처 결과가 있으면 80자 절단 추측 없이 실패 원인을 확정할 수 있다.
+            _record_kakao_diagnostic(
+                f"match_exact_failed exact={exact} prefix={prefix} "
+                f"ordered={ordered} markers={markers} "
+                f"value_len={len(normalized_value)} message_len={len(normalized_message)}"
+            )
+            _record_kakao_diagnostic(f"match_target_message={_diagnostic_text_sample(normalized_message)}")
+        return exact or prefix or ordered or markers
     if not normalized_value:
         return False
     return normalized_message in normalized_value
@@ -937,18 +998,130 @@ def _message_input_value(control: object) -> str | None:
         try:
             properties = legacy_properties()
             if "Value" in properties:
-                return str(properties.get("Value", ""))
+                value = str(properties.get("Value", ""))
+                _record_kakao_diagnostic(f"input_value={_diagnostic_text_sample(value)}")
+                return value
         except Exception:
             pass
 
     get_value = getattr(control, "get_value", None)
     if callable(get_value):
         try:
-            return str(get_value())
+            value = str(get_value())
+            _record_kakao_diagnostic(f"input_value={_diagnostic_text_sample(value)}")
+            return value
         except Exception:
             pass
 
     return None
+
+
+def _normalize_message_input_value(control: object, value: str) -> str:
+    normalized_value = _normalize_input_text(value)
+    if _is_empty_message_input_placeholder(control, normalized_value):
+        return ""
+    return normalized_value
+
+
+def _is_long_message_prefix(normalized_value: str, normalized_message: str) -> bool:
+    if len(normalized_value) < KAKAO_TRUNCATED_PREFIX_MIN_CHARS:
+        return False
+    if len(normalized_value) >= len(normalized_message):
+        return False
+    matched = normalized_message.startswith(normalized_value)
+    if matched:
+        _record_kakao_diagnostic("input_value_matches_message_prefix=True")
+    return matched
+
+
+def _has_ordered_message_lines(normalized_value: str, normalized_message: str) -> bool:
+    if len(normalized_value) < KAKAO_TRUNCATED_PREFIX_MIN_CHARS:
+        return False
+
+    value_lines = _meaningful_message_lines(normalized_value)
+    message_lines = _meaningful_message_lines(normalized_message)
+    if len(value_lines) < KAKAO_ORDERED_MATCH_MIN_LINES:
+        return False
+
+    message_index = 0
+    matched = 0
+    for value_line in value_lines:
+        while message_index < len(message_lines) and message_lines[message_index] != value_line:
+            message_index += 1
+        if message_index >= len(message_lines):
+            return False
+        matched += 1
+        message_index += 1
+
+    result = matched >= KAKAO_ORDERED_MATCH_MIN_LINES
+    if result:
+        _record_kakao_diagnostic(f"input_value_ordered_line_matches={matched}")
+    return result
+
+
+def _has_bot_message_markers(normalized_value: str, normalized_message: str) -> bool:
+    compact_value = _compact_for_marker_match(normalized_value)
+    compact_message = _compact_for_marker_match(normalized_message)
+    required_markers = [
+        "[실시간실적봇]",
+        "[크롤링",
+        "기준",
+    ]
+    if not all(marker in compact_message and marker in compact_value for marker in required_markers):
+        return False
+
+    if "아침:" not in compact_value and "배정" not in compact_value:
+        return False
+
+    _record_kakao_diagnostic("input_value_bot_markers=True")
+    return True
+
+
+def _compact_for_marker_match(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
+def _meaningful_message_lines(value: str) -> list[str]:
+    ignored = {"", "..."}
+    return [line.strip() for line in value.split("\n") if line.strip() not in ignored]
+
+
+_KAKAO_INPUT_PLACEHOLDERS = {
+    "메시지 입력",
+    "메시지 입력 RichEdit Control",
+    "메시지를 입력하세요",
+    "RichEdit Control",
+}
+
+
+def _is_empty_message_input_placeholder(control: object, normalized_value: str) -> bool:
+    if not normalized_value:
+        return False
+
+    # 빈 RichEdit 입력창은 안내 문구("메시지 입력" 등)를 노출한다. 입력값이 그 고정
+    # 안내 문구와 같을 때만 비어 있는 것으로 본다.
+    #
+    # 중요: RICHEDIT50W는 비어 있지 않을 때 window_text()/element_info.name이 "현재 입력된
+    # 본문"을 그대로 돌려준다. 예전 코드는 그 값을 placeholder 집합에 넣어 비교했기 때문에,
+    # 실제 본문이 입력된 경우에도 "값 == 자기 자신"이 성립해 빈 placeholder로 잘못 판정했다.
+    # 그러면 실적 메시지가 통째로 빈 문자열로 치환되어 모든 일치 검사가 실패했다(전송 차단).
+    # 그래서 컨트롤이 동적으로 돌려주는 name/window_text는 더 이상 placeholder로 쓰지 않고,
+    # 아래 고정 안내 문구 집합만 사용한다.
+    normalized_placeholders = {
+        _normalize_input_text(value) for value in _KAKAO_INPUT_PLACEHOLDERS
+    }
+    return normalized_value in normalized_placeholders
+
+
+def _diagnostic_text_sample(value: str) -> str:
+    normalized = _normalize_input_text(value)
+    if not normalized:
+        return "''"
+    # 매처가 실패하는 원인을 진단하려면 80자 절단본이 아니라 값 전체가 필요하다.
+    # 입력창 한 건은 길어야 수백 자라 로그가 과도하게 커지지 않는다.
+    if len(normalized) > 400:
+        normalized = f"{normalized[:397]}..."
+    return repr(normalized)
 
 
 def _normalize_input_text(value: str) -> str:

@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
+from .config import DEFAULT_BAEMIN_CENTER_ID, DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 
 
 @dataclass
@@ -41,8 +41,8 @@ class UiSettings:
             ),
             peak_dashboard_url="",
             platform_name="baemin",
-            baemin_center_name="표준서울마포B이츠앤홀딩스3",
-            baemin_center_id="DP2605181318",
+            baemin_center_name=DEFAULT_BAEMIN_CENTER_NAME,
+            baemin_center_id=DEFAULT_BAEMIN_CENTER_ID,
             browser_mode="cdp",
             cdp_url="http://127.0.0.1:9222",
             browser_user_data_dir=Path("runtime/browser-profile"),

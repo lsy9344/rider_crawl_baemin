@@ -9,7 +9,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['build\\rider_crawl_exe_entry.py'],
+    ['rider_crawl_exe_entry.py'],
     pathex=['src'],
     binaries=binaries,
     datas=datas,

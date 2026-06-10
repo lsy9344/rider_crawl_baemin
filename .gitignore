@@ -5,3 +5,5 @@ __pycache__/
 runtime/
 logs/
 .env
+# PyInstaller rebuild artifacts (the shipped exe in dist/ is tracked via LFS).
+build/

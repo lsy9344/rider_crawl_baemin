@@ -23,10 +23,11 @@ cd /d C:\rider_crawl
 py -3.10 -m venv .venv
 .venv\Scripts\python.exe -m pip install -U pip
 .venv\Scripts\pip.exe install -e ".[dev]"
-.venv\Scripts\pip.exe install -U crawl4ai
 .venv\Scripts\crawl4ai-setup.exe
 .venv\Scripts\crawl4ai-doctor.exe
 ```
+
+> `crawl4ai`는 `pyproject.toml`에 `0.8.7`로 고정되어 있어 `pip install -e ".[dev]"`로 검증된 버전이 설치됩니다. `pip install -U crawl4ai`로 따로 올리지 마세요. 고정 버전을 벗어나면 파서/크롤러 동작이 달라질 수 있습니다. `crawl4ai-setup`/`crawl4ai-doctor`는 버전을 올리지 않고 브라우저 의존성만 설치·점검합니다.
 
 ## 설치(macOS)
 
@@ -35,10 +36,11 @@ cd /Users/sooyeol/Desktop/dev_busi/rider_crawl
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -U pip
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pip install -U crawl4ai
 .venv/bin/crawl4ai-setup
 .venv/bin/crawl4ai-doctor
 ```
+
+> macOS도 동일합니다. `crawl4ai`는 `pyproject.toml`에 `0.8.7`로 고정되어 있으므로 `pip install -U crawl4ai`로 올리지 마세요.
 
 ## Chrome 준비
 
@@ -195,11 +197,12 @@ UI 없이 `.env` 또는 환경변수 설정으로 1회만 실행하려면 다음
 | --- | --- |
 | `COUPANG_EATS_URL` | 쿠팡 실적 주 URL(기본 `https://partner.coupangeats.com/page/rider-performance`) |
 | `PEAK_DASHBOARD_URL` | 쿠팡 피크 대시보드 보조 URL(기본 `https://partner.coupangeats.com/page/peak-dashboard`) |
-| `BAEMIN_CENTER_NAME` | 쿠팡 탭에서는 **기대 센터/상점명**으로 재사용됩니다(exact match, `;`·줄바꿈으로 alias 나열 가능). 설정 시 실적·피크 화면 센터명이 모두 일치하는지 검증합니다 |
+| `BAEMIN_CENTER_NAME` | 쿠팡 탭에서는 **기대 센터/상점명**으로 재사용됩니다(exact match, `;`·줄바꿈으로 alias 나열 가능). 실적·피크 화면 센터명이 모두 일치하는지 검증합니다. **쿠팡에서는 필수**이며, 미설정이거나 배민 기본값(`표준서울마포...`)이면 실행 시 설정 오류가 납니다(`--once` CLI 포함). 배민 기본값을 기본으로 넣지 않습니다 |
+| `BAEMIN_CENTER_ID` | 쿠팡 탭에서는 사용하지 않습니다(빈 값) |
 
 > `PERFORMANCE_URL`을 직접 설정하면 플랫폼과 무관하게 주 URL로 우선 사용됩니다.
 
-상태 파일 루트 정책: run lock과 마지막 메시지 해시는 `LOG_DIR` 기준 `runtime/`에 두어 탭/스코프별로 분리·격리합니다. 반면 텔레그램 offset/lock은 "봇 토큰별 단일·탭 독립"이라 작업 디렉터리(cwd)와 무관한 고정 루트에 둡니다. 고정 루트는 `RIDER_CRAWL_STATE_ROOT` 환경변수로 바꿀 수 있으며, 미설정 시 프로젝트 루트(개발용) 또는 `~/.rider_crawl`을 씁니다. 두 상태군의 루트가 다른 것은 의도된 설계입니다.
+상태 파일 루트 정책: run lock과 마지막 메시지 해시는 `LOG_DIR`의 형제 디렉터리(`<LOG_DIR>/../runtime/`)에 두어 탭/스코프별로 분리·격리합니다. 따라서 계정을 커스텀 로그 경로로 나눌 때(`LOG_DIR=C:\acct1\logs`, `LOG_DIR=C:\acct2\logs`)는 lock/해시도 계정별로 자동 분리됩니다. CLI로 여러 계정을 따로 실행한다면 계정마다 `LOG_DIR`를 서로 다른 상위 폴더로 지정하세요(예: `C:\acct1\logs`, `C:\acct2\logs`). 반면 텔레그램 offset/lock은 "봇 토큰별 단일·탭 독립"이라 작업 디렉터리(cwd)와 무관한 고정 루트에 둡니다. 고정 루트는 `RIDER_CRAWL_STATE_ROOT` 환경변수로 바꿀 수 있으며, 미설정 시 프로젝트 루트(개발용) 또는 `~/.rider_crawl`을 씁니다. 두 상태군의 루트가 다른 것은 의도된 설계입니다.
 
 Windows:
 
@@ -212,6 +215,19 @@ macOS:
 ```bash
 .venv/bin/python -m rider_crawl --once
 ```
+
+## 실행 파일(exe) 재빌드
+
+배포용 단일 실행 파일은 `dist/rider_crawl_onefile.exe`로 제공됩니다. 깨끗한 환경에서 다시 빌드하려면 PyInstaller로 루트의 `rider_crawl_onefile.spec`을 실행합니다. 진입점은 루트의 `rider_crawl_exe_entry.py`이며 spec이 이 파일을 참조합니다(`pathex=['src']`로 `rider_crawl` 패키지를 임포트).
+
+Windows:
+
+```bat
+.venv\Scripts\pip.exe install pyinstaller
+.venv\Scripts\pyinstaller.exe rider_crawl_onefile.spec
+```
+
+빌드 결과는 `dist/rider_crawl_onefile.exe`에 생성됩니다. PyInstaller가 만드는 `build/` 디렉터리는 재생성되는 임시 산출물이라 버전 관리에 포함하지 않습니다.
 
 ## 수집 방식
 

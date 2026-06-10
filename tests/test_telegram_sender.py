@@ -90,11 +90,14 @@ def test_send_telegram_text_does_not_retry_ambiguous_transport_failure(tmp_path)
         calls += 1
         raise OSError("response lost after request")
 
-    with pytest.raises(TelegramSendError, match="request failed"):
+    with pytest.raises(TelegramSendError, match="request failed") as exc_info:
         send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=sleeps.append)
 
     assert calls == 1
     assert sleeps == []
+    # The request may have reached Telegram, so the outcome is ambiguous and must
+    # not be fast-retried by the caller (would double-send).
+    assert exc_info.value.ambiguous is True
 
 
 def test_send_telegram_text_does_not_retry_after_response_read_failure(tmp_path):
@@ -105,10 +108,25 @@ def test_send_telegram_text_does_not_retry_after_response_read_failure(tmp_path)
         calls += 1
         return _UnreadableResponse()
 
-    with pytest.raises(TelegramSendError, match="response could not be read"):
+    with pytest.raises(TelegramSendError, match="response could not be read") as exc_info:
         send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=lambda _seconds: None)
 
     assert calls == 1
+    # Telegram accepted the request; the message was almost certainly delivered.
+    # The caller must not fast-retry this ambiguous failure.
+    assert exc_info.value.ambiguous is True
+
+
+def test_get_telegram_updates_transport_failure_is_not_ambiguous(tmp_path):
+    # getUpdates는 멱등 조회라 다시 호출해도 중복 부작용이 없다. sendMessage만
+    # ambiguous로 표시하고, 조회 실패는 ambiguous가 아니어야 한다.
+    def fake_urlopen(request, timeout):
+        raise OSError("connection reset")
+
+    with pytest.raises(TelegramSendError) as exc_info:
+        get_telegram_updates(_config(tmp_path), offset=1, urlopen=fake_urlopen)
+
+    assert exc_info.value.ambiguous is False
 
 
 def test_send_telegram_text_reads_retry_after_from_http_error(tmp_path):

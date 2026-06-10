@@ -313,6 +313,20 @@ def test_send_kakao_text_clears_existing_draft_before_pasting(monkeypatch, tmp_p
     assert clear_index < paste_index
 
 
+def test_send_kakao_text_treats_empty_input_placeholder_as_empty(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # KakaoTalk's RichEdit can expose the empty input placeholder/control name as
+    # the value. That is not a draft and should not block sending.
+    message_input = _ScriptedMessageInput(
+        ["메시지 입력 RichEdit Control", "hello", "메시지 입력 RichEdit Control"]
+    )
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, "hello")
+
+
 def test_send_kakao_text_rejects_when_draft_not_cleared(monkeypatch, tmp_path):
     config = _config(tmp_path, chat_name="실적봇_A")
     # Clear-check reads a non-empty draft: the input was not cleared.
@@ -337,6 +351,141 @@ def test_send_kakao_text_rejects_when_pasted_value_not_exactly_equal(monkeypatch
         send_kakao_text(config, "hello")
 
 
+def test_send_kakao_text_accepts_long_pasted_value_prefix(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message = "\n".join(
+        [
+            "[실시간 실적봇]",
+            "[크롤링2]",
+            "⏰ 19:20 기준",
+            "",
+            "아침 : 1건/9건",
+            "점심 피크 : 12.6건/45건",
+            "점심 논피크 : 13.4건/57건",
+            "저녁 피크 : 0건/120건",
+            "저녁 논피크 : 0건/78건",
+        ]
+    )
+    # Some Kakao RichEdit reads expose only the front part of a long multi-line
+    # draft. If that front part is a clear prefix of the message, paste succeeded.
+    message_input = _ScriptedMessageInput(["", message[:90], "메시지 입력"])
+    _patch_kakao_send_window(monkeypatch, message_input)
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, message)
+
+    assert ("press", ("enter",)) in pyautogui.actions
+
+
+def test_send_kakao_text_accepts_long_pasted_value_with_ui_read_variation(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message = "\n".join(
+        [
+            "[실시간 실적봇]",
+            "[크롤링2]",
+            "⏰ 19:24 기준",
+            "",
+            "아침 : 1건/9건",
+            "점심 피크 : 12.6건/45건",
+            "점심 논피크 : 13.4건/57건",
+            "저녁 피크 : 0건/120건",
+            "저녁 논피크 : 0건/78건",
+        ]
+    )
+    # UIA can read a long RichEdit value with whitespace/control differences, so
+    # the value is neither exact nor a clean prefix even though the message is in
+    # KakaoTalk. It still has enough ordered content to prove paste landed there.
+    ui_value = (
+        "[실시간 실적봇]\r\n"
+        "[크롤링2]\r\n"
+        "⏰ 19:24 기준\r\n"
+        "아침 : 1건/9건\r\n"
+        "점심 피크 : 12.6건/45건\r\n"
+        "점심 논피크 : 13.4건/57건\r\n"
+        "..."
+    )
+    message_input = _ScriptedMessageInput(["", ui_value, "메시지 입력"])
+    _patch_kakao_send_window(monkeypatch, message_input)
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, message)
+
+    assert ("press", ("enter",)) in pyautogui.actions
+
+
+def test_send_kakao_text_accepts_pasted_bot_header_when_rich_edit_read_is_partial(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message = "\n".join(
+        [
+            "[실시간 실적봇]",
+            "[크롤링2]",
+            "⏰ 19:27 기준",
+            "",
+            "아침 : 1건/9건",
+            "점심 피크 : 12.6건/45건",
+            "점심 논피크 : 13.4건/57건",
+            "저녁 피크 : 17.4건/120건",
+            "저녁 논피크 : 0건/78건",
+            "",
+            "배정 309건 / 처리 44.4건",
+            "🚨거절률: 11.3%🚨",
+            "🌇수행중인인원 : 3명",
+        ]
+    )
+    # On the real Kakao RichEdit control, UIA may repeatedly expose only a partial
+    # preview. Once clear/focus already succeeded, seeing our message headers in
+    # the target input is enough to press Enter.
+    ui_value = "[실시간 실적봇] [크롤링2] ⏰ 19:27 기준 아침 : 1건/9건 점심 피크 :"
+    message_input = _ScriptedMessageInput(["", ui_value, "메시지 입력"])
+    _patch_kakao_send_window(monkeypatch, message_input)
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, message)
+
+    assert ("press", ("enter",)) in pyautogui.actions
+
+
+def test_send_kakao_text_sends_when_richedit_name_echoes_pasted_body(monkeypatch, tmp_path):
+    # Regression: a real RICHEDIT50W reports its live content through
+    # window_text()/element_info.name. The old placeholder check added that value
+    # to the placeholder set, so the pasted body equalled "its own name" and was
+    # blanked to "" — making every match check fail with "정확히 일치하지 않습니다".
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message = "\n".join(
+        [
+            "[실시간 실적봇]",
+            "[크롤링2]",
+            "⏰ 19:46 기준",
+            "",
+            "아침 : 1건/9건",
+            "점심 피크 : 12.6건/45건",
+            "점심 논피크 : 13.4건/57건",
+            "저녁 피크 : 17.4건/120건",
+            "저녁 논피크 : 0건/78건",
+            "",
+            "배정 309건 / 처리 44.4건",
+            "🚨거절률: 11.3%🚨",
+            "🌇수행중인인원 : 3명",
+        ]
+    )
+    # cleared(empty) -> pasted(full body) -> sent(empty), with name/window_text echoing each.
+    message_input = _RichEditMessageInput(["", message, ""])
+    _patch_kakao_send_window(monkeypatch, message_input)
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, message)
+
+    assert ("press", ("enter",)) in pyautogui.actions
+
+
 def test_send_kakao_text_fails_when_pasted_value_unreadable(monkeypatch, tmp_path):
     config = _config(tmp_path, chat_name="실적봇_A")
     # Clears fine (empty), but value becomes unreadable after paste.
@@ -358,8 +507,11 @@ def test_send_kakao_text_rejects_residual_text_after_send(monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
     monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
 
-    with pytest.raises(KakaoSendError, match="비워지지 않아"):
+    with pytest.raises(KakaoSendError, match="비워지지 않아") as exc_info:
         send_kakao_text(config, "hello")
+    # 잔여 텍스트가 보이면 메시지가 전송되지 않은 것이 확실하므로 ambiguous가 아니다.
+    # 빠른 재시도로 안전하게 다시 보낼 수 있다.
+    assert exc_info.value.ambiguous is False
 
 
 def test_send_kakao_text_fails_when_post_send_value_unreadable(monkeypatch, tmp_path):
@@ -370,8 +522,11 @@ def test_send_kakao_text_fails_when_post_send_value_unreadable(monkeypatch, tmp_
     monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
     monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
 
-    with pytest.raises(KakaoSendError, match="읽을 수 없어 전송 결과"):
+    with pytest.raises(KakaoSendError, match="읽을 수 없어 전송 결과") as exc_info:
         send_kakao_text(config, "hello")
+    # Enter는 눌렀지만 전송 결과를 확인할 수 없으므로 실제로 전송됐을 수 있다(ambiguous).
+    # 빠른 재시도로 같은 메시지를 또 보내지 않도록 ambiguous로 표시한다.
+    assert exc_info.value.ambiguous is True
 
 
 def test_send_kakao_text_aborts_when_input_loses_focus_before_clear(monkeypatch, tmp_path):
@@ -603,6 +758,46 @@ class _ScriptedMessageInput:
         if value is None:
             raise RuntimeError("input value unreadable")
         return value
+
+
+class _RichEditMessageInput:
+    """A fake control that mirrors a real KakaoTalk RICHEDIT50W input.
+
+    A real RichEdit control exposes its *current* content through both
+    ``window_text()`` and ``element_info.name`` (not a static placeholder). When
+    empty it instead reports the "메시지 입력" placeholder string. This is what
+    poisoned the old placeholder detection: the live body equalled the control's
+    own name/window_text, so a non-empty input was wrongly treated as empty.
+    """
+
+    _PLACEHOLDER = "메시지 입력"
+
+    def __init__(self, values: list[str], *, default: str = "", focus: bool = True) -> None:
+        self._values = list(values)
+        self._default = default
+        self._focus = focus
+        self.click_count = 0
+        self.element_info = _FakeElementInfo(control_type="Document", class_name="RICHEDIT50W")
+        self._current = ""
+        self._refresh_name()
+
+    def _refresh_name(self) -> None:
+        # Empty input shows the placeholder; otherwise the live body, like the real control.
+        self.element_info.name = self._PLACEHOLDER if self._current == "" else self._current
+
+    def click_input(self) -> None:
+        self.click_count += 1
+
+    def has_keyboard_focus(self) -> bool:
+        return self._focus
+
+    def window_text(self) -> str:
+        return self._PLACEHOLDER if self._current == "" else self._current
+
+    def get_value(self):
+        self._current = self._values.pop(0) if self._values else self._default
+        self._refresh_name()
+        return self._current
 
 
 class _UnknownFocusMessageInput:

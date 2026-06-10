@@ -92,6 +92,7 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
     값 같은 부수 텍스트(예: ``<option>강남센터</option>``)에 기대 센터명이 있으면
     잘못 통과한다. 그래서 헤딩(``h1``~``h3``)만 보고, 헤딩에 ``센터명 시프트(시간)…``
     형태로 시프트가 붙어 있으면 앞쪽 센터명만 떼어내 비교한다.
+    피크 페이지에 센터 헤딩이 노출되지 않으면 실적 페이지 검증만 사용한다.
     기대 센터가 비어 있으면 검증을 건너뛴다(기존 동작 유지).
     """
 
@@ -101,10 +102,7 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
 
     heading_centers = _coupang_peak_heading_centers(peak_html)
     if not heading_centers:
-        raise RuntimeError(
-            "쿠팡 센터 검증 실패: 피크 대시보드 화면 헤딩에서 센터명을 확인하지 못했습니다.\n"
-            f"설정 센터명: {config.baemin_center_name.strip()}"
-        )
+        return
 
     if not (heading_centers & expected_aliases):
         raise RuntimeError(
@@ -128,6 +126,8 @@ def _coupang_peak_heading_center_raw(peak_html: str) -> set[str]:
     top_headings = parser.top_level_headings()
     centers: set[str] = set()
     for heading in top_headings:
+        if _is_coupang_peak_section_heading(heading):
+            continue
         center = _coupang_center_from_heading(heading)
         if center:
             centers.add(center)
@@ -141,6 +141,16 @@ _COUPANG_SHIFT_PATTERN = (
     r"|점심\s*피크|점심\s*논피크|저녁\s*피크|저녁\s*논피크"
     r"|오전\s*논피크|오후\s*논피크|심야\s*논피크|논피크|피크)"
 )
+
+_COUPANG_PEAK_SECTION_HEADINGS = {
+    "실시간오늘의실적",
+    "피크타임별현황",
+    "시간대별기록",
+}
+
+
+def _is_coupang_peak_section_heading(heading: str) -> bool:
+    return _normalize_coupang_center(heading) in _COUPANG_PEAK_SECTION_HEADINGS
 
 
 def _coupang_center_from_heading(heading: str) -> str:

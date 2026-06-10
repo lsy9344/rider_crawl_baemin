@@ -52,8 +52,8 @@ class AppConfig:
             coupang_eats_url=_primary_url_from_env(platform_name),
             peak_dashboard_url=_peak_dashboard_url_from_env(platform_name),
             platform_name=platform_name,
-            baemin_center_name=os.getenv("BAEMIN_CENTER_NAME", "표준서울마포B이츠앤홀딩스3"),
-            baemin_center_id=os.getenv("BAEMIN_CENTER_ID", "DP2605181318"),
+            baemin_center_name=_center_name_from_env(platform_name),
+            baemin_center_id=_center_id_from_env(platform_name),
             browser_mode=os.getenv("BROWSER_MODE", "cdp"),
             cdp_url=os.getenv("CDP_URL", "http://127.0.0.1:9222"),
             browser_user_data_dir=Path(os.getenv("BROWSER_USER_DATA_DIR", "runtime/browser-profile")),
@@ -83,9 +83,15 @@ class AppConfig:
         #   하므로 ``app_state_root()``(고정 루트)에 둔다. 두 상태군의 요구가 달라
         #   루트가 갈라져 있으며, 이는 버그가 아니라 의도된 설계다.
         #   (telegram_commands._default_offset_store_path 참고)
-        if self.log_dir.name == "logs":
-            return self.log_dir.parent / "runtime"
-        return Path("runtime")
+        #
+        # runtime은 항상 log_dir의 형제(``log_dir.parent / "runtime"``)에 둔다.
+        # 이전에는 ``log_dir.name == "logs"``일 때만 그렇게 하고 그 외에는 cwd 기준
+        # ``runtime``으로 떨어졌다. 그러면 LOG_DIR=C:/acct1/custom-log,
+        # LOG_DIR=C:/acct2/custom-log처럼 커스텀 로그 경로로 계정을 나눠도 둘 다 cwd의
+        # ``runtime``을 공유해 lock/last-hash가 섞였다. 디렉터리 이름과 무관하게 항상
+        # log_dir 옆에 두어 계정/스코프별로 격리한다. 기본값(LOG_DIR=logs)에서는
+        # log_dir.parent가 cwd라 결과가 ``runtime``으로 동일하게 유지된다.
+        return self.log_dir.parent / "runtime"
 
     @property
     def state_dir(self) -> Path:
@@ -162,3 +168,47 @@ def _primary_url_from_env(platform_name: str) -> str:
     # ``COUPANG_EATS_URL`` is kept as a legacy fallback only when no Baemin URL is
     # set, so old ``.env`` files keep working without overriding an explicit Baemin URL.
     return os.getenv("COUPANG_EATS_URL", DEFAULT_BAEMIN_DELIVERY_HISTORY_URL)
+
+
+# 배민 기본 센터명/ID. 배민 플랫폼에서만 기본값으로 쓰고, 쿠팡 플랫폼에서는 이
+# 값을 절대 기본값으로 넣지 않는다(아래 ``_center_name_from_env`` 참고).
+DEFAULT_BAEMIN_CENTER_NAME = "표준서울마포B이츠앤홀딩스3"
+DEFAULT_BAEMIN_CENTER_ID = "DP2605181318"
+
+
+def _center_name_from_env(platform_name: str) -> str:
+    # 쿠팡 탭은 ``BAEMIN_CENTER_NAME``을 "기대 센터/상점명"으로 재사용한다
+    # (crawler._validate_coupang_center). 배민 기본 센터명을 쿠팡 기본값으로 넣으면
+    # 화면 센터명과 절대 일치하지 않아 크롤링이 항상 실패한다. 그래서 쿠팡에서는
+    # 배민 기본값을 넣지 않고 env 값만 쓰며, 미설정이면 빈 값으로 둔 뒤
+    # ``_require_coupang_center``에서 명확한 설정 오류를 낸다.
+    if platform_name == "coupang":
+        center_name = os.getenv("BAEMIN_CENTER_NAME", "").strip()
+        _require_coupang_center(center_name)
+        return center_name
+    return os.getenv("BAEMIN_CENTER_NAME", DEFAULT_BAEMIN_CENTER_NAME)
+
+
+def _center_id_from_env(platform_name: str) -> str:
+    # 배민 센터 ID는 쿠팡 탭에서 쓰지 않으므로 쿠팡에서는 배민 기본값을 넣지 않는다.
+    if platform_name == "coupang":
+        return os.getenv("BAEMIN_CENTER_ID", "")
+    return os.getenv("BAEMIN_CENTER_ID", DEFAULT_BAEMIN_CENTER_ID)
+
+
+def _require_coupang_center(center_name: str) -> None:
+    # 쿠팡 계정/센터/상점은 CDP 포트와 Chrome 프로필 로그인으로만 결정되므로, 포트나
+    # 프로필이 꼬이면 다른 쿠팡 계정 실적을 정상처럼 전송할 수 있다. 기대 센터명이
+    # 없으면 크롤러가 센터 검증을 건너뛰므로, CLI(--once)도 UI 저장 검증과 동일하게
+    # 명시적으로 기대 센터명을 요구한다.
+    if not center_name:
+        raise ValueError(
+            "PERFORMANCE_PLATFORM=coupang에서는 BAEMIN_CENTER_NAME에 "
+            "실제 쿠팡 센터/상점명을 입력하세요. 이 값은 화면에서 확인된 센터와 대조해 "
+            "다른 쿠팡 계정 실적 전송을 막는 데 쓰입니다."
+        )
+    if center_name == DEFAULT_BAEMIN_CENTER_NAME:
+        raise ValueError(
+            "PERFORMANCE_PLATFORM=coupang인데 BAEMIN_CENTER_NAME이 배민 기본값입니다. "
+            "실제 쿠팡 센터/상점명으로 바꿔 입력하세요."
+        )
