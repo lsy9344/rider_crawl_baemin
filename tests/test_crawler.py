@@ -227,6 +227,42 @@ def test_crawl_current_screen_accepts_matching_center_id_with_different_display_
     assert snapshot.completed_count == 1
 
 
+def test_crawl_current_screen_accepts_center_shown_as_plain_text_span(tmp_path):
+    # 실제 배달현황 화면은 선택된 센터를 드롭다운이 아니라 <span>센터명(DP아이디)</span>
+    # 같은 일반 텍스트로만 표시한다. option/input만 보던 파서는 증거를 못 찾아
+    # "센터 정보를 확인하지 못했습니다"로 실패했다. 텍스트 라벨도 증거로 잡아야 한다.
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+    html = _baemin_delivery_history_html(
+        '<span data-atelier-component="Typography">'
+        "표준서울마포B이츠앤홀딩스3(DP2605181318)</span>"
+    )
+
+    snapshot = crawl_current_screen(config, fetch_html=lambda _config: html)
+
+    assert snapshot.completed_count == 1
+
+
+def test_crawl_current_screen_rejects_wrong_center_shown_as_plain_text_span(tmp_path):
+    # 텍스트 라벨로 다른 센터 ID가 떠 있으면 잘못된 계정 실적 전송을 막아야 한다.
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+    html = _baemin_delivery_history_html(
+        '<span data-atelier-component="Typography">다른센터(DP9999999999)</span>'
+    )
+
+    with pytest.raises(RuntimeError, match="배민 센터 검증 실패"):
+        crawl_current_screen(config, fetch_html=lambda _config: html)
+
+
 def test_select_page_by_url_allows_query_and_hash():
     pages = [
         _FakePage("https://partner.coupangeats.com/page/peak-dashboard"),
@@ -449,6 +485,47 @@ def test_fetch_via_cdp_allows_localhost_address(tmp_path, monkeypatch):
     monkeypatch.setattr(crawler.asyncio, "run", _consume_coroutine_then("<html></html>"))
 
     assert crawler.fetch_page_html_via_crawl4ai_cdp(config) == "<html></html>"
+
+
+def test_fetch_via_cdp_connection_refused_raises_cdp_unavailable(tmp_path, monkeypatch):
+    # Chrome이 포트에 안 떠 있어 connect_over_cdp가 거부되면 환경 오류로 구분한다.
+    # 이래야 UI가 5초마다 재시도하지 않고 정규 주기까지 기다린다.
+    from rider_crawl.browser_launcher import CdpUnavailableError
+
+    config = _config(tmp_path, browser_mode="cdp")
+
+    def raise_connect_refused(coro, *_args, **_kwargs):
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(
+            "BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222"
+        )
+
+    monkeypatch.setattr(crawler.asyncio, "run", raise_connect_refused)
+
+    with pytest.raises(CdpUnavailableError, match="CDP 연결 실패"):
+        crawler.fetch_page_html_via_crawl4ai_cdp(config)
+
+
+def test_fetch_via_cdp_non_connection_error_stays_runtime_error(tmp_path, monkeypatch):
+    # 페이지가 떠 있는 상태의 일시적 실패는 기존처럼 RuntimeError로 두어 빠른 재시도
+    # 경로를 타게 한다(CdpUnavailableError로 묶으면 일시 장애 복구가 늦어진다).
+    from rider_crawl.browser_launcher import CdpUnavailableError
+
+    config = _config(tmp_path, browser_mode="cdp")
+
+    def raise_table_timeout(coro, *_args, **_kwargs):
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError("Timeout 60000ms exceeded waiting for locator('table')")
+
+    monkeypatch.setattr(crawler.asyncio, "run", raise_table_timeout)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        crawler.fetch_page_html_via_crawl4ai_cdp(config)
+    assert not isinstance(excinfo.value, CdpUnavailableError)
 
 
 def _config(

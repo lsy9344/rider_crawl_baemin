@@ -7,7 +7,7 @@ import re
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .browser_launcher import ensure_local_cdp_address
+from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
 from .config import AppConfig
 from .models import CurrentScreenSnapshot
 from .parser import parse_current_screen_html
@@ -51,13 +51,42 @@ def fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
             "playwright가 설치되어 있지 않습니다.\n"
             "pip install -e . 실행 후 다시 확인하세요."
         ) from exc
+    except CdpUnavailableError:
+        raise
     except Exception as exc:
+        # Chrome이 CDP 포트에 안 떠 있어 connect_over_cdp가 거부되면(ECONNREFUSED 등),
+        # 이건 "Chrome 준비하기"가 안 된 환경 오류이지 일시적 페이지 로딩 실패가 아니다.
+        # 스케줄러 5초 재시도로는 절대 복구되지 않으므로 별도 예외로 구분해, UI가 정규
+        # 주기까지 기다리며 로그를 폭주시키지 않게 한다(ui._run_once_background 참고).
+        if _is_cdp_connection_failure(exc):
+            raise CdpUnavailableError(
+                f"Chrome CDP 연결 실패: {config.cdp_url}\n"
+                "'준비하기'로 이 탭의 Chrome을 --remote-debugging-port 옵션과 전용 "
+                "프로필로 먼저 실행하고, 배민 배달현황 페이지에 로그인해 두세요.\n"
+                f"상세 오류: {type(exc).__name__}: {exc}"
+            ) from exc
         raise RuntimeError(
             f"Chrome CDP 연결 또는 배민 배달현황 수집 실패: {config.cdp_url}\n"
             "Chrome을 --remote-debugging-port=9222 옵션과 전용 프로필로 실행하고, "
             "배민 배달현황 페이지에 로그인된 상태인지 확인하세요.\n"
             f"상세 오류: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+def _is_cdp_connection_failure(exc: Exception) -> bool:
+    # connect_over_cdp가 포트에 못 붙을 때 나는 신호들. 포트에 Chrome이 없거나(거부),
+    # 주소를 못 찾거나, 핸드셰이크 자체가 실패한 경우를 "환경 오류"로 본다. 페이지가
+    # 떠 있는 상태의 일시적 로딩 타임아웃과는 구분해야 하므로 연결 단계 신호만 본다.
+    message = str(exc).casefold()
+    signals = (
+        "econnrefused",
+        "connect_over_cdp",
+        "connection refused",
+        "retrieving websocket url",
+        "enotfound",
+        "ehostunreach",
+    )
+    return any(signal in message for signal in signals)
 
 
 async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
@@ -341,6 +370,14 @@ def _validate_baemin_center_in_html(config: AppConfig, html: str, *, require_evi
         )
 
 
+# ``센터명(DP아이디)`` 형태의 화면 텍스트에서 센터명과 ID를 함께 잡는다. 이름은 바로
+# 앞의 괄호 없는 텍스트 묶음으로 본다(공백/구분자가 섞일 수 있어 [^()]로 받되 normalize).
+_CENTER_LABEL_WITH_ID_PATTERN = re.compile(
+    r"(?P<name>[^()\n\r]*?)\s*\(\s*(?P<id>DP[A-Z0-9_-]+)\s*\)",
+    flags=re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class _BaeminCenterEvidence:
     name: str
@@ -373,6 +410,20 @@ class _BaeminCenterEvidenceParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._current_option is not None:
             self._current_option["text"].append(data)
+        # 선택된 센터가 드롭다운이 아니라 일반 텍스트(예: <span>센터명(DP...)</span>)로만
+        # 표시되는 화면도 있다. 이 경우 option/input 기반 수집은 증거를 0개로 보고
+        # "센터 정보를 확인하지 못했습니다"로 실패한다. ``센터명(DP아이디)`` 형태의
+        # 텍스트를 직접 잡아 증거로 추가한다. DP 아이디가 괄호 안에 있는 라벨은 화면의
+        # 센터 표기 형식이라 오탐 위험이 낮고, ID가 다르면 기존 mismatch 검증에 그대로
+        # 걸린다.
+        self._collect_center_label_from_text(data)
+
+    def _collect_center_label_from_text(self, data: str) -> None:
+        for match in _CENTER_LABEL_WITH_ID_PATTERN.finditer(data):
+            name = _normalize_visible_text(match.group("name"))
+            center_id = match.group("id").strip()
+            if center_id:
+                self.evidence.append(_BaeminCenterEvidence(name=name, center_id=center_id))
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()

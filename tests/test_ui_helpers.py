@@ -970,6 +970,39 @@ def test_crawl_failure_requests_scheduler_retry(tmp_path, monkeypatch):
     )
 
 
+def test_cdp_unavailable_waits_full_interval_and_skips_error_log(tmp_path, monkeypatch):
+    # Chrome이 CDP 포트에 없으면 5초 재시도로는 복구되지 않는다. 정규 주기까지 기다리고
+    # (True), 전체 스택트레이스를 run_errors.log에 매번 쌓지 않아야 폭주가 멈춘다.
+    from rider_crawl.browser_launcher import CdpUnavailableError
+
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_send_locks = {}
+    settings = _settings(tmp_path)
+
+    def failing_run_once(_config, **_kwargs):
+        raise CdpUnavailableError("Chrome CDP 연결 실패: http://127.0.0.1:9222")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    log_writes = []
+    monkeypatch.setattr(
+        ui,
+        "_write_run_error_log",
+        lambda *args, **kwargs: log_writes.append(args),
+    )
+
+    result = ui._run_once_background(0, settings)
+
+    assert result is True
+    assert log_writes == []
+    assert any(
+        kind == "error" and "CDP 연결 실패" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
+
+
 def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()

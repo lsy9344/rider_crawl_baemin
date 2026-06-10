@@ -222,11 +222,44 @@ def _telegram_error_from_response(method: str, body: str, *, status_code: int | 
     description = data.get("description")
     retry_after = _telegram_retry_after_seconds(data)
     retryable = status_code == 429 or retry_after is not None or data.get("error_code") == 429
+
+    # 일반 그룹이 슈퍼그룹으로 전환되면 chat_id가 바뀐다(보통 -100… 형태). 텔레그램은
+    # 에러 응답의 parameters.migrate_to_chat_id에 새 chat_id를 담아준다. 그 값을 그대로
+    # 안내해 사용자가 설정의 채팅방 ID를 새 값으로 바꾸도록 한다. 자동 재시도해도 옛
+    # ID로는 절대 성공하지 못하므로 retryable로 두지 않는다.
+    migrate_to = _telegram_migrate_to_chat_id(data)
+    if migrate_to is not None:
+        return TelegramSendError(
+            "Telegram Bot API error: 그룹이 슈퍼그룹으로 전환되어 채팅방 ID가 바뀌었습니다. "
+            f"설정의 '텔레그램 채팅방 ID'를 {migrate_to} 로 바꿔 저장하세요. "
+            f"(원문: {description})",
+            retryable=False,
+        )
+
     return TelegramSendError(
         f"Telegram Bot API error: {description}",
         retryable=retryable,
         retry_after_seconds=retry_after,
     )
+
+
+def _telegram_migrate_to_chat_id(data: object) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    parameters = data.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    value = parameters.get("migrate_to_chat_id")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _telegram_retry_after_seconds(data: object) -> int | None:

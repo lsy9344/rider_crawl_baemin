@@ -16,6 +16,17 @@ class BrowserLaunchError(RuntimeError):
     pass
 
 
+class CdpUnavailableError(RuntimeError):
+    """CDP 포트에 디버깅 가능한 Chrome이 없어 연결할 수 없는 상태.
+
+    "Chrome 준비하기"가 안 됐거나 포트가 잘못된 환경/설정 오류이지, 페이지가 잠깐 안
+    뜨는 일시적 오류가 아니다. 스케줄러가 5초마다 재시도해도 사람이 Chrome을 켜기
+    전에는 절대 복구되지 않으므로, UI는 이 오류를 빠른 재시도 대상에서 제외해
+    로그/연결 폭주를 막는다(ui._run_once_background 참고)."""
+
+    pass
+
+
 CommandRunner = Callable[[list[str], bool], object]
 CdpProbe = Callable[[str], object]
 
@@ -109,6 +120,7 @@ def prepare_windows_chrome(
     ensure_local_cdp_address(config.cdp_url)
     probe = cdp_probe or _probe_cdp_endpoint
     _ensure_cdp_endpoint_unused(config.cdp_url, probe=probe)
+    _ensure_chrome_profile_free(profile_dir)
 
     command = build_windows_chrome_command(config)
     runner = run_command or _run_command
@@ -173,6 +185,71 @@ def _platform_display_name(config: AppConfig) -> str:
     if getattr(config, "platform_name", "baemin") == "coupang":
         return "쿠팡이츠"
     return "배민"
+
+
+def _ensure_chrome_profile_free(profile_dir: Path) -> None:
+    # 이 지점은 ``_ensure_cdp_endpoint_unused``가 통과한 뒤다. 즉 CDP 포트에 디버깅
+    # 가능한 Chrome이 "없다"는 뜻이다. 그런데도 이 프로필을 쓰는 Chrome이 이미 떠
+    # 있으면, 같은 ``--user-data-dir``로 chrome.exe를 다시 띄워도 새 프로세스는 기존
+    # 인스턴스에 URL만 넘기고 바로 종료한다. 그 결과 디버깅 포트는 안 열린 채 빈 창만
+    # 하나 더 뜬다(준비하기를 누를 때마다 창이 계속 생기는 증상). 그래서 이미 프로필을
+    # 점유한 Chrome이 있으면 실행하지 않고, 그 Chrome을 먼저 닫으라고 명확히 안내한다.
+    if not _chrome_running_for_profile(profile_dir):
+        return
+    raise BrowserLaunchError(
+        "이 브라우저 프로필을 쓰는 Chrome이 이미 실행 중인데 CDP 디버깅 포트는 열려 있지 "
+        "않습니다. 같은 프로필로 Chrome을 다시 실행하면 디버깅 포트 없이 빈 창만 계속 "
+        "생깁니다.\n"
+        f"먼저 이 프로필의 Chrome 창을 모두 닫은 뒤 다시 '준비하기'를 누르세요: {profile_dir}"
+    )
+
+
+def _chrome_running_for_profile(profile_dir: Path) -> bool:
+    # psutil은 crawl4ai를 통해 들어오는 선택적 의존성이라, 없으면 이 안전장치를 조용히
+    # 건너뛰고 기존 동작(실행 시도 후 _wait_for_cdp_ready 타임아웃)으로 떨어진다.
+    try:
+        import psutil
+    except Exception:
+        return False
+
+    target = _profile_dir_key(profile_dir)
+    for process in psutil.process_iter(["name"]):
+        try:
+            name = (process.info.get("name") or "").casefold()
+            if name not in {"chrome.exe", "chrome"}:
+                continue
+            cmdline = process.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+        if _cmdline_uses_profile(cmdline, target):
+            return True
+    return False
+
+
+def _cmdline_uses_profile(cmdline: list[str], target_key: str) -> bool:
+    for arg in cmdline:
+        if not arg.startswith("--user-data-dir"):
+            continue
+        # ``--user-data-dir=PATH`` 또는 ``--user-data-dir PATH`` 두 형태 모두 처리한다.
+        _, _, value = arg.partition("=")
+        value = value.strip().strip('"')
+        if value and _profile_dir_key(Path(value)) == target_key:
+            return True
+    # ``--user-data-dir`` 다음 인자가 경로인 분리형도 확인한다.
+    for index, arg in enumerate(cmdline[:-1]):
+        if arg == "--user-data-dir":
+            candidate = cmdline[index + 1].strip().strip('"')
+            if candidate and _profile_dir_key(Path(candidate)) == target_key:
+                return True
+    return False
+
+
+def _profile_dir_key(path: Path) -> str:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path
+    return str(resolved).casefold()
 
 
 def _ensure_cdp_endpoint_unused(cdp_url: str, *, probe: CdpProbe) -> None:

@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
-from .browser_launcher import BrowserLaunchError, prepare_chrome
+from .browser_launcher import BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
@@ -488,6 +488,13 @@ class RiderBotUi:
                 settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
                 send_message=self._send_message_with_kakao_lock,
             )
+        except CdpUnavailableError as exc:
+            # Chrome이 CDP 포트에 안 떠 있는 환경 오류. 5초 재시도로는 사람이 Chrome을
+            # 켜기 전에는 절대 복구되지 않으므로, 빠른 재시도(False)를 막고 정규 주기까지
+            # 기다린다(True). 또 전체 스택트레이스를 매번 파일에 쌓지 않고 한 줄로만
+            # 알려, run_errors.log와 연결 시도가 폭주하던 문제를 함께 없앤다.
+            self.messages.put(("error", f"{label} {exc}"))
+            return True
         except TelegramSendError as exc:
             # Transient send failures (rate limit, brief network blip) retry soon
             # by returning False. But when the failure is ambiguous (the request

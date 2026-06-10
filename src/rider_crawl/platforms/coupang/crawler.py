@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlsplit
 
-from rider_crawl.browser_launcher import ensure_local_cdp_address
+from rider_crawl.browser_launcher import CdpUnavailableError, ensure_local_cdp_address
 from rider_crawl.config import AppConfig
 from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 
@@ -244,9 +244,12 @@ def fetch_page_html_via_cdp(config: AppConfig, *, target_url: str | None = None)
         try:
             browser = playwright.chromium.connect_over_cdp(config.cdp_url)
         except PlaywrightError as exc:
-            raise RuntimeError(
+            # Chrome이 CDP 포트에 안 떠 있는 환경 오류. 스케줄러 5초 재시도로는 복구되지
+            # 않으므로 CdpUnavailableError로 구분해 UI가 정규 주기까지 기다리게 한다.
+            raise CdpUnavailableError(
                 f"Chrome CDP 연결 실패: {config.cdp_url}\n"
-                "Chrome을 --remote-debugging-port=9222 옵션으로 실행한 뒤 다시 시도하세요."
+                "'준비하기'로 이 탭의 Chrome을 --remote-debugging-port 옵션으로 먼저 "
+                "실행한 뒤 다시 시도하세요."
             ) from exc
 
         # CDP 대상은 사용자가 켜 둔 Chrome이므로 여기서 browser.close()를 호출하지 않는다.

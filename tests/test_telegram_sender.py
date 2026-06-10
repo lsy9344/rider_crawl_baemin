@@ -176,6 +176,32 @@ def test_send_telegram_text_raises_send_error_for_non_dict_json_body(tmp_path):
         send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=lambda _seconds: None)
 
 
+def test_send_telegram_text_reports_new_chat_id_on_supergroup_migration(tmp_path):
+    # 일반 그룹이 슈퍼그룹으로 전환되면 chat_id가 바뀐다. 텔레그램이 알려준 새 ID를
+    # 안내해야 하고, 옛 ID로는 절대 성공하지 못하므로 재시도하면 안 된다.
+    calls = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        return _FakeResponse(
+            {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                "parameters": {"migrate_to_chat_id": -1003945684789},
+            }
+        )
+
+    with pytest.raises(TelegramSendError) as exc_info:
+        send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=lambda _s: None)
+
+    assert "-1003945684789" in str(exc_info.value)
+    assert exc_info.value.retryable is False
+    # 옛 ID로 재시도하지 않으므로 한 번만 호출돼야 한다.
+    assert calls == 1
+
+
 def test_get_telegram_updates_uses_long_polling_parameters(tmp_path):
     calls: list[tuple[str, bytes]] = []
 
