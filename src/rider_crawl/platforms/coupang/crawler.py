@@ -221,6 +221,110 @@ def _normalize_coupang_center(value: str) -> str:
     return re.sub(r"\s+", "", value or "").casefold()
 
 
+# 쿠팡 실적/대시보드 페이지 상단의 센터 탭(``<div class="slide-tab">센터명</div>``)
+# 텍스트를 읽기 위한 JS. 활성 탭에는 ``slide-tab-active`` 클래스가 붙는다(실측 확인).
+# 센터가 1개면 탭이 1개만 노출되고, 여러 센터 계정이 아직 어떤 센터도 고르지 않은
+# 통합 상태("…협력사 N개" 헤딩)에서는 어떤 탭에도 active 클래스가 없을 수 있다.
+# 그 경우 일치 탭을 그대로 눌러 해당 센터로 전환한다. 화면에 보이는(offsetParent !=
+# null) 탭만 후보로 본다. 구버전 호환을 위해 ``.slide-tab``이 없으면 Ant Design 탭/
+# ``role=tab``으로 떨어진다.
+_COUPANG_CENTER_TAB_JS = """
+() => {
+  const seen = [];
+  const collect = (nodes) => {
+    for (const node of nodes) {
+      if (!node || node.offsetParent === null) continue;
+      const text = (node.innerText || node.textContent || '').trim();
+      if (!text) continue;
+      if (seen.some((entry) => entry.node === node)) continue;
+      const cls = String(node.className || '');
+      const selected =
+        node.getAttribute('aria-selected') === 'true' ||
+        /slide-tab-active|ant-tabs-tab-active|(?:^|\\s)active(?:\\s|$)|selected/.test(cls);
+      seen.push({ node, text, selected });
+    }
+  };
+  collect(document.querySelectorAll('.slide-tab'));
+  if (seen.length === 0) collect(document.querySelectorAll('.ant-tabs-tab'));
+  if (seen.length === 0) collect(document.querySelectorAll('[role="tab"]'));
+  return seen.map(({ text, selected }) => ({ text, selected }));
+}
+"""
+
+
+def _coupang_center_tab_label_matches(label: str, expected_aliases: set[str]) -> bool:
+    """Return True when a center-tab label matches one of the expected aliases.
+
+    탭 라벨은 짧은 센터명(예: ``양주중앙``)으로 뜨고, 실적 페이지 헤딩은 회사명을 붙여
+    ``제이앤에이치플러스 양주중앙``으로 뜬다. 같은 설정값(``baemin_center_name``)이
+    회사명 포함/미포함 어느 쪽이어도 탭을 찾도록, 정규화 후 양방향 부분일치를 본다.
+    이 단계는 "탭을 눌러 이동"만 하고, 잘못된 센터는 이후 ``_validate_coupang_center``
+    의 exact 검증이 그대로 막으므로 부분일치로 인한 오선택 위험이 낮다.
+    """
+
+    normalized_label = _normalize_coupang_center(label)
+    if not normalized_label:
+        return False
+    for alias in expected_aliases:
+        if normalized_label == alias or alias in normalized_label or normalized_label in alias:
+            return True
+    return False
+
+
+def _select_coupang_center(page: Any, config: AppConfig, *, timeout_errors: tuple[type[BaseException], ...]) -> bool:
+    """Click the center tab matching the configured center name, if present.
+
+    쿠팡 실적/대시보드 화면은 한 계정에 여러 센터가 있으면 상단에 센터 탭
+    (예: ``양주중앙 / 의정부남부 / 의정부중앙``)을 노출하고, 그중 하나만 활성화된다.
+    배민의 센터 선택과 동일하게, 설정한 센터(``baemin_center_name``)에 맞는 탭을 찾아
+    아직 활성이 아니면 클릭해 그 센터 화면으로 전환한다.
+
+    - 기대 센터명이 비어 있으면 아무 것도 하지 않는다(기존 동작 유지).
+    - 센터가 1개인 계정은 탭이 1개만(또는 0개) 노출되므로, 일치 탭이 없거나 이미
+      활성이면 조용히 넘어간다. 다른 센터가 선택돼 있으면 이후
+      ``_validate_coupang_center`` 검증이 막으므로 여기서 실패시키지 않는다.
+
+    실제로 탭을 클릭해 화면을 전환했을 때만 ``True``를 돌려준다. 호출부는 이 값으로
+    전환 후 페이지가 다시 준비됐는지 한 번만 더 기다린다(불필요한 재대기 방지).
+    """
+
+    expected_aliases = _coupang_center_aliases(config.baemin_center_name)
+    if not expected_aliases:
+        return False
+
+    try:
+        tabs = page.evaluate(_COUPANG_CENTER_TAB_JS)
+    except Exception:
+        return False
+
+    match = next(
+        (
+            tab
+            for tab in tabs
+            if _coupang_center_tab_label_matches(str(tab.get("text", "")), expected_aliases)
+        ),
+        None,
+    )
+    if match is None or match.get("selected"):
+        # 일치 탭이 없거나(단일 센터 등) 이미 선택돼 있으면 전환 불필요.
+        return False
+
+    label = str(match["text"]).strip()
+    try:
+        # 같은 라벨의 다른 요소(헤딩 등)를 누르지 않도록 탭 컨테이너 안에서만 찾는다.
+        tab_locator = page.locator(".slide-tab, .ant-tabs-tab, [role=tab]").filter(has_text=label).first
+        tab_locator.click(timeout=config.page_timeout_seconds)
+    except Exception:
+        # 탭 클릭이 실패해도 크롤링 자체는 계속한다. 잘못된 센터면 이후 검증이 막는다.
+        return False
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except timeout_errors:
+        pass
+    return True
+
+
 def fetch_page_html(config: AppConfig, *, target_url: str | None = None) -> str:
     if config.browser_mode == "cdp":
         if target_url is None:
@@ -290,6 +394,13 @@ def fetch_page_html_via_persistent_context(config: AppConfig, *, target_url: str
                 target_url=target_url or config.coupang_eats_url,
                 timeout_errors=(PlaywrightTimeoutError,),
             )
+            if _select_coupang_center(page, config, timeout_errors=(PlaywrightTimeoutError,)):
+                _wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=target_url or config.coupang_eats_url,
+                    timeout_errors=(PlaywrightTimeoutError,),
+                )
             return page.content()
         finally:
             context.close()
@@ -322,6 +433,9 @@ def _fetch_target_page_content(
     except load_timeout_errors:
         pass
     _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+    if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+        # 탭을 눌러 다른 센터로 전환했으면, 새 센터 화면이 준비될 때까지 한 번 더 기다린다.
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
     return page.content()
 
 

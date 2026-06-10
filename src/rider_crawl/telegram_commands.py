@@ -164,6 +164,39 @@ class TelegramCommandProcessor:
         for target in self.config_by_target:
             self.locks_by_target.setdefault(target, threading.Lock())
 
+    def update_routing(
+        self,
+        configs: list[AppConfig],
+        *,
+        locks_by_target: dict[TelegramTarget, threading.Lock] | None = None,
+    ) -> None:
+        """이 토큰을 공유하는 활성 탭 구성이 바뀔 때 명령 라우팅을 다시 맞춘다.
+
+        탭별 시작/중지로 같은 토큰의 활성 탭이 늘거나 줄어도, 폴러는 그대로 둔 채
+        라우팅 대상(``config_by_target``)과 대상별 락만 갱신한다. 그래서 '!조회'
+        명령이 항상 현재 활성 탭으로만 전달된다.
+        """
+
+        self.configs = configs
+        self.config_by_target = _config_by_unique_target(configs)
+        if locks_by_target is not None:
+            normalized = {
+                (_normalize_chat_id(chat_id), _normalize_thread_id(thread_id)): lock
+                for (chat_id, thread_id), lock in locks_by_target.items()
+                if _normalize_chat_id(chat_id)
+            }
+        else:
+            normalized = {}
+        # 기존 대상의 락은 유지하고, 새 대상에는 제공된(혹은 새) 락을 붙인다.
+        merged: dict[TelegramTarget, threading.Lock] = {}
+        for target in self.config_by_target:
+            merged[target] = (
+                normalized.get(target)
+                or self.locks_by_target.get(target)
+                or threading.Lock()
+            )
+        self.locks_by_target = merged
+
     def handle_text(
         self,
         chat_id: str,

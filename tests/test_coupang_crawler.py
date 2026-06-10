@@ -221,6 +221,132 @@ def test_coupang_center_from_heading_strips_shift_keeping_full_center(heading, e
     assert crawler._coupang_center_from_heading(heading) == expected
 
 
+@pytest.mark.parametrize(
+    ("label", "configured", "expected"),
+    [
+        # 탭 라벨(짧은 센터명)이 설정값과 정확히 같음.
+        ("양주중앙", "양주중앙", True),
+        # 설정값이 회사명을 포함해도(헤딩 형태) 짧은 탭 라벨과 매칭돼야 한다.
+        ("양주중앙", "제이앤에이치플러스 양주중앙", True),
+        # 공백/대소문자는 정규화 후 비교한다.
+        ("양주 중앙", "양주중앙", True),
+        # 다른 센터 탭은 매칭되면 안 된다.
+        ("의정부남부", "양주중앙", False),
+        ("의정부중앙", "양주중앙", False),
+    ],
+)
+def test_coupang_center_tab_label_matches(label, configured, expected):
+    aliases = crawler._coupang_center_aliases(configured)
+    assert crawler._coupang_center_tab_label_matches(label, aliases) is expected
+
+
+def test_select_coupang_center_clicks_matching_inactive_tab(tmp_path):
+    config = _config(tmp_path, baemin_center_name="양주중앙")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[
+            {"text": "양주중앙", "selected": False},
+            {"text": "의정부남부", "selected": True},
+            {"text": "의정부중앙", "selected": False},
+        ],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is True
+    assert page.clicked_tab_labels == ["양주중앙"]
+
+
+def test_select_coupang_center_clicks_when_no_tab_active(tmp_path):
+    # 여러 센터 계정이 아직 어떤 센터도 고르지 않은 통합 상태("협력사 N개")에서는
+    # 어떤 탭에도 active 클래스가 없다. 이때도 일치 탭을 눌러 전환해야 한다.
+    config = _config(tmp_path, baemin_center_name="양주중앙")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[
+            {"text": "양주중앙", "selected": False},
+            {"text": "의정부남부", "selected": False},
+            {"text": "의정부중앙", "selected": False},
+        ],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is True
+    assert page.clicked_tab_labels == ["양주중앙"]
+
+
+def test_select_coupang_center_matches_label_when_config_has_company_prefix(tmp_path):
+    # 설정값이 회사명을 포함해도(헤딩 형태) 짧은 탭 라벨과 매칭돼 클릭돼야 한다.
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 양주중앙")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[
+            {"text": "양주중앙", "selected": False},
+            {"text": "의정부남부", "selected": False},
+        ],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is True
+    assert page.clicked_tab_labels == ["양주중앙"]
+
+
+def test_select_coupang_center_skips_already_active_tab(tmp_path):
+    config = _config(tmp_path, baemin_center_name="양주중앙")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[
+            {"text": "양주중앙", "selected": True},
+            {"text": "의정부남부", "selected": False},
+        ],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is False
+    assert page.clicked_tab_labels == []
+
+
+def test_select_coupang_center_noops_when_no_matching_tab(tmp_path):
+    # 단일 센터 계정처럼 일치 탭이 없으면 클릭하지 않고 넘어간다(검증이 이후 단계에서 막음).
+    config = _config(tmp_path, baemin_center_name="양주중앙")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[{"text": "의정부남부", "selected": True}],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is False
+    assert page.clicked_tab_labels == []
+
+
+def test_select_coupang_center_noops_when_center_name_empty(tmp_path):
+    config = _config(tmp_path, baemin_center_name="")
+    page = _FakePage(
+        config.coupang_eats_url,
+        center_tabs=[{"text": "양주중앙", "selected": False}],
+    )
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is False
+    assert page.clicked_tab_labels == []
+
+
+def test_select_coupang_center_tolerates_pages_without_tabs(tmp_path):
+    # evaluate가 실패해도(탭 UI 없음 등) 크롤링을 막지 않는다.
+    config = _config(tmp_path, baemin_center_name="양주중앙")
+    page = _FakePage(config.coupang_eats_url)  # center_tabs=None → evaluate raises
+
+    clicked = crawler._select_coupang_center(page, config, timeout_errors=(FakeTimeout,))
+
+    assert clicked is False
+    assert page.clicked_tab_labels == []
+
+
 def test_coupang_crawl_performance_snapshot_parses_performance_and_peak_dashboard(tmp_path):
     performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     peak_dashboard_html = _PEAK_DASHBOARD_HTML
@@ -411,11 +537,20 @@ class FakeTimeout(Exception):
 
 
 class _FakePage:
-    def __init__(self, url: str, html: str = "", wait_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        html: str = "",
+        wait_error: Exception | None = None,
+        center_tabs: list[dict] | None = None,
+    ) -> None:
         self.url = url
         self.html = html
         self.wait_error = wait_error
         self.required_texts: list[str] = []
+        # ``center_tabs``는 _COUPANG_CENTER_TAB_JS가 돌려주는 값을 흉내 낸다.
+        self.center_tabs = center_tabs
+        self.clicked_tab_labels: list[str] = []
 
     def wait_for_load_state(self, *_args, **_kwargs):
         return None
@@ -429,8 +564,33 @@ class _FakePage:
             raise self.wait_error
         return None
 
+    def evaluate(self, _script):
+        if self.center_tabs is None:
+            raise RuntimeError("evaluate not supported")
+        return self.center_tabs
+
+    def locator(self, _selector):
+        return _FakeTabLocator(self)
+
     def content(self) -> str:
         return self.html
+
+
+class _FakeTabLocator:
+    def __init__(self, page: "_FakePage", label: str | None = None) -> None:
+        self._page = page
+        self._label = label
+
+    def filter(self, *, has_text: str):
+        return _FakeTabLocator(self._page, has_text)
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, **_kwargs):
+        if self._label is not None:
+            self._page.clicked_tab_labels.append(self._label)
 
 
 class _FakeBrowser:

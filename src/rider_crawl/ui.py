@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import traceback
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, messagebox
@@ -32,6 +33,21 @@ TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
 TELEGRAM_FIELD_KEYS = ("telegram_bot_token", "telegram_chat_id", "telegram_message_thread_id")
 KAKAO_FIELD_KEYS = ("kakao_chat_name",)
 MESSENGER_FIELD_KEYS = TELEGRAM_FIELD_KEYS + KAKAO_FIELD_KEYS
+
+
+@dataclass
+class _TelegramPollerHandle:
+    """봇 토큰 하나에 대한 단일 폴러와 그 폴러가 담당하는 활성 탭 집합.
+
+    여러 탭이 같은 토큰을 공유할 때 폴러는 하나만 돌고, ``tab_indexes``에 든 탭들이
+    모두 중지되면(빈 집합) 폴러도 멈춘다. ``processor``는 같은 토큰의 활성 탭 전부를
+    라우팅 대상으로 알고 있어 '!조회' 명령이 올바른 탭으로 전달된다.
+    """
+
+    stop_event: threading.Event
+    worker: threading.Thread
+    processor: TelegramCommandProcessor
+    tab_indexes: set[int] = field(default_factory=set)
 
 
 def default_settings_path() -> Path:
@@ -147,10 +163,14 @@ class RiderBotUi:
         self.settings = self.settings_tabs[0]
         self.messages: queue.Queue[tuple[str, Any]] = queue.Queue()
         # 탭마다 독립적으로 시작/중지한다. 한 탭의 '시작'이 다른 탭을 함께 돌리지
-        # 않도록 stop_event/워커/텔레그램 워커를 탭 인덱스별로 따로 보관한다.
+        # 않도록 stop_event/워커를 탭 인덱스별로 따로 보관한다.
         self.stop_events_by_tab: dict[int, threading.Event] = {}
         self.workers_by_tab: dict[int, list[threading.Thread]] = {}
-        self.telegram_workers_by_tab: dict[int, list[threading.Thread]] = {}
+        # 텔레그램 명령 폴러는 봇 토큰 단위로 하나만 돈다. 여러 탭이 같은 토큰을
+        # 공유하면 getUpdates를 두 폴러가 나눠 받아 '!조회' 명령이 다른 탭으로 가
+        # 누락될 수 있으므로, 토큰별로 폴러 하나를 두고 그 토큰을 쓰는 활성 탭 전부를
+        # 명령 라우팅 대상으로 등록한다.
+        self.telegram_pollers_by_token: dict[str, _TelegramPollerHandle] = {}
         self.settings_notebook: ttk.Notebook | None = None
         self.crawl_locks_by_tab: dict[int, threading.Lock] = {
             index: threading.Lock() for index in range(len(self.settings_tabs))
@@ -451,7 +471,7 @@ class RiderBotUi:
         )
         self.workers_by_tab[tab_index] = [worker]
 
-        self._start_telegram_listener(tab_index, settings, stop_event)
+        self._start_telegram_listener(tab_index, settings)
         worker.start()
         self._refresh_run_controls()
         self.status_var.set(f"크롤링{tab_index + 1} 실행 중")
@@ -461,6 +481,9 @@ class RiderBotUi:
         stop_event = self.stop_events_by_tab.get(tab_index)
         if stop_event is not None:
             stop_event.set()
+        # 이 탭의 텔레그램 명령 폴러도 함께 정리한다(같은 토큰의 다른 탭이 남아
+        # 있으면 폴러는 유지하고 이 탭만 라우팅에서 제외).
+        self._stop_telegram_listener(tab_index)
         self.status_var.set(f"크롤링{tab_index + 1} 중지 요청됨")
         self.next_run_var.set("-")
         self._refresh_run_controls()
@@ -669,45 +692,99 @@ class RiderBotUi:
         self._sync_selected_vars()
         self._refresh_run_controls()
 
-    def _start_telegram_listener(
-        self,
-        tab_index: int,
-        settings: UiSettings,
-        stop_event: threading.Event,
-    ) -> None:
-        active_settings = [(tab_index, settings)]
-        configs = app_configs_from_settings(active_settings)
-        grouped_configs = telegram_configs_by_token(configs)
-        self.telegram_workers_by_tab[tab_index] = []
-        if not grouped_configs:
+    def _start_telegram_listener(self, tab_index: int, settings: UiSettings) -> None:
+        config = settings.to_app_config(
+            crawl_name=f"크롤링{tab_index + 1}", state_subdir=f"crawling{tab_index + 1}"
+        )
+        if not telegram_configs_by_token([config]):
             self._append_preview(
                 f"[안내]\n크롤링{tab_index + 1} 텔레그램 봇 토큰과 채팅방 ID가 없어 명령 감지를 시작하지 않습니다.\n"
             )
             return
 
+        token = config.telegram_bot_token.strip()
+        handle = self.telegram_pollers_by_token.get(token)
+        if handle is not None and handle.worker.is_alive():
+            # 같은 토큰의 폴러가 이미 돌고 있다. 폴러를 새로 띄우지 않고 이 탭을
+            # 라우팅 대상에 추가만 한다. 두 폴러가 getUpdates를 나눠 받아 명령이
+            # 누락되는 것을 막는다.
+            handle.tab_indexes.add(tab_index)
+            self._rebuild_telegram_routing(token)
+            self.messages.put(
+                ("log", f"크롤링{tab_index + 1} 텔레그램 명령 라우팅 추가(토큰 공유): 채팅방 {len(handle.processor.configs)}개")
+            )
+            return
+
+        configs, locks_by_target = self._telegram_routing_for_token(token, extra_tab=tab_index)
+        processor = TelegramCommandProcessor(
+            configs,
+            locks_by_target=locks_by_target,
+            send_text=self._send_telegram_command_reply_with_lock,
+            log_event=lambda message: self.messages.put(("log", message)),
+        )
+        poller = TelegramUpdatePoller(configs[0], handle_text=processor.handle_text)
+        stop_event = threading.Event()
+        worker = threading.Thread(
+            target=self._telegram_poll_loop,
+            args=(poller, stop_event),
+            daemon=True,
+        )
+        self.telegram_pollers_by_token[token] = _TelegramPollerHandle(
+            stop_event=stop_event,
+            worker=worker,
+            processor=processor,
+            tab_indexes={tab_index},
+        )
+        self.messages.put(("log", f"크롤링{tab_index + 1} 텔레그램 poller 시작: 채팅방 {len(configs)}개"))
+        worker.start()
+
+    def _stop_telegram_listener(self, tab_index: int) -> None:
+        # 이 탭이 쓰던 토큰 폴러에서 탭을 뺀다. 같은 토큰의 다른 탭이 아직 돌고
+        # 있으면 폴러는 유지하고 라우팅만 갱신한다. 마지막 탭이면 폴러를 멈춘다.
+        for token, handle in list(self.telegram_pollers_by_token.items()):
+            if tab_index not in handle.tab_indexes:
+                continue
+            handle.tab_indexes.discard(tab_index)
+            if handle.tab_indexes:
+                self._rebuild_telegram_routing(token)
+            else:
+                handle.stop_event.set()
+                self.telegram_pollers_by_token.pop(token, None)
+
+    def _rebuild_telegram_routing(self, token: str) -> None:
+        handle = self.telegram_pollers_by_token.get(token)
+        if handle is None:
+            return
+        configs, locks_by_target = self._telegram_routing_for_token(token)
+        if not configs:
+            return
+        handle.processor.update_routing(configs, locks_by_target=locks_by_target)
+
+    def _telegram_routing_for_token(
+        self, token: str, *, extra_tab: int | None = None
+    ) -> tuple[list[AppConfig], dict]:
+        # 이 토큰을 공유하는 '실행 중'(또는 막 시작하는 extra_tab) 탭들의 config와
+        # 대상별 락을 모은다. 라우팅은 활성 탭만 대상으로 해야 중지된 탭으로 명령이
+        # 가지 않는다.
+        handle = self.telegram_pollers_by_token.get(token)
+        active_indexes = set(handle.tab_indexes) if handle is not None else set()
+        if extra_tab is not None:
+            active_indexes.add(extra_tab)
+
+        indexed: list[tuple[int, UiSettings]] = []
+        for index in sorted(active_indexes):
+            tab_settings = self.settings_tabs[index]
+            if tab_settings.telegram_bot_token.strip() != token:
+                continue
+            indexed.append((index, tab_settings))
+
+        configs = app_configs_from_settings(indexed)
         locks_by_target = {
-            _telegram_target_key(settings): self._crawl_lock_for_tab(index)
-            for index, settings in active_settings
-            if _telegram_target_key(settings) is not None
+            _telegram_target_key(tab_settings): self._crawl_lock_for_tab(index)
+            for index, tab_settings in indexed
+            if _telegram_target_key(tab_settings) is not None
         }
-        workers: list[threading.Thread] = []
-        for token_configs in grouped_configs.values():
-            processor = TelegramCommandProcessor(
-                token_configs,
-                locks_by_target=locks_by_target,
-                send_text=self._send_telegram_command_reply_with_lock,
-                log_event=lambda message: self.messages.put(("log", message)),
-            )
-            poller = TelegramUpdatePoller(token_configs[0], handle_text=processor.handle_text)
-            worker = threading.Thread(
-                target=self._telegram_poll_loop,
-                args=(poller, stop_event),
-                daemon=True,
-            )
-            workers.append(worker)
-            self.messages.put(("log", f"크롤링{tab_index + 1} 텔레그램 poller 시작: 채팅방 {len(token_configs)}개"))
-            worker.start()
-        self.telegram_workers_by_tab[tab_index] = workers
+        return configs, locks_by_target
 
     def _telegram_poll_loop(self, poller: TelegramUpdatePoller, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -718,9 +795,10 @@ class RiderBotUi:
                 stop_event.wait(5)
 
     def _has_live_workers(self, tab_index: int) -> bool:
-        workers = list(self.workers_by_tab.get(tab_index, [])) + list(
-            self.telegram_workers_by_tab.get(tab_index, [])
-        )
+        # 시작/중지 버튼은 이 탭의 크롤링 워커 상태만 따른다. 텔레그램 명령 폴러는
+        # 토큰 단위로 별도 관리되며(같은 토큰의 다른 탭과 공유될 수 있어) 버튼 상태의
+        # 기준이 아니다.
+        workers = self.workers_by_tab.get(tab_index, [])
         return any(worker.is_alive() for worker in workers)
 
     def _refresh_run_controls(self) -> None:
@@ -734,7 +812,6 @@ class RiderBotUi:
         # 중지 요청 후 워커가 모두 종료되면 이 탭의 실행 상태를 비운다.
         if stopping and not self._has_live_workers(tab_index):
             self.workers_by_tab.pop(tab_index, None)
-            self.telegram_workers_by_tab.pop(tab_index, None)
             self.stop_events_by_tab.pop(tab_index, None)
             stopping = False
 

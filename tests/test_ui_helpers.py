@@ -803,7 +803,7 @@ def test_start_is_blocked_while_previous_workers_are_still_stopping(tmp_path, mo
     ui.messages = queue.Queue()
     ui.settings_notebook = _FakeNotebook(0)
     ui.workers_by_tab = {0: [_FakeThread(alive=True)]}
-    ui.telegram_workers_by_tab = {0: []}
+    ui.telegram_pollers_by_token = {}
     ui.stop_events_by_tab = {}
     ui.status_var = _FakeVar()
     save_calls = []
@@ -826,7 +826,7 @@ def test_start_runs_only_selected_tab_with_its_own_interval(tmp_path, monkeypatc
         _settings(tmp_path, cdp_url="http://127.0.0.1:9223", interval_minutes="1"),
     ]
     ui.workers_by_tab = {}
-    ui.telegram_workers_by_tab = {}
+    ui.telegram_pollers_by_token = {}
     ui.stop_events_by_tab = {}
     ui.crawl_locks_by_tab = {}
     ui.status_var = _FakeVar()
@@ -877,7 +877,7 @@ def test_per_tab_start_stop_works_for_all_nine_tabs(tmp_path, monkeypatch):
     ]
     ui.vars_by_tab = [{} for _ in range(tab_count)]
     ui.workers_by_tab = {}
-    ui.telegram_workers_by_tab = {}
+    ui.telegram_pollers_by_token = {}
     ui.stop_events_by_tab = {}
     ui.crawl_locks_by_tab = {}
     ui.status_var = _FakeVar()
@@ -886,6 +886,7 @@ def test_per_tab_start_stop_works_for_all_nine_tabs(tmp_path, monkeypatch):
     ui.stop_button = _FakeButton()
     monkeypatch.setattr(ui, "save_settings", lambda: ui.settings_tabs[notebook.current_index])
     monkeypatch.setattr(ui, "_start_telegram_listener", lambda *a, **k: None)
+    monkeypatch.setattr(ui, "_stop_telegram_listener", lambda *a, **k: None)
 
     recorded: list[tuple[int, int]] = []
 
@@ -942,7 +943,6 @@ def test_switching_to_idle_tab_reenables_start_button():
     ui.status_var = _FakeVar()
     ui.vars_by_tab = [{}, {}]
     ui.workers_by_tab = {0: [_FakeThread(alive=True)]}
-    ui.telegram_workers_by_tab = {0: []}
     stop_event = threading.Event()
     ui.stop_events_by_tab = {0: stop_event}
 
@@ -962,6 +962,52 @@ def test_switching_to_idle_tab_reenables_start_button():
     ui._on_tab_changed()
     assert ui.start_button.state == "disabled"
     assert ui.stop_button.state == "normal"
+
+
+def test_shared_token_keeps_single_poller_routing_all_active_tabs(tmp_path, monkeypatch):
+    # 크롤링1,2가 같은 봇 토큰을 공유하고 채팅방만 다르다. 탭별로 시작해도 폴러는
+    # 하나만 돌고, 두 채팅방 모두 명령 라우팅 대상에 들어가야 한다(누락 방지).
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_pollers_by_token = {}
+    ui.settings_tabs = [
+        _settings(tmp_path, cdp_url="http://127.0.0.1:9222", telegram_bot_token="shared", telegram_chat_id="-100111"),
+        _settings(tmp_path, cdp_url="http://127.0.0.1:9223", telegram_bot_token="shared", telegram_chat_id="-100222"),
+    ]
+    # 폴러 워커가 네트워크를 치지 않도록 stop_event를 기다리기만 하는 루프로 교체.
+    monkeypatch.setattr(ui, "_telegram_poll_loop", lambda poller, stop_event: stop_event.wait(5))
+    # 실제 getUpdates 호출을 막기 위해 poller의 오프셋 경로를 임시 폴더로 둔다.
+    monkeypatch.setattr(
+        "rider_crawl.telegram_commands._default_offset_store_path",
+        lambda config: tmp_path / "offset.txt",
+    )
+
+    ui._start_telegram_listener(0, ui.settings_tabs[0])
+    ui._start_telegram_listener(1, ui.settings_tabs[1])
+
+    # 폴러는 토큰당 1개만 존재
+    assert set(ui.telegram_pollers_by_token) == {"shared"}
+    handle = ui.telegram_pollers_by_token["shared"]
+    assert handle.tab_indexes == {0, 1}
+    # 두 채팅방 모두 명령 라우팅 대상에 포함
+    targets = set(handle.processor.config_by_target)
+    assert ("-100111", "") in targets
+    assert ("-100222", "") in targets
+
+    # 크롤링1만 중지 → 폴러는 유지, 라우팅에서 -100111만 제외되고 -100222는 남음
+    ui._stop_telegram_listener(0)
+    assert set(ui.telegram_pollers_by_token) == {"shared"}
+    assert ui.telegram_pollers_by_token["shared"].tab_indexes == {1}
+    survivor_targets = set(handle.processor.config_by_target)
+    assert ("-100111", "") not in survivor_targets
+    assert ("-100222", "") in survivor_targets
+
+    # 크롤링2까지 중지 → 폴러 종료
+    ui._stop_telegram_listener(1)
+    assert "shared" not in ui.telegram_pollers_by_token
+    handle.worker.join(2)
+    assert not handle.worker.is_alive()
 
 
 def test_show_result_labels_next_run_with_tab_index():
