@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from rider_crawl.config import AppConfig
+from rider_crawl.config import AppConfig, app_state_root
 from rider_crawl.parser import parse_baemin_delivery_history_html
 from rider_crawl.telegram_commands import (
     TelegramUpdatePoller,
@@ -596,6 +596,57 @@ def test_default_offset_store_path_depends_on_token_not_first_tab_log_dir(tmp_pa
     second = replace(_config(tmp_path, crawl_name="크롤링2"), log_dir=tmp_path / "second" / "logs")
 
     assert _default_offset_store_path(first) == _default_offset_store_path(second)
+
+
+def test_default_offset_store_path_is_absolute_and_cwd_stable(tmp_path, monkeypatch):
+    config = _config(tmp_path, crawl_name="크롤링1")
+
+    sub_a = tmp_path / "a"
+    sub_b = tmp_path / "b"
+    sub_a.mkdir()
+    sub_b.mkdir()
+
+    monkeypatch.chdir(sub_a)
+    path_from_a = _default_offset_store_path(config)
+    monkeypatch.chdir(sub_b)
+    path_from_b = _default_offset_store_path(config)
+
+    assert path_from_a.is_absolute()
+    # 작업 디렉터리가 달라도 같은 토큰이면 같은 파일을 가리켜야 한다.
+    assert path_from_a == path_from_b
+
+
+def test_default_offset_store_path_honors_state_root_override(tmp_path, monkeypatch):
+    config = _config(tmp_path, crawl_name="크롤링1")
+    monkeypatch.setenv("RIDER_CRAWL_STATE_ROOT", str(tmp_path / "state-root"))
+
+    path = _default_offset_store_path(config)
+
+    expected_root = (tmp_path / "state-root").resolve()
+    assert path == expected_root / "runtime" / "state" / "telegram_offsets" / path.name
+    assert path.parent == app_state_root() / "runtime" / "state" / "telegram_offsets"
+
+
+def test_telegram_command_processor_replies_that_lookup_is_baemin_only_for_coupang(tmp_path):
+    sent: list[str] = []
+    config = AppConfig(
+        **{
+            **_config(tmp_path, crawl_name="크롤링1", chat_id="-100123").__dict__,
+            "platform_name": "coupang",
+            "coupang_eats_url": "https://partner.coupangeats.com/page/rider-performance",
+            "peak_dashboard_url": "https://partner.coupangeats.com/page/peak-dashboard",
+        }
+    )
+    processor = TelegramCommandProcessor(
+        [config],
+        fetch_html=lambda _config: (_ for _ in ()).throw(AssertionError("must not fetch Coupang as Baemin")),
+        send_text=lambda _config, message, **_kwargs: sent.append(message),
+    )
+
+    handled = processor.handle_text("-100123", "!홍길동1234")
+
+    assert handled is True
+    assert sent == ["라이더 조회 명령은 배민 탭에서만 지원합니다."]
 
 
 def _config(

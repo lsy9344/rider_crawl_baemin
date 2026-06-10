@@ -1,0 +1,432 @@
+from pathlib import Path
+
+import pytest
+
+from rider_crawl.config import AppConfig
+from rider_crawl.platforms.coupang import crawler
+from rider_crawl.platforms.coupang.crawler import crawl_current_screen, crawl_performance_snapshot
+
+_PEAK_DASHBOARD_HTML = """
+<main>
+  <p>20:38 업데이트</p>
+  <p>배정 물량</p><p>103건</p>
+  <p>처리 물량</p><p>67건</p>
+  <p>거절률</p><p>6.5%</p>
+  <section>
+    <h2>피크타임별 현황</h2>
+    <p>아침</p><p>100%</p><p>잔여</p><p>0</p><p>목표/완료</p><p>9/9</p>
+    <p>점심 피크</p><p>100%</p><p>잔여</p><p>0</p><p>목표/완료</p><p>45/45</p>
+    <p>점심 논피크</p><p>52.6%</p><p>잔여</p><p>9</p><p>목표/완료</p><p>19/10</p>
+    <p>저녁 피크</p><p>43.5%</p><p>잔여</p><p>22</p><p>목표/완료</p><p>39/17</p>
+    <p>저녁 논피크</p><p>7.4%</p><p>잔여</p><p>25</p><p>목표/완료</p><p>27/2</p>
+  </section>
+  <h2>시간대별 기록</h2>
+</main>
+"""
+
+
+_PEAK_DASHBOARD_HTML_WITH_CENTER = _PEAK_DASHBOARD_HTML.replace(
+    "<main>",
+    "<main>\n  <h1>제이앤에이치플러스 의정부남부</h1>",
+)
+
+# 실제 선택 센터(헤딩)는 다른데, 드롭다운/option 등 부수 텍스트에 기대 센터명이 있는
+# 경우. 헤딩 exact 비교가 아니라 전체 텍스트 contains로 검증하면 잘못 통과한다.
+_PEAK_DASHBOARD_HTML_OTHER_CENTER_HEADING = _PEAK_DASHBOARD_HTML.replace(
+    "<main>",
+    "<main>\n  <h1>서초센터</h1>\n"
+    "  <select><option>강남센터</option>"
+    "<option>제이앤에이치플러스 의정부남부</option></select>",
+)
+
+
+def test_coupang_crawl_current_screen_parses_html_from_injected_fetcher(tmp_path):
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    snapshot = crawl_current_screen(_config(tmp_path), fetch_html=lambda _config: html)
+
+    assert snapshot.updated_at == "14:02"
+    assert snapshot.completed_count == 102.4
+    assert snapshot.active_riders == 7
+
+
+def test_coupang_crawl_current_screen_rejects_unexpected_center(tmp_path):
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="다른센터 강남")
+
+    with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
+        crawl_current_screen(config, fetch_html=lambda _config: html)
+
+
+def test_coupang_crawl_current_screen_accepts_expected_center(tmp_path):
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_current_screen(config, fetch_html=lambda _config: html)
+
+    assert snapshot.center_name == "제이앤에이치플러스 의정부남부"
+
+
+def test_coupang_crawl_current_screen_rejects_substring_center_match(tmp_path):
+    # 화면이 "제이앤에이치플러스 의정부남부"인데 설정이 그 부분 문자열이면, exact가
+    # 아니므로 통과하지 않아야 한다(다른 계정/센터 전송 방지).
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="의정부남부")
+
+    with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
+        crawl_current_screen(config, fetch_html=lambda _config: html)
+
+
+def test_coupang_crawl_current_screen_rejects_superstring_center_match(tmp_path):
+    # 설정이 화면 센터명을 포함하는 더 긴 이름이어도 exact가 아니므로 막아야 한다.
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부2호점")
+
+    with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
+        crawl_current_screen(config, fetch_html=lambda _config: html)
+
+
+def test_coupang_crawl_current_screen_accepts_explicit_alias(tmp_path):
+    # alias 목록(; 또는 줄바꿈 구분)에 화면 센터명이 있으면 통과한다.
+    html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(
+        tmp_path,
+        baemin_center_name="제이앤에이치 의정부; 제이앤에이치플러스 의정부남부",
+    )
+
+    snapshot = crawl_current_screen(config, fetch_html=lambda _config: html)
+
+    assert snapshot.center_name == "제이앤에이치플러스 의정부남부"
+
+
+def test_coupang_crawl_performance_snapshot_rejects_unexpected_center(tmp_path):
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="엉뚱한센터")
+
+    with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
+        crawl_performance_snapshot(
+            config,
+            fetch_performance_html=lambda _config: performance_html,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+        )
+
+
+def test_coupang_crawl_performance_snapshot_rejects_peak_html_without_center_heading(tmp_path):
+    # 피크 HTML에 센터 헤딩(h1)이 없으면(섹션 h2만 있음) 센터를 확인하지 못해 막는다.
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    with pytest.raises(RuntimeError, match="헤딩과 일치하지 않습니다"):
+        crawl_performance_snapshot(
+            config,
+            fetch_performance_html=lambda _config: performance_html,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+        )
+
+
+def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_matches(tmp_path):
+    # 실제 선택 센터 헤딩은 "서초센터"인데, 드롭다운 option에만 기대 센터명이 있는
+    # 경우. 헤딩 exact 비교이므로 부수 텍스트 일치로는 통과하면 안 된다(회귀 방지).
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    with pytest.raises(RuntimeError, match="헤딩과 일치하지 않습니다"):
+        crawl_performance_snapshot(
+            config,
+            fetch_performance_html=lambda _config: performance_html,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_OTHER_CENTER_HEADING,
+        )
+
+
+def test_coupang_crawl_performance_snapshot_accepts_matching_peak_center(tmp_path):
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_shift_suffix(tmp_path):
+    # 헤딩이 "센터명 시프트(시간)" 형태여도 앞쪽 센터명만 떼어 비교한다.
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    peak_html = _PEAK_DASHBOARD_HTML.replace(
+        "<main>",
+        "<main>\n  <h1>제이앤에이치플러스 의정부남부 저녁피크(16:55~20:00)</h1>",
+    )
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: peak_html,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_spaced_shift_suffix(tmp_path):
+    # 실제 표기처럼 시프트명에 공백이 있어도("저녁 피크") 센터명을 잘못 자르지 않는다.
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    peak_html = _PEAK_DASHBOARD_HTML.replace(
+        "<main>",
+        "<main>\n  <h1>제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00)</h1>",
+    )
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: peak_html,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+@pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("제이앤에이치플러스 의정부남부", "제이앤에이치플러스 의정부남부"),
+        ("제이앤에이치플러스 의정부남부 저녁피크(16:55~20:00)", "제이앤에이치플러스 의정부남부"),
+        ("제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00)", "제이앤에이치플러스 의정부남부"),
+        ("제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00) 할당량 소진 중", "제이앤에이치플러스 의정부남부"),
+        ("에이비씨로지스 강남센터 점심 논피크(12:00~14:00)", "에이비씨로지스 강남센터"),
+        ("에이비씨로지스 강남센터 오전피크(09:00~12:30)", "에이비씨로지스 강남센터"),
+    ],
+)
+def test_coupang_center_from_heading_strips_shift_keeping_full_center(heading, expected):
+    assert crawler._coupang_center_from_heading(heading) == expected
+
+
+def test_coupang_crawl_performance_snapshot_parses_performance_and_peak_dashboard(tmp_path):
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    peak_dashboard_html = _PEAK_DASHBOARD_HTML
+
+    snapshot = crawl_performance_snapshot(
+        _config(tmp_path),
+        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: peak_dashboard_html,
+    )
+
+    assert snapshot.current_screen.active_riders == 7
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+    assert snapshot.peak_dashboard.assigned_count == 103
+    assert snapshot.peak_dashboard.processed_count == 67
+    assert snapshot.peak_dashboard.reject_rate == 6.5
+    assert snapshot.peak_dashboard.dinner_non_peak.done == 2
+    assert snapshot.peak_dashboard.dinner_non_peak.total == 27
+
+
+def test_coupang_crawl_performance_snapshot_routes_each_page_to_its_own_url(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    peak_dashboard_html = _PEAK_DASHBOARD_HTML
+
+    html_by_url = {
+        config.coupang_eats_url: performance_html,
+        config.peak_dashboard_url: peak_dashboard_html,
+    }
+    requested_urls: list[str] = []
+
+    def fake_fetch_page_html(_config, *, target_url=None):
+        requested_urls.append(target_url)
+        return html_by_url[target_url]
+
+    monkeypatch.setattr(crawler, "fetch_page_html", fake_fetch_page_html)
+
+    snapshot = crawl_performance_snapshot(config)
+
+    assert requested_urls == [config.coupang_eats_url, config.peak_dashboard_url]
+    assert snapshot.current_screen.active_riders == 7
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
+    config = _config(tmp_path, browser_mode="cdp")
+    monkeypatch.setattr(crawler, "fetch_page_html_via_cdp", lambda _config, *, target_url=None: "cdp-html")
+    monkeypatch.setattr(
+        crawler,
+        "fetch_page_html_via_persistent_context",
+        lambda _config, *, target_url=None: "persistent-html",
+    )
+
+    assert crawler.fetch_page_html(config) == "cdp-html"
+
+
+def test_coupang_fetch_page_html_keeps_persistent_context_as_fallback(tmp_path, monkeypatch):
+    config = _config(tmp_path, browser_mode="persistent")
+    monkeypatch.setattr(crawler, "fetch_page_html_via_cdp", lambda _config, *, target_url=None: "cdp-html")
+    monkeypatch.setattr(
+        crawler,
+        "fetch_page_html_via_persistent_context",
+        lambda _config, *, target_url=None: "persistent-html",
+    )
+
+    assert crawler.fetch_page_html(config) == "persistent-html"
+
+
+def test_coupang_select_page_by_url_allows_query_and_hash():
+    pages = [
+        _FakePage("https://partner.coupangeats.com/page/peak-dashboard"),
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=1#today"),
+    ]
+
+    page = crawler._select_page_by_url(pages, "https://partner.coupangeats.com/page/rider-performance")
+
+    assert page is pages[1]
+
+
+def test_coupang_select_page_by_url_prefers_exact_match_over_path_match():
+    target = "https://partner.coupangeats.com/page/rider-performance?center=1"
+    pages = [
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=2"),
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=1"),
+    ]
+
+    page = crawler._select_page_by_url(pages, target)
+
+    assert page is pages[1]
+
+
+def test_coupang_select_page_by_url_rejects_duplicate_exact_matches():
+    target = "https://partner.coupangeats.com/page/rider-performance?center=1"
+    pages = [
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=1"),
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=1"),
+    ]
+
+    assert crawler._select_page_by_url(pages, target) is None
+
+
+def test_coupang_select_page_by_url_rejects_scheme_mismatch_in_path_fallback():
+    # https 대상에 http 탭만 열려 있으면 매칭되지 않아야 한다(다운그레이드 탭 방지).
+    target = "https://partner.coupangeats.com/page/rider-performance"
+    pages = [_FakePage("http://partner.coupangeats.com/page/rider-performance")]
+
+    assert crawler._select_page_by_url(pages, target) is None
+
+
+def test_coupang_select_page_by_url_rejects_duplicate_path_matches():
+    target = "https://partner.coupangeats.com/page/rider-performance"
+    pages = [
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=1"),
+        _FakePage("https://partner.coupangeats.com/page/rider-performance?center=2"),
+    ]
+
+    assert crawler._select_page_by_url(pages, target) is None
+
+
+def test_coupang_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser([_FakePage(config.coupang_eats_url, html="<html>ok</html>")])
+
+    html = crawler._fetch_target_page_content(browser, config)
+
+    assert html == "<html>ok</html>"
+    assert browser.closed is False
+
+
+def test_coupang_fetch_target_page_content_wraps_locator_timeout_with_actionable_message(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser([_FakePage(config.coupang_eats_url, wait_error=FakeTimeout("locator timeout"))])
+
+    with pytest.raises(RuntimeError, match="쿠팡이츠 실적 페이지"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
+def test_coupang_fetch_target_page_content_reports_peak_dashboard_readiness_timeout(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [_FakePage(config.peak_dashboard_url, wait_error=FakeTimeout("locator timeout"))]
+    )
+
+    with pytest.raises(RuntimeError, match="쿠팡이츠 피크 대시보드"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+        )
+
+
+def test_coupang_fetch_target_page_content_waits_for_peak_dashboard_required_text(tmp_path):
+    config = _config(tmp_path)
+    page = _FakePage(config.peak_dashboard_url, html="<html>피크타임별 현황</html>")
+    browser = _FakeBrowser([page])
+
+    html = crawler._fetch_target_page_content(
+        browser, config, target_url=config.peak_dashboard_url
+    )
+
+    assert html == "<html>피크타임별 현황</html>"
+    assert page.required_texts == ["피크타임별 현황"]
+
+
+def _config(tmp_path, *, browser_mode: str = "cdp", baemin_center_name: str = "") -> AppConfig:
+    return AppConfig(
+        coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        platform_name="coupang",
+        baemin_center_name=baemin_center_name,
+        baemin_center_id="",
+        browser_mode=browser_mode,
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser",
+        headless=False,
+        kakao_chat_name="",
+        log_dir=tmp_path / "logs",
+        send_enabled=False,
+        send_only_on_change=False,
+        timezone="Asia/Seoul",
+        run_lock_timeout_seconds=900,
+        page_timeout_seconds=60000,
+    )
+
+
+class FakeTimeout(Exception):
+    pass
+
+
+class _FakePage:
+    def __init__(self, url: str, html: str = "", wait_error: Exception | None = None) -> None:
+        self.url = url
+        self.html = html
+        self.wait_error = wait_error
+        self.required_texts: list[str] = []
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        if self.wait_error:
+            raise self.wait_error
+        return None
+
+    def content(self) -> str:
+        return self.html
+
+
+class _FakeBrowser:
+    def __init__(self, pages: list[_FakePage]) -> None:
+        self.contexts = [_FakeContext(pages)]
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, pages: list[_FakePage]) -> None:
+        self.pages = pages
+
+    def new_page(self):
+        page = _FakePage("about:blank")
+        self.pages.append(page)
+        return page

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from .config import AppConfig
 from .lock import RunLock
 from .message import render_current_screen_message
-from .models import CurrentScreenSnapshot
+from .models import CrawlSnapshotResult
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class RunResult:
 def run_once(
     config: AppConfig,
     *,
-    crawl_snapshot: Callable[[AppConfig], CurrentScreenSnapshot] | None = None,
+    crawl_snapshot: Callable[[AppConfig], CrawlSnapshotResult] | None = None,
     send_message: Callable[[AppConfig, str], None] | None = None,
 ) -> RunResult:
     crawl = crawl_snapshot or _crawl_snapshot
@@ -96,7 +96,9 @@ def _message_scope_key(config: AppConfig) -> str:
     messenger_name = config.messenger_name.strip() or "telegram"
     parts = [
         messenger_name,
+        config.platform_name.strip() or "baemin",
         config.coupang_eats_url.strip(),
+        config.peak_dashboard_url.strip(),
         config.baemin_center_name.strip(),
         config.baemin_center_id.strip(),
     ]
@@ -123,10 +125,10 @@ def _normalize_telegram_thread_id(raw: object) -> str:
         return value
 
 
-def _crawl_snapshot(config: AppConfig) -> CurrentScreenSnapshot:
+def _crawl_snapshot(config: AppConfig) -> CrawlSnapshotResult:
     from .platforms import crawl_snapshot
 
-    return crawl_snapshot(config)
+    return crawl_snapshot(config, platform_name=config.platform_name)
 
 
 def _send_message(config: AppConfig, message: str) -> None:

@@ -66,17 +66,17 @@ async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(config.cdp_url)
+        # CDP 대상은 사용자가 켜 둔 Chrome이므로 browser.close()를 호출하지 않는다.
+        # 여러 아이디/프로필을 운영 중일 때 사용자의 Chrome 창이나 로그인 세션을
+        # 닫지 않도록, 쿠팡 크롤러와 동일하게 닫지 않는 정책으로 맞춘다.
+        page = await _open_baemin_delivery_history_page(browser, config)
         try:
-            page = await _open_baemin_delivery_history_page(browser, config)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-            except PlaywrightTimeoutError:
-                pass
-            await _click_baemin_refresh_button(page)
-            await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
-            html = await _collect_baemin_delivery_history_pages(page, config)
-        finally:
-            await browser.close()
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except PlaywrightTimeoutError:
+            pass
+        await _click_baemin_refresh_button(page)
+        await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+        html = await _collect_baemin_delivery_history_pages(page, config)
 
     if not html:
         raise RuntimeError("배민 배달현황 HTML을 가져오지 못했습니다")
@@ -94,31 +94,29 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(config.cdp_url)
+        # CDP 대상은 사용자가 켜 둔 Chrome이므로 여기서도 browser.close()를 호출하지 않는다.
+        pages = _browser_pages(browser)
+        page = _select_page_by_url(pages, config.coupang_eats_url)
+        if page is None:
+            page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
+        if page is None:
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            page = await context.new_page()
+
+        await page.goto(
+            config.coupang_eats_url,
+            wait_until="domcontentloaded",
+            timeout=config.page_timeout_seconds,
+        )
         try:
-            pages = _browser_pages(browser)
-            page = _select_page_by_url(pages, config.coupang_eats_url)
-            if page is None:
-                page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
-            if page is None:
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except PlaywrightTimeoutError:
+            pass
 
-            await page.goto(
-                config.coupang_eats_url,
-                wait_until="domcontentloaded",
-                timeout=config.page_timeout_seconds,
-            )
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10_000)
-            except PlaywrightTimeoutError:
-                pass
+        if not _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+            return
 
-            if not _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
-                return
-
-            await _select_baemin_center(page, config)
-        finally:
-            await browser.close()
+        await _select_baemin_center(page, config)
 
 
 async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) -> Any:

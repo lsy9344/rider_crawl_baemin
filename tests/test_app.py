@@ -4,7 +4,12 @@ from dataclasses import replace
 from rider_crawl.app import run_once
 from rider_crawl.config import AppConfig
 from rider_crawl.lock import LockAlreadyHeldError
-from rider_crawl.models import CurrentScreenSnapshot
+from rider_crawl.models import (
+    CurrentScreenSnapshot,
+    PeakDashboardSnapshot,
+    PeakPeriodSnapshot,
+    PerformanceSnapshot,
+)
 
 
 def test_run_once_dry_run_builds_message_without_sending(tmp_path):
@@ -270,9 +275,11 @@ def _config(
     telegram_bot_token: str = "",
     telegram_chat_id: str = "",
     telegram_message_thread_id: str = "",
+    platform_name: str = "baemin",
 ) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
+        platform_name=platform_name,
         baemin_center_name="",
         baemin_center_id="",
         browser_mode="cdp",
@@ -316,3 +323,50 @@ def _snapshot() -> CurrentScreenSnapshot:
         non_peak_count=41.8,
         active_riders=5,
     )
+
+
+def _performance_snapshot() -> PerformanceSnapshot:
+    return PerformanceSnapshot(
+        current_screen=_snapshot(),
+        peak_dashboard=PeakDashboardSnapshot(
+            updated_at="20:38",
+            assigned_count=103,
+            processed_count=67,
+            reject_rate=6.5,
+            morning=PeakPeriodSnapshot(done=9, total=9),
+            lunch_peak=PeakPeriodSnapshot(done=45, total=45),
+            lunch_non_peak=PeakPeriodSnapshot(done=10, total=19),
+            dinner_peak=PeakPeriodSnapshot(done=17, total=39),
+            dinner_non_peak=PeakPeriodSnapshot(done=2, total=27),
+        ),
+    )
+
+
+def test_app_default_crawl_uses_configured_platform_name(tmp_path, monkeypatch):
+    import rider_crawl.app as app
+
+    config = _config(tmp_path, platform_name="coupang")
+    snapshot = _performance_snapshot()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "rider_crawl.platforms.crawl_snapshot",
+        lambda received, *, platform_name=None: calls.append(platform_name) or snapshot,
+    )
+
+    assert app._crawl_snapshot(config) is snapshot
+    assert calls == ["coupang"]
+
+
+def test_message_scope_key_includes_platform_and_peak_dashboard_url(tmp_path):
+    from dataclasses import replace
+    import rider_crawl.app as app
+
+    baemin = _config(tmp_path, platform_name="baemin")
+    coupang = replace(
+        baemin,
+        platform_name="coupang",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+
+    assert app._message_scope_key(baemin) != app._message_scope_key(coupang)

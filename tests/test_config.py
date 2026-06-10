@@ -4,6 +4,8 @@ from rider_crawl.config import AppConfig
 
 
 def test_app_config_reads_environment_values(monkeypatch):
+    monkeypatch.delenv("PERFORMANCE_PLATFORM", raising=False)
+    monkeypatch.delenv("PERFORMANCE_URL", raising=False)
     monkeypatch.setenv("BAEMIN_DELIVERY_HISTORY_URL", "https://example.test/delivery/history")
     monkeypatch.setenv("BAEMIN_CENTER_NAME", "강남센터")
     monkeypatch.setenv("BAEMIN_CENTER_ID", "DP123")
@@ -51,6 +53,8 @@ def test_app_config_reads_environment_values(monkeypatch):
 
 def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     for key in (
+        "PERFORMANCE_PLATFORM",
+        "PERFORMANCE_URL",
         "COUPANG_EATS_URL",
         "BAEMIN_DELIVERY_HISTORY_URL",
         "BAEMIN_CENTER_NAME",
@@ -90,5 +94,61 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     assert config.telegram_chat_id == ""
     assert config.telegram_message_thread_id == ""
     assert config.messenger_name == "telegram"
+    assert config.run_lock_timeout_seconds == 900
     assert config.crawl_name == ""
     assert config.state_subdir == ""
+
+
+def test_app_config_reads_coupang_environment_values(monkeypatch):
+    monkeypatch.delenv("PERFORMANCE_URL", raising=False)
+    monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
+    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/rider-performance")
+    monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
+
+    config = AppConfig.from_env()
+
+    assert config.platform_name == "coupang"
+    assert config.coupang_eats_url == "https://example.test/rider-performance"
+    assert config.peak_dashboard_url == "https://example.test/peak-dashboard"
+
+
+def test_app_config_defaults_to_baemin_platform(monkeypatch):
+    for key in (
+        "PERFORMANCE_PLATFORM",
+        "PERFORMANCE_URL",
+        "COUPANG_EATS_URL",
+        "BAEMIN_DELIVERY_HISTORY_URL",
+        "PEAK_DASHBOARD_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.platform_name == "baemin"
+    assert "deliverycenter.baemin.com" in config.coupang_eats_url
+    # 배민은 쿠팡 전용 보조 URL을 채우지 않아야 UI 배민 설정과 scope hash가 맞는다.
+    assert config.peak_dashboard_url == ""
+
+
+def test_app_config_baemin_ignores_peak_dashboard_url_env(monkeypatch):
+    for key in ("PERFORMANCE_PLATFORM", "PERFORMANCE_URL", "COUPANG_EATS_URL", "BAEMIN_DELIVERY_HISTORY_URL"):
+        monkeypatch.delenv(key, raising=False)
+    # 배민이면 PEAK_DASHBOARD_URL env가 있어도 빈 값이어야 UI 배민 설정과 scope hash가 맞는다.
+    monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
+
+    config = AppConfig.from_env()
+
+    assert config.platform_name == "baemin"
+    assert config.peak_dashboard_url == ""
+
+
+def test_app_config_coupang_platform_uses_coupang_defaults(monkeypatch):
+    monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
+    monkeypatch.delenv("PERFORMANCE_URL", raising=False)
+    monkeypatch.delenv("COUPANG_EATS_URL", raising=False)
+    monkeypatch.delenv("PEAK_DASHBOARD_URL", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.coupang_eats_url == "https://partner.coupangeats.com/page/rider-performance"
+    assert config.peak_dashboard_url == "https://partner.coupangeats.com/page/peak-dashboard"

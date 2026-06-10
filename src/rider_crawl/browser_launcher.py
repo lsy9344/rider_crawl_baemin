@@ -74,10 +74,7 @@ def prepare_mac_chrome(
         raise BrowserLaunchError("Chrome 실행 실패: Google Chrome 설치와 CDP 주소를 확인하세요.") from exc
     _wait_for_cdp_ready(config.cdp_url, probe=probe, timeout_seconds=cdp_timeout_seconds)
 
-    return (
-        "Chrome 실행 요청 완료. 열린 Chrome 창에서 배민에 로그인하고 "
-        "배달현황 페이지가 보이는 상태로 두세요."
-    )
+    return _chrome_ready_message(config)
 
 
 def build_mac_chrome_command(config: AppConfig) -> list[str]:
@@ -121,10 +118,7 @@ def prepare_windows_chrome(
         raise BrowserLaunchError("Chrome 실행 실패: Google Chrome 설치와 CDP 주소를 확인하세요.") from exc
     _wait_for_cdp_ready(config.cdp_url, probe=probe, timeout_seconds=cdp_timeout_seconds)
 
-    return (
-        "Chrome 실행 요청 완료. 열린 Chrome 창에서 배민에 로그인하고 "
-        "배달현황 페이지가 보이는 상태로 두세요."
-    )
+    return _chrome_ready_message(config)
 
 
 def build_windows_chrome_command(config: AppConfig, *, chrome_path: str | Path | None = None) -> list[str]:
@@ -168,13 +162,26 @@ def _wait_for_cdp_ready(
             time.sleep(0.2)
 
 
+def _chrome_ready_message(config: AppConfig) -> str:
+    return (
+        f"Chrome 실행 요청 완료. 열린 Chrome 창에서 {_platform_display_name(config)}에 로그인하고 "
+        "실적 페이지가 보이는 상태로 두세요."
+    )
+
+
+def _platform_display_name(config: AppConfig) -> str:
+    if getattr(config, "platform_name", "baemin") == "coupang":
+        return "쿠팡이츠"
+    return "배민"
+
+
 def _ensure_cdp_endpoint_unused(cdp_url: str, *, probe: CdpProbe) -> None:
     try:
         probe(cdp_url)
     except Exception:
         return
     raise BrowserLaunchError(
-        "CDP 주소가 이미 사용 중입니다. 여러 배민 아이디는 탭마다 다른 CDP 포트를 사용하고, "
+        "CDP 주소가 이미 사용 중입니다. 여러 계정은 탭마다 다른 CDP 포트를 사용하고, "
         "해당 포트의 기존 Chrome을 닫은 뒤 다시 준비하세요."
     )
 

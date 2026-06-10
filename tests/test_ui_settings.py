@@ -4,6 +4,45 @@ from pathlib import Path
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
 
 
+def test_ui_settings_defaults_to_baemin_platform():
+    settings = UiSettings.defaults()
+
+    assert settings.platform_name == "baemin"
+    assert settings.peak_dashboard_url == ""
+
+
+def test_ui_settings_save_and_load_round_trip_keeps_platform(tmp_path):
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettings.defaults()
+    settings.platform_name = "coupang"
+    settings.performance_url = "https://partner.coupangeats.com/page/rider-performance"
+    settings.peak_dashboard_url = "https://partner.coupangeats.com/page/peak-dashboard"
+
+    store.save(settings)
+    loaded = store.load()
+
+    assert loaded.platform_name == "coupang"
+    assert loaded.performance_url == "https://partner.coupangeats.com/page/rider-performance"
+    assert loaded.peak_dashboard_url == "https://partner.coupangeats.com/page/peak-dashboard"
+
+
+def test_ui_settings_load_infers_coupang_from_legacy_coupang_url(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://partner.coupangeats.com/page/rider-performance",
+          "peak_dashboard_url": "https://partner.coupangeats.com/page/peak-dashboard"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.platform_name == "coupang"
+
+
 def test_ui_settings_defaults_are_safe_for_first_run():
     settings = UiSettings.defaults()
 
@@ -21,6 +60,7 @@ def test_ui_settings_defaults_are_safe_for_first_run():
     assert settings.telegram_bot_token == ""
     assert settings.telegram_chat_id == ""
     assert settings.telegram_message_thread_id == ""
+    assert settings.run_lock_timeout_seconds == 900
 
 
 def test_additional_tab_defaults_do_not_inherit_first_center():

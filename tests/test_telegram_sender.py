@@ -148,6 +148,16 @@ def test_send_telegram_text_requires_token_and_chat_id(tmp_path):
         send_telegram_text(config, "hello", urlopen=lambda *_args, **_kwargs: None)
 
 
+def test_send_telegram_text_raises_send_error_for_non_dict_json_body(tmp_path):
+    # 텔레그램이 dict가 아닌 JSON(예: ``[]``)을 주면 data.get(...)에서 AttributeError가
+    # 나면 안 된다. 응답을 명확한 TelegramSendError로 변환해야 한다.
+    def fake_urlopen(request, timeout):
+        return _FakeResponse([])
+
+    with pytest.raises(TelegramSendError, match="Telegram Bot API error"):
+        send_telegram_text(_config(tmp_path), "hello", urlopen=fake_urlopen, sleep=lambda _seconds: None)
+
+
 def test_get_telegram_updates_uses_long_polling_parameters(tmp_path):
     calls: list[tuple[str, bytes]] = []
 

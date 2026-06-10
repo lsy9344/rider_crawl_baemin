@@ -170,7 +170,16 @@ def _telegram_error_from_response(method: str, body: str, *, status_code: int | 
             retry_after_seconds=None,
         )
 
-    description = data.get("description") if isinstance(data, dict) else body
+    # 텔레그램이 dict가 아닌 JSON(예: ``[]``)을 주면 ``data.get(...)``이 AttributeError를
+    # 낸다. dict가 아닐 때는 본문 전체를 설명으로 쓰고 error_code 검사는 건너뛴다.
+    if not isinstance(data, dict):
+        return TelegramSendError(
+            f"Telegram Bot API error: {body}",
+            retryable=status_code == 429,
+            retry_after_seconds=None,
+        )
+
+    description = data.get("description")
     retry_after = _telegram_retry_after_seconds(data)
     retryable = status_code == 429 or retry_after is not None or data.get("error_code") == 429
     return TelegramSendError(
@@ -259,13 +268,45 @@ def send_kakao_text(
         _record_kakao_diagnostic(f"message_input={_control_debug_summary(message_input)}")
         _remember_kakao_chat_window(chat_name, chat_window)
 
+        # 기존 초안이 입력창에 남아 있으면 "기존문구 + 실적 메시지"가 함께 전송될 수
+        # 있으므로, 붙여넣기 전에 입력창을 비우고 비워졌는지 확인한다. 전역 ctrl+a/
+        # delete/ctrl+v/enter는 포커스가 빗나가면 다른 앱 입력을 지우거나 거기에
+        # 붙여넣을 수 있으므로, 파괴적 키 입력 직전마다 대상 컨트롤 포커스를 재확인한다.
+        _ensure_message_input_focus(message_input)
+        _clear_message_input(message_input, pyautogui)
+
+        _ensure_message_input_focus(message_input)
         pyperclip.copy(message)
         pyautogui.hotkey("ctrl", "v")
-        _wait_for_message_input_contains(message_input, message)
+        # 붙여넣은 값이 메시지와 "완전 동일"한지 검증한다. "포함" 검증은 기존 초안이
+        # 남아 있어도 통과하므로, 잘못된 합쳐진 메시지 전송을 막지 못한다.
+        _wait_for_message_input_equals(message_input, message)
+        _ensure_message_input_focus(message_input)
         pyautogui.press("enter")
-        _wait_for_message_input_to_clear(message_input, message)
+        _wait_for_message_input_to_clear(message_input)
     except KakaoSendError as exc:
         raise KakaoSendError(_error_with_kakao_diagnostics(exc, config)) from exc
+
+
+def _clear_message_input(control: object, pyautogui: object) -> None:
+    pyautogui.hotkey("ctrl", "a")
+    pyautogui.press("delete")
+    # 입력창이 빈 문자열과 "완전 동일"해질 때까지 기다린다(value == "").
+    result = _wait_for_input_condition(control, "", should_contain=True, match_exact=True)
+    if result is True:
+        return
+    if result is None:
+        # 입력값을 읽을 수 없으면 비워졌는지 확인할 수 없다. 기존 초안이 남은 채로
+        # 실적 메시지가 합쳐져 전송되는 것을 막기 위해 성공으로 처리하지 않는다.
+        raise KakaoSendError(
+            "카카오톡 입력창 내용을 읽을 수 없어 비우기 결과를 확인하지 못했습니다. "
+            "기존 초안과 실적 메시지가 합쳐져 전송될 수 있어 중단합니다."
+        )
+
+    raise KakaoSendError(
+        "카카오톡 입력창을 비우지 못했습니다. "
+        "기존 초안이 남아 있어 실적 메시지와 함께 전송되는 것을 막기 위해 중단합니다."
+    )
 
 
 def _reset_kakao_diagnostics() -> None:
@@ -389,7 +430,19 @@ def _select_kakao_chat_window(chat_name: str) -> object:
 
     window = candidates[0][1]
     _record_kakao_diagnostic(f"strict_selected={_window_debug_summary(window)}")
-    _bring_window_to_front(window)
+    try:
+        _bring_window_to_front(window)
+    except KakaoSendError as exc:
+        # The exact target window was found but could not be safely focused. Do
+        # NOT let this fall through to the main-window search fallback: that path
+        # automates ctrl+f / paste / Enter against whatever app is in foreground,
+        # which could send to the wrong room or wrong app. Fail immediately as an
+        # unsafe selection so the caller surfaces the error instead of searching.
+        _record_kakao_diagnostic(f"strict_focus_failed={exc}")
+        raise KakaoUnsafeSelectionError(
+            f"카카오톡 채팅방 '{chat_name}' 창을 찾았지만 전면으로 가져오지 못했습니다. "
+            "해당 채팅방 창을 직접 클릭해 활성화한 뒤 다시 실행하세요."
+        ) from exc
     return window
 
 
@@ -677,6 +730,72 @@ def _focus_chat_message_input(window: object) -> object:
     )
 
 
+def _ensure_message_input_focus(control: object) -> None:
+    """Re-assert and verify that ``control`` holds keyboard focus.
+
+    전역 ctrl+a/delete/ctrl+v/enter 직전에 호출한다. 클릭으로 포커스를 다시 준 뒤
+    실제로 대상 입력창이 포커스를 가졌는지 확인한다. 확인하지 못하면(포커스가 다른
+    창/앱으로 빗나갔을 수 있으므로) 성공으로 진행하지 않고 실패 처리한다.
+    """
+
+    click_input = getattr(control, "click_input", None)
+    if callable(click_input):
+        try:
+            click_input()
+            time.sleep(0.1)
+        except Exception as exc:
+            raise KakaoSendError(
+                "카카오톡 입력창에 포커스를 주지 못했습니다. "
+                "대상 채팅방 창이 가려졌거나 닫혔을 수 있습니다."
+            ) from exc
+
+    focus_state = _control_has_keyboard_focus(control)
+    _record_kakao_diagnostic(f"input_focus_check={focus_state}")
+    # 안전 목적의 검사이므로 "포커스 있음(True)"이 확인될 때만 진행한다. False(빗나감)
+    # 뿐 아니라 None(확인 불가)도 막는다. 포커스를 확인할 수 없는 컨트롤에서 ctrl+a/
+    # delete/ctrl+v/enter를 그대로 보내면 다른 앱 입력을 지우거나 거기에 붙여넣을 수
+    # 있기 때문이다.
+    if focus_state is not True:
+        raise KakaoSendError(
+            "카카오톡 입력창이 포커스를 가졌는지 확인하지 못했습니다. "
+            "포커스가 다른 창으로 빗나가면 다른 앱 입력을 지우거나 거기에 붙여넣을 수 "
+            "있어 중단합니다."
+        )
+
+
+def _control_has_keyboard_focus(control: object) -> bool | None:
+    """Return True/False if focus can be determined, else None (unknown).
+
+    pywinauto UIA 컨트롤은 ``has_keyboard_focus()``를 제공한다. 없으면 컨트롤이 속한
+    최상위 창 핸들이 현재 포그라운드 창과 같은지로 대체 확인한다. 둘 다 불가하면
+    알 수 없음(None)을 반환한다. 호출부는 None을 안전을 위해 실패로 처리한다.
+    """
+
+    has_focus = getattr(control, "has_keyboard_focus", None)
+    if callable(has_focus):
+        try:
+            return bool(has_focus())
+        except Exception:
+            pass
+
+    top_handle = _control_top_level_handle(control)
+    foreground_handle = _foreground_window_handle()
+    if top_handle is not None and foreground_handle is not None:
+        return top_handle == foreground_handle
+
+    return None
+
+
+def _control_top_level_handle(control: object) -> int | None:
+    top_level = getattr(control, "top_level_parent", None)
+    if callable(top_level):
+        try:
+            return _window_handle(top_level())
+        except Exception:
+            return None
+    return None
+
+
 def _message_input_candidates(window: object) -> list[object]:
     descendants = _message_input_descendants(window)
     candidates = []
@@ -736,56 +855,80 @@ def _control_class_name(control: object) -> str:
     return str(getattr(getattr(control, "element_info", None), "class_name", "") or "").strip()
 
 
-def _wait_for_message_input_contains(control: object, message: str) -> None:
-    result = _wait_for_input_condition(control, message, should_contain=True)
+def _wait_for_message_input_equals(control: object, message: str) -> None:
+    # "포함"이 아니라 "완전 동일"을 요구한다. 기존 초안이 남아 있으면 합쳐진 값이
+    # 메시지를 포함하더라도 완전 동일하지 않아 실패한다.
+    result = _wait_for_input_condition(control, message, should_contain=True, match_exact=True)
     if result is True:
         return
     if result is None:
-        _record_kakao_diagnostic("input_value_unreadable_after_paste=continue_to_enter")
-        return
+        # 붙여넣기 후 입력값을 읽을 수 없으면 성공처럼 진행하지 않는다. 읽기 실패를
+        # 성공으로 처리하면 app.py가 마지막 해시를 기록해 재전송 기회를 잃는다.
+        raise KakaoSendError(
+            "카카오톡 입력창 내용을 읽을 수 없어 붙여넣기 결과를 확인하지 못했습니다. "
+            "붙여넣기 실패나 포커스 이탈을 성공으로 처리하지 않습니다."
+        )
 
     raise KakaoSendError(
-        "카카오톡 입력창에 메시지가 붙여넣어지지 않았습니다. "
-        "다른 창이 입력을 가로챘거나 카카오톡 입력창 포커스가 풀렸습니다."
+        "카카오톡 입력창 내용이 보낼 메시지와 정확히 일치하지 않습니다. "
+        "기존 초안이 남아 있거나 다른 창이 입력을 가로챘을 수 있습니다."
     )
 
 
-def _wait_for_message_input_to_clear(control: object, message: str) -> None:
-    result = _wait_for_input_condition(control, message, should_contain=False)
+def _wait_for_message_input_to_clear(control: object) -> None:
+    # 전송 후 입력창이 "정확히 빈 문자열"인지 확인한다. "전체 메시지를 포함하지
+    # 않는지"만 보면 'hello' 전송 후 'hell' 같은 잔여 텍스트가 남아도 통과해, 실제로는
+    # 전송이 안 됐는데 성공으로 처리될 수 있다. 그러면 마지막 해시가 기록되어 재전송
+    # 기회를 잃는다.
+    result = _wait_for_input_condition(control, "", should_contain=True, match_exact=True)
     if result is True:
         return
     if result is None:
-        _record_kakao_diagnostic("input_value_unreadable_after_enter=skip_clear_check")
-        return
+        # 전송 후 입력값을 읽을 수 없으면 전송 성공 여부를 확인할 수 없다. 읽기 실패를
+        # 성공으로 처리하면 마지막 해시가 기록되어 재전송 기회가 사라지므로 실패 처리한다.
+        raise KakaoSendError(
+            "카카오톡 입력창 내용을 읽을 수 없어 전송 결과를 확인하지 못했습니다. "
+            "전송 성공으로 처리하지 않습니다."
+        )
 
     raise KakaoSendError(
         "카카오톡 메시지가 전송되지 않았습니다. "
-        "입력창에 메시지가 남아 있어 성공으로 처리하지 않았습니다."
+        "입력창이 비워지지 않아(잔여 텍스트) 성공으로 처리하지 않았습니다."
     )
 
 
-def _wait_for_input_condition(control: object, message: str, *, should_contain: bool) -> bool | None:
+def _wait_for_input_condition(
+    control: object,
+    message: str,
+    *,
+    should_contain: bool,
+    match_exact: bool = False,
+) -> bool | None:
     deadline = time.monotonic() + KAKAO_SEND_VERIFY_TIMEOUT_SECONDS
     unreadable = False
     while True:
-        contains = _message_input_contains(control, message)
-        if contains is None:
+        matched = _message_input_matches(control, message, match_exact=match_exact)
+        if matched is None:
             unreadable = True
-        elif contains == should_contain:
+        elif matched == should_contain:
             return True
         if time.monotonic() >= deadline:
             return None if unreadable else False
         time.sleep(KAKAO_SEND_VERIFY_INTERVAL_SECONDS)
 
 
-def _message_input_contains(control: object, message: str) -> bool | None:
+def _message_input_matches(control: object, message: str, *, match_exact: bool) -> bool | None:
     value = _message_input_value(control)
     if value is None:
         return None
-    if not value:
-        return False
 
-    return _normalize_input_text(message) in _normalize_input_text(value)
+    normalized_value = _normalize_input_text(value)
+    normalized_message = _normalize_input_text(message)
+    if match_exact:
+        return normalized_value == normalized_message
+    if not normalized_value:
+        return False
+    return normalized_message in normalized_value
 
 
 def _message_input_value(control: object) -> str | None:

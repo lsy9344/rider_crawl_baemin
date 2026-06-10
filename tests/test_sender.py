@@ -156,6 +156,46 @@ def test_send_does_not_run_main_search_when_exact_title_is_ambiguous(monkeypatch
     assert main_search_called == []
 
 
+def test_strict_selection_raises_unsafe_when_exact_window_focus_fails(monkeypatch):
+    # 정확한 창은 찾았지만 포커스를 안전하게 가져오지 못한 경우, 메인창 검색
+    # fallback으로 넘어가지 않고 KakaoUnsafeSelectionError로 즉시 실패해야 한다.
+    windows = [_FakeKakaoWindow("실적봇_A", handle=11, with_input=True)]
+    monkeypatch.setattr(sender_module, "_list_kakao_windows", lambda: list(windows))
+
+    def fail_focus(_window):
+        raise KakaoSendError("카카오톡 창을 전면으로 가져오지 못했습니다.")
+
+    monkeypatch.setattr(sender_module, "_bring_window_to_front", fail_focus)
+
+    with pytest.raises(KakaoUnsafeSelectionError):
+        sender_module._select_kakao_chat_window("실적봇_A")
+
+
+def test_send_does_not_run_main_search_when_exact_window_focus_fails(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    windows = [_FakeKakaoWindow("실적봇_A", handle=11, with_input=True)]
+    monkeypatch.setattr(sender_module, "_list_kakao_windows", lambda: list(windows))
+    monkeypatch.setattr(sender_module, "platform", _FakePlatform("Windows"))
+    monkeypatch.setitem(sys.modules, "pyautogui", _FakePyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    def fail_focus(_window):
+        raise KakaoSendError("카카오톡 창을 전면으로 가져오지 못했습니다.")
+
+    monkeypatch.setattr(sender_module, "_bring_window_to_front", fail_focus)
+
+    main_search_called = []
+    monkeypatch.setattr(
+        sender_module,
+        "_open_kakao_chat_window_from_main",
+        lambda _chat: main_search_called.append(True),
+    )
+
+    with pytest.raises(KakaoSendError):
+        send_kakao_text(config, "hello")
+    assert main_search_called == []
+
+
 def test_send_fails_when_no_backend_can_be_scanned(monkeypatch, tmp_path):
     config = _config(tmp_path, chat_name="실적봇_A")
 
@@ -242,6 +282,163 @@ def test_open_from_main_focuses_main_window_not_arbitrary_kakao(monkeypatch):
     sender_module._open_kakao_chat_window_from_main("실적봇_A")
 
     assert focused == [main_window]
+
+
+def _patch_kakao_send_window(monkeypatch, message_input):
+    selected = _FakeKakaoWindow("실적봇_A", handle=11, with_input=True)
+    monkeypatch.setattr(sender_module, "_find_or_open_kakao_chat_window", lambda _chat: selected)
+    monkeypatch.setattr(sender_module, "_focus_chat_message_input", lambda _window: message_input)
+    monkeypatch.setattr(sender_module, "_remember_kakao_chat_window", lambda _chat, _window: None)
+    monkeypatch.setattr(sender_module, "platform", _FakePlatform("Windows"))
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(sender_module, "KAKAO_SEND_VERIFY_TIMEOUT_SECONDS", 0.0)
+
+
+def test_send_kakao_text_clears_existing_draft_before_pasting(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Reads happen once per phase: cleared(empty) -> pasted(message) -> sent(empty).
+    message_input = _ScriptedMessageInput(["", "hello", ""])
+    pyautogui = _RecordingPyAutoGui()
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, "hello")
+
+    assert ("hotkey", ("ctrl", "a")) in pyautogui.actions
+    assert ("press", ("delete",)) in pyautogui.actions
+    # Clear happens before the paste.
+    clear_index = pyautogui.actions.index(("press", ("delete",)))
+    paste_index = pyautogui.actions.index(("hotkey", ("ctrl", "v")))
+    assert clear_index < paste_index
+
+
+def test_send_kakao_text_rejects_when_draft_not_cleared(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Clear-check reads a non-empty draft: the input was not cleared.
+    message_input = _ScriptedMessageInput([], default="기존 초안")
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="입력창을 비우지 못했습니다"):
+        send_kakao_text(config, "hello")
+
+
+def test_send_kakao_text_rejects_when_pasted_value_not_exactly_equal(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Clears fine, but paste leaves "draft + message" so it is not exactly equal.
+    message_input = _ScriptedMessageInput([""], default="기존 초안hello")
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="정확히 일치하지 않습니다"):
+        send_kakao_text(config, "hello")
+
+
+def test_send_kakao_text_fails_when_pasted_value_unreadable(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Clears fine (empty), but value becomes unreadable after paste.
+    message_input = _ScriptedMessageInput([""], default=None)
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="읽을 수 없어 붙여넣기 결과"):
+        send_kakao_text(config, "hello")
+
+
+def test_send_kakao_text_rejects_residual_text_after_send(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Clears (empty), pastes exact message, but after Enter a residual "hell" remains.
+    # "전체 메시지 미포함"만 보면 통과하지만, 정확히 빈 문자열이 아니므로 막아야 한다.
+    message_input = _ScriptedMessageInput(["", "hello", "hell"], default="hell")
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="비워지지 않아"):
+        send_kakao_text(config, "hello")
+
+
+def test_send_kakao_text_fails_when_post_send_value_unreadable(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Clears (empty), pastes exact message, but value becomes unreadable after Enter.
+    message_input = _ScriptedMessageInput(["", "hello"], default=None)
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="읽을 수 없어 전송 결과"):
+        send_kakao_text(config, "hello")
+
+
+def test_send_kakao_text_aborts_when_input_loses_focus_before_clear(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Focus is stolen: the destructive ctrl+a/delete must not run on another app.
+    message_input = _ScriptedMessageInput(["", "hello", ""], focus=False)
+    pyautogui = _RecordingPyAutoGui()
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="포커스"):
+        send_kakao_text(config, "hello")
+    # No clear/paste/enter was attempted once focus could not be confirmed.
+    assert ("press", ("delete",)) not in pyautogui.actions
+    assert ("hotkey", ("ctrl", "v")) not in pyautogui.actions
+
+
+def test_send_kakao_text_reasserts_focus_before_each_destructive_step(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message_input = _ScriptedMessageInput(["", "hello", ""], focus=True)
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, "hello")
+
+    # Focus is re-clicked before clear, before paste, and before enter.
+    assert message_input.click_count == 3
+
+
+def test_send_kakao_text_aborts_when_focus_cannot_be_determined(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Focus state is unknown (no has_keyboard_focus, no resolvable handle): a safety
+    # check must block rather than fire destructive keys on an unverified control.
+    message_input = _UnknownFocusMessageInput()
+    pyautogui = _RecordingPyAutoGui()
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setattr(sender_module, "_foreground_window_handle", lambda: None)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="확인하지 못했습니다"):
+        send_kakao_text(config, "hello")
+    assert ("press", ("delete",)) not in pyautogui.actions
+    assert ("hotkey", ("ctrl", "v")) not in pyautogui.actions
+
+
+def test_ensure_message_input_focus_blocks_on_unknown_focus(monkeypatch):
+    control = _UnknownFocusMessageInput()
+    monkeypatch.setattr(sender_module, "_foreground_window_handle", lambda: None)
+
+    assert sender_module._control_has_keyboard_focus(control) is None
+    with pytest.raises(KakaoSendError, match="확인하지 못했습니다"):
+        sender_module._ensure_message_input_focus(control)
+
+
+def test_send_kakao_text_fails_when_clear_value_unreadable(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    # Value unreadable from the start: cannot confirm the input was cleared.
+    message_input = _ScriptedMessageInput([], default=None)
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setitem(sys.modules, "pyautogui", _RecordingPyAutoGui())
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    with pytest.raises(KakaoSendError, match="읽을 수 없어 비우기 결과"):
+        send_kakao_text(config, "hello")
 
 
 def _patch_desktop(monkeypatch, windows_for_backend):
@@ -357,6 +554,73 @@ class _FakePyAutoGui:
 
     def press(self, *args) -> None:
         pass
+
+
+class _RecordingPyAutoGui:
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, tuple]] = []
+
+    def hotkey(self, *args) -> None:
+        self.actions.append(("hotkey", args))
+
+    def press(self, *args) -> None:
+        self.actions.append(("press", args))
+
+
+class _ScriptedMessageInput:
+    """A fake message-input control that yields scripted values on each read.
+
+    Each call to ``get_value`` returns the next scripted value; once the script is
+    exhausted it returns ``default``. A scripted ``None`` simulates an unreadable
+    input control. ``focus`` controls what ``has_keyboard_focus`` reports: ``True``
+    (default) keeps focus checks passing, ``False`` simulates focus being stolen.
+    """
+
+    def __init__(
+        self,
+        values: list[str | None],
+        *,
+        default: str | None = "",
+        focus: bool = True,
+    ) -> None:
+        self._values = list(values)
+        self._default = default
+        self._focus = focus
+        self.click_count = 0
+        self.element_info = _FakeElementInfo(control_type="Document", class_name="RICHEDIT50W", name="메시지 입력")
+
+    def click_input(self) -> None:
+        self.click_count += 1
+
+    def has_keyboard_focus(self) -> bool:
+        return self._focus
+
+    def get_value(self):
+        if self._values:
+            value = self._values.pop(0)
+        else:
+            value = self._default
+        if value is None:
+            raise RuntimeError("input value unreadable")
+        return value
+
+
+class _UnknownFocusMessageInput:
+    """A control whose focus state cannot be determined.
+
+    No ``has_keyboard_focus`` and no resolvable top-level handle, so
+    ``_control_has_keyboard_focus`` returns None (unknown).
+    """
+
+    def __init__(self) -> None:
+        self.click_count = 0
+        self.element_info = _FakeElementInfo(control_type="Document", class_name="RICHEDIT50W", name="메시지 입력")
+
+    def click_input(self) -> None:
+        self.click_count += 1
+
+    def get_value(self):
+        return ""
 
 
 class _FakePyperclip:

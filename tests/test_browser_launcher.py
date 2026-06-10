@@ -165,6 +165,33 @@ def test_prepare_mac_chrome_wraps_command_failure(tmp_path):
         prepare_mac_chrome(_config(tmp_path), platform_name="Darwin", run_command=fail)
 
 
+def test_prepare_chrome_message_names_coupang_platform(tmp_path):
+    calls = []
+    probes = []
+    config = AppConfig(
+        **{
+            **_config(tmp_path).__dict__,
+            "platform_name": "coupang",
+            "coupang_eats_url": "https://partner.coupangeats.com/page/rider-performance",
+            "peak_dashboard_url": "https://partner.coupangeats.com/page/peak-dashboard",
+        }
+    )
+
+    def probe(cdp_url):
+        probes.append(cdp_url)
+        if not calls:
+            raise OSError("not ready")
+
+    message = prepare_chrome(
+        config,
+        platform_name="Windows",
+        run_command=lambda command, check: calls.append((command, check)),
+        cdp_probe=probe,
+    )
+
+    assert "쿠팡이츠" in message
+
+
 def _config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",

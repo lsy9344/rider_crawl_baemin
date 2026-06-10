@@ -33,6 +33,193 @@ def test_messenger_options_expose_telegram_and_kakao_for_ui():
     assert MESSENGER_OPTIONS == (("telegram", "텔레그램"), ("kakao", "카카오톡"))
 
 
+def test_platform_options_expose_baemin_and_coupang_for_ui():
+    assert ui.PLATFORM_OPTIONS == (("baemin", "배민"), ("coupang", "쿠팡이츠"))
+
+
+def test_coerce_settings_builds_coupang_ui_settings_from_form_values(tmp_path):
+    settings = coerce_settings(
+        {
+            "platform_name": "coupang",
+            "performance_url": " https://partner.coupangeats.com/page/rider-performance ",
+            "peak_dashboard_url": " https://partner.coupangeats.com/page/peak-dashboard ",
+            "baemin_center_name": "",
+            "baemin_center_id": "",
+            "browser_mode": "cdp",
+            "cdp_url": " http://127.0.0.1:9222 ",
+            "browser_user_data_dir": str(tmp_path / "browser"),
+            "log_dir": str(tmp_path / "logs"),
+            "kakao_chat_name": "",
+            "telegram_bot_token": " token ",
+            "telegram_chat_id": " -100123 ",
+            "telegram_message_thread_id": "",
+            "messenger_name": "telegram",
+            "interval_minutes": "35",
+            "page_timeout_seconds": "60000",
+            "run_lock_timeout_seconds": "900",
+            "headless": False,
+            "send_enabled": True,
+            "send_only_on_change": False,
+        }
+    )
+
+    assert settings.platform_name == "coupang"
+    assert settings.baemin_center_name == ""
+    assert settings.baemin_center_id == ""
+
+
+def test_validate_active_tab_isolation_allows_coupang_with_expected_center(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = "쿠팡강남센터"
+    settings.baemin_center_id = ""
+
+    validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_without_expected_center(tmp_path):
+    # 기대 센터명이 비면 크롤러가 쿠팡 센터 검증을 건너뛰어 다른 계정 실적을 보낼 수
+    # 있다. 다중 쿠팡 계정 안전성을 위해 저장 단계에서 기대 센터명을 필수로 받는다.
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="기대 센터/상점명"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_with_default_baemin_center(tmp_path):
+    # 플랫폼만 쿠팡으로 바꾸고 배민 기본 센터명을 그대로 두면 크롤링 단계에서 쿠팡
+    # 센터 검증이 항상 실패한다. 저장 단계에서 미리 막는다.
+    from rider_crawl.ui_settings import UiSettings
+
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = UiSettings.defaults().baemin_center_name
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="배민 기본값"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_without_peak_dashboard_url(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="",
+    )
+
+    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_with_baemin_primary_url(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url=(
+            "https://deliverycenter.baemin.com/delivery/history?page=0&size=20"
+        ),
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_with_non_coupang_peak_url(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://example.test/dashboard",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_peak_url_with_wrong_path(tmp_path):
+    # 같은 도메인이지만 peak-dashboard가 아닌 경로(rider-performance)는 막아야 한다.
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/rider-performance",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="peak-dashboard"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_when_primary_equals_peak(tmp_path):
+    # 주 URL과 피크 URL을 같은 값으로 두면 둘 중 하나는 반드시 강제 경로(주 URL은
+    # rider-performance, 피크 URL은 peak-dashboard)와 어긋나므로 경로 검증에서 걸린다.
+    # 즉 경로 강제만으로 "두 URL이 같은 경우"가 구조적으로 차단된다.
+    same_url = "https://partner.coupangeats.com/page/peak-dashboard"
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url=same_url,
+        peak_dashboard_url=same_url,
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    # 주 URL이 rider-performance가 아니므로 주 URL 검증에서 먼저 걸린다.
+    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_primary_url_with_http_scheme(tmp_path):
+    # 크롤러 탭 매칭이 scheme까지 비교하므로 http로 저장하면 https 탭을 못 찾는다.
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="http://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_coupang_peak_url_with_http_scheme(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="http://partner.coupangeats.com/page/peak-dashboard",
+    )
+    settings.baemin_center_name = ""
+    settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
+        validate_active_tab_isolation([settings])
+
+
 def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
     states = ui._messenger_field_states("telegram")
 
@@ -697,6 +884,29 @@ def test_kakao_send_failure_requests_scheduler_retry(tmp_path, monkeypatch):
     )
 
 
+def test_crawl_failure_requests_scheduler_retry(tmp_path, monkeypatch):
+    # 크롤링/파싱/플랫폼 오류도 전송 오류처럼 빠른 재시도 경로(False)를 타야 한다.
+    # True를 반환하면 일시적 페이지 로딩 실패가 다음 정규 주기까지 복구되지 않는다.
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_send_locks = {}
+    settings = _settings(tmp_path)
+
+    def failing_run_once(_config, **_kwargs):
+        raise RuntimeError("페이지 로딩 실패")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    result = ui._run_once_background(0, settings)
+
+    assert result is False
+    assert any(
+        kind == "error" and "페이지 로딩 실패" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
+
+
 def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()
@@ -1012,6 +1222,8 @@ def _settings(
     tmp_path: Path,
     *,
     performance_url: str = "https://example.test/rider",
+    peak_dashboard_url: str = "",
+    platform_name: str = "baemin",
     browser_mode: str = "cdp",
     cdp_url: str = "http://127.0.0.1:9222",
     browser_user_data_dir: Path | None = None,
@@ -1024,8 +1236,9 @@ def _settings(
 ):
     return coerce_settings(
         {
+            "platform_name": platform_name,
             "performance_url": performance_url,
-            "peak_dashboard_url": "",
+            "peak_dashboard_url": peak_dashboard_url,
             "baemin_center_name": "센터",
             "baemin_center_id": "DP123",
             "browser_mode": browser_mode,

@@ -12,6 +12,7 @@ from .config import AppConfig
 class UiSettings:
     performance_url: str
     peak_dashboard_url: str
+    platform_name: str
     baemin_center_name: str
     baemin_center_id: str
     browser_mode: str
@@ -39,6 +40,7 @@ class UiSettings:
                 "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
             ),
             peak_dashboard_url="",
+            platform_name="baemin",
             baemin_center_name="표준서울마포B이츠앤홀딩스3",
             baemin_center_id="DP2605181318",
             browser_mode="cdp",
@@ -75,6 +77,8 @@ class UiSettings:
     def to_app_config(self, *, crawl_name: str = "", state_subdir: str = "") -> AppConfig:
         return AppConfig(
             coupang_eats_url=self.performance_url,
+            peak_dashboard_url=self.peak_dashboard_url,
+            platform_name=self.platform_name,
             baemin_center_name=self.baemin_center_name,
             baemin_center_id=self.baemin_center_id,
             browser_mode=self.browser_mode,
@@ -157,9 +161,23 @@ def _settings_from_mapping(raw: dict[str, Any], defaults: UiSettings) -> UiSetti
             data[key] = value
     if _is_legacy_kakao_mapping(raw):
         data["messenger_name"] = "kakao"
+    data["platform_name"] = _infer_platform_name(raw, defaults.platform_name)
+    if data["platform_name"] not in {"baemin", "coupang"}:
+        data["platform_name"] = defaults.platform_name
     data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
     data["log_dir"] = Path(data["log_dir"])
     return UiSettings(**data)
+
+
+def _infer_platform_name(raw: dict[str, Any], default: str) -> str:
+    explicit = str(raw.get("platform_name", "")).strip().casefold()
+    if explicit:
+        return explicit
+    url = str(raw.get("performance_url", "")).casefold()
+    peak_url = str(raw.get("peak_dashboard_url", "")).casefold()
+    if "partner.coupangeats.com" in url or "partner.coupangeats.com" in peak_url:
+        return "coupang"
+    return default
 
 
 def _is_legacy_kakao_mapping(raw: dict[str, Any]) -> bool:

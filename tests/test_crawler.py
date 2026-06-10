@@ -385,6 +385,47 @@ def _consume_coroutine_then(value):
     return runner
 
 
+def test_crawl4ai_cdp_async_path_never_closes_user_browser(tmp_path, monkeypatch):
+    # 실제 _fetch_page_html_via_crawl4ai_cdp async 경로를 직접 실행해, 사용자가 켜 둔
+    # CDP 대상 Chrome(browser)에 browser.close()가 호출되지 않는지 회귀 검증한다.
+    # 나중에 close()가 다시 들어오면 이 테스트가 실패해 잡아낸다.
+    config = _config(tmp_path, browser_mode="cdp")
+
+    table_page = _FakeAsyncContentPage(config.coupang_eats_url, html="<table>ok</table>")
+    browser = _FakeAsyncCdpBrowser()
+    playwright = _FakeAsyncPlaywright(browser)
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(
+            TimeoutError=TimeoutError,
+            async_playwright=lambda: playwright,
+        ),
+    )
+
+    async def fake_open(received_browser, received_config):
+        assert received_browser is browser
+        return table_page
+
+    async def fake_refresh(_page):
+        return None
+
+    async def fake_collect(_page, _config):
+        return "<html>collected</html>"
+
+    monkeypatch.setattr(crawler, "_open_baemin_delivery_history_page", fake_open)
+    monkeypatch.setattr(crawler, "_click_baemin_refresh_button", fake_refresh)
+    monkeypatch.setattr(crawler, "_collect_baemin_delivery_history_pages", fake_collect)
+
+    html = asyncio.run(crawler._fetch_page_html_via_crawl4ai_cdp(config))
+
+    assert html == "<html>collected</html>"
+    assert browser.connected_with == config.cdp_url
+    assert browser.close_calls == 0
+
+
 def test_fetch_via_cdp_rejects_non_local_address_before_connecting(tmp_path, monkeypatch):
     from rider_crawl.browser_launcher import BrowserLaunchError
 
@@ -535,3 +576,58 @@ class _FakeAsyncButton:
 
     async def click(self, **_kwargs):
         self.page.clicked_button_name = self.name
+
+
+class _FakeAsyncLocatorTarget:
+    async def wait_for(self, **_kwargs):
+        return None
+
+
+class _FakeAsyncLocator:
+    @property
+    def first(self):
+        return _FakeAsyncLocatorTarget()
+
+
+class _FakeAsyncContentPage:
+    def __init__(self, url: str, *, html: str) -> None:
+        self.url = url
+        self._html = html
+
+    async def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def locator(self, _selector: str):
+        return _FakeAsyncLocator()
+
+    async def content(self) -> str:
+        return self._html
+
+
+class _FakeAsyncCdpBrowser:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.connected_with: str | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _FakeAsyncChromium:
+    def __init__(self, browser: _FakeAsyncCdpBrowser) -> None:
+        self._browser = browser
+
+    async def connect_over_cdp(self, cdp_url: str):
+        self._browser.connected_with = cdp_url
+        return self._browser
+
+
+class _FakeAsyncPlaywright:
+    def __init__(self, browser: _FakeAsyncCdpBrowser) -> None:
+        self.chromium = _FakeAsyncChromium(browser)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False

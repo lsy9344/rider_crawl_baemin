@@ -26,6 +26,7 @@ DEFAULT_WINDOW_GEOMETRY = "900x900"
 MIN_WINDOW_HEIGHT = 780
 PREVIEW_TEXT_HEIGHT = 24
 MESSENGER_OPTIONS = (("telegram", "텔레그램"), ("kakao", "카카오톡"))
+PLATFORM_OPTIONS = (("baemin", "배민"), ("coupang", "쿠팡이츠"))
 TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
 TELEGRAM_FIELD_KEYS = ("telegram_bot_token", "telegram_chat_id", "telegram_message_thread_id")
 KAKAO_FIELD_KEYS = ("kakao_chat_name",)
@@ -44,6 +45,7 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     active_settings = active_crawling_settings(settings_list)
     _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
+    _validate_active_coupang_urls(active_settings)
     _validate_active_telegram_required(active_settings)
     _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
@@ -96,10 +98,12 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
     page_timeout_seconds = _positive_int(values["page_timeout_seconds"], "페이지 타임아웃")
     run_lock_timeout_seconds = _positive_int(values["run_lock_timeout_seconds"], "중복 실행 락 타임아웃")
     messenger_name = _messenger_name(values.get("messenger_name", "telegram"))
+    platform_name = _platform_name(values.get("platform_name", "baemin"))
 
     return UiSettings(
         performance_url=str(values["performance_url"]).strip(),
         peak_dashboard_url=str(values["peak_dashboard_url"]).strip(),
+        platform_name=platform_name,
         baemin_center_name=str(values.get("baemin_center_name", defaults.baemin_center_name)).strip(),
         baemin_center_id=str(values.get("baemin_center_id", defaults.baemin_center_id)).strip(),
         browser_mode=str(values["browser_mode"]).strip(),
@@ -152,7 +156,7 @@ class RiderBotUi:
         self.telegram_send_locks: dict[str, threading.Lock] = {}
         self.telegram_last_send_monotonic: dict[str, float] = {}
 
-        self.root.title("배민 배달현황 실적봇")
+        self.root.title("배달 실적봇 (배민·쿠팡이츠)")
         self.root.geometry(DEFAULT_WINDOW_GEOMETRY)
         self.root.minsize(780, MIN_WINDOW_HEIGHT)
 
@@ -168,6 +172,7 @@ class RiderBotUi:
         return {
             "performance_url": StringVar(value=settings.performance_url),
             "peak_dashboard_url": StringVar(value=settings.peak_dashboard_url),
+            "platform_name": StringVar(value=settings.platform_name),
             "baemin_center_name": StringVar(value=settings.baemin_center_name),
             "baemin_center_id": StringVar(value=settings.baemin_center_id),
             "browser_mode": StringVar(value=settings.browser_mode),
@@ -196,12 +201,12 @@ class RiderBotUi:
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(3, weight=1)
 
-        title = ttk.Label(outer, text="배민 배달현황 실적봇", font=("", 18, "bold"))
+        title = ttk.Label(outer, text="배달 실적봇 (배민·쿠팡이츠)", font=("", 18, "bold"))
         title.grid(row=0, column=0, sticky="w")
 
         subtitle = ttk.Label(
             outer,
-            text="로그인된 배민 배달현황 페이지를 읽고 선택한 채널로 텍스트 실적을 보냅니다.",
+            text="선택한 플랫폼(배민·쿠팡이츠)의 로그인된 배달현황 페이지를 읽고 선택한 채널로 텍스트 실적을 보냅니다.",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(4, 14))
 
@@ -228,8 +233,8 @@ class RiderBotUi:
 
     def _build_settings_fields(self, frame: ttk.Frame, tab_vars: dict[str, StringVar | BooleanVar]) -> None:
         rows = [
-            ("배달현황 URL", "performance_url"),
-            ("보조 URL", "peak_dashboard_url"),
+            ("실적/배달현황 URL", "performance_url"),
+            ("보조 URL(쿠팡 피크 대시보드)", "peak_dashboard_url"),
             ("배민 센터명", "baemin_center_name"),
             ("배민 센터 ID", "baemin_center_id"),
             ("CDP 주소", "cdp_url"),
@@ -253,32 +258,42 @@ class RiderBotUi:
 
         checks = ttk.Frame(frame)
         checks.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(checks, text="브라우저 연결").grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(checks, text="플랫폼").grid(row=0, column=0, padx=(0, 8))
+        for offset, (value, label) in enumerate(PLATFORM_OPTIONS, start=1):
+            ttk.Radiobutton(
+                checks,
+                text=label,
+                value=value,
+                variable=tab_vars["platform_name"],
+            ).grid(row=0, column=offset, sticky="w", padx=(0, 18))
+        ttk.Label(checks, text="브라우저 연결").grid(row=1, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
         ttk.Combobox(
             checks,
             textvariable=tab_vars["browser_mode"],
             values=("cdp", "persistent"),
             state="readonly",
             width=12,
-        ).grid(row=0, column=1, padx=(0, 18))
-        ttk.Checkbutton(checks, text="Headless", variable=tab_vars["headless"]).grid(row=0, column=2, padx=(0, 18))
-        ttk.Label(checks, text="전송 방식").grid(row=1, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
+        ).grid(row=1, column=1, sticky="w", pady=(8, 0), padx=(0, 18))
+        ttk.Checkbutton(checks, text="Headless", variable=tab_vars["headless"]).grid(
+            row=1, column=2, sticky="w", pady=(8, 0), padx=(0, 18)
+        )
+        ttk.Label(checks, text="전송 방식").grid(row=2, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
         for offset, (value, label) in enumerate(MESSENGER_OPTIONS, start=1):
             ttk.Radiobutton(
                 checks,
                 text=label,
                 value=value,
                 variable=tab_vars["messenger_name"],
-            ).grid(row=1, column=offset, sticky="w", pady=(8, 0), padx=(0, 18))
+            ).grid(row=2, column=offset, sticky="w", pady=(8, 0), padx=(0, 18))
         ttk.Checkbutton(checks, text="메시지 전송", variable=tab_vars["send_enabled"]).grid(
-            row=1,
+            row=2,
             column=3,
             sticky="w",
             pady=(8, 0),
             padx=(0, 18),
         )
         ttk.Checkbutton(checks, text="변경 시에만 전송", variable=tab_vars["send_only_on_change"]).grid(
-            row=1,
+            row=2,
             column=4,
             sticky="w",
             pady=(8, 0),
@@ -310,15 +325,17 @@ class RiderBotUi:
         ttk.Label(
             checklist,
             text=(
-                "1. 배민 배달현황 링크는 로그인된 상태로 열려 있어야 합니다.\n"
-                "2. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
-                "3. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
-                "4. 전송 방식을 텔레그램 또는 카카오톡으로 선택하세요.\n"
-                "5. 텔레그램은 봇 토큰과 그룹방 chat_id를 입력하고, 토픽 그룹이면 토픽 ID도 입력하세요.\n"
-                "6. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
-                "7. 여러 계정은 탭마다 다른 CDP 포트와 브라우저 프로필 경로를 사용하세요.\n"
-                "8. 처음에는 메시지 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
-                "9. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 메세지 전송 간격으로 반복됩니다."
+                "1. 플랫폼을 배민 또는 쿠팡이츠로 선택하세요. 플랫폼별로 입력 항목이 다릅니다.\n"
+                "2. 배민은 로그인된 배달현황 페이지를, 쿠팡이츠는 rider-performance와 peak-dashboard를 열어두세요.\n"
+                "3. 쿠팡이츠 탭은 보조 URL(쿠팡 피크 대시보드)을, 배민 탭은 센터 정보를 입력하세요.\n"
+                "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
+                "5. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
+                "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
+                "7. 텔레그램은 봇 토큰과 그룹방 chat_id를 입력하고, 토픽 그룹이면 토픽 ID도 입력하세요.\n"
+                "8. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
+                "9. 여러 계정은 탭마다 다른 CDP 포트와 브라우저 프로필 경로를 사용하세요.\n"
+                "10. 처음에는 메시지 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
+                "11. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 메세지 전송 간격으로 반복됩니다."
             ),
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -480,8 +497,11 @@ class RiderBotUi:
             self.messages.put(("error", f"{label} 카카오톡 전송 오류: {exc}"))
             return False
         except Exception as exc:  # UI boundary: surface errors to the operator.
+            # 크롤링/파싱/플랫폼 오류(일시적 페이지 로딩 실패 등)도 텔레그램/카카오
+            # 전송 오류처럼 빠른 재시도 경로(False 반환)를 타게 한다. True를 반환하면
+            # 스케줄러가 다음 정규 주기까지 기다려 일시 장애 복구가 늦어진다.
             self.messages.put(("error", f"{label} 오류: {exc}"))
-            return True
+            return False
         finally:
             tab_lock.release()
         self.messages.put(("log", f"{label} 완료"))
@@ -719,6 +739,14 @@ def _messenger_name(raw: Any) -> str:
     return value
 
 
+def _platform_name(raw: Any) -> str:
+    value = str(raw).strip().casefold() or "baemin"
+    valid_names = {name for name, _label in PLATFORM_OPTIONS}
+    if value not in valid_names:
+        raise ValueError("플랫폼은 배민 또는 쿠팡이츠만 선택하세요")
+    return value
+
+
 def _messenger_field_states(messenger_name: str) -> dict[str, str]:
     value = messenger_name.strip() or "telegram"
     telegram_state = "normal" if value == "telegram" else "disabled"
@@ -772,11 +800,13 @@ def _validate_active_cdp_local(indexed_settings: list[tuple[int, UiSettings]]) -
 def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, UiSettings]]) -> None:
     seen_name_only: dict[str, int] = {}
     for index, settings in indexed_settings:
+        if settings.platform_name != "baemin":
+            continue
         center_name = settings.baemin_center_name.strip()
         center_id = settings.baemin_center_id.strip()
         if not center_name and not center_id:
             raise ValueError(
-                f"크롤링{index + 1} 배민 센터명 또는 배민 센터 ID를 입력하세요. "
+                f"크롤링{index + 1} 배민 탭은 배민 센터명 또는 배민 센터 ID를 입력하세요. "
                 "여러 배민 아이디는 탭마다 센터 정보를 확인할 수 있어야 합니다."
             )
         # Same center name across tabs cannot tell two accounts apart, so each
@@ -789,6 +819,80 @@ def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, Ui
                     "같은 센터명을 쓰는 탭은 계정 구분을 위해 각각 배민 센터 ID를 입력하세요."
                 )
             seen_name_only[center_name.casefold()] = index
+
+
+_COUPANG_HOST = "partner.coupangeats.com"
+
+
+def _validate_active_coupang_urls(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        if settings.platform_name != "coupang":
+            continue
+        # 주 URL이 배민 기본값으로 남아 있으면 플랫폼만 쿠팡으로 바꾼 채 저장될 수 있다.
+        # 주 URL이 쿠팡 rider-performance인지 확인해 잘못된 페이지 크롤링을 막는다.
+        # scheme까지 https로 강제한다. 크롤러의 탭 매칭은 scheme까지 비교하므로(
+        # crawler._url_matches), http로 저장하면 "저장은 됐는데 https 탭을 못 찾는"
+        # 상태가 된다. 그래서 UI 저장 단계에서 https가 아니면 막는다.
+        performance_url = settings.performance_url.strip()
+        if not performance_url:
+            raise ValueError(f"크롤링{index + 1} 쿠팡 실적 URL(주 URL)을 입력하세요.")
+        if not _is_coupang_performance_url(performance_url):
+            raise ValueError(
+                f"크롤링{index + 1} 쿠팡 실적 URL(주 URL)은 "
+                f"https://{_COUPANG_HOST}/page/rider-performance 형식이어야 합니다."
+            )
+        peak_url = settings.peak_dashboard_url.strip()
+        if not peak_url:
+            raise ValueError(f"크롤링{index + 1} 쿠팡 피크 대시보드 URL을 입력하세요.")
+        # 도메인/scheme만 보면 rider-performance나 같은 도메인의 엉뚱한 경로도 통과한다.
+        # /page/peak-dashboard 경로까지 확인한다. 주 URL은 rider-performance, 피크
+        # URL은 peak-dashboard로 경로가 강제되므로 두 URL이 같아지는 경우도 함께
+        # 차단된다.
+        if not _is_coupang_path_url(peak_url, "/page/peak-dashboard"):
+            raise ValueError(
+                f"크롤링{index + 1} 쿠팡 피크 대시보드 URL은 "
+                f"https://{_COUPANG_HOST}/page/peak-dashboard 형식이어야 합니다."
+            )
+        _validate_coupang_expected_center(index, settings)
+
+
+# 쿠팡 탭이 기대 센터명으로 재사용하는 기본 배민 센터명. 이 값이 그대로 남아 있으면
+# "플랫폼만 쿠팡으로 바꾼" 상태이므로, 크롤링 단계에서 쿠팡 센터 검증이 실패한다.
+# UI 저장 단계에서 미리 막아 "저장은 됐는데 크롤링이 안 되는" 상태를 방지한다.
+_DEFAULT_BAEMIN_CENTER_NAME = UiSettings.defaults().baemin_center_name
+
+
+def _validate_coupang_expected_center(index: int, settings: UiSettings) -> None:
+    # 쿠팡 계정/센터/상점은 CDP 포트와 Chrome 프로필 로그인으로만 결정되므로, 포트나
+    # 프로필이 꼬이면 다른 쿠팡 계정 실적을 정상처럼 전송할 수 있다. 크롤러는 기대
+    # 센터명(``baemin_center_name``을 쿠팡 탭의 기대 센터/상점명으로 재사용)이 비어
+    # 있으면 검증을 건너뛰므로, 다중 쿠팡 계정 운영에서 안전하게 막으려면 저장 단계에서
+    # 기대 센터명을 필수로 받아 크롤러의 exact-match 검증이 항상 돌게 한다.
+    center_name = settings.baemin_center_name.strip()
+    if not center_name:
+        raise ValueError(
+            f"크롤링{index + 1} 쿠팡 탭은 기대 센터/상점명(배민 센터명 칸)을 입력하세요. "
+            "포트/프로필이 잘못 연결되면 다른 쿠팡 계정 실적을 보낼 수 있어, "
+            "화면에서 확인된 센터와 대조할 기대값이 필요합니다."
+        )
+    # 배민 기본 센터명이 그대로 남아 있으면 쿠팡 화면 센터명과 절대 일치하지 않아
+    # 크롤링이 항상 실패한다. 저장 단계에서 실제 쿠팡 센터명으로 바꾸도록 막는다.
+    if center_name == _DEFAULT_BAEMIN_CENTER_NAME:
+        raise ValueError(
+            f"크롤링{index + 1} 쿠팡 탭의 기대 센터/상점명이 배민 기본값입니다. "
+            "실제 쿠팡 센터/상점명으로 바꿔 입력하세요."
+        )
+
+
+def _is_coupang_path_url(url: str, path: str) -> bool:
+    parsed = urlsplit(url.strip())
+    host = (parsed.hostname or "").casefold()
+    scheme = (parsed.scheme or "").casefold()
+    return scheme == "https" and host == _COUPANG_HOST and parsed.path.rstrip("/").casefold() == path
+
+
+def _is_coupang_performance_url(url: str) -> bool:
+    return _is_coupang_path_url(url, "/page/rider-performance")
 
 
 def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .config import AppConfig
+from .config import AppConfig, app_state_root
 from .lock import RunLock
 from .parser import parse_baemin_delivery_history_html, parse_count
 
@@ -182,6 +182,16 @@ class TelegramCommandProcessor:
         if config is None:
             self.log_event(f"텔레그램 대상 미매칭: {_target_label(target)}")
             return False
+
+        # The rider lookup parses Baemin delivery-history tables, so it cannot run
+        # against Coupang tabs. Reply predictably instead of fetching Coupang HTML.
+        if getattr(config, "platform_name", "baemin") != "baemin":
+            self.send_text(
+                config,
+                "라이더 조회 명령은 배민 탭에서만 지원합니다.",
+                message_thread_id=message_thread_id,
+            )
+            return True
 
         source = _source_label(config, self.configs.index(config))
         self.log_event(f"{source} 텔레그램 명령 수신: !{command.name}{command.phone_last4}")
@@ -499,8 +509,12 @@ def _get_telegram_updates(config: AppConfig, *, offset: int | None, timeout_seco
 
 
 def _default_offset_store_path(config: AppConfig) -> Path:
+    # 실행 작업 디렉터리(cwd)가 아니라 고정된 앱 state root를 기준으로 한다. cwd
+    # 기준이면 앱을 다른 디렉터리에서 실행할 때 같은 봇 토큰도 다른 offset/lock 파일을
+    # 써서 같은 업데이트를 다시 처리할 수 있다. 토큰별 단일 파일 정책은 유지해 같은
+    # 봇 토큰을 여러 탭에서 폴링해도 오프셋을 공유한다.
     token_hash = hashlib.sha256(config.telegram_bot_token.strip().encode("utf-8")).hexdigest()[:16]
-    return Path("runtime") / "state" / "telegram_offsets" / f"{token_hash}.txt"
+    return app_state_root() / "runtime" / "state" / "telegram_offsets" / f"{token_hash}.txt"
 
 
 def _completed_updates_store_path(offset_store_path: Path) -> Path:

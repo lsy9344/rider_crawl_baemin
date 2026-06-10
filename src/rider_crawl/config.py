@@ -7,6 +7,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+DEFAULT_BAEMIN_DELIVERY_HISTORY_URL = (
+    "https://deliverycenter.baemin.com/delivery/history?"
+    "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
+)
+DEFAULT_COUPANG_RIDER_PERFORMANCE_URL = "https://partner.coupangeats.com/page/rider-performance"
+DEFAULT_COUPANG_PEAK_DASHBOARD_URL = "https://partner.coupangeats.com/page/peak-dashboard"
+DEFAULT_PLATFORM_NAME = "baemin"
+
+
 @dataclass(frozen=True)
 class AppConfig:
     coupang_eats_url: str
@@ -29,18 +38,20 @@ class AppConfig:
     messenger_name: str = "telegram"
     crawl_name: str = ""
     state_subdir: str = ""
+    # ``peak_dashboard_url`` is the Coupang peak-dashboard page; ``coupang_eats_url``
+    # is the generic primary performance URL (Baemin delivery-history or Coupang
+    # rider-performance depending on ``platform_name``).
+    peak_dashboard_url: str = ""
+    platform_name: str = DEFAULT_PLATFORM_NAME
 
     @classmethod
     def from_env(cls) -> "AppConfig":
         load_dotenv()
+        platform_name = _platform_name(os.getenv("PERFORMANCE_PLATFORM", DEFAULT_PLATFORM_NAME))
         return cls(
-            coupang_eats_url=os.getenv(
-                "BAEMIN_DELIVERY_HISTORY_URL",
-                os.getenv(
-                    "COUPANG_EATS_URL",
-                    "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
-                ),
-            ),
+            coupang_eats_url=_primary_url_from_env(platform_name),
+            peak_dashboard_url=_peak_dashboard_url_from_env(platform_name),
+            platform_name=platform_name,
             baemin_center_name=os.getenv("BAEMIN_CENTER_NAME", "표준서울마포B이츠앤홀딩스3"),
             baemin_center_id=os.getenv("BAEMIN_CENTER_ID", "DP2605181318"),
             browser_mode=os.getenv("BROWSER_MODE", "cdp"),
@@ -64,14 +75,53 @@ class AppConfig:
 
     @property
     def runtime_dir(self) -> Path:
+        # 상태 루트 정책(의도적 분리):
+        # - run lock / last message hash는 ``runtime_dir``(= log_dir 기준)에 둔다.
+        #   이들은 스코프/탭별(``state_subdir``)로 나뉘고, UI가 log_dir 위치를
+        #   바꿀 수 있으며, 테스트는 tmp_path로 격리해야 한다.
+        # - 반면 텔레그램 offset/lock은 "토큰별 단일·탭 독립"이라 log_dir과 무관해야
+        #   하므로 ``app_state_root()``(고정 루트)에 둔다. 두 상태군의 요구가 달라
+        #   루트가 갈라져 있으며, 이는 버그가 아니라 의도된 설계다.
+        #   (telegram_commands._default_offset_store_path 참고)
         if self.log_dir.name == "logs":
             return self.log_dir.parent / "runtime"
         return Path("runtime")
 
     @property
     def state_dir(self) -> Path:
+        # ``state_subdir``는 탭/스코프별로 last message hash를 분리한다. 이 분리가
+        # 필요하기 때문에 last hash는 고정 ``app_state_root()``이 아니라
+        # ``runtime_dir`` 아래에 둔다(위 runtime_dir 주석의 정책 참고).
         base = self.runtime_dir / "state"
         return base / self.state_subdir if self.state_subdir else base
+
+
+def app_state_root() -> Path:
+    """Return a fixed app state root that does not depend on the current cwd.
+
+    텔레그램 offset/lock처럼 "토큰별 단일" 상태 파일은 실행 작업 디렉터리(cwd)에
+    묶이면 안 된다. 다른 디렉터리에서 실행하면 같은 봇 토큰도 다른 파일을 써서 같은
+    업데이트를 다시 처리할 수 있기 때문이다. 그래서 cwd가 아니라 고정된 루트를 쓴다.
+
+    상태 루트 정책: 이 고정 루트는 "토큰별 단일·탭 독립" 상태(텔레그램 offset)
+    전용이다. run lock / last message hash는 스코프/탭별 분리가 필요해 일부러
+    ``AppConfig.runtime_dir``(log_dir 기준)에 둔다. 두 상태군의 요구가 달라 루트가
+    갈라진 것은 의도된 설계다(``AppConfig.runtime_dir`` 주석 참고).
+
+    우선순위: ``RIDER_CRAWL_STATE_ROOT`` 환경변수 > 패키지 설치 위치 기준 프로젝트
+    루트(개발용 ``src`` 레이아웃) > 그래도 못 찾으면 사용자 홈 아래 고정 경로.
+    """
+
+    override = os.getenv("RIDER_CRAWL_STATE_ROOT")
+    if override and override.strip():
+        return Path(override).expanduser().resolve()
+
+    # src 레이아웃: .../<project_root>/src/rider_crawl/config.py → parents[2]가 루트.
+    package_root = Path(__file__).resolve().parents[2]
+    if (package_root / "src").is_dir() or (package_root / "pyproject.toml").is_file():
+        return package_root
+
+    return (Path.home() / ".rider_crawl").resolve()
 
 
 def _env_bool(name: str, *, default: bool) -> bool:
@@ -79,3 +129,36 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _platform_name(raw: str) -> str:
+    value = str(raw or "").strip().casefold() or DEFAULT_PLATFORM_NAME
+    if value not in {"baemin", "coupang"}:
+        raise ValueError("PERFORMANCE_PLATFORM은 baemin 또는 coupang이어야 합니다")
+    return value
+
+
+def _peak_dashboard_url_from_env(platform_name: str) -> str:
+    # 피크 대시보드는 쿠팡 전용 보조 URL이다. 배민이면 PEAK_DASHBOARD_URL env가
+    # 있어도 무조건 빈 값으로 둔다. 이 값은 메시지 scope hash에 들어가므로, 배민에서
+    # 값을 채우면 UI 배민 설정(빈 값)과 CLI 배민 설정의 중복 감지 파일이 갈라진다.
+    # 문서/UI 동작과 맞춰 배민은 항상 빈 값으로 통일한다.
+    if platform_name != "coupang":
+        return ""
+    return os.getenv("PEAK_DASHBOARD_URL", DEFAULT_COUPANG_PEAK_DASHBOARD_URL)
+
+
+def _primary_url_from_env(platform_name: str) -> str:
+    performance_url = os.getenv("PERFORMANCE_URL")
+    if performance_url:
+        return performance_url
+
+    if platform_name == "coupang":
+        return os.getenv("COUPANG_EATS_URL", DEFAULT_COUPANG_RIDER_PERFORMANCE_URL)
+
+    baemin_url = os.getenv("BAEMIN_DELIVERY_HISTORY_URL")
+    if baemin_url:
+        return baemin_url
+    # ``COUPANG_EATS_URL`` is kept as a legacy fallback only when no Baemin URL is
+    # set, so old ``.env`` files keep working without overriding an explicit Baemin URL.
+    return os.getenv("COUPANG_EATS_URL", DEFAULT_BAEMIN_DELIVERY_HISTORY_URL)
