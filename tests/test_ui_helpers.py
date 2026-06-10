@@ -801,8 +801,10 @@ def test_different_tabs_can_enter_run_once_concurrently(tmp_path, monkeypatch):
 def test_start_is_blocked_while_previous_workers_are_still_stopping(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()
-    ui.workers = [_FakeThread(alive=True)]
-    ui.telegram_workers = []
+    ui.settings_notebook = _FakeNotebook(0)
+    ui.workers_by_tab = {0: [_FakeThread(alive=True)]}
+    ui.telegram_workers_by_tab = {0: []}
+    ui.stop_events_by_tab = {}
     ui.status_var = _FakeVar()
     save_calls = []
     monkeypatch.setattr(ui, "save_settings", lambda: save_calls.append("saved"))
@@ -810,7 +812,156 @@ def test_start_is_blocked_while_previous_workers_are_still_stopping(tmp_path, mo
     ui.start()
 
     assert save_calls == []
-    assert ui.status_var.value == "중지 처리 중"
+    assert ui.status_var.value == "크롤링1 중지 처리 중"
+
+
+def test_start_runs_only_selected_tab_with_its_own_interval(tmp_path, monkeypatch):
+    # 크롤링1=2분, 크롤링2=1분으로 두고 크롤링2 탭에서 '시작'을 누른다. 크롤링2만
+    # 자신의 1분 간격으로 스케줄링되고, 크롤링1은 시작되지 않아야 한다.
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.settings_notebook = _FakeNotebook(1)
+    ui.settings_tabs = [
+        _settings(tmp_path, cdp_url="http://127.0.0.1:9222", interval_minutes="2"),
+        _settings(tmp_path, cdp_url="http://127.0.0.1:9223", interval_minutes="1"),
+    ]
+    ui.workers_by_tab = {}
+    ui.telegram_workers_by_tab = {}
+    ui.stop_events_by_tab = {}
+    ui.crawl_locks_by_tab = {}
+    ui.status_var = _FakeVar()
+    ui.start_button = _FakeButton()
+    ui.stop_button = _FakeButton()
+    monkeypatch.setattr(ui, "save_settings", lambda: ui.settings_tabs[1])
+    monkeypatch.setattr(ui, "_start_telegram_listener", lambda *a, **k: None)
+
+    intervals: list[int] = []
+
+    class _RecordingScheduler:
+        def __init__(self, *, interval_minutes, run_job):
+            intervals.append(interval_minutes)
+            self.run_job = run_job
+
+        def run_loop(self, *, stop_event):
+            pass
+
+    monkeypatch.setattr("rider_crawl.ui.BotScheduler", _RecordingScheduler)
+
+    ui.start()
+    for worker in ui.workers_by_tab.get(1, []):
+        worker.join(2)
+
+    assert intervals == [1]
+    assert set(ui.workers_by_tab) == {1}
+    assert 0 not in ui.stop_events_by_tab
+    assert ui.status_var.value == "크롤링2 실행 중"
+
+
+def test_per_tab_start_stop_works_for_all_nine_tabs(tmp_path, monkeypatch):
+    # 크롤링1~9 전부에서 '시작'은 그 탭만, '중지'는 그 탭만 적용되어야 한다.
+    # 각 탭은 자신의 메세지 전송 간격으로 스케줄링되고 서로 영향을 주지 않는다.
+    tab_count = 9
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    notebook = _FakeNotebook(0)
+    ui.settings_notebook = notebook
+    ui.settings_tabs = [
+        _settings(
+            tmp_path,
+            cdp_url=f"http://127.0.0.1:{9222 + index}",
+            browser_user_data_dir=tmp_path / f"browser{index}",
+            telegram_chat_id=f"-100{index}",
+            interval_minutes=str(index + 1),
+        )
+        for index in range(tab_count)
+    ]
+    ui.vars_by_tab = [{} for _ in range(tab_count)]
+    ui.workers_by_tab = {}
+    ui.telegram_workers_by_tab = {}
+    ui.stop_events_by_tab = {}
+    ui.crawl_locks_by_tab = {}
+    ui.status_var = _FakeVar()
+    ui.next_run_var = _FakeVar()
+    ui.start_button = _FakeButton()
+    ui.stop_button = _FakeButton()
+    monkeypatch.setattr(ui, "save_settings", lambda: ui.settings_tabs[notebook.current_index])
+    monkeypatch.setattr(ui, "_start_telegram_listener", lambda *a, **k: None)
+
+    recorded: list[tuple[int, int]] = []
+
+    class _RecordingScheduler:
+        def __init__(self, *, interval_minutes, run_job):
+            recorded.append((notebook.current_index, interval_minutes))
+            self.run_job = run_job
+            self._stop = None
+
+        def run_loop(self, *, stop_event):
+            # 중지 신호가 올 때까지 살아 있는 것처럼 동작한다.
+            stop_event.wait(5)
+
+    monkeypatch.setattr("rider_crawl.ui.BotScheduler", _RecordingScheduler)
+
+    # 모든 탭을 차례로 시작한다. 각 시작은 그 탭만 스케줄링해야 한다.
+    for index in range(tab_count):
+        notebook.current_index = index
+        ui._on_tab_changed()  # 탭 전환 시 미실행 탭이므로 시작 버튼이 활성화돼야 한다.
+        assert ui.start_button.state == "normal"
+        ui.start()
+        assert ui.start_button.state == "disabled"
+        assert ui.stop_button.state == "normal"
+
+    # 9개 탭 각각 자기 간격(index+1분)으로 스케줄링됐는지 확인한다.
+    assert recorded == [(index, index + 1) for index in range(tab_count)]
+    assert set(ui.workers_by_tab) == set(range(tab_count))
+    assert all(len(workers) == 1 for workers in ui.workers_by_tab.values())
+
+    # 가운데 탭(크롤링5, index 4)만 중지한다. 나머지는 계속 실행 중이어야 한다.
+    notebook.current_index = 4
+    ui.stop()
+    for worker in ui.workers_by_tab.get(4, []):
+        worker.join(2)
+    ui._refresh_run_controls()  # 폴링이 하는 정리 동작과 동일
+    assert ui.start_button.state == "normal"  # 크롤링5는 다시 시작 가능
+    assert 4 not in ui.stop_events_by_tab
+    assert 4 not in ui.workers_by_tab
+    # 다른 탭들은 여전히 실행 중
+    for index in range(tab_count):
+        if index == 4:
+            continue
+        assert ui.stop_events_by_tab.get(index) is not None
+        assert ui._has_live_workers(index)
+
+
+def test_switching_to_idle_tab_reenables_start_button():
+    # 크롤링1을 시작한 상태에서 크롤링2 탭으로 가면 '시작' 버튼이 다시 활성화돼야 한다.
+    # (각 탭은 독립적으로 시작/중지된다.)
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.settings_notebook = _FakeNotebook(0)
+    ui.start_button = _FakeButton()
+    ui.stop_button = _FakeButton()
+    ui.status_var = _FakeVar()
+    ui.vars_by_tab = [{}, {}]
+    ui.workers_by_tab = {0: [_FakeThread(alive=True)]}
+    ui.telegram_workers_by_tab = {0: []}
+    stop_event = threading.Event()
+    ui.stop_events_by_tab = {0: stop_event}
+
+    # 크롤링1 탭(실행 중): 시작 비활성화, 중지 활성화
+    ui._refresh_run_controls()
+    assert ui.start_button.state == "disabled"
+    assert ui.stop_button.state == "normal"
+
+    # 크롤링2 탭(미실행)으로 전환: 시작 다시 활성화
+    ui.settings_notebook.current_index = 1
+    ui._on_tab_changed()
+    assert ui.start_button.state == "normal"
+    assert ui.stop_button.state == "disabled"
+
+    # 크롤링1 탭으로 복귀: 다시 실행 중 상태
+    ui.settings_notebook.current_index = 0
+    ui._on_tab_changed()
+    assert ui.start_button.state == "disabled"
+    assert ui.stop_button.state == "normal"
 
 
 def test_show_result_labels_next_run_with_tab_index():
@@ -1329,6 +1480,7 @@ def _settings(
     telegram_message_thread_id: str = "",
     messenger_name: str = "telegram",
     send_enabled: bool = True,
+    interval_minutes: str = "35",
 ):
     return coerce_settings(
         {
@@ -1346,7 +1498,7 @@ def _settings(
             "telegram_chat_id": telegram_chat_id,
             "telegram_message_thread_id": telegram_message_thread_id,
             "messenger_name": messenger_name,
-            "interval_minutes": "35",
+            "interval_minutes": interval_minutes,
             "page_timeout_seconds": "60000",
             "run_lock_timeout_seconds": "900",
             "headless": False,
@@ -1391,9 +1543,25 @@ class _FakeThread:
         return self.alive
 
 
+class _FakeNotebook:
+    def __init__(self, current_index: int) -> None:
+        self.current_index = current_index
+
+    def index(self, _which: str) -> int:
+        return self.current_index
+
+
 class _FakeVar:
     def __init__(self) -> None:
         self.value = ""
 
     def set(self, value: str) -> None:
         self.value = value
+
+
+class _FakeButton:
+    def __init__(self) -> None:
+        self.state = None
+
+    def configure(self, *, state: str) -> None:
+        self.state = state

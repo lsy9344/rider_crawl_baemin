@@ -146,9 +146,11 @@ class RiderBotUi:
         self.settings_tabs = store.load_all()
         self.settings = self.settings_tabs[0]
         self.messages: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.stop_event: threading.Event | None = None
-        self.workers: list[threading.Thread] = []
-        self.telegram_workers: list[threading.Thread] = []
+        # 탭마다 독립적으로 시작/중지한다. 한 탭의 '시작'이 다른 탭을 함께 돌리지
+        # 않도록 stop_event/워커/텔레그램 워커를 탭 인덱스별로 따로 보관한다.
+        self.stop_events_by_tab: dict[int, threading.Event] = {}
+        self.workers_by_tab: dict[int, list[threading.Thread]] = {}
+        self.telegram_workers_by_tab: dict[int, list[threading.Thread]] = {}
         self.settings_notebook: ttk.Notebook | None = None
         self.crawl_locks_by_tab: dict[int, threading.Lock] = {
             index: threading.Lock() for index in range(len(self.settings_tabs))
@@ -229,7 +231,7 @@ class RiderBotUi:
             self._build_settings_fields(tab, tab_vars)
             notebook.add(tab, text=f"크롤링{index + 1}")
 
-        notebook.bind("<<NotebookSelected>>", lambda _event: self._sync_selected_vars())
+        notebook.bind("<<NotebookSelected>>", lambda _event: self._on_tab_changed())
         return frame
 
     def _build_settings_fields(self, frame: ttk.Frame, tab_vars: dict[str, StringVar | BooleanVar]) -> None:
@@ -337,7 +339,7 @@ class RiderBotUi:
                 "8. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
                 "9. 여러 계정은 탭마다 다른 CDP 포트와 브라우저 프로필 경로를 사용하세요.\n"
                 "10. 처음에는 메시지 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
-                "11. 시작 버튼을 누르면 즉시 1회 실행 후 설정한 메세지 전송 간격으로 반복됩니다."
+                "11. 시작/중지는 현재 보고 있는 탭에만 적용됩니다. 탭별로 따로 시작하고 각 탭의 메세지 전송 간격으로 반복됩니다."
             ),
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -416,49 +418,50 @@ class RiderBotUi:
         threading.Thread(target=self._run_once_background, args=(self._selected_tab_index(), settings), daemon=True).start()
 
     def start(self) -> None:
-        if self._has_live_workers():
-            self.status_var.set("중지 처리 중")
+        # '시작'은 현재 보고 있는 탭 하나만 실행한다. 다른 탭은 영향을 주지 않으므로
+        # 탭마다 다른 메세지 전송 간격이 그대로 적용된다.
+        tab_index = self._selected_tab_index()
+        if self._has_live_workers(tab_index):
+            self.status_var.set(f"크롤링{tab_index + 1} 중지 처리 중")
             return
 
         if self.save_settings() is None:
             return
 
-        active_settings = active_crawling_settings(self.settings_tabs)
-        if not active_settings:
+        settings = self.settings_tabs[tab_index]
+        if not settings.performance_url.strip():
             self.status_var.set("활성 탭 없음")
-            self._append_preview("[안내]\n배달현황 URL이 입력된 탭이 없습니다.\n")
+            self._append_preview(f"[안내]\n크롤링{tab_index + 1} 배달현황 URL이 입력되지 않았습니다.\n")
             return
 
         stop_event = threading.Event()
-        self.stop_event = stop_event
-        self.workers = []
-        for index, settings in active_settings:
-            scheduler = BotScheduler(
-                interval_minutes=settings.interval_minutes,
-                run_job=lambda tab_index=index, tab_settings=settings, event=stop_event: self._run_once_background(
-                    tab_index,
-                    tab_settings,
-                    event,
-                ),
-            )
-            worker = threading.Thread(
-                target=scheduler.run_loop,
-                kwargs={"stop_event": self.stop_event},
-                daemon=True,
-            )
-            self.workers.append(worker)
+        self.stop_events_by_tab[tab_index] = stop_event
+        scheduler = BotScheduler(
+            interval_minutes=settings.interval_minutes,
+            run_job=lambda event=stop_event: self._run_once_background(
+                tab_index,
+                settings,
+                event,
+            ),
+        )
+        worker = threading.Thread(
+            target=scheduler.run_loop,
+            kwargs={"stop_event": stop_event},
+            daemon=True,
+        )
+        self.workers_by_tab[tab_index] = [worker]
 
-        self._start_telegram_listener(active_settings)
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
-        self.status_var.set("실행 중")
-        for worker in self.workers:
-            worker.start()
+        self._start_telegram_listener(tab_index, settings, stop_event)
+        worker.start()
+        self._refresh_run_controls()
+        self.status_var.set(f"크롤링{tab_index + 1} 실행 중")
 
     def stop(self) -> None:
-        if self.stop_event:
-            self.stop_event.set()
-        self.status_var.set("중지 요청됨")
+        tab_index = self._selected_tab_index()
+        stop_event = self.stop_events_by_tab.get(tab_index)
+        if stop_event is not None:
+            stop_event.set()
+        self.status_var.set(f"크롤링{tab_index + 1} 중지 요청됨")
         self.next_run_var.set("-")
         self._refresh_run_controls()
 
@@ -616,8 +619,11 @@ class RiderBotUi:
                 tab_index, result, interval_minutes = payload
                 self._show_result(tab_index, result, interval_minutes)
 
-        if self.stop_event is not None and self.stop_event.is_set():
-            self._refresh_run_controls()
+        # 시작/중지 버튼은 현재 보고 있는 탭의 실행 상태를 따라야 한다. 탭 전환
+        # 이벤트(<<NotebookSelected>>)에만 의존하지 않고, 폴링마다 선택 탭 기준으로
+        # 버튼 상태를 다시 맞춰 "다른 탭에서 시작했는데 이 탭 버튼이 잠겨 있는" 문제를
+        # 막는다.
+        self._refresh_run_controls()
         self.root.after(200, self._poll_messages)
 
     def _show_result(self, tab_index: int, result: RunResult, interval_minutes: int) -> None:
@@ -657,11 +663,26 @@ class RiderBotUi:
     def _sync_selected_vars(self) -> None:
         self.vars = self.vars_by_tab[self._selected_tab_index()]
 
-    def _start_telegram_listener(self, active_settings: list[tuple[int, UiSettings]]) -> None:
+    def _on_tab_changed(self) -> None:
+        # 시작/중지 버튼은 현재 보고 있는 탭에 작용하므로, 탭을 바꾸면 그 탭의 실행
+        # 상태에 맞게 버튼 활성화를 다시 맞춘다.
+        self._sync_selected_vars()
+        self._refresh_run_controls()
+
+    def _start_telegram_listener(
+        self,
+        tab_index: int,
+        settings: UiSettings,
+        stop_event: threading.Event,
+    ) -> None:
+        active_settings = [(tab_index, settings)]
         configs = app_configs_from_settings(active_settings)
         grouped_configs = telegram_configs_by_token(configs)
-        if not grouped_configs or self.stop_event is None:
-            self._append_preview("[안내]\n텔레그램 봇 토큰과 채팅방 ID가 없어 명령 감지를 시작하지 않습니다.\n")
+        self.telegram_workers_by_tab[tab_index] = []
+        if not grouped_configs:
+            self._append_preview(
+                f"[안내]\n크롤링{tab_index + 1} 텔레그램 봇 토큰과 채팅방 ID가 없어 명령 감지를 시작하지 않습니다.\n"
+            )
             return
 
         locks_by_target = {
@@ -669,7 +690,7 @@ class RiderBotUi:
             for index, settings in active_settings
             if _telegram_target_key(settings) is not None
         }
-        self.telegram_workers = []
+        workers: list[threading.Thread] = []
         for token_configs in grouped_configs.values():
             processor = TelegramCommandProcessor(
                 token_configs,
@@ -680,12 +701,13 @@ class RiderBotUi:
             poller = TelegramUpdatePoller(token_configs[0], handle_text=processor.handle_text)
             worker = threading.Thread(
                 target=self._telegram_poll_loop,
-                args=(poller, self.stop_event),
+                args=(poller, stop_event),
                 daemon=True,
             )
-            self.telegram_workers.append(worker)
-            self.messages.put(("log", f"텔레그램 poller 시작: 채팅방 {len(token_configs)}개"))
+            workers.append(worker)
+            self.messages.put(("log", f"크롤링{tab_index + 1} 텔레그램 poller 시작: 채팅방 {len(token_configs)}개"))
             worker.start()
+        self.telegram_workers_by_tab[tab_index] = workers
 
     def _telegram_poll_loop(self, poller: TelegramUpdatePoller, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -695,25 +717,36 @@ class RiderBotUi:
                 self._append_run_error("텔레그램 명령 감지", exc, log_dir=self.settings.log_dir)
                 stop_event.wait(5)
 
-    def _has_live_workers(self) -> bool:
-        workers = list(getattr(self, "workers", [])) + list(getattr(self, "telegram_workers", []))
+    def _has_live_workers(self, tab_index: int) -> bool:
+        workers = list(self.workers_by_tab.get(tab_index, [])) + list(
+            self.telegram_workers_by_tab.get(tab_index, [])
+        )
         return any(worker.is_alive() for worker in workers)
 
     def _refresh_run_controls(self) -> None:
         if not hasattr(self, "start_button") or not hasattr(self, "stop_button"):
             return
 
-        stopping = self.stop_event is not None and self.stop_event.is_set()
-        if stopping and self._has_live_workers():
+        tab_index = self._selected_tab_index()
+        stop_event = self.stop_events_by_tab.get(tab_index)
+        stopping = stop_event is not None and stop_event.is_set()
+
+        # 중지 요청 후 워커가 모두 종료되면 이 탭의 실행 상태를 비운다.
+        if stopping and not self._has_live_workers(tab_index):
+            self.workers_by_tab.pop(tab_index, None)
+            self.telegram_workers_by_tab.pop(tab_index, None)
+            self.stop_events_by_tab.pop(tab_index, None)
+            stopping = False
+
+        if stopping:
+            # 정지 처리 중: 두 버튼 모두 비활성화해 중복 조작을 막는다.
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
             return
 
-        if stopping:
-            self.workers = []
-            self.telegram_workers = []
-        self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        running = self._has_live_workers(tab_index)
+        self.start_button.configure(state="disabled" if running else "normal")
+        self.stop_button.configure(state="normal" if running else "disabled")
 
     def _append_preview(self, text: str, *, tag: str | None = None) -> None:
         self.preview.configure(state="normal")
