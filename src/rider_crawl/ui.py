@@ -9,7 +9,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, messagebox
+from tkinter import BooleanVar, Canvas, StringVar, Tk, messagebox
 from tkinter import ttk
 from typing import Any
 from urllib.parse import urlsplit
@@ -219,10 +219,35 @@ class RiderBotUi:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        outer = ttk.Frame(self.root, padding=18)
-        outer.grid(row=0, column=0, sticky="nsew")
+        # 창 높이보다 내용(설정 9탭 + 미리보기·로그 + 버튼)이 길면 하단이 화면 밖으로
+        # 잘린다. 전체 내용을 세로 스크롤 가능한 캔버스에 담아 작은 창에서도 메시지
+        # 미리보기·로그와 버튼까지 모두 스크롤해서 볼 수 있게 한다.
+        container = ttk.Frame(self.root)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        canvas = Canvas(container, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        vscroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=vscroll.set)
+
+        outer = ttk.Frame(canvas, padding=18)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(3, weight=1)
+        outer_window = canvas.create_window((0, 0), window=outer, anchor="nw")
+
+        def _sync_scrollregion(_event: Any = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _stretch_outer(event: Any) -> None:
+            # 내용 프레임 너비를 캔버스 너비에 맞춰 가로 스크롤 없이 꽉 채운다.
+            canvas.itemconfigure(outer_window, width=event.width)
+
+        outer.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _stretch_outer)
+        self._bind_mousewheel(canvas)
 
         title = ttk.Label(outer, text="배달 실적봇 (배민·쿠팡이츠)", font=("", 18, "bold"))
         title.grid(row=0, column=0, sticky="w")
@@ -236,6 +261,18 @@ class RiderBotUi:
         self._build_settings(outer).grid(row=2, column=0, sticky="ew")
         self._build_runtime(outer).grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         self._build_buttons(outer).grid(row=4, column=0, sticky="ew", pady=(14, 0))
+
+    def _bind_mousewheel(self, canvas: Canvas) -> None:
+        # 마우스 휠로 전체 창을 스크롤한다. bind_all이라 어느 위젯 위에 있어도 동작하며,
+        # 미리보기·로그 Text는 자체 휠 바인딩에서 "break"로 가로채 그 안만 스크롤한다.
+        def _on_mousewheel(event: Any) -> None:
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _on_preview_mousewheel(self, event: Any) -> str:
+        self.preview.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
 
     def _build_settings(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.LabelFrame(parent, text="설정", padding=14)
@@ -378,6 +415,10 @@ class RiderBotUi:
         preview_box.rowconfigure(0, weight=1)
         self.preview = _make_text(preview_box)
         self.preview.grid(row=0, column=0, sticky="nsew")
+        preview_scroll = ttk.Scrollbar(preview_box, orient="vertical", command=self.preview.yview)
+        preview_scroll.grid(row=0, column=1, sticky="ns")
+        self.preview.configure(yscrollcommand=preview_scroll.set)
+        self.preview.bind("<MouseWheel>", self._on_preview_mousewheel)
         return frame
 
     def _build_buttons(self, parent: ttk.Frame) -> ttk.Frame:

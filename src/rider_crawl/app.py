@@ -34,7 +34,10 @@ def run_once(
 
     with RunLock(_run_lock_path(config), stale_timeout_seconds=config.run_lock_timeout_seconds):
         snapshot = crawl(config)
-        message = render_current_screen_message(snapshot, source_label=config.crawl_name)
+        # 메시지 라벨은 탭의 '센터명'(baemin_center_name; 쿠팡 탭은 기대 센터/상점명으로
+        # 재사용)을 쓴다. 센터명이 비어 있으면 기존처럼 크롤링 탭 이름으로 대체한다.
+        source_label = config.baemin_center_name.strip() or config.crawl_name
+        message = render_current_screen_message(snapshot, source_label=source_label)
         message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
 
         if config.send_only_on_change and _is_duplicate(config, message_hash):

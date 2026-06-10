@@ -66,7 +66,7 @@ def test_run_once_dry_run_builds_message_without_sending(tmp_path):
     assert "오후논피크 : 41.8건" in result.message
 
 
-def test_run_once_includes_crawl_name_when_present(tmp_path):
+def test_run_once_includes_crawl_name_when_center_name_absent(tmp_path):
     config = _config(tmp_path, crawl_name="크롤링2")
 
     result = run_once(
@@ -76,6 +76,19 @@ def test_run_once_includes_crawl_name_when_present(tmp_path):
     )
 
     assert "[크롤링2]" in result.message
+
+
+def test_run_once_labels_message_with_center_name(tmp_path):
+    config = _config(tmp_path, crawl_name="크롤링1", baemin_center_name="표준서울마포")
+
+    result = run_once(
+        config,
+        crawl_snapshot=lambda _config: _snapshot(),
+        send_message=lambda _config, message: None,
+    )
+
+    assert "[표준서울마포]" in result.message
+    assert "[크롤링1]" not in result.message
 
 
 def test_run_once_sends_again_when_telegram_target_changes(tmp_path):
@@ -276,11 +289,12 @@ def _config(
     telegram_chat_id: str = "",
     telegram_message_thread_id: str = "",
     platform_name: str = "baemin",
+    baemin_center_name: str = "",
 ) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
         platform_name=platform_name,
-        baemin_center_name="",
+        baemin_center_name=baemin_center_name,
         baemin_center_id="",
         browser_mode="cdp",
         cdp_url="http://127.0.0.1:9222",
