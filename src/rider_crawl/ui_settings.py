@@ -155,9 +155,28 @@ def _settings_from_mapping(raw: dict[str, Any], defaults: UiSettings) -> UiSetti
     for key, value in raw.items():
         if key in data:
             data[key] = value
+    if _is_legacy_kakao_mapping(raw):
+        data["messenger_name"] = "kakao"
     data["browser_user_data_dir"] = Path(data["browser_user_data_dir"])
     data["log_dir"] = Path(data["log_dir"])
     return UiSettings(**data)
+
+
+def _is_legacy_kakao_mapping(raw: dict[str, Any]) -> bool:
+    """Old Kakao setups predate ``messenger_name`` and have no Telegram fields.
+
+    Load them as ``kakao`` (regardless of ``send_enabled``) so an existing Kakao
+    configuration is not silently treated as Telegram. New tabs still default to
+    Telegram because they are created from :meth:`UiSettings.defaults`, not loaded
+    from a legacy mapping.
+    """
+
+    return (
+        bool(str(raw.get("kakao_chat_name", "")).strip())
+        and not str(raw.get("messenger_name", "")).strip()
+        and not str(raw.get("telegram_bot_token", "")).strip()
+        and not str(raw.get("telegram_chat_id", "")).strip()
+    )
 
 
 def _seconds_to_minutes(seconds: int) -> int:

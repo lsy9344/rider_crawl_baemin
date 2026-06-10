@@ -17,7 +17,7 @@ from .browser_launcher import BrowserLaunchError, prepare_chrome
 from .config import AppConfig
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
-from .sender import TelegramSendError
+from .sender import KakaoSendError, TelegramSendError
 from .telegram_commands import TelegramCommandProcessor, TelegramUpdatePoller
 from .ui_settings import UiSettings, UiSettingsStore
 
@@ -39,8 +39,10 @@ def active_crawling_settings(settings_list: list[UiSettings]) -> list[tuple[int,
 
 def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     active_settings = active_crawling_settings(settings_list)
+    _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
     _validate_active_telegram_required(active_settings)
+    _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
         active_settings,
         label="CDP 주소",
@@ -55,6 +57,11 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
         active_settings,
         label="텔레그램 채팅방 ID",
         key=_telegram_target_key,
+    )
+    _validate_unique_active_value(
+        active_settings,
+        label="카카오톡 채팅방명",
+        key=_kakao_chat_name_key,
     )
 
 
@@ -444,6 +451,13 @@ class RiderBotUi:
         except TelegramSendError as exc:
             self.messages.put(("error", f"{label} 텔레그램 전송 오류: {exc}"))
             return False
+        except KakaoSendError as exc:
+            # Transient KakaoTalk failures (window briefly closed, focus stolen)
+            # should retry soon like Telegram, not wait the full interval. The
+            # kakao_send_lock is released by its `with` block on the exception,
+            # so a fast retry here does not block other tabs' sends.
+            self.messages.put(("error", f"{label} 카카오톡 전송 오류: {exc}"))
+            return False
         except Exception as exc:  # UI boundary: surface errors to the operator.
             self.messages.put(("error", f"{label} 오류: {exc}"))
             return True
@@ -704,14 +718,39 @@ def _validate_unique_active_value(
         seen[value] = index
 
 
-def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+def _validate_active_cdp_local(indexed_settings: list[tuple[int, UiSettings]]) -> None:
     for index, settings in indexed_settings:
-        if settings.baemin_center_name.strip() or settings.baemin_center_id.strip():
+        if settings.browser_mode != "cdp":
+            continue
+        host = (urlsplit(settings.cdp_url.strip()).hostname or "").casefold()
+        if host in {"127.0.0.1", "localhost"}:
             continue
         raise ValueError(
-            f"크롤링{index + 1} 배민 센터명 또는 배민 센터 ID를 입력하세요. "
-            "여러 배민 아이디는 탭마다 센터 정보를 확인할 수 있어야 합니다."
+            f"크롤링{index + 1} CDP 주소는 IPv4 로컬 주소만 허용합니다. 예: http://127.0.0.1:9222\n"
+            "원격 CDP 주소는 다른 로그인 세션을 읽을 수 있어 차단합니다."
         )
+
+
+def _validate_active_baemin_center_identity(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    seen_name_only: dict[str, int] = {}
+    for index, settings in indexed_settings:
+        center_name = settings.baemin_center_name.strip()
+        center_id = settings.baemin_center_id.strip()
+        if not center_name and not center_id:
+            raise ValueError(
+                f"크롤링{index + 1} 배민 센터명 또는 배민 센터 ID를 입력하세요. "
+                "여러 배민 아이디는 탭마다 센터 정보를 확인할 수 있어야 합니다."
+            )
+        # Same center name across tabs cannot tell two accounts apart, so each
+        # such tab must carry a center ID to distinguish the underlying account.
+        if center_name and not center_id:
+            previous = seen_name_only.get(center_name.casefold())
+            if previous is not None:
+                raise ValueError(
+                    f"배민 센터명이 중복되었습니다: 크롤링{previous + 1}, 크롤링{index + 1}. "
+                    "같은 센터명을 쓰는 탭은 계정 구분을 위해 각각 배민 센터 ID를 입력하세요."
+                )
+            seen_name_only[center_name.casefold()] = index
 
 
 def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:
@@ -722,6 +761,14 @@ def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSetti
             raise ValueError(f"크롤링{index + 1} 텔레그램 봇 토큰을 입력하세요.")
         if not settings.telegram_chat_id.strip():
             raise ValueError(f"크롤링{index + 1} 텔레그램 채팅방 ID를 입력하세요.")
+
+
+def _validate_active_kakao_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        if settings.messenger_name != "kakao" or not settings.send_enabled:
+            continue
+        if not settings.kakao_chat_name.strip():
+            raise ValueError(f"크롤링{index + 1} 카카오톡 채팅방명을 입력하세요.")
 
 
 def _cdp_port_key(settings: UiSettings) -> object:
@@ -743,6 +790,13 @@ def _telegram_target_key(settings: UiSettings | AppConfig) -> tuple[str, str] | 
     if not chat_id:
         return None
     return (chat_id, _normalize_telegram_thread_id(settings.telegram_message_thread_id))
+
+
+def _kakao_chat_name_key(settings: UiSettings | AppConfig) -> str | None:
+    if settings.messenger_name != "kakao" or not settings.send_enabled:
+        return None
+    name = settings.kakao_chat_name.strip()
+    return name.casefold() if name else None
 
 
 def _normalize_telegram_thread_id(raw: object) -> str:

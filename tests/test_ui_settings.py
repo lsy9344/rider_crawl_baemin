@@ -140,6 +140,82 @@ def test_ui_settings_load_migrates_legacy_refresh_seconds_to_message_minutes(tmp
     assert loaded.interval_minutes == math.ceil(125 / 60)
 
 
+def test_ui_settings_load_migrates_legacy_kakao_without_messenger_name_when_send_enabled(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history",
+          "kakao_chat_name": "실적봇_의정부남부",
+          "send_enabled": true
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.messenger_name == "kakao"
+    assert loaded.kakao_chat_name == "실적봇_의정부남부"
+    assert loaded.send_enabled is True
+
+
+def test_ui_settings_load_migrates_legacy_kakao_without_messenger_name_when_send_disabled(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history",
+          "kakao_chat_name": "실적봇_의정부남부",
+          "send_enabled": false
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.messenger_name == "kakao"
+    assert loaded.kakao_chat_name == "실적봇_의정부남부"
+    assert loaded.send_enabled is False
+
+
+def test_ui_settings_load_keeps_telegram_default_for_ambiguous_settings(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history",
+          "telegram_bot_token": "token",
+          "telegram_chat_id": "-100123"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.messenger_name == "telegram"
+
+
+def test_ui_settings_load_keeps_explicit_messenger_name_over_legacy_kakao_heuristic(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history",
+          "kakao_chat_name": "실적봇_의정부남부",
+          "messenger_name": "telegram"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.messenger_name == "telegram"
+
+
 def test_ui_settings_convert_to_app_config(tmp_path):
     settings = UiSettings.defaults()
     settings.performance_url = "https://example.test/rider"

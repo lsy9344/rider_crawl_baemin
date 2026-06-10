@@ -62,7 +62,7 @@ def prepare_mac_chrome(
     profile_dir = _chrome_profile_dir(config)
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    _ensure_local_cdp_address(config.cdp_url)
+    ensure_local_cdp_address(config.cdp_url)
     probe = cdp_probe or _probe_cdp_endpoint
     _ensure_cdp_endpoint_unused(config.cdp_url, probe=probe)
 
@@ -82,7 +82,7 @@ def prepare_mac_chrome(
 
 def build_mac_chrome_command(config: AppConfig) -> list[str]:
     port = _cdp_port(config.cdp_url)
-    _ensure_local_cdp_address(config.cdp_url)
+    ensure_local_cdp_address(config.cdp_url)
     return [
         "open",
         "-na",
@@ -109,7 +109,7 @@ def prepare_windows_chrome(
     profile_dir = _chrome_profile_dir(config)
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    _ensure_local_cdp_address(config.cdp_url)
+    ensure_local_cdp_address(config.cdp_url)
     probe = cdp_probe or _probe_cdp_endpoint
     _ensure_cdp_endpoint_unused(config.cdp_url, probe=probe)
 
@@ -129,7 +129,7 @@ def prepare_windows_chrome(
 
 def build_windows_chrome_command(config: AppConfig, *, chrome_path: str | Path | None = None) -> list[str]:
     port = _cdp_port(config.cdp_url)
-    _ensure_local_cdp_address(config.cdp_url)
+    ensure_local_cdp_address(config.cdp_url)
     return [
         str(chrome_path or _find_windows_chrome_executable()),
         "--remote-debugging-address=127.0.0.1",
@@ -191,11 +191,12 @@ def _cdp_port(cdp_url: str) -> int:
     return port
 
 
-def _ensure_local_cdp_address(cdp_url: str) -> None:
+def ensure_local_cdp_address(cdp_url: str) -> None:
     host = (urlsplit(cdp_url).hostname or "").casefold()
     if host not in {"127.0.0.1", "localhost"}:
         raise BrowserLaunchError(
-            "Chrome 준비하기는 IPv4 로컬 CDP 주소만 지원합니다. 예: http://127.0.0.1:9222"
+            "CDP 주소는 IPv4 로컬 주소만 허용합니다. 예: http://127.0.0.1:9222\n"
+            "원격 CDP 주소는 다른 로그인 세션을 읽을 수 있어 차단합니다."
         )
 
 

@@ -7,7 +7,7 @@ import pytest
 
 from rider_crawl import ui
 from rider_crawl.app import RunResult
-from rider_crawl.sender import TelegramSendError
+from rider_crawl.sender import KakaoSendError, TelegramSendError
 from rider_crawl.ui import (
     DEFAULT_WINDOW_GEOMETRY,
     MESSENGER_OPTIONS,
@@ -168,6 +168,73 @@ def test_validate_active_tab_isolation_rejects_active_tab_without_baemin_center_
         validate_active_tab_isolation([settings])
 
 
+def test_validate_active_tab_isolation_rejects_shared_center_name_without_ids(tmp_path):
+    first = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_chat_id="-100111",
+    )
+    second = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_chat_id="-100222",
+    )
+    for settings in (first, second):
+        settings.baemin_center_name = "강남센터"
+        settings.baemin_center_id = ""
+
+    with pytest.raises(ValueError, match="센터명이 중복"):
+        validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_allows_shared_center_name_with_distinct_ids(tmp_path):
+    first = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_chat_id="-100111",
+    )
+    second = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_chat_id="-100222",
+    )
+    first.baemin_center_name = "강남센터"
+    first.baemin_center_id = "DP100"
+    second.baemin_center_name = "강남센터"
+    second.baemin_center_id = "DP200"
+
+    validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_rejects_non_local_cdp_address(tmp_path):
+    settings = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://10.0.0.5:9222",
+    )
+
+    with pytest.raises(ValueError, match="로컬 주소"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_allows_localhost_cdp_address(tmp_path):
+    settings = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://localhost:9222",
+    )
+
+    validate_active_tab_isolation([settings])
+
+
 def test_validate_active_tab_isolation_ignores_inactive_tabs(tmp_path):
     active = _settings(
         tmp_path,
@@ -310,6 +377,7 @@ def test_validate_active_tab_isolation_ignores_duplicate_chat_ids_for_non_telegr
         cdp_url="http://127.0.0.1:9223",
         browser_user_data_dir=tmp_path / "browser2",
         telegram_chat_id="-100123",
+        kakao_chat_name="실적봇_A",
         messenger_name="kakao",
     )
     disabled = _settings(
@@ -346,6 +414,83 @@ def test_validate_active_tab_isolation_rejects_enabled_telegram_without_chat_id(
 
     with pytest.raises(ValueError, match="텔레그램 채팅방 ID"):
         validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_enabled_kakao_without_chat_name(tmp_path):
+    settings = _settings(
+        tmp_path,
+        kakao_chat_name="",
+        messenger_name="kakao",
+        send_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="카카오톡 채팅방명"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_duplicate_active_kakao_chat_names(tmp_path):
+    first = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        kakao_chat_name="실적봇_A",
+        messenger_name="kakao",
+    )
+    second = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        kakao_chat_name="실적봇_A",
+        messenger_name="kakao",
+    )
+
+    with pytest.raises(ValueError, match="카카오톡 채팅방명"):
+        validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_allows_unique_active_kakao_chat_names(tmp_path):
+    first = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        kakao_chat_name="실적봇_A",
+        messenger_name="kakao",
+    )
+    second = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        kakao_chat_name="실적봇_B",
+        messenger_name="kakao",
+    )
+
+    validate_active_tab_isolation([first, second])
+
+
+def test_validate_active_tab_isolation_ignores_duplicate_kakao_names_for_disabled_tabs(tmp_path):
+    enabled = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        kakao_chat_name="실적봇_A",
+        messenger_name="kakao",
+    )
+    disabled = _settings(
+        tmp_path,
+        performance_url="https://example.test/second",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        kakao_chat_name="실적봇_A",
+        messenger_name="kakao",
+        send_enabled=False,
+    )
+
+    validate_active_tab_isolation([enabled, disabled])
 
 
 def test_telegram_configs_by_token_groups_duplicate_tokens_once(tmp_path):
@@ -511,6 +656,27 @@ def test_telegram_send_failure_requests_scheduler_retry(tmp_path, monkeypatch):
 
     assert result is False
     assert any(kind == "error" and "rate limited" in payload for kind, payload in list(ui.messages.queue))
+
+
+def test_kakao_send_failure_requests_scheduler_retry(tmp_path, monkeypatch):
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    settings = _settings(tmp_path, messenger_name="kakao", kakao_chat_name="실적봇_A")
+
+    def failing_run_once(_config, **_kwargs):
+        raise KakaoSendError("창을 전면으로 가져오지 못했습니다")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    result = ui._run_once_background(0, settings)
+
+    # Kakao failures retry soon like Telegram, not after the full interval.
+    assert result is False
+    assert any(
+        kind == "error" and "카카오톡 전송 오류" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
 
 
 def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
@@ -831,6 +997,7 @@ def _settings(
     browser_mode: str = "cdp",
     cdp_url: str = "http://127.0.0.1:9222",
     browser_user_data_dir: Path | None = None,
+    kakao_chat_name: str = "",
     telegram_bot_token: str = "token",
     telegram_chat_id: str = "-100123",
     telegram_message_thread_id: str = "",
@@ -847,7 +1014,7 @@ def _settings(
             "cdp_url": cdp_url,
             "browser_user_data_dir": str(browser_user_data_dir or tmp_path / "browser"),
             "log_dir": str(tmp_path / "logs"),
-            "kakao_chat_name": "",
+            "kakao_chat_name": kakao_chat_name,
             "telegram_bot_token": telegram_bot_token,
             "telegram_chat_id": telegram_chat_id,
             "telegram_message_thread_id": telegram_message_thread_id,

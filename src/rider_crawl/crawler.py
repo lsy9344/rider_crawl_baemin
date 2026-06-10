@@ -7,6 +7,7 @@ import re
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .browser_launcher import ensure_local_cdp_address
 from .config import AppConfig
 from .models import CurrentScreenSnapshot
 from .parser import parse_current_screen_html
@@ -39,6 +40,10 @@ def fetch_page_html_via_cdp(config: AppConfig) -> str:
 
 
 def fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
+    # Verify the CDP address before connecting. A non-local address could point
+    # at another machine's Chrome and read a different login session, so reject
+    # it up front with a clear message instead of letting connect_over_cdp run.
+    ensure_local_cdp_address(config.cdp_url)
     try:
         return asyncio.run(_fetch_page_html_via_crawl4ai_cdp(config))
     except ImportError as exc:
@@ -81,6 +86,8 @@ async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
 async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
     if not config.baemin_center_id:
         return
+
+    ensure_local_cdp_address(config.cdp_url)
 
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     from playwright.async_api import async_playwright

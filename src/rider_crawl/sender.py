@@ -13,12 +13,22 @@ from .config import AppConfig
 
 KAKAO_SEND_VERIFY_TIMEOUT_SECONDS = 2.0
 KAKAO_SEND_VERIFY_INTERVAL_SECONDS = 0.1
-_LAST_KAKAO_CHAT_HANDLE: int | None = None
+_LAST_KAKAO_CHAT_HANDLE_BY_CHAT: dict[str, int] = {}
 _KAKAO_DIAGNOSTICS: list[str] = []
 
 
 class KakaoSendError(RuntimeError):
     """Raised when KakaoTalk text delivery cannot be attempted safely."""
+
+
+class KakaoUnsafeSelectionError(KakaoSendError):
+    """Raised when the target chat window is ambiguous or cannot be scanned.
+
+    These conditions must fail immediately. Falling back to the KakaoTalk
+    main-window search would automate the UI (ctrl+f / paste / Enter) while the
+    real target is already known to be unsafe, risking a send to the wrong room
+    or even the wrong application.
+    """
 
 
 class TelegramSendError(RuntimeError):
@@ -239,17 +249,15 @@ def send_kakao_text(
         except ImportError as exc:
             raise KakaoSendError("pyautogui and pyperclip are required for KakaoTalk sending") from exc
 
-        chat_window = _find_or_open_kakao_chat_window(config.kakao_chat_name.strip())
+        chat_name = config.kakao_chat_name.strip()
+        chat_window = _find_or_open_kakao_chat_window(chat_name)
         _record_kakao_diagnostic(f"selected_window={_window_debug_summary(chat_window)}")
-        try:
-            message_input = _focus_chat_message_input(chat_window)
-        except KakaoSendError as exc:
-            _record_kakao_diagnostic(f"selected_window_input_error={exc}")
-            chat_window = _focus_kakao_message_window()
-            _record_kakao_diagnostic(f"fallback_message_window={_window_debug_summary(chat_window)}")
-            message_input = _focus_chat_message_input(chat_window)
+        # Strict mode: after a chat window is selected by exact title, never
+        # recover from a missing input control by switching to another KakaoTalk
+        # window. Sending to an arbitrary room is worse than failing.
+        message_input = _focus_chat_message_input(chat_window)
         _record_kakao_diagnostic(f"message_input={_control_debug_summary(message_input)}")
-        _remember_kakao_chat_window(chat_window)
+        _remember_kakao_chat_window(chat_name, chat_window)
 
         pyperclip.copy(message)
         pyautogui.hotkey("ctrl", "v")
@@ -315,53 +323,150 @@ def _control_debug_summary(control: object) -> str:
 
 
 def _find_or_open_kakao_chat_window(chat_name: str) -> object:
-    _record_kakao_diagnostic("lookup=chat_title")
+    # Primary path: strict selection among already-open KakaoTalk chat windows.
+    _record_kakao_diagnostic("lookup=strict_open_window")
     try:
-        return _focus_kakao_chat_window(chat_name)
+        return _select_kakao_chat_window(chat_name)
+    except KakaoUnsafeSelectionError:
+        # Ambiguous target or unscannable desktop: do not run main-window search.
+        # Automating the UI here could send to the wrong room or wrong app.
+        raise
     except KakaoSendError as exc:
-        _record_kakao_diagnostic(f"lookup_chat_title_error={exc}")
-        try:
-            _record_kakao_diagnostic("lookup=last_successful_handle")
-            return _focus_last_kakao_chat_window(chat_name)
-        except KakaoSendError as last_exc:
-            _record_kakao_diagnostic(f"lookup_last_handle_error={last_exc}")
-            _open_kakao_chat_window_from_main(chat_name)
+        _record_kakao_diagnostic(f"lookup_strict_error={exc}")
 
-    _record_kakao_diagnostic("lookup=chat_title_after_main_search")
+    # Compatibility fallback: only reached when no matching window was open yet.
+    # Search from the KakaoTalk main window to open the room, then re-run strict
+    # selection. The opened window's title is rechecked by
+    # _select_kakao_chat_window, so this cannot select an unrelated room.
+    _record_kakao_diagnostic("lookup=main_search_then_strict")
+    _open_kakao_chat_window_from_main(chat_name)
     try:
-        return _focus_kakao_chat_window(chat_name)
+        return _select_kakao_chat_window(chat_name)
     except KakaoSendError as exc:
-        _record_kakao_diagnostic(f"lookup_chat_title_after_main_search_error={exc}")
+        raise KakaoSendError(
+            f"카카오톡 채팅방 '{chat_name}' 창을 안전하게 선택하지 못했습니다. "
+            "해당 채팅방을 별도 창으로 열어둔 뒤 다시 실행하세요."
+        ) from exc
+
+
+def _select_kakao_chat_window(chat_name: str) -> object:
+    """Return the single open KakaoTalk window whose title exactly matches.
+
+    Scans open windows across both pywinauto backends, deduplicates by handle,
+    and requires exactly one normalized-title match. Zero or multiple matches
+    raise ``KakaoSendError`` with candidate titles in diagnostics. This path
+    never falls back to an arbitrary message-input window.
+    """
+
+    target = _normalize_kakao_title(chat_name)
+    if not target:
+        raise KakaoSendError("KAKAO_CHAT_NAME is required before sending")
+
+    windows = _list_kakao_windows()
+    candidates: list[tuple[str, object]] = []
+    rejected: list[str] = []
+    for window in windows:
+        title = _window_title(window)
+        if _normalize_kakao_title(title) == target:
+            candidates.append((title, window))
+        else:
+            rejected.append(title)
+
+    _record_kakao_diagnostic(
+        f"strict_candidates={[title for title, _ in candidates]}, rejected={rejected}"
+    )
+
+    if not candidates:
+        raise KakaoSendError(
+            f"카카오톡 채팅방 '{chat_name}' 창을 찾지 못했습니다. "
+            "카카오톡에서 해당 채팅방을 더블클릭해 별도 창으로 열어둔 뒤 다시 실행하세요."
+        )
+    if len(candidates) > 1:
+        raise KakaoUnsafeSelectionError(
+            f"카카오톡 채팅방 '{chat_name}' 와 같은 이름의 창이 여러 개 열려 있습니다. "
+            "잘못된 채팅방으로 전송하지 않도록 중복 창을 닫고 다시 실행하세요."
+        )
+
+    window = candidates[0][1]
+    _record_kakao_diagnostic(f"strict_selected={_window_debug_summary(window)}")
+    _bring_window_to_front(window)
+    return window
+
+
+def _list_kakao_windows() -> list[object]:
+    windows: list[object] = []
+    seen_handles: set[int] = set()
+    scanned_any_backend = False
+    for backend in ("uia", "win32"):
         try:
-            _record_kakao_diagnostic("lookup=message_input_window")
-            return _focus_kakao_message_window()
-        except KakaoSendError as exc:
-            raise KakaoSendError(
-                f"카카오톡 채팅방 '{chat_name}' 창을 자동으로 열지 못했습니다. "
-                "카카오톡 메인창에서 해당 채팅방이 검색되는지 확인하세요."
-            ) from exc
+            backend_windows = _desktop_windows(backend)
+        except Exception:
+            _record_kakao_diagnostic(f"scan_backend={backend}, error=window_list_failed")
+            continue
+        scanned_any_backend = True
+        _record_kakao_diagnostic(f"scan_backend={backend}, windows={len(backend_windows)}")
+        for window in backend_windows:
+            if not _is_kakao_chat_window(window):
+                continue
+            handle = _window_handle(window)
+            if isinstance(handle, int):
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            windows.append(window)
+
+    if not scanned_any_backend:
+        # Neither backend could be scanned (e.g. pywinauto missing). Returning an
+        # empty list would let the caller fall through to main-window search,
+        # which can paste/Enter into whatever app is currently in foreground.
+        raise KakaoUnsafeSelectionError(
+            "카카오톡 창 목록을 조회하지 못했습니다. "
+            "pywinauto 설치와 카카오톡 PC 앱 실행 상태를 확인하세요."
+        )
+    return windows
 
 
-def _remember_kakao_chat_window(window: object) -> None:
-    global _LAST_KAKAO_CHAT_HANDLE
+def _desktop_windows(backend: str) -> list[object]:
+    from pywinauto import Desktop
+
+    return list(Desktop(backend=backend).windows())
+
+
+def _is_kakao_chat_window(window: object) -> bool:
+    """A KakaoTalk window that can be a chat room, not the main contact window."""
+
+    if not _is_kakao_window(window):
+        return False
+    title = _window_title(window)
+    return bool(title) and title not in {"카카오톡", "KakaoTalk"}
+
+
+def _normalize_kakao_title(title: str) -> str:
+    return (title or "").strip()
+
+
+def _remember_kakao_chat_window(chat_name: str, window: object) -> None:
     handle = _window_handle(window)
-    if isinstance(handle, int) and handle > 0:
-        _LAST_KAKAO_CHAT_HANDLE = handle
-        _record_kakao_diagnostic(f"remembered_handle={handle}")
+    key = _normalize_kakao_title(chat_name)
+    if key and isinstance(handle, int) and handle > 0:
+        _LAST_KAKAO_CHAT_HANDLE_BY_CHAT[key] = handle
+        _record_kakao_diagnostic(f"remembered_handle chat={key!r} handle={handle}")
 
 
 def _focus_last_kakao_chat_window(chat_name: str) -> object:
-    if _LAST_KAKAO_CHAT_HANDLE is None:
+    key = _normalize_kakao_title(chat_name)
+    handle = _LAST_KAKAO_CHAT_HANDLE_BY_CHAT.get(key)
+    if handle is None:
         raise KakaoSendError("remembered KakaoTalk chat window was not found")
 
     for backend in ("uia", "win32"):
-        window = _window_from_handle(_LAST_KAKAO_CHAT_HANDLE, backend)
+        window = _window_from_handle(handle, backend)
         if window is None:
             continue
         try:
             if not _is_kakao_window(window):
                 continue
-            if not _window_matches_kakao_chat_name(window, chat_name):
+            if _normalize_kakao_title(_window_title(window)) != key:
                 continue
             _bring_window_to_front(window)
         except Exception:
@@ -381,11 +486,6 @@ def _window_from_handle(handle: int, backend: str) -> object | None:
         return Desktop(backend=backend).window(handle=handle)
     except Exception:
         return None
-
-
-def _window_matches_kakao_chat_name(window: object, chat_name: str) -> bool:
-    title = _window_title(window)
-    return bool(chat_name and (title == chat_name or chat_name in title))
 
 
 def _focus_kakao_message_window() -> object:
@@ -550,7 +650,11 @@ def _open_kakao_chat_window_from_main(chat_name: str) -> None:
     except ImportError as exc:
         raise KakaoSendError("pyautogui and pyperclip are required for KakaoTalk sending") from exc
 
-    _focus_kakaotalk_window()
+    # Ctrl+F search-then-Enter only opens a room when it runs against the
+    # KakaoTalk main contact-list window. Focusing an arbitrary Kakao window
+    # (e.g. an already-open chat room) would run an in-room search instead and
+    # could leave the wrong window in front, so require the real main window.
+    _focus_kakao_main_window()
     pyperclip.copy(chat_name)
     pyautogui.hotkey("ctrl", "f")
     time.sleep(0.2)
@@ -559,25 +663,6 @@ def _open_kakao_chat_window_from_main(chat_name: str) -> None:
     time.sleep(0.5)
     pyautogui.press("enter")
     time.sleep(1.0)
-
-
-def _focus_kakao_chat_window(chat_name: str) -> object:
-    try:
-        from pywinauto import Desktop
-    except ImportError as exc:
-        raise KakaoSendError("pywinauto is required for KakaoTalk sending") from exc
-
-    for window in Desktop(backend="uia").windows():
-        title = _window_title(window)
-        if title == chat_name or chat_name in title:
-            _record_kakao_diagnostic(f"matched_chat_title={_window_debug_summary(window)}")
-            _bring_window_to_front(window)
-            return window
-
-    raise KakaoSendError(
-        f"카카오톡 채팅방 '{chat_name}' 창을 찾지 못했습니다. "
-        "카카오톡에서 해당 채팅방을 더블클릭해 별도 창으로 열어둔 뒤 다시 실행하세요."
-    )
 
 
 def _focus_chat_message_input(window: object) -> object:
@@ -740,6 +825,69 @@ def _focus_kakaotalk_window() -> object:
         except Exception:
             pass
     return _focus_kakao_window_candidates(windows)
+
+
+def _focus_kakao_main_window() -> object:
+    """Focus the KakaoTalk main contact-list window, or fail safely.
+
+    The main-window search fallback drives Ctrl+F over whatever window is in
+    front, which only opens a room from the main contact list. Selecting an
+    arbitrary Kakao window (a chat room, a settings dialog) could trigger an
+    in-room search or focus an unrelated window. So scan for windows whose
+    normalized title is exactly the KakaoTalk main title and require one.
+    """
+
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise KakaoSendError("pywinauto is required for KakaoTalk sending") from exc
+
+    candidates: list[object] = []
+    seen_handles: set[int] = set()
+    scanned_any_backend = False
+    for backend in ("uia", "win32"):
+        try:
+            windows = Desktop(backend=backend).windows()
+        except Exception:
+            _record_kakao_diagnostic(f"main_scan_backend={backend}, error=window_list_failed")
+            continue
+        scanned_any_backend = True
+        for window in windows:
+            if not _is_kakao_main_window(window):
+                continue
+            handle = _window_handle(window)
+            if isinstance(handle, int):
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            candidates.append(window)
+
+    if not scanned_any_backend:
+        raise KakaoUnsafeSelectionError(
+            "카카오톡 창 목록을 조회하지 못했습니다. "
+            "pywinauto 설치와 카카오톡 PC 앱 실행 상태를 확인하세요."
+        )
+
+    _record_kakao_diagnostic(
+        f"main_candidates={[_window_title(window) for window in candidates]}"
+    )
+    if not candidates:
+        raise KakaoSendError(
+            "카카오톡 메인 창을 찾지 못했습니다. "
+            "대상 채팅방을 별도 창으로 열어두거나 카카오톡 메인 창을 띄운 뒤 다시 실행하세요."
+        )
+
+    window = candidates[0]
+    _bring_window_to_front(window)
+    return window
+
+
+def _is_kakao_main_window(window: object) -> bool:
+    """The KakaoTalk main contact-list window, not a chat room or dialog."""
+
+    if not _is_kakao_window(window):
+        return False
+    return _normalize_kakao_title(_window_title(window)) in {"카카오톡", "KakaoTalk"}
 
 
 def _bring_window_to_front(window: object) -> None:

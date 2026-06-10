@@ -375,19 +375,55 @@ def test_click_baemin_refresh_button_clicks_real_refresh_button():
     assert page.clicked_button_name == "새로고침"
 
 
+def _consume_coroutine_then(value):
+    def runner(coro, *_args, **_kwargs):
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return value
+
+    return runner
+
+
+def test_fetch_via_cdp_rejects_non_local_address_before_connecting(tmp_path, monkeypatch):
+    from rider_crawl.browser_launcher import BrowserLaunchError
+
+    config = _config(tmp_path, browser_mode="cdp", cdp_url="http://10.0.0.5:9222")
+
+    connect_attempts = []
+    monkeypatch.setattr(
+        crawler.asyncio,
+        "run",
+        lambda *_args, **_kwargs: connect_attempts.append(True),
+    )
+
+    with pytest.raises(BrowserLaunchError, match="로컬 주소"):
+        crawler.fetch_page_html_via_crawl4ai_cdp(config)
+    assert connect_attempts == []
+
+
+def test_fetch_via_cdp_allows_localhost_address(tmp_path, monkeypatch):
+    config = _config(tmp_path, browser_mode="cdp", cdp_url="http://localhost:9222")
+
+    monkeypatch.setattr(crawler.asyncio, "run", _consume_coroutine_then("<html></html>"))
+
+    assert crawler.fetch_page_html_via_crawl4ai_cdp(config) == "<html></html>"
+
+
 def _config(
     tmp_path,
     *,
     browser_mode: str,
     baemin_center_name: str = "",
     baemin_center_id: str = "",
+    cdp_url: str = "http://127.0.0.1:9222",
 ) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
         baemin_center_name=baemin_center_name,
         baemin_center_id=baemin_center_id,
         browser_mode=browser_mode,
-        cdp_url="http://127.0.0.1:9222",
+        cdp_url=cdp_url,
         browser_user_data_dir=tmp_path / "browser",
         headless=False,
         kakao_chat_name="",
