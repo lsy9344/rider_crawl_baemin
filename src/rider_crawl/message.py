@@ -52,10 +52,10 @@ def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, so
         [
             f"⏰ {snapshot.updated_at} 기준",
             "",
-            f"오전오후피크 : {_format_count(snapshot.lunch_peak_count)}건",
-            f"오후논피크 : {_format_count(snapshot.afternoon_non_peak_count)}건",
-            f"저녁피크 : {_format_count(snapshot.dinner_peak_count)}건",
-            f"저녁논피크 : {_format_count(snapshot.dinner_non_peak_count)}건",
+            f"오전오후피크 : {_format_baemin_period(snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate)}",
+            f"오후논피크 : {_format_baemin_period(snapshot.afternoon_non_peak_count, snapshot.afternoon_non_peak_goal, snapshot.afternoon_non_peak_rate)}",
+            f"저녁피크 : {_format_baemin_period(snapshot.dinner_peak_count, snapshot.dinner_peak_goal, snapshot.dinner_peak_rate)}",
+            f"저녁논피크 : {_format_baemin_period(snapshot.dinner_non_peak_count, snapshot.dinner_non_peak_goal, snapshot.dinner_non_peak_rate)}",
         ]
     )
     rate_lines = _rate_line("거절율", snapshot.reject_rate)
@@ -106,6 +106,13 @@ def _format_count(value: float | int) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+def _format_baemin_period(done: float | int, goal: float | int, rate: float | int | None) -> str:
+    if goal or rate is not None:
+        shown_rate = 0 if rate is None else rate
+        return f"{_format_count(done)}건/{_format_count(goal)}건[{_format_count(shown_rate)}%]"
+    return f"{_format_count(done)}건"
 
 
 def _rate_line(label: str, value: float | None) -> list[str]:

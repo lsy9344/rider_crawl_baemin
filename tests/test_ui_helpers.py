@@ -1200,6 +1200,40 @@ def test_cdp_unavailable_waits_full_interval_and_skips_error_log(tmp_path, monke
     )
 
 
+def test_browser_action_required_stops_tab_and_skips_error_log(tmp_path, monkeypatch):
+    from rider_crawl.browser_launcher import BrowserActionRequiredError
+
+    ui = RiderBotUi.__new__(RiderBotUi)
+    ui.messages = queue.Queue()
+    ui.crawl_locks_by_tab = {}
+    ui.telegram_send_locks = {}
+    settings = _settings(tmp_path)
+
+    def failing_run_once(_config, **_kwargs):
+        raise BrowserActionRequiredError("쿠팡이츠 로그인이 만료되었습니다. 다시 로그인하세요.")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", failing_run_once)
+
+    log_writes = []
+    monkeypatch.setattr(
+        ui,
+        "_write_run_error_log",
+        lambda *args, **kwargs: log_writes.append(args),
+    )
+
+    stop_event = threading.Event()
+    result = ui._run_once_background(0, settings, stop_event)
+
+    assert result is False
+    assert stop_event.is_set()
+    assert log_writes == []
+    assert any(
+        kind == "error" and "다시 로그인" in payload
+        for kind, payload in list(ui.messages.queue)
+    )
+    assert ("status", "크롤링1 중지됨") in list(ui.messages.queue)
+
+
 def test_kakao_send_uses_common_lock(tmp_path, monkeypatch):
     ui = RiderBotUi.__new__(RiderBotUi)
     ui.messages = queue.Queue()

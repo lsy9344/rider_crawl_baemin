@@ -11,7 +11,7 @@ from rider_crawl.browser_launcher import (
     prepare_chrome,
     prepare_mac_chrome,
 )
-from rider_crawl.config import AppConfig
+from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
 
 
 def test_build_mac_chrome_command_uses_cdp_port_and_dedicated_profile(tmp_path):
@@ -25,10 +25,7 @@ def test_build_mac_chrome_command_uses_cdp_port_and_dedicated_profile(tmp_path):
     assert "--remote-debugging-port=9222" in command
     assert user_data_arg == f"--user-data-dir={(tmp_path / 'browser').resolve()}"
     assert Path(user_data_arg.removeprefix("--user-data-dir=")).is_absolute()
-    assert (
-        command[-1]
-        == "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
-    )
+    assert command[-1] == DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
 
 
 def test_build_mac_chrome_command_resolves_relative_default_profile_path():
@@ -243,7 +240,7 @@ def test_prepare_chrome_message_names_coupang_platform(tmp_path):
 
 def _config(tmp_path: Path) -> AppConfig:
     return AppConfig(
-        coupang_eats_url="https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
+        coupang_eats_url=DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
         baemin_center_name="",
         baemin_center_id="",
         browser_mode="cdp",
@@ -262,7 +259,7 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _config_with_relative_log_dir() -> AppConfig:
     return AppConfig(
-        coupang_eats_url="https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
+        coupang_eats_url=DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
         baemin_center_name="",
         baemin_center_id="",
         browser_mode="cdp",

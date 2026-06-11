@@ -27,6 +27,12 @@ class CdpUnavailableError(RuntimeError):
     pass
 
 
+class BrowserActionRequiredError(RuntimeError):
+    """Browser state requires manual operator action before crawling can continue."""
+
+    pass
+
+
 CommandRunner = Callable[[list[str], bool], object]
 CdpProbe = Callable[[str], object]
 

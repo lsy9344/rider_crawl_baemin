@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 
+from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
 
 
@@ -46,10 +47,7 @@ def test_ui_settings_load_infers_coupang_from_legacy_coupang_url(tmp_path):
 def test_ui_settings_defaults_are_safe_for_first_run():
     settings = UiSettings.defaults()
 
-    assert (
-        settings.performance_url
-        == "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
-    )
+    assert settings.performance_url == DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
     assert settings.peak_dashboard_url == ""
     assert settings.browser_mode == "cdp"
     assert settings.cdp_url == "http://127.0.0.1:9222"

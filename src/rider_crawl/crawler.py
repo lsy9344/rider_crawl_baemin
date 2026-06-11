@@ -8,9 +8,9 @@ from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
-from .config import AppConfig
+from .config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
 from .models import CurrentScreenSnapshot
-from .parser import parse_current_screen_html
+from .parser import parse_achievement_report_text, parse_current_screen_html
 
 
 def crawl_current_screen(
@@ -18,10 +18,16 @@ def crawl_current_screen(
     *,
     fetch_html: Callable[[AppConfig], str] | None = None,
 ) -> CurrentScreenSnapshot:
-    html = (fetch_html or fetch_page_html)(config)
+    content = (fetch_html or fetch_page_html)(config)
+    if _looks_like_baemin_achievement_report(content):
+        return parse_achievement_report_text(
+            content,
+            center_id=config.baemin_center_id,
+            center_name=config.baemin_center_name,
+        )
     if fetch_html is not None:
-        _validate_baemin_center_in_html(config, html, require_evidence=True)
-    return parse_current_screen_html(html)
+        _validate_baemin_center_in_html(config, content, require_evidence=True)
+    return parse_current_screen_html(content)
 
 
 def fetch_page_html(config: AppConfig) -> str:
@@ -31,7 +37,8 @@ def fetch_page_html(config: AppConfig) -> str:
         html = fetch_page_html_via_persistent_context(config)
     else:
         raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
-    _validate_baemin_center_in_html(config, html, require_evidence=True)
+    if not _looks_like_baemin_achievement_report(html):
+        _validate_baemin_center_in_html(config, html, require_evidence=True)
     return html
 
 
@@ -62,13 +69,13 @@ def fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
             raise CdpUnavailableError(
                 f"Chrome CDP 연결 실패: {config.cdp_url}\n"
                 "'준비하기'로 이 탭의 Chrome을 --remote-debugging-port 옵션과 전용 "
-                "프로필로 먼저 실행하고, 배민 배달현황 페이지에 로그인해 두세요.\n"
+                "프로필로 먼저 실행하고, 배민 달성현황 페이지에 로그인해 두세요.\n"
                 f"상세 오류: {type(exc).__name__}: {exc}"
             ) from exc
         raise RuntimeError(
-            f"Chrome CDP 연결 또는 배민 배달현황 수집 실패: {config.cdp_url}\n"
+            f"Chrome CDP 연결 또는 배민 달성현황 수집 실패: {config.cdp_url}\n"
             "Chrome을 --remote-debugging-port=9222 옵션과 전용 프로필로 실행하고, "
-            "배민 배달현황 페이지에 로그인된 상태인지 확인하세요.\n"
+            "배민 달성현황 페이지에 로그인된 상태인지 확인하세요.\n"
             f"상세 오류: {type(exc).__name__}: {exc}"
         ) from exc
 
@@ -103,12 +110,10 @@ async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
             await page.wait_for_load_state("networkidle", timeout=10_000)
         except PlaywrightTimeoutError:
             pass
-        await _click_baemin_refresh_button(page)
-        await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
-        html = await _collect_baemin_delivery_history_pages(page, config)
+        html = await _collect_baemin_achievement_report_text(page, config)
 
     if not html:
-        raise RuntimeError("배민 배달현황 HTML을 가져오지 못했습니다")
+        raise RuntimeError("배민 달성현황 텍스트를 가져오지 못했습니다")
     return str(html)
 
 
@@ -125,7 +130,9 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
         browser = await playwright.chromium.connect_over_cdp(config.cdp_url)
         # CDP 대상은 사용자가 켜 둔 Chrome이므로 여기서도 browser.close()를 호출하지 않는다.
         pages = _browser_pages(browser)
-        page = _select_page_by_url(pages, config.coupang_eats_url)
+        page = _select_page_by_url(pages, _baemin_report_url(config))
+        if page is None:
+            page = _select_page_by_url(pages, config.coupang_eats_url)
         if page is None:
             page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
         if page is None:
@@ -133,7 +140,7 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
             page = await context.new_page()
 
         await page.goto(
-            config.coupang_eats_url,
+            _baemin_report_url(config),
             wait_until="domcontentloaded",
             timeout=config.page_timeout_seconds,
         )
@@ -150,7 +157,10 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
 
 async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) -> Any:
     pages = _browser_pages(browser)
-    page = _select_page_by_url(pages, config.coupang_eats_url)
+    report_url = _baemin_report_url(config)
+    page = _select_page_by_url(pages, report_url)
+    if page is None:
+        page = _select_page_by_url(pages, config.coupang_eats_url)
     if page is None:
         page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
     if page is None:
@@ -161,13 +171,13 @@ async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) ->
         await _goto_page(page, _BAEMIN_CENTER_CHANGE_URL, config)
         await _select_baemin_center(page, config)
 
-    await _goto_page(page, config.coupang_eats_url, config)
+    await _goto_page(page, report_url, config)
     if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
         await _select_baemin_center(page, config)
-        await _goto_page(page, config.coupang_eats_url, config)
+        await _goto_page(page, report_url, config)
 
-    if not _url_matches(str(page.url), config.coupang_eats_url):
-        await _goto_page(page, config.coupang_eats_url, config)
+    if not _url_matches(str(page.url), report_url):
+        await _goto_page(page, report_url, config)
 
     return page
 
@@ -210,6 +220,55 @@ async def _collect_baemin_delivery_history_pages(page: Any, config: AppConfig) -
         timeout=config.page_timeout_seconds,
     )
     return "\n".join(html_parts)
+
+
+async def _collect_baemin_achievement_report_text(page: Any, config: AppConfig) -> str:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (config.page_timeout_seconds / 1000)
+    expected_id = config.baemin_center_id.strip().upper()
+    last_report_text = ""
+
+    while loop.time() < deadline:
+        await _scroll_baemin_report(page)
+        for text in await _baemin_report_text_candidates(page):
+            if "주간 배달 현황" not in text:
+                continue
+            last_report_text = text
+            if not expected_id or expected_id in text.upper():
+                return text
+        await page.wait_for_timeout(1_000)
+
+    if last_report_text:
+        raise RuntimeError(
+            "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
+            f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
+        )
+    raise RuntimeError("배민 달성현황의 '주간 배달 현황' 영역을 찾지 못했습니다")
+
+
+async def _baemin_report_text_candidates(page: Any) -> list[str]:
+    candidates = []
+    frames = list(getattr(page, "frames", []) or [])
+    if page not in frames:
+        frames.append(page)
+
+    for frame in frames:
+        try:
+            text = await frame.locator("body").inner_text(timeout=2_000)
+        except Exception:
+            continue
+        normalized = _normalize_report_text(text)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+async def _scroll_baemin_report(page: Any) -> None:
+    for frame in list(getattr(page, "frames", []) or [page]):
+        try:
+            await frame.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            continue
 
 
 async def _delivery_history_total_count(page: Any) -> int:
@@ -531,7 +590,7 @@ def fetch_page_html_via_persistent_context(config: AppConfig) -> str:
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(
-                config.coupang_eats_url,
+                _baemin_report_url(config),
                 wait_until="domcontentloaded",
                 timeout=config.page_timeout_seconds,
             )
@@ -540,11 +599,59 @@ def fetch_page_html_via_persistent_context(config: AppConfig) -> str:
             except PlaywrightTimeoutError:
                 pass
 
-            _click_baemin_refresh_button_sync(page)
-            page.get_by_text("배달현황").wait_for(timeout=config.page_timeout_seconds)
-            return page.content()
+            return _collect_baemin_achievement_report_text_sync(page, config)
         finally:
             context.close()
+
+
+def _collect_baemin_achievement_report_text_sync(page: Any, config: AppConfig) -> str:
+    import time
+
+    deadline = time.monotonic() + (config.page_timeout_seconds / 1000)
+    expected_id = config.baemin_center_id.strip().upper()
+    last_report_text = ""
+
+    while time.monotonic() < deadline:
+        _scroll_baemin_report_sync(page)
+        for text in _baemin_report_text_candidates_sync(page):
+            if "주간 배달 현황" not in text:
+                continue
+            last_report_text = text
+            if not expected_id or expected_id in text.upper():
+                return text
+        page.wait_for_timeout(1_000)
+
+    if last_report_text:
+        raise RuntimeError(
+            "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
+            f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
+        )
+    raise RuntimeError("배민 달성현황의 '주간 배달 현황' 영역을 찾지 못했습니다")
+
+
+def _baemin_report_text_candidates_sync(page: Any) -> list[str]:
+    candidates = []
+    frames = list(getattr(page, "frames", []) or [])
+    if page not in frames:
+        frames.append(page)
+
+    for frame in frames:
+        try:
+            text = frame.locator("body").inner_text(timeout=2_000)
+        except Exception:
+            continue
+        normalized = _normalize_report_text(text)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _scroll_baemin_report_sync(page: Any) -> None:
+    for frame in list(getattr(page, "frames", []) or [page]):
+        try:
+            frame.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            continue
 
 
 def _browser_pages(browser: Any) -> list[Any]:
@@ -614,6 +721,31 @@ def _url_matches(page_url: str, target_url: str) -> bool:
         and page.netloc == target.netloc
         and _normalize_path(page.path) == _normalize_path(target.path)
     )
+
+
+def _baemin_report_url(config: AppConfig) -> str:
+    configured = config.coupang_eats_url.strip()
+    if not configured:
+        return DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
+
+    parsed = urlsplit(configured)
+    if parsed.netloc == "deliverycenter.baemin.com" and _normalize_path(parsed.path) == "/delivery/report":
+        return configured
+    return DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
+
+
+def _looks_like_baemin_achievement_report(content: str) -> bool:
+    text = content if "<" not in content else _normalize_visible_text(content)
+    if "주간 배달 현황" not in text:
+        return False
+    if any(label in text for label in ("아침점심", "오후논피", "저녁피크", "심야논피")):
+        return True
+    period_pattern = r"\d+(?:,\d{3})*\s*/\s*\d+(?:,\d{3})*\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)"
+    return len(re.findall(period_pattern, text)) >= 4
+
+
+def _normalize_report_text(value: str) -> str:
+    return "\n".join(line.strip() for line in value.splitlines() if line.strip())
 
 
 def _normalize_path(path: str) -> str:

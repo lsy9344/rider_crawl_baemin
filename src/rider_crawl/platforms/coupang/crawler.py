@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlsplit
 
-from rider_crawl.browser_launcher import CdpUnavailableError, ensure_local_cdp_address
+from rider_crawl.browser_launcher import BrowserActionRequiredError, CdpUnavailableError, ensure_local_cdp_address
 from rider_crawl.config import AppConfig
 from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 
@@ -421,13 +421,10 @@ def _fetch_target_page_content(
     load_timeout_errors: tuple[type[BaseException], ...] = (),
 ) -> str:
     target_url = target_url or config.coupang_eats_url
-    page = _select_page_by_url(_browser_pages(browser), target_url)
+    pages = _browser_pages(browser)
+    page = _select_page_by_url(pages, target_url)
     if page is None:
-        contexts = list(browser.contexts)
-        if not contexts:
-            raise RuntimeError("Chrome CDP 연결에서 사용할 브라우저 컨텍스트를 찾지 못했습니다.")
-        page = contexts[0].new_page()
-        page.goto(target_url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+        _raise_coupang_page_action_required(pages, target_url)
     try:
         page.wait_for_load_state("networkidle", timeout=10_000)
     except load_timeout_errors:
@@ -451,6 +448,32 @@ def _select_page_by_url(pages: Iterable[Any], target_url: str) -> Any | None:
         return None
     path_matches = [page for page in pages_list if _url_matches(str(page.url), target_url)]
     return path_matches[0] if len(path_matches) == 1 else None
+
+
+def _raise_coupang_page_action_required(pages: list[Any], target_url: str) -> None:
+    login_page = _login_required_page(pages)
+    if login_page is not None:
+        raise BrowserActionRequiredError(_coupang_login_required_message(target_url))
+
+    exact_matches = [page for page in pages if _url_matches_exact(str(page.url), target_url)]
+    path_matches = [page for page in pages if _url_matches(str(page.url), target_url)]
+    if len(exact_matches) > 1 or (not exact_matches and len(path_matches) > 1):
+        raise BrowserActionRequiredError(
+            "Chrome CDP에서 쿠팡이츠 대상 탭이 여러 개 열려 있습니다.\n"
+            "중복된 rider-performance 또는 peak-dashboard 탭을 하나만 남긴 뒤 다시 실행하세요."
+        )
+
+    raise BrowserActionRequiredError(
+        "열려 있는 Chrome 탭에서 쿠팡이츠 대상 페이지를 찾지 못했습니다.\n"
+        f"{target_url} 페이지를 로그인된 상태로 열어두세요."
+    )
+
+
+def _login_required_page(pages: Iterable[Any]) -> Any | None:
+    for page in pages:
+        if _page_looks_like_coupang_login_required(page):
+            return page
+    return None
 
 
 def _url_matches_exact(page_url: str, target_url: str) -> bool:
@@ -503,8 +526,53 @@ def _wait_for_target_page_ready(
     try:
         page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
     except timeout_errors as exc:
+        if _page_looks_like_coupang_login_required(page):
+            raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
         seconds = max(1, config.page_timeout_seconds // 1000)
         raise RuntimeError(
             f"{label}가 {seconds}초 안에 준비되지 않았습니다. "
             "Chrome에서 쿠팡이츠 로그인과 화면 로딩을 확인하세요."
         ) from exc
+
+
+def _page_looks_like_coupang_login_required(page: Any) -> bool:
+    url = str(getattr(page, "url", "")).casefold()
+    if _url_looks_like_coupang_login_required(url):
+        return True
+
+    try:
+        html = str(page.content())
+    except Exception:
+        return False
+    return _html_looks_like_coupang_login_required(html)
+
+
+def _url_looks_like_coupang_login_required(url: str) -> bool:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold()
+    path = parsed.path.casefold()
+    if host == "xauth.coupang.com" and "/auth/realms/eats-partner" in path:
+        return True
+    return host == "partner.coupangeats.com" and any(token in path for token in ("login", "signin", "sign-in", "auth"))
+
+
+def _html_looks_like_coupang_login_required(html: str) -> bool:
+    text = re.sub(r"\s+", " ", html or "").casefold()
+    strong_text_signals = ("세션이 만료", "다시 로그인", "로그인이 필요", "sign in to eats-partner")
+    if any(signal in text for signal in strong_text_signals):
+        return True
+
+    has_vendor_identity = "vendor portal" in text or "vendor-portal" in text
+    has_xauth_form = "login-actions/authenticate" in text and "realms/eats-partner" in text
+    has_login_fields = "username" in text and "password" in text
+    has_visible_login_controls = "아이디 입력" in text and "비밀번호 입력" in text and "로그인" in text
+    return has_vendor_identity and ((has_xauth_form and has_login_fields) or has_visible_login_controls)
+
+
+def _coupang_login_required_message(target_url: str) -> str:
+    return (
+        "쿠팡이츠 로그인이 만료되었거나 로그인 화면으로 이동했습니다.\n"
+        "Chrome에서 쿠팡이츠에 다시 로그인한 뒤 rider-performance와 peak-dashboard "
+        "페이지를 각각 로그인된 상태로 열어두세요.\n"
+        f"대상 URL: {target_url}"
+    )

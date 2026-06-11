@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from .models import CurrentScreenSnapshot
 
@@ -68,6 +68,42 @@ class BaeminDeliveryHistoryTable:
     headers: list[str]
     summary: dict[str, str] | None
     riders: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class _AchievementPeriod:
+    done: int
+    goal: int
+    rate: int
+
+
+@dataclass(frozen=True)
+class _AchievementRow:
+    center_label: str
+    date_label: str
+    day_label: str
+    lunch_peak: _AchievementPeriod
+    afternoon_non_peak: _AchievementPeriod
+    dinner_peak: _AchievementPeriod
+    dinner_non_peak: _AchievementPeriod
+    acceptance_rate: float
+
+    @property
+    def row_date(self) -> date:
+        year, month, day = (int(part) for part in self.date_label.split("-"))
+        return date(2000 + year, month, day)
+
+    @property
+    def has_delivery_count(self) -> bool:
+        return any(
+            period.done > 0
+            for period in (
+                self.lunch_peak,
+                self.afternoon_non_peak,
+                self.dinner_peak,
+                self.dinner_non_peak,
+            )
+        )
 
 
 class _VisibleTextParser(HTMLParser):
@@ -142,6 +178,54 @@ def parse_current_screen_html(html: str) -> CurrentScreenSnapshot:
         return parse_current_screen_text(html_to_text(html))
 
     return baemin_delivery_history_to_snapshot(table)
+
+
+def parse_achievement_report_text(
+    text: str,
+    *,
+    center_id: str,
+    center_name: str,
+    now: datetime | None = None,
+) -> CurrentScreenSnapshot:
+    rows = _parse_achievement_rows(text, center_id=center_id)
+    if not rows:
+        raise MissingPerformanceDataError("배민 달성현황에서 설정 센터 행을 찾지 못했습니다")
+
+    current_time = now or datetime.now()
+    row = _select_achievement_row(rows, today=current_time.date())
+    reject_rate = max(0, min(100, round(100 - row.acceptance_rate)))
+
+    return CurrentScreenSnapshot(
+        center_name=center_name.strip() or row.center_label,
+        date_label=row.date_label,
+        shift_label="주간 배달 현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at=current_time.strftime("%H:%M"),
+        available_current=0,
+        available_total=0,
+        waiting_count=0,
+        online_riders=0,
+        rejected_ignored_count=0,
+        cancelled_count=0,
+        completed_count=0,
+        sequence_violation_count=0,
+        lunch_peak_count=row.lunch_peak.done,
+        lunch_peak_goal=row.lunch_peak.goal,
+        lunch_peak_rate=row.lunch_peak.rate,
+        afternoon_non_peak_count=row.afternoon_non_peak.done,
+        afternoon_non_peak_goal=row.afternoon_non_peak.goal,
+        afternoon_non_peak_rate=row.afternoon_non_peak.rate,
+        dinner_peak_count=row.dinner_peak.done,
+        dinner_peak_goal=row.dinner_peak.goal,
+        dinner_peak_rate=row.dinner_peak.rate,
+        dinner_non_peak_count=row.dinner_non_peak.done,
+        dinner_non_peak_goal=row.dinner_non_peak.goal,
+        dinner_non_peak_rate=row.dinner_non_peak.rate,
+        non_peak_count=row.afternoon_non_peak.done + row.dinner_non_peak.done,
+        active_riders=0,
+        reject_rate=reject_rate,
+    )
 
 
 def parse_baemin_delivery_history_html(html: str) -> BaeminDeliveryHistoryTable:
@@ -259,6 +343,76 @@ def parse_pair(raw: str) -> tuple[int, int]:
     if len(numbers) < 2:
         raise ValueError(f"pair text needs two numbers: {raw!r}")
     return int(numbers[0]), int(numbers[1])
+
+
+def _parse_achievement_rows(text: str, *, center_id: str) -> list[_AchievementRow]:
+    expected_id = center_id.strip().upper()
+    if not expected_id:
+        raise MissingPerformanceDataError("배민 달성현황을 읽으려면 센터 ID가 필요합니다")
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    rows: list[_AchievementRow] = []
+    for index, line in enumerate(lines):
+        if expected_id not in line.upper():
+            continue
+        candidate = lines[index : index + 8]
+        if len(candidate) < 8 or not _looks_like_achievement_date(candidate[1]):
+            continue
+        try:
+            rows.append(
+                _AchievementRow(
+                    center_label=candidate[0],
+                    date_label=candidate[1],
+                    day_label=candidate[2],
+                    lunch_peak=_parse_achievement_period(candidate[3]),
+                    afternoon_non_peak=_parse_achievement_period(candidate[4]),
+                    dinner_peak=_parse_achievement_period(candidate[5]),
+                    dinner_non_peak=_parse_achievement_period(candidate[6]),
+                    acceptance_rate=float(parse_count(candidate[7])),
+                )
+            )
+        except (MissingPerformanceDataError, ValueError):
+            continue
+    return rows
+
+
+def _select_achievement_row(rows: list[_AchievementRow], *, today: date) -> _AchievementRow:
+    today_rows = [row for row in rows if row.row_date == today]
+    completed_today = [row for row in today_rows if row.has_delivery_count]
+    if completed_today:
+        return completed_today[-1]
+
+    completed_rows = [row for row in rows if row.row_date <= today and row.has_delivery_count]
+    if completed_rows:
+        return max(completed_rows, key=lambda row: row.row_date)
+
+    if today_rows:
+        return today_rows[-1]
+
+    past_rows = [row for row in rows if row.row_date <= today]
+    if past_rows:
+        return max(past_rows, key=lambda row: row.row_date)
+
+    return max(rows, key=lambda row: row.row_date)
+
+
+def _parse_achievement_period(raw: str) -> _AchievementPeriod:
+    match = re.search(
+        r"(?P<done>\d+(?:,\d{3})*)\s*/\s*(?P<goal>\d+(?:,\d{3})*)\s*"
+        r"\(\s*(?P<rate>\d+(?:\.\d+)?)\s*%\s*\)",
+        raw,
+    )
+    if not match:
+        raise MissingPerformanceDataError(f"배민 달성현황 구간 값을 읽지 못했습니다: {raw!r}")
+    return _AchievementPeriod(
+        done=int(match.group("done").replace(",", "")),
+        goal=int(match.group("goal").replace(",", "")),
+        rate=round(float(match.group("rate"))),
+    )
+
+
+def _looks_like_achievement_date(raw: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}-\d{2}-\d{2}", raw.strip()))
 
 
 def _scrapling_text(html: str) -> str:

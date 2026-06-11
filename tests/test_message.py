@@ -69,3 +69,52 @@ def test_render_current_screen_message_omits_reject_rate_when_unavailable():
     message = render_current_screen_message(snapshot)
 
     assert "거절율" not in message
+
+
+def test_render_current_screen_message_includes_achievement_goals_when_available():
+    snapshot = CurrentScreenSnapshot(
+        center_name="표준서울마포B이츠앤홀딩스3",
+        date_label="26-06-10",
+        shift_label="주간 배달 현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at="00:37",
+        available_current=0,
+        available_total=0,
+        waiting_count=0,
+        online_riders=0,
+        rejected_ignored_count=0,
+        cancelled_count=0,
+        completed_count=0,
+        sequence_violation_count=0,
+        lunch_peak_count=323,
+        lunch_peak_goal=231,
+        lunch_peak_rate=100,
+        afternoon_non_peak_count=296,
+        afternoon_non_peak_goal=220,
+        afternoon_non_peak_rate=100,
+        dinner_peak_count=433,
+        dinner_peak_goal=330,
+        dinner_peak_rate=100,
+        dinner_non_peak_count=374,
+        dinner_non_peak_goal=319,
+        dinner_non_peak_rate=100,
+        non_peak_count=670,
+        active_riders=0,
+        reject_rate=12,
+    )
+
+    assert render_current_screen_message(snapshot, source_label="표준서울마포B이츠앤홀딩스3") == "\n".join(
+        [
+            "[실시간 실적봇]",
+            "[표준서울마포B이츠앤홀딩스3]",
+            "⏰ 00:37 기준",
+            "",
+            "오전오후피크 : 323건/231건[100%]",
+            "오후논피크 : 296건/220건[100%]",
+            "저녁피크 : 433건/330건[100%]",
+            "저녁논피크 : 374건/319건[100%]",
+            "",
+            "거절율 : 12%",
+        ]
+    )

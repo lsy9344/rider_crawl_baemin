@@ -11,6 +11,7 @@ DEFAULT_BAEMIN_DELIVERY_HISTORY_URL = (
     "https://deliverycenter.baemin.com/delivery/history?"
     "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
 )
+DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL = "https://deliverycenter.baemin.com/delivery/report"
 DEFAULT_COUPANG_RIDER_PERFORMANCE_URL = "https://partner.coupangeats.com/page/rider-performance"
 DEFAULT_COUPANG_PEAK_DASHBOARD_URL = "https://partner.coupangeats.com/page/peak-dashboard"
 DEFAULT_PLATFORM_NAME = "baemin"
@@ -167,7 +168,7 @@ def _primary_url_from_env(platform_name: str) -> str:
         return baemin_url
     # ``COUPANG_EATS_URL`` is kept as a legacy fallback only when no Baemin URL is
     # set, so old ``.env`` files keep working without overriding an explicit Baemin URL.
-    return os.getenv("COUPANG_EATS_URL", DEFAULT_BAEMIN_DELIVERY_HISTORY_URL)
+    return os.getenv("COUPANG_EATS_URL", DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL)
 
 
 # 배민 기본 센터명/ID. 배민 플랫폼에서만 기본값으로 쓰고, 쿠팡 플랫폼에서는 이

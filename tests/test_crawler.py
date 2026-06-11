@@ -64,6 +64,35 @@ def test_crawl_current_screen_parses_html_from_injected_fetcher(tmp_path):
     assert snapshot.active_riders == 5
 
 
+def test_crawl_current_screen_parses_achievement_report_text_from_injected_fetcher(tmp_path):
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+        ]
+    )
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+
+    snapshot = crawl_current_screen(config, fetch_html=lambda _config: text)
+
+    assert snapshot.lunch_peak_count == 323
+    assert snapshot.lunch_peak_goal == 231
+    assert snapshot.dinner_non_peak_count == 374
+    assert snapshot.reject_rate == 12
+
+
 def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
     config = _config(tmp_path, browser_mode="cdp")
 
@@ -382,7 +411,7 @@ def test_open_baemin_delivery_history_page_enforces_configured_center_before_his
 
     assert opened_page is page
     assert page.goto_urls[0] == crawler._BAEMIN_CENTER_CHANGE_URL
-    assert page.goto_urls[-1] == config.coupang_eats_url
+    assert page.goto_urls[-1] == crawler._baemin_report_url(config)
     assert selected == [(crawler._BAEMIN_CENTER_CHANGE_URL, "DP123")]
 
 
@@ -409,6 +438,35 @@ def test_click_baemin_refresh_button_clicks_real_refresh_button():
     asyncio.run(crawler._click_baemin_refresh_button(page))
 
     assert page.clicked_button_name == "새로고침"
+
+
+def test_collect_baemin_achievement_report_text_preserves_frame_line_breaks(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_id="DP2605181318",
+    )
+    frame = _FakeAsyncTextFrame(
+        "\n".join(
+            [
+                "주간 배달 현황",
+                "표준서울마포B - DP2605181318",
+                "26-06-10",
+                "수",
+                "323/231 (100%)",
+                "296/220 (100%)",
+                "433/330 (100%)",
+                "374/319 (100%)",
+                "88.18%",
+            ]
+        )
+    )
+    page = _FakeAsyncReportPage([frame])
+
+    text = asyncio.run(crawler._collect_baemin_achievement_report_text(page, config))
+
+    assert "\n26-06-10\n" in text
+    assert frame.scrolled is True
 
 
 def _consume_coroutine_then(value):
@@ -445,19 +503,15 @@ def test_crawl4ai_cdp_async_path_never_closes_user_browser(tmp_path, monkeypatch
         assert received_browser is browser
         return table_page
 
-    async def fake_refresh(_page):
-        return None
-
     async def fake_collect(_page, _config):
-        return "<html>collected</html>"
+        return "주간 배달 현황 collected"
 
     monkeypatch.setattr(crawler, "_open_baemin_delivery_history_page", fake_open)
-    monkeypatch.setattr(crawler, "_click_baemin_refresh_button", fake_refresh)
-    monkeypatch.setattr(crawler, "_collect_baemin_delivery_history_pages", fake_collect)
+    monkeypatch.setattr(crawler, "_collect_baemin_achievement_report_text", fake_collect)
 
     html = asyncio.run(crawler._fetch_page_html_via_crawl4ai_cdp(config))
 
-    assert html == "<html>collected</html>"
+    assert html == "주간 배달 현황 collected"
     assert browser.connected_with == config.cdp_url
     assert browser.close_calls == 0
 
@@ -679,6 +733,35 @@ class _FakeAsyncContentPage:
 
     async def content(self) -> str:
         return self._html
+
+
+class _FakeAsyncTextFrame:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.scrolled = False
+
+    async def evaluate(self, _script: str):
+        self.scrolled = True
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        return _FakeAsyncTextLocator(self.text)
+
+
+class _FakeAsyncTextLocator:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    async def inner_text(self, **_kwargs):
+        return self.text
+
+
+class _FakeAsyncReportPage:
+    def __init__(self, frames: list[_FakeAsyncTextFrame]) -> None:
+        self.frames = frames
+
+    async def wait_for_timeout(self, _timeout: int):
+        return None
 
 
 class _FakeAsyncCdpBrowser:

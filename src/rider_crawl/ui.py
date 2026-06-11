@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
-from .browser_launcher import BrowserLaunchError, CdpUnavailableError, prepare_chrome
+from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
@@ -254,7 +254,7 @@ class RiderBotUi:
 
         subtitle = ttk.Label(
             outer,
-            text="선택한 플랫폼(배민·쿠팡이츠)의 로그인된 배달현황 페이지를 읽고 선택한 채널로 텍스트 실적을 보냅니다.",
+            text="선택한 플랫폼(배민·쿠팡이츠)의 로그인된 실적 페이지를 읽고 선택한 채널로 텍스트 실적을 보냅니다.",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(4, 14))
 
@@ -293,7 +293,7 @@ class RiderBotUi:
 
     def _build_settings_fields(self, frame: ttk.Frame, tab_vars: dict[str, StringVar | BooleanVar]) -> None:
         rows = [
-            ("실적/배달현황 URL", "performance_url"),
+            ("실적/달성현황 URL", "performance_url"),
             ("보조 URL(쿠팡 피크 대시보드)", "peak_dashboard_url"),
             ("센터명(배민 센터명 / 쿠팡 기대 센터·상점명)", "baemin_center_name"),
             ("배민 센터 ID(쿠팡 미사용)", "baemin_center_id"),
@@ -386,7 +386,7 @@ class RiderBotUi:
             checklist,
             text=(
                 "1. 플랫폼을 배민 또는 쿠팡이츠로 선택하세요. 플랫폼별로 입력 항목이 다릅니다.\n"
-                "2. 배민은 로그인된 배달현황 페이지를, 쿠팡이츠는 rider-performance와 peak-dashboard를 열어두세요.\n"
+                "2. 배민은 로그인된 달성현황(beta) 페이지를, 쿠팡이츠는 rider-performance와 peak-dashboard를 열어두세요.\n"
                 "3. 쿠팡이츠 탭은 보조 URL(쿠팡 피크 대시보드)을 입력하세요. 센터명 칸은 배민은 센터명, "
                 "쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
@@ -492,7 +492,7 @@ class RiderBotUi:
         settings = self.settings_tabs[tab_index]
         if not settings.performance_url.strip():
             self.status_var.set("활성 탭 없음")
-            self._append_preview(f"[안내]\n크롤링{tab_index + 1} 배달현황 URL이 입력되지 않았습니다.\n")
+            self._append_preview(f"[안내]\n크롤링{tab_index + 1} 실적 URL이 입력되지 않았습니다.\n")
             return
 
         stop_event = threading.Event()
@@ -562,6 +562,14 @@ class RiderBotUi:
             # 알려, run_errors.log와 연결 시도가 폭주하던 문제를 함께 없앤다.
             self.messages.put(("error", f"{label} {exc}"))
             return True
+        except BrowserActionRequiredError as exc:
+            # 로그인 만료나 중복/누락된 CDP 탭처럼 사용자가 Chrome에서 조치해야 하는
+            # 상태다. 자동 복구되지 않으므로 이 탭의 반복 실행을 완전히 멈춘다.
+            self.messages.put(("error", f"{label} {exc}"))
+            if stop_event is not None:
+                stop_event.set()
+            self.messages.put(("status", f"{label} 중지됨"))
+            return False
         except TelegramSendError as exc:
             # Transient send failures (rate limit, brief network blip) retry soon
             # by returning False. But when the failure is ambiguous (the request

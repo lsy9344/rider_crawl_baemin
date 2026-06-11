@@ -5,7 +5,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_BAEMIN_CENTER_ID, DEFAULT_BAEMIN_CENTER_NAME, AppConfig
+from .config import (
+    DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
+    DEFAULT_BAEMIN_CENTER_ID,
+    DEFAULT_BAEMIN_CENTER_NAME,
+    AppConfig,
+)
 
 
 @dataclass
@@ -35,10 +40,7 @@ class UiSettings:
     @classmethod
     def defaults(cls) -> "UiSettings":
         return cls(
-            performance_url=(
-                "https://deliverycenter.baemin.com/delivery/history?"
-                "page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
-            ),
+            performance_url=DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
             peak_dashboard_url="",
             platform_name="baemin",
             baemin_center_name=DEFAULT_BAEMIN_CENTER_NAME,

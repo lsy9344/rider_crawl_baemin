@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from rider_crawl.browser_launcher import BrowserActionRequiredError
 from rider_crawl.config import AppConfig
 from rider_crawl.platforms.coupang import crawler
 from rider_crawl.platforms.coupang.crawler import crawl_current_screen, crawl_performance_snapshot
@@ -475,6 +476,124 @@ def test_coupang_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
     assert browser.closed is False
 
 
+def test_coupang_fetch_target_page_content_does_not_open_new_tab_when_target_missing(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser([_FakePage("about:blank", html="<html></html>")])
+
+    with pytest.raises(BrowserActionRequiredError, match="열려 있는 Chrome 탭"):
+        crawler._fetch_target_page_content(browser, config)
+
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_coupang_fetch_target_page_content_does_not_open_new_tab_when_target_duplicated(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(config.coupang_eats_url, html="<html>old</html>"),
+            _FakePage(config.coupang_eats_url, html="<html>new</html>"),
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="대상 탭이 여러 개"):
+        crawler._fetch_target_page_content(browser, config)
+
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_coupang_fetch_target_page_content_reports_login_required_without_fast_retry(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
+def test_coupang_fetch_target_page_content_reports_vendor_portal_login_structure(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="""
+                <html>
+                  <head><title>vendor-portal</title></head>
+                  <body>
+                    <div>Vendor Portal</div>
+                    <form action="https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate" method="post">
+                      <input class="ant-input ant-input-borderless" type="text" placeholder="아이디 입력">
+                      <input class="ant-input ant-input-borderless" type="password" placeholder="비밀번호 입력">
+                      <input name="username">
+                      <input name="password">
+                      <input name="credentialId">
+                      <button class="ant-btn ant-btn-primary login-input-button" type="button">로그인</button>
+                    </form>
+                  </body>
+                </html>
+                """,
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
+def test_coupang_login_detection_does_not_match_plain_login_word_only():
+    page = _FakePage(
+        "https://partner.coupangeats.com/page/rider-performance",
+        html="<html><body>로그인 안내 문구만 있는 일반 오류</body></html>",
+    )
+
+    assert crawler._page_looks_like_coupang_login_required(page) is False
+
+
+def test_coupang_fetch_target_page_content_reports_login_url_without_fast_retry(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                final_url="https://partner.coupangeats.com/login",
+                html="<html><body>Login</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
+def test_coupang_fetch_target_page_content_reports_xauth_login_url_without_fast_retry(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                final_url=(
+                    "https://xauth.coupang.com/auth/realms/eats-partner/protocol/"
+                    "openid-connect/auth?client_id=edp-vendor-portal"
+                ),
+                html="<html><body>Vendor Portal</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
 def test_coupang_fetch_target_page_content_wraps_locator_timeout_with_actionable_message(tmp_path):
     config = _config(tmp_path)
     browser = _FakeBrowser([_FakePage(config.coupang_eats_url, wait_error=FakeTimeout("locator timeout"))])
@@ -541,10 +660,11 @@ class _FakePage:
         self,
         url: str,
         html: str = "",
+        final_url: str | None = None,
         wait_error: Exception | None = None,
         center_tabs: list[dict] | None = None,
     ) -> None:
-        self.url = url
+        self.url = final_url or url
         self.html = html
         self.wait_error = wait_error
         self.required_texts: list[str] = []
@@ -605,8 +725,10 @@ class _FakeBrowser:
 class _FakeContext:
     def __init__(self, pages: list[_FakePage]) -> None:
         self.pages = pages
+        self.new_page_calls = 0
 
     def new_page(self):
+        self.new_page_calls += 1
         page = _FakePage("about:blank")
         self.pages.append(page)
         return page

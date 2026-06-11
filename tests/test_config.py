@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from rider_crawl.config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
+from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, DEFAULT_BAEMIN_CENTER_NAME, AppConfig
 
 
 def test_app_config_reads_environment_values(monkeypatch):
@@ -84,10 +84,7 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     config = AppConfig.from_env()
 
     assert config.send_enabled is False
-    assert (
-        config.coupang_eats_url
-        == "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus="
-    )
+    assert config.coupang_eats_url == DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
     assert config.browser_mode == "cdp"
     assert config.cdp_url == "http://127.0.0.1:9222"
     assert config.kakao_chat_name == ""

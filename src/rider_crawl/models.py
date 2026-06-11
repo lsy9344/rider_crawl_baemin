@@ -27,6 +27,14 @@ class CurrentScreenSnapshot:
     cancel_rate: float | None = None
     afternoon_non_peak_count: float = 0
     dinner_non_peak_count: float = 0
+    lunch_peak_goal: float = 0
+    lunch_peak_rate: float | None = None
+    afternoon_non_peak_goal: float = 0
+    afternoon_non_peak_rate: float | None = None
+    dinner_peak_goal: float = 0
+    dinner_peak_rate: float | None = None
+    dinner_non_peak_goal: float = 0
+    dinner_non_peak_rate: float | None = None
 
 
 @dataclass(frozen=True)
