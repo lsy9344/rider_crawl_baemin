@@ -61,7 +61,7 @@ def test_run_once_dry_run_builds_message_without_sending(tmp_path):
 
     assert result.sent is False
     assert sent_messages == []
-    assert "⏰ 14:02 기준" in result.message
+    assert "⏰{5월21일} 14:02 기준" in result.message
     assert "오전오후피크 : 60.6건" in result.message
     assert "오후논피크 : 41.8건" in result.message
 

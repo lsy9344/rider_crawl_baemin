@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 
 from .models import CurrentScreenSnapshot, PeakPeriodSnapshot, PerformanceSnapshot
 
@@ -43,6 +44,7 @@ def render_current_screen_message(
 
 
 def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, source_label: str = "") -> str:
+    timestamp = _format_baemin_timestamp(snapshot.date_label, snapshot.updated_at)
     lines = [
         "[실시간 실적봇]",
     ]
@@ -50,7 +52,7 @@ def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, so
         lines.append(f"[{source_label.strip()}]")
     lines.extend(
         [
-            f"⏰ {snapshot.updated_at} 기준",
+            f"{timestamp} 기준",
             "",
             f"오전오후피크 : {_format_baemin_period(snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate)}",
             f"오후논피크 : {_format_baemin_period(snapshot.afternoon_non_peak_count, snapshot.afternoon_non_peak_goal, snapshot.afternoon_non_peak_rate)}",
@@ -90,6 +92,29 @@ def _render_performance_message(
         ]
     )
     return "\n".join(lines)
+
+
+def _format_baemin_timestamp(date_label: str, updated_at: str) -> str:
+    date_prefix = _format_baemin_date_prefix(date_label)
+    if date_prefix:
+        return f"⏰{date_prefix} {updated_at}"
+    return f"⏰ {updated_at}"
+
+
+def _format_baemin_date_prefix(date_label: str) -> str:
+    label = date_label.strip()
+    if not label:
+        return ""
+
+    numeric_match = re.fullmatch(r"\d{2}-(?P<month>\d{1,2})-(?P<day>\d{1,2})", label)
+    if numeric_match:
+        return f"{{{int(numeric_match.group('month'))}월{int(numeric_match.group('day'))}일}}"
+
+    korean_match = re.search(r"(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일", label)
+    if korean_match:
+        return f"{{{int(korean_match.group('month'))}월{int(korean_match.group('day'))}일}}"
+
+    return f"{{{label}}}"
 
 
 def _format_period(period: PeakPeriodSnapshot, time_range: str = "") -> str:
