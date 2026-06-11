@@ -237,4 +237,7 @@ Windows:
 - 배민 탭: 달성현황(beta) 페이지의 Looker/Google 보고서 프레임을 읽고, `주간 배달 현황`에서 설정한 센터 ID의 날짜 행을 찾습니다. 오늘 행에 실적이 있으면 오늘 행을 쓰고, 오늘 행이 아직 0이면 오늘 이전의 가장 최근 실적 행을 사용합니다. 수락률은 `100 - 수락률`로 거절율을 계산합니다.
 - 쿠팡이츠 탭: `rider-performance`(실적)와 `peak-dashboard`(피크 대시보드) 두 페이지를 모두 읽어 실시간 실적 메시지를 만듭니다. 실적 페이지에서 수행 중인 인원을, 피크 대시보드에서 업데이트 시각·배정/처리 물량·거절률·피크타임별 목표/완료를 읽습니다.
 - CDP 연결이 실패하면 새 로그인 창을 만들지 않고 오류를 표시합니다. CDP로 붙은 Chrome은 사용자가 직접 띄운 창이므로 수집 후 닫지 않습니다.
-- 쿠팡이츠 로그인이 만료되면 자동 로그인이나 2차 인증 처리를 하지 않고 해당 크롤링 탭의 반복 실행을 중지합니다. Chrome에서 다시 로그인한 뒤 `rider-performance`와 `peak-dashboard` 두 페이지를 로그인된 상태로 열어두고 `시작`을 다시 누르세요.
+- 쿠팡이츠 로그인이 만료되면 기본적으로는 자동 로그인이나 2차 인증 처리를 하지 않고 해당 크롤링 탭의 반복 실행을 중지합니다. Chrome에서 다시 로그인한 뒤 `rider-performance`와 `peak-dashboard` 두 페이지를 로그인된 상태로 열어두고 `시작`을 다시 누르세요.
+- (선택) `COUPANG_AUTO_EMAIL_2FA_ENABLED=true`로 켜면 쿠팡이츠 로그인 만료를 감지했을 때 자동 복구를 한 번 시도합니다. 1차 로그인 화면이면 `COUPANG_CREDENTIALS_PATH`의 계정 파일로 로그인하고, 이어서 이메일 인증을 선택하고 인증번호 발송 후, Gmail API(`gmail.readonly`)로 발송 시각 이후 도착한 인증번호 메일을 읽어 입력합니다. 인증에 성공하면 대상 페이지를 다시 준비시켜 수집을 이어가고, 실패하거나 CAPTCHA 화면이면 기존처럼 탭을 중지합니다.
+  - 사전 준비: Google Cloud Console에서 OAuth Desktop 클라이언트와 Gmail API를 만든 뒤 클라이언트 JSON을 `secrets/google/credentials.gmail.json`에 두고, 최초 1회 로컬에서 Gmail 승인을 실행해 `secrets/google/token.gmail.json`을 만듭니다. 이 인증 파일은 Git에 올리지 않습니다.
+  - 관련 환경변수: `COUPANG_CREDENTIALS_PATH`, `GMAIL_CREDENTIALS_PATH`, `GMAIL_TOKEN_PATH`, `GMAIL_2FA_QUERY`(실제 발신자/제목에 맞게 좁히기), `GMAIL_2FA_POLL_SECONDS`, `GMAIL_2FA_POLL_INTERVAL_SECONDS`, `COUPANG_2FA_CODE_DIGITS`. 인증번호와 토큰 값은 로그에 남기지 않습니다.

@@ -630,7 +630,197 @@ def test_coupang_fetch_target_page_content_waits_for_peak_dashboard_required_tex
     assert page.required_texts == ["피크타임별 현황"]
 
 
-def _config(tmp_path, *, browser_mode: str = "cdp", baemin_center_name: str = "") -> AppConfig:
+def test_coupang_login_required_stops_tab_when_auto_2fa_disabled(tmp_path):
+    # 자동 2FA가 꺼져 있으면(기본값) 로그인 만료 시 기존처럼 탭을 중지한다.
+    config = _config(tmp_path)
+    assert config.coupang_auto_email_2fa_enabled is False
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+    recover_calls: list[object] = []
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=lambda page, _config: recover_calls.append(page) or True,
+        )
+
+    # 꺼져 있으면 복구 함수를 아예 호출하지 않는다.
+    assert recover_calls == []
+
+
+def test_coupang_login_required_recovers_when_auto_2fa_enabled_and_recovery_succeeds(tmp_path):
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    # 첫 준비 대기에서는 로그인 만료로 실패하고, 복구 후 다시 열면 준비가 된다.
+    page = _RecoverablePage(
+        config.coupang_eats_url,
+        login_html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+        ready_html="<html>라이더 현황 ok</html>",
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    def _recover(received_page, _config):
+        recover_calls.append(received_page)
+        received_page.mark_recovered()
+        return True
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=_recover,
+    )
+
+    assert recover_calls == [page]
+    assert page.reopened is True
+    assert html == "<html>라이더 현황 ok</html>"
+
+
+def test_coupang_login_required_stops_when_recovery_fails(tmp_path):
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=lambda page, _config: False,
+        )
+
+
+def test_coupang_recovery_swallows_recover_exception_and_stops_tab(tmp_path):
+    # 복구 함수가 예외를 던져도(예: Gmail 미도착) 인증번호 누출 없이 기존 로그인 필요
+    # 오류로 탭을 중지한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    def _boom(page, _config):
+        raise RuntimeError("인증 메일 미도착")
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=_boom,
+        )
+
+
+def test_coupang_recovers_when_target_tab_url_drifted_to_login(tmp_path):
+    # 로그인 만료로 대상 탭 URL이 xauth 로그인으로 바뀌어 대상 탭 매칭이 실패한 경우.
+    # 자동 2FA가 켜져 있으면 로그인 페이지에서 복구 후 대상 URL로 되돌려 읽는다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    login_url = (
+        "https://xauth.coupang.com/auth/realms/eats-partner/protocol/openid-connect/auth"
+    )
+    page = _LoginDriftPage(
+        login_url=login_url,
+        target_url=config.coupang_eats_url,
+        ready_html="<html>라이더 현황 ok</html>",
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    def _recover(received_page, _config):
+        recover_calls.append(received_page)
+        received_page.mark_recovered()
+        return True
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=_recover,
+    )
+
+    assert recover_calls == [page]
+    assert html == "<html>라이더 현황 ok</html>"
+
+
+def test_coupang_login_drift_reopens_target_when_session_already_restored(tmp_path):
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    login_url = (
+        "https://xauth.coupang.com/auth/realms/eats-partner/protocol/openid-connect/auth"
+    )
+    page = _SessionRestoredLoginDriftPage(
+        login_url=login_url,
+        target_url=config.peak_dashboard_url,
+        ready_html="<html>피크타임별 현황 ok</html>",
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=lambda received_page, _config: recover_calls.append(received_page) or True,
+    )
+
+    assert recover_calls == []
+    assert page.url == config.peak_dashboard_url
+    assert html == "<html>피크타임별 현황 ok</html>"
+
+
+def test_coupang_login_drift_stops_when_auto_2fa_disabled(tmp_path):
+    # 2FA가 꺼져 있으면 URL이 로그인으로 바뀐 경우에도 기존처럼 운영자 조치 오류로 중지.
+    config = _config(tmp_path)
+    login_url = (
+        "https://xauth.coupang.com/auth/realms/eats-partner/protocol/openid-connect/auth"
+    )
+    page = _LoginDriftPage(
+        login_url=login_url,
+        target_url=config.coupang_eats_url,
+        ready_html="<html>라이더 현황 ok</html>",
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=lambda p, _c: recover_calls.append(p) or True,
+        )
+
+    assert recover_calls == []
+
+
+def _config(
+    tmp_path,
+    *,
+    browser_mode: str = "cdp",
+    baemin_center_name: str = "",
+    coupang_auto_email_2fa_enabled: bool = False,
+) -> AppConfig:
     return AppConfig(
         coupang_eats_url="https://partner.coupangeats.com/page/rider-performance",
         peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
@@ -648,6 +838,7 @@ def _config(tmp_path, *, browser_mode: str = "cdp", baemin_center_name: str = ""
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=900,
         page_timeout_seconds=60000,
+        coupang_auto_email_2fa_enabled=coupang_auto_email_2fa_enabled,
     )
 
 
@@ -694,6 +885,137 @@ class _FakePage:
 
     def content(self) -> str:
         return self.html
+
+
+class _RecoverablePage:
+    """A page that is login-expired until recovery, then serves the ready target.
+
+    첫 ``wait_for``는 로그인 만료(타임아웃)로 실패하고 content는 로그인 HTML이다.
+    ``mark_recovered()`` 뒤 ``goto``/``reload``로 다시 열면 준비된 대상 HTML을 주고
+    ``wait_for``가 통과한다. 자동 2FA 복구 후 대상 페이지 재준비 흐름을 검증한다.
+    """
+
+    def __init__(self, url: str, *, login_html: str, ready_html: str) -> None:
+        self.url = url
+        self._login_html = login_html
+        self._ready_html = ready_html
+        self._recovered = False
+        self.reopened = False
+        self.required_texts: list[str] = []
+
+    def mark_recovered(self) -> None:
+        self._recovered = True
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def goto(self, _url, **_kwargs):
+        self.reopened = True
+        return None
+
+    def reload(self, **_kwargs):
+        self.reopened = True
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        # 복구 전에는 대상 텍스트가 없어 타임아웃, 복구 후 재오픈되면 준비 완료.
+        if self._recovered and self.reopened:
+            return None
+        raise FakeTimeout("locator timeout")
+
+    def evaluate(self, _script):
+        # 센터 탭 조회는 이 테스트에서 불필요하므로 빈 목록.
+        return []
+
+    def content(self) -> str:
+        return self._ready_html if (self._recovered and self.reopened) else self._login_html
+
+
+class _LoginDriftPage:
+    """A tab whose URL drifted to the login/xauth screen on session expiry.
+
+    대상 URL 매칭이 실패하지만 ``_page_looks_like_coupang_login_required``에는 걸리는
+    상태다. 복구 후 ``goto(target_url)``로 되돌리면 URL이 대상과 맞고 준비 HTML을 준다.
+    """
+
+    def __init__(self, *, login_url: str, target_url: str, ready_html: str) -> None:
+        self.url = login_url
+        self._target_url = target_url
+        self._ready_html = ready_html
+        self._recovered = False
+        self.required_texts: list[str] = []
+
+    def mark_recovered(self) -> None:
+        self._recovered = True
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def goto(self, url, **_kwargs):
+        # 복구 후 대상 URL로 되돌리는 호출만 반영한다.
+        if self._recovered:
+            self.url = url
+        return None
+
+    def reload(self, **_kwargs):
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        if self._recovered and self.url == self._target_url:
+            return None
+        raise FakeTimeout("locator timeout")
+
+    def evaluate(self, _script):
+        return []
+
+    def content(self) -> str:
+        # 복구 전에는 로그인 필요 신호를 노출해 _login_required_page에 걸리게 한다.
+        if self._recovered and self.url == self._target_url:
+            return self._ready_html
+        return "<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>"
+
+
+class _SessionRestoredLoginDriftPage:
+    def __init__(self, *, login_url: str, target_url: str, ready_html: str) -> None:
+        self.url = login_url
+        self._target_url = target_url
+        self._ready_html = ready_html
+        self.required_texts: list[str] = []
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+        return None
+
+    def reload(self, **_kwargs):
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        if self.url == self._target_url:
+            return None
+        raise FakeTimeout("locator timeout")
+
+    def evaluate(self, _script):
+        return []
+
+    def content(self) -> str:
+        if self.url == self._target_url:
+            return self._ready_html
+        return "<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>"
 
 
 class _FakeTabLocator:

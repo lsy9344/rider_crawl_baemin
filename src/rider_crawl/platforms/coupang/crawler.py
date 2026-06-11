@@ -388,17 +388,36 @@ def fetch_page_html_via_persistent_context(config: AppConfig, *, target_url: str
             except PlaywrightTimeoutError:
                 pass
 
-            _wait_for_target_page_ready(
-                page,
-                config,
-                target_url=target_url or config.coupang_eats_url,
-                timeout_errors=(PlaywrightTimeoutError,),
-            )
+            resolved_target = target_url or config.coupang_eats_url
+            try:
+                _wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=resolved_target,
+                    timeout_errors=(PlaywrightTimeoutError,),
+                )
+            except BrowserActionRequiredError:
+                # CDP 경로와 동일하게, 로그인 만료 시 자동 이메일 2FA가 켜져 있으면 한 번만
+                # 복구를 시도하고 대상 페이지를 다시 준비시킨다. 꺼져 있거나 실패하면 raise.
+                if not _try_recover_coupang_session(page, config, None):
+                    raise
+                _reload_target_page(
+                    page,
+                    config,
+                    target_url=resolved_target,
+                    load_timeout_errors=(PlaywrightTimeoutError,),
+                )
+                _wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=resolved_target,
+                    timeout_errors=(PlaywrightTimeoutError,),
+                )
             if _select_coupang_center(page, config, timeout_errors=(PlaywrightTimeoutError,)):
                 _wait_for_target_page_ready(
                     page,
                     config,
-                    target_url=target_url or config.coupang_eats_url,
+                    target_url=resolved_target,
                     timeout_errors=(PlaywrightTimeoutError,),
                 )
             return page.content()
@@ -419,21 +438,143 @@ def _fetch_target_page_content(
     *,
     target_url: str | None = None,
     load_timeout_errors: tuple[type[BaseException], ...] = (),
+    recover_session: Callable[[Any, AppConfig], bool] | None = None,
 ) -> str:
     target_url = target_url or config.coupang_eats_url
     pages = _browser_pages(browser)
     page = _select_page_by_url(pages, target_url)
     if page is None:
-        _raise_coupang_page_action_required(pages, target_url)
+        # 대상 탭을 못 찾았다. 로그인 만료로 대상 탭의 URL이 login/xauth로 바뀐 경우가
+        # 있으므로, 자동 이메일 2FA가 켜져 있으면 열린 로그인 페이지에서 복구를 한 번
+        # 시도하고 그 페이지를 대상으로 이어 간다. 복구 대상이 없거나 실패하면 기존처럼
+        # 운영자 조치 필요 오류를 던진다.
+        page = _recover_login_page_to_target(
+            pages,
+            config,
+            target_url=target_url,
+            recover_session=recover_session,
+            load_timeout_errors=load_timeout_errors,
+        )
+        if page is None:
+            _raise_coupang_page_action_required(pages, target_url)
     try:
         page.wait_for_load_state("networkidle", timeout=10_000)
     except load_timeout_errors:
         pass
-    _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+    try:
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+    except BrowserActionRequiredError:
+        # 로그인 만료 감지. 자동 이메일 2FA가 켜져 있으면 딱 한 번 복구를 시도한 뒤,
+        # 대상 화면을 다시 띄워 준비 상태를 재확인한다. 복구가 꺼져 있거나 실패하면
+        # 기존처럼 BrowserActionRequiredError로 탭을 중지한다(빠른 재시도 금지).
+        if not _try_recover_coupang_session(page, config, recover_session):
+            raise
+        _reload_target_page(page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
     if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
         # 탭을 눌러 다른 센터로 전환했으면, 새 센터 화면이 준비될 때까지 한 번 더 기다린다.
         _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
     return page.content()
+
+
+def _recover_login_page_to_target(
+    pages: list[Any],
+    config: AppConfig,
+    *,
+    target_url: str,
+    recover_session: Callable[[Any, AppConfig], bool] | None,
+    load_timeout_errors: tuple[type[BaseException], ...],
+) -> Any | None:
+    """Recover an expired login tab whose URL drifted to login/xauth, if possible.
+
+    대상 탭이 없을 때, 열려 있는 로그인 필요 페이지를 찾아 자동 이메일 2FA로 복구한다.
+    복구가 꺼져 있거나 로그인 페이지가 없으면 ``None``을 돌려 호출부가 기존 오류 흐름을
+    타게 한다. 복구 성공 후 대상 URL로 다시 연 뒤, 그 페이지 URL이 대상과 맞으면 그
+    페이지를, 아니면 ``None``을 돌려준다(중복 탭 방지를 위해 새 탭은 만들지 않는다).
+    """
+
+    if not config.coupang_auto_email_2fa_enabled:
+        return None
+
+    login_page = _login_required_page(pages)
+    if login_page is None:
+        return None
+
+    _reload_target_page(
+        login_page,
+        config,
+        target_url=target_url,
+        load_timeout_errors=load_timeout_errors,
+    )
+    if _url_matches(str(getattr(login_page, "url", "")), target_url):
+        return login_page
+
+    if not _try_recover_coupang_session(login_page, config, recover_session):
+        return None
+
+    _reload_target_page(login_page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
+    if _url_matches(str(getattr(login_page, "url", "")), target_url):
+        return login_page
+    return None
+
+
+def _try_recover_coupang_session(
+    page: Any,
+    config: AppConfig,
+    recover_session: Callable[[Any, AppConfig], bool] | None,
+) -> bool:
+    """Attempt email-2FA recovery once when enabled; return whether it succeeded.
+
+    ``COUPANG_AUTO_EMAIL_2FA_ENABLED``가 꺼져 있으면 아무 것도 하지 않고 ``False``.
+    복구 함수는 주입 가능(테스트용)하며, 기본값은 이메일 2FA 복구 구현이다. 복구 중
+    발생한 운영자 조치 필요 오류는 호출부가 기존 로그인 필요 오류로 중단하도록 그대로
+    삼킨다(여기서 새 예외를 만들지 않는다 — 인증번호/토큰 누출 위험을 줄인다).
+    """
+
+    if not config.coupang_auto_email_2fa_enabled:
+        return False
+
+    recover = recover_session or _default_recover_coupang_session
+    try:
+        return bool(recover(page, config))
+    except Exception:
+        # 복구 실패(Gmail 미도착, 입력칸 못 찾음 등)는 자동 복구 불가로 본다. 상위에서
+        # 기존 BrowserActionRequiredError를 다시 던져 탭을 중지한다.
+        return False
+
+
+def _default_recover_coupang_session(page: Any, config: AppConfig) -> bool:
+    from rider_crawl.auth.coupang_email_2fa import recover_coupang_session_with_email_2fa
+
+    return recover_coupang_session_with_email_2fa(page, config)
+
+
+def _reload_target_page(
+    page: Any,
+    config: AppConfig,
+    *,
+    target_url: str,
+    load_timeout_errors: tuple[type[BaseException], ...],
+) -> None:
+    """Re-open the target URL after a successful 2FA recovery, then settle.
+
+    인증 성공 뒤 화면이 인증 화면에 머물러 있을 수 있으므로 대상 URL을 다시 연다.
+    ``goto``를 지원하지 않는 page(테스트 fake 등)는 ``reload``로 떨어진다.
+    """
+
+    try:
+        page.goto(target_url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+    except load_timeout_errors:
+        pass
+    except Exception:
+        try:
+            page.reload()
+        except Exception:
+            pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except load_timeout_errors:
+        pass
 
 
 def _select_page_by_url(pages: Iterable[Any], target_url: str) -> Any | None:

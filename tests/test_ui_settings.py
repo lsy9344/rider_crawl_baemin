@@ -281,3 +281,54 @@ def test_ui_settings_convert_to_app_config(tmp_path):
     assert config.telegram_bot_token == "token"
     assert config.telegram_chat_id == "-100123"
     assert config.telegram_message_thread_id == "77"
+
+
+def test_ui_settings_to_app_config_reads_gmail_2fa_from_env(monkeypatch):
+    # Gmail/2FA 설정은 UI JSON이 아니라 환경변수로 제어한다. UI 실행 경로도 이 값을
+    # 읽어야 2FA가 켜진다(from_env와 동일 소스).
+    monkeypatch.setenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", "true")
+    monkeypatch.setenv("GMAIL_2FA_QUERY", "from:(no-reply@coupang.com) subject:(인증)")
+    monkeypatch.setenv("COUPANG_2FA_CODE_DIGITS", "8")
+
+    config = UiSettings.defaults().to_app_config()
+
+    assert config.coupang_auto_email_2fa_enabled is True
+    assert config.gmail_2fa_query == "from:(no-reply@coupang.com) subject:(인증)"
+    assert config.coupang_2fa_code_digits == 8
+
+
+def test_ui_settings_to_app_config_loads_dotenv_file(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "COUPANG_AUTO_EMAIL_2FA_ENABLED=true",
+                "COUPANG_CREDENTIALS_PATH=secrets/google/coupang.credentials.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", raising=False)
+    monkeypatch.delenv("COUPANG_CREDENTIALS_PATH", raising=False)
+
+    config = UiSettings.defaults().to_app_config()
+
+    assert config.coupang_auto_email_2fa_enabled is True
+    assert config.coupang_credentials_path == Path("secrets/google/coupang.credentials.json")
+    monkeypatch.delenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", raising=False)
+    monkeypatch.delenv("COUPANG_CREDENTIALS_PATH", raising=False)
+
+
+def test_ui_settings_to_app_config_defaults_2fa_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    for key in (
+        "COUPANG_AUTO_EMAIL_2FA_ENABLED",
+        "COUPANG_CREDENTIALS_PATH",
+        "GMAIL_2FA_QUERY",
+        "COUPANG_2FA_CODE_DIGITS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    config = UiSettings.defaults().to_app_config()
+
+    assert config.coupang_auto_email_2fa_enabled is False

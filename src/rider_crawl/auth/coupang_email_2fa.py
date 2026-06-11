@@ -1,0 +1,304 @@
+"""쿠팡이츠 이메일 2차 인증 자동 복구.
+
+로그인 만료 화면에서 이메일 인증 방식을 고르고, 인증번호 발송 버튼을 누른 뒤
+Gmail에서 받은 코드를 입력칸에 넣어 제출한다. 자동 복구가 가능한 화면이면 ``True``,
+CAPTCHA·아이디/비밀번호 입력 등 1차 구현 범위 밖이면 ``False``를 반환한다.
+
+selector는 운영 PC에서 실제 쿠팡 인증 화면 기준으로 보정한다. 그래서 화면 조작을
+얇은 헬퍼로 분리하고, 후보 selector를 여러 개 두어 화면 변화에 견디게 했다.
+
+보안: 인증번호와 토큰 값은 예외 메시지/로그에 넣지 않는다.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+from rider_crawl.auth.gmail import Gmail2faError, fetch_latest_verification_code
+from rider_crawl.config import AppConfig
+
+# 발송 클릭 직전 시각에서 빼 둘 안전 여유(초). 로컬/Gmail 서버 시계 오차와, 클릭과
+# 동시에 도착하는 메일을 ``requested_after`` 컷오프에서 잃지 않도록 둔다.
+_REQUESTED_AFTER_SAFETY_SECONDS = 30
+
+# 이메일 인증 방식을 고르는 버튼/링크 후보 텍스트. 화면 문구가 바뀔 수 있어 여러 개를 둔다.
+_EMAIL_METHOD_TEXTS = ("이메일로 인증", "이메일 인증", "이메일", "email")
+
+# 인증번호 발송(요청) 버튼 후보 텍스트.
+_SEND_CODE_TEXTS = (
+    "인증번호 발송",
+    "인증번호 받기",
+    "인증번호 전송",
+    "인증코드 전송",
+    "코드 받기",
+    "send code",
+    "send",
+)
+
+# 인증번호 입력칸 후보 selector(placeholder/이름/일반 텍스트 입력).
+_CODE_INPUT_SELECTORS = (
+    "input[name='code']",
+    "input[name='verificationCode']",
+    "input[placeholder*='인증번호']",
+    "input[placeholder*='코드']",
+    "input[type='tel']",
+    "input[type='number']",
+)
+
+# 코드 입력 후 제출(확인) 버튼 후보 텍스트.
+_SUBMIT_TEXTS = ("인증 완료", "확인", "인증", "제출", "로그인", "submit", "verify")
+
+# 자동 복구 범위 밖 신호. 이 텍스트가 보이면 운영자 조치가 필요하므로 False를 돌려준다.
+_CAPTCHA_SIGNALS = ("captcha", "보안문자", "자동입력 방지", "로봇이 아닙니다", "recaptcha")
+_PASSWORD_SIGNALS = ("비밀번호 입력",)
+
+_USERNAME_INPUT_SELECTORS = (
+    "input[placeholder*='아이디']",
+    "input[name='username']",
+)
+_PASSWORD_INPUT_SELECTORS = (
+    "input[placeholder*='비밀번호']",
+    "input[type='password']",
+    "input[name='password']",
+)
+_LOGIN_BUTTON_TEXTS = ("로그인", "login")
+
+
+def recover_coupang_session_with_email_2fa(
+    page: Any,
+    config: AppConfig,
+    *,
+    fetch_code: Callable[..., str] | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> bool:
+    """Attempt to recover an expired Coupang session via email 2FA.
+
+    성공하면 ``True``, 자동 복구할 수 없는 화면(CAPTCHA, 아이디/비밀번호 입력 등)이면
+    ``False``를 돌려준다. Gmail/입력 단계의 복구 불가 오류는 ``Coupang2faError``로
+    올려, 호출부가 기존 ``BrowserActionRequiredError`` 흐름으로 중단하게 한다.
+    """
+
+    page_text = _safe_page_text(page)
+
+    if _contains_any(page_text, _CAPTCHA_SIGNALS):
+        # CAPTCHA는 자동으로 풀지 않는다(문서 제외 범위). 운영자 처리로 넘긴다.
+        return False
+
+    if _is_password_login_screen(page_text, page):
+        if not _submit_primary_login(page, config):
+            return False
+        _wait_after_action(page, config)
+
+    # 이메일 인증 방식 선택. 이미 코드 입력 단계면 이 클릭은 없어도 된다.
+    _click_first_by_text(page, _EMAIL_METHOD_TEXTS, config, roles=("tab", "button"))
+    # 인증번호 발송 버튼이 없으면(= 이메일 인증 화면이 아니면) 자동 복구 대상이 아니다.
+    # 로그인 제출 뒤에도 비밀번호 화면에 머물러 있으면 계정 정보 오류나 CAPTCHA 가능성이
+    # 있으므로 운영자 조치가 필요한 상태로 본다.
+    refreshed_text = _safe_page_text(page)
+    if _is_password_login_screen(refreshed_text, page):
+        return False
+
+    # 인증번호 발송 시각은 "발송 클릭 직전"을 기준으로, 거기서 약간의 안전 여유를 뺀
+    # 시각으로 잡는다. 발송 클릭 직후에 시각을 찍으면, 클릭과 동시에 도착한 메일의 Gmail
+    # internalDate가 그 시각보다 살짝 앞서 버려질 수 있다(로컬 시계와 Gmail 서버 시계
+    # 오차 포함). 이 시각 이전 메일은 Gmail 조회에서 버린다.
+    requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
+
+    if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
+        # 발송 버튼을 못 찾으면 이메일 인증 화면이 아니라고 보고 자동 복구를 포기한다.
+        return False
+
+    code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
+
+    _fill_code_input(page, code, config)
+    _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",))
+    return True
+
+
+class Coupang2faError(RuntimeError):
+    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/토큰을 넣지 않는다."""
+
+
+def _fetch_code(
+    config: AppConfig,
+    *,
+    requested_after: datetime,
+    fetch_code: Callable[..., str] | None,
+) -> str:
+    fetcher = fetch_code or _default_fetch_code
+    try:
+        code = fetcher(
+            credentials_path=config.gmail_credentials_path,
+            token_path=config.gmail_token_path,
+            query=config.gmail_2fa_query,
+            requested_after=requested_after,
+            poll_seconds=config.gmail_2fa_poll_seconds,
+            poll_interval_seconds=config.gmail_2fa_poll_interval_seconds,
+            code_digits=config.coupang_2fa_code_digits,
+        )
+    except Gmail2faError as exc:
+        # Gmail 조회 실패는 자동 복구 불가. 코드 값은 애초에 메시지에 없다.
+        raise Coupang2faError(str(exc)) from exc
+
+    if not code:
+        raise Coupang2faError("Gmail에서 인증번호를 받지 못했습니다.")
+    return code
+
+
+def _default_fetch_code(**kwargs: Any) -> str:
+    return fetch_latest_verification_code(**kwargs)
+
+
+# --- 화면 조작 헬퍼 ----------------------------------------------------------
+
+
+def _safe_page_text(page: Any) -> str:
+    try:
+        return str(page.content() or "").casefold()
+    except Exception:
+        return ""
+
+
+def _contains_any(text: str, signals: tuple[str, ...]) -> bool:
+    return any(signal.casefold() in text for signal in signals)
+
+
+def _is_password_login_screen(text: str, page: Any | None = None) -> bool:
+    if page is None:
+        return _contains_any(text, _PASSWORD_SIGNALS)
+    return _has_visible_input(page, _PASSWORD_INPUT_SELECTORS)
+
+
+def _submit_primary_login(page: Any, config: AppConfig) -> bool:
+    credentials = _load_coupang_credentials(config)
+    if credentials is None:
+        return False
+
+    username, password = credentials
+    if not _fill_first_input(page, _USERNAME_INPUT_SELECTORS, username, config):
+        return False
+    if not _fill_first_input(page, _PASSWORD_INPUT_SELECTORS, password, config):
+        return False
+    return _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+
+
+def _load_coupang_credentials(config: AppConfig) -> tuple[str, str] | None:
+    try:
+        raw = json.loads(config.coupang_credentials_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(raw, dict):
+        return None
+    username = str(raw.get("username") or "").strip()
+    password = str(raw.get("password") or "")
+    if not username or not password:
+        return None
+    return username, password
+
+
+def _fill_first_input(
+    page: Any,
+    selectors: tuple[str, ...],
+    value: str,
+    config: AppConfig,
+) -> bool:
+    timeout = min(config.page_timeout_seconds, 5_000)
+    for selector in selectors:
+        try:
+            page.locator(selector).first.fill(value, timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _has_visible_input(page: Any, selectors: tuple[str, ...]) -> bool:
+    for selector in selectors:
+        try:
+            visible_count = page.locator(selector).evaluate_all(
+                """els => els.filter((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0
+                        && rect.height > 0
+                        && style.visibility !== 'hidden'
+                        && style.display !== 'none';
+                }).length"""
+            )
+            if visible_count > 0:
+                return True
+        except AttributeError:
+            try:
+                if page.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        except Exception:
+            continue
+    return False
+
+
+def _wait_after_action(page: Any, config: AppConfig) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 10_000))
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
+def _click_first_by_text(
+    page: Any,
+    texts: tuple[str, ...],
+    config: AppConfig,
+    *,
+    roles: tuple[str, ...] = ("tab", "button"),
+) -> bool:
+    """Click the first visible element whose text matches one of ``texts``.
+
+    어떤 후보든 한 번 클릭에 성공하면 ``True``. 화면에 없거나 모두 실패하면 ``False``.
+    """
+
+    timeout = min(config.page_timeout_seconds, 5_000)
+    for text in texts:
+        for role in roles:
+            try:
+                page.get_by_role(role, name=text, exact=False).click(timeout=timeout)
+                return True
+            except TypeError:
+                try:
+                    page.get_by_role(role, name=text).click(timeout=timeout)
+                    return True
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        try:
+            locator = page.get_by_text(text, exact=False).first
+        except TypeError:
+            # fake page 등 exact 인자를 안 받는 구현 호환.
+            locator = page.get_by_text(text)
+        try:
+            locator.click(timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _fill_code_input(page: Any, code: str, config: AppConfig) -> None:
+    for selector in _CODE_INPUT_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            locator.fill(code, timeout=config.page_timeout_seconds)
+            return
+        except Exception:
+            continue
+    raise Coupang2faError(
+        "쿠팡 인증번호 입력칸을 찾지 못했습니다. 인증 화면 selector 보정이 필요합니다."
+    )

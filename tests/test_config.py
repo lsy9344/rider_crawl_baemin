@@ -78,6 +78,7 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
         "MESSENGER_NAME",
         "CRAWL_NAME",
         "STATE_SUBDIR",
+        "COUPANG_CREDENTIALS_PATH",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -96,6 +97,15 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     assert config.run_lock_timeout_seconds == 900
     assert config.crawl_name == ""
     assert config.state_subdir == ""
+    assert config.coupang_credentials_path == Path("secrets/google/coupang.credentials.json")
+
+
+def test_app_config_reads_coupang_credentials_path(monkeypatch):
+    monkeypatch.setenv("COUPANG_CREDENTIALS_PATH", "C:/safe/coupang.credentials.json")
+
+    config = AppConfig.from_env()
+
+    assert config.coupang_credentials_path == Path("C:/safe/coupang.credentials.json")
 
 
 def test_app_config_reads_coupang_environment_values(monkeypatch):

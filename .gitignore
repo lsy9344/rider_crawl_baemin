@@ -5,5 +5,9 @@ __pycache__/
 runtime/
 logs/
 .env
+secrets/google/*.json
+secrets/google/*.pickle
+secrets/google/token*
+secrets/google/credentials*
 # PyInstaller rebuild artifacts (the shipped exe in dist/ is tracked via LFS).
 build/

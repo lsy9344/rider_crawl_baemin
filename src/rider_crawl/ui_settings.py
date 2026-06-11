@@ -10,6 +10,7 @@ from .config import (
     DEFAULT_BAEMIN_CENTER_ID,
     DEFAULT_BAEMIN_CENTER_NAME,
     AppConfig,
+    gmail_2fa_settings_from_env,
 )
 
 
@@ -100,6 +101,9 @@ class UiSettings:
             page_timeout_seconds=self.page_timeout_seconds,
             crawl_name=crawl_name,
             state_subdir=state_subdir,
+            # Gmail/2FA 설정은 UI JSON이 아니라 환경변수로 제어한다(1차 구현 정책).
+            # from_env와 동일한 단일 소스를 써서 UI 실행 탭도 2FA를 켤 수 있게 한다.
+            **gmail_2fa_settings_from_env(),
         )
 
 
