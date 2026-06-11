@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .config import AppConfig, app_state_root
+from .keyword_responder import KeywordResponder
 from .lock import RunLock
 from .parser import parse_baemin_delivery_history_html, parse_count
 
@@ -138,12 +139,16 @@ class TelegramCommandProcessor:
         locks_by_chat_id: dict[str, threading.Lock] | None = None,
         locks_by_target: dict[TelegramTarget, threading.Lock] | None = None,
         log_event: LogEvent | None = None,
+        keyword_responder: KeywordResponder | None = None,
     ) -> None:
         self.configs = configs
         self.bot_config = bot_config
         self.fetch_html = fetch_html or _fetch_page_html
         self.send_text = send_text or _send_telegram_text
         self.log_event = log_event or (lambda _message: None)
+        # 키워드 감지 자동응답. None이 아니면 '!조회' 명령이 아닌 일반 메시지에서
+        # 키워드(config.json)를 감지해 자동 안내 메시지를 발송한다.
+        self.keyword_responder = keyword_responder
         self.config_by_target = _config_by_unique_target(configs)
         if locks_by_target is not None:
             self.locks_by_target = {
@@ -207,7 +212,8 @@ class TelegramCommandProcessor:
     ) -> bool:
         command = parse_rider_lookup_command(text)
         if command is None:
-            return False
+            # '!조회' 명령이 아니면 키워드 감지 자동응답을 시도한다(설정되어 있을 때).
+            return self._handle_keyword_auto_reply(chat_id, text, message_thread_id)
 
         normalized_chat_id = _normalize_chat_id(chat_id)
         target = (normalized_chat_id, _normalize_thread_id(message_thread_id))
@@ -249,6 +255,57 @@ class TelegramCommandProcessor:
         except Exception as exc:
             self.log_event(f"{source} 최종 답장 전송 오류: {exc}")
             raise
+        return True
+
+    def _handle_keyword_auto_reply(
+        self,
+        chat_id: str,
+        text: str,
+        message_thread_id: int | None,
+    ) -> bool:
+        """키워드 감지 시 자동 안내 메시지를 발송한다.
+
+        설정된(``config_by_target``) 채팅방/토픽에서 온 메시지에만 반응하므로,
+        토픽 ID까지 일치해야 하고 대상이 아닌 그룹은 무시한다. 같은 대상에서
+        마지막 전송 성공 후 ``cooldown_seconds`` 이내 반복 키워드는 응답하지 않는다.
+
+        ``/start``, ``/help`` 같은 명령어 메시지는 키워드 감지 대상에서 제외한다.
+        쿨다운은 **전송 성공 후**에만 기록해, 전송 실패 시 다음 메시지에서 다시
+        응답할 수 있게 한다(메시지 유실 방지).
+
+        같은 batch의 업데이트는 폴러가 병렬 처리하므로, 같은 대상(채팅방/토픽)에
+        대한 쿨다운 확인→전송→기록을 대상별 락 안에서 원자적으로 처리한다. 그러지
+        않으면 두 스레드가 동시에 쿨다운을 통과해 자동응답이 중복 발송될 수 있다.
+        """
+        if self.keyword_responder is None:
+            return False
+
+        # /start, /help 등 슬래시 명령어는 키워드 감지 대상에서 제외한다.
+        if text.lstrip().startswith("/"):
+            return False
+
+        normalized_chat_id = _normalize_chat_id(chat_id)
+        target = (normalized_chat_id, _normalize_thread_id(message_thread_id))
+        config = self.config_by_target.get(target)
+        if config is None:
+            # 설정된 대상(채팅방/토픽)이 아니면 자동응답하지 않는다.
+            return False
+
+        # 같은 대상은 한 번에 하나씩만 검사/전송한다(동시 batch 중복 응답 방지).
+        with self.locks_by_target[target]:
+            reply = self.keyword_responder.reply_for(target, text)
+            if reply is None:
+                return False
+
+            source = _source_label(config, self.configs.index(config))
+            self.log_event(f"{source} 키워드 감지 → 자동응답 발송")
+            try:
+                self.send_text(config, reply, message_thread_id=message_thread_id)
+            except Exception as exc:
+                self.log_event(f"{source} 키워드 자동응답 전송 오류: {exc}")
+                raise
+            # 전송에 성공했을 때만 쿨다운을 기록한다(실패 시 재시도에서 다시 응답 가능).
+            self.keyword_responder.mark_sent(target)
         return True
 
     def _lookup(self, config: AppConfig, command: RiderLookupCommand) -> list[RiderCancelMatch]:

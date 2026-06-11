@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from .app import RunResult, run_once
 from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
+from .keyword_responder import KeywordResponder
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
 from .sender import KakaoSendError, TelegramSendError
@@ -178,6 +179,9 @@ class RiderBotUi:
         self.kakao_send_lock = threading.Lock()
         self.telegram_send_locks: dict[str, threading.Lock] = {}
         self.telegram_last_send_monotonic: dict[str, float] = {}
+        # 키워드 감지 자동응답기. 모든 토큰 폴러가 공유한다. 대상(채팅방/토픽)별
+        # 쿨다운 상태를 한 곳에서 관리하고, 설정은 메시지마다 config.json에서 다시 읽는다.
+        self.keyword_responder = KeywordResponder()
 
         self.root.title("배달 실적봇 (배민·쿠팡이츠)")
         self.root.geometry(DEFAULT_WINDOW_GEOMETRY)
@@ -770,6 +774,7 @@ class RiderBotUi:
             locks_by_target=locks_by_target,
             send_text=self._send_telegram_command_reply_with_lock,
             log_event=lambda message: self.messages.put(("log", message)),
+            keyword_responder=getattr(self, "keyword_responder", None),
         )
         poller = TelegramUpdatePoller(configs[0], handle_text=processor.handle_text)
         stop_event = threading.Event()

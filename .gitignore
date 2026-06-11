@@ -11,3 +11,5 @@ secrets/google/token*
 secrets/google/credentials*
 # PyInstaller rebuild artifacts (the shipped exe in dist/ is tracked via LFS).
 build/
+# 작업지시서/요구사항 PDF 등 외부 문서는 코드 저장소에 두지 않는다.
+*.pdf
