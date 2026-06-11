@@ -1005,9 +1005,32 @@ def test_shared_token_keeps_single_poller_routing_all_active_tabs(tmp_path, monk
 
     # 크롤링2까지 중지 → 폴러 종료
     ui._stop_telegram_listener(1)
-    assert "shared" not in ui.telegram_pollers_by_token
     handle.worker.join(2)
+    ui._cleanup_stopped_telegram_poller("shared")
+    assert "shared" not in ui.telegram_pollers_by_token
     assert not handle.worker.is_alive()
+
+
+def test_stopping_telegram_listener_keeps_handle_until_worker_exits(tmp_path):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.settings_tabs = [_settings(tmp_path, telegram_bot_token="token", telegram_chat_id="-100123")]
+    app.telegram_pollers_by_token = {}
+    stop_event = threading.Event()
+    worker = _FakeThread(alive=True)
+    handle = ui._TelegramPollerHandle(
+        stop_event=stop_event,
+        worker=worker,
+        processor=object(),
+        tab_indexes={0},
+    )
+    app.telegram_pollers_by_token["token"] = handle
+
+    app._stop_telegram_listener(0)
+
+    assert app.telegram_pollers_by_token["token"] is handle
+    assert stop_event.is_set()
+    assert handle.tab_indexes == set()
 
 
 def test_show_result_labels_next_run_with_tab_index():

@@ -756,7 +756,11 @@ class RiderBotUi:
             return
 
         token = config.telegram_bot_token.strip()
+        self._cleanup_stopped_telegram_poller(token)
         handle = self.telegram_pollers_by_token.get(token)
+        if handle is not None and handle.worker.is_alive() and handle.stop_event.is_set():
+            self.messages.put(("log", f"Telegram poller stopping for token; start skipped: {token[:8]}..."))
+            return
         if handle is not None and handle.worker.is_alive():
             # 같은 토큰의 폴러가 이미 돌고 있다. 폴러를 새로 띄우지 않고 이 탭을
             # 라우팅 대상에 추가만 한다. 두 폴러가 getUpdates를 나눠 받아 명령이
@@ -803,7 +807,12 @@ class RiderBotUi:
                 self._rebuild_telegram_routing(token)
             else:
                 handle.stop_event.set()
-                self.telegram_pollers_by_token.pop(token, None)
+                self._cleanup_stopped_telegram_poller(token)
+
+    def _cleanup_stopped_telegram_poller(self, token: str) -> None:
+        handle = self.telegram_pollers_by_token.get(token)
+        if handle is not None and not handle.worker.is_alive():
+            self.telegram_pollers_by_token.pop(token, None)
 
     def _rebuild_telegram_routing(self, token: str) -> None:
         handle = self.telegram_pollers_by_token.get(token)

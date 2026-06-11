@@ -118,7 +118,7 @@ def test_parse_achievement_report_text_extracts_latest_completed_row_for_center(
     assert snapshot.dinner_non_peak_count == 374
     assert snapshot.dinner_non_peak_goal == 319
     assert snapshot.dinner_non_peak_rate == 100
-    assert snapshot.reject_rate == 12
+    assert snapshot.reject_rate == 11.82
 
 
 def test_parse_achievement_report_text_prefers_today_when_today_has_counts():

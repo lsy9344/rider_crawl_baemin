@@ -90,7 +90,7 @@ def test_crawl_current_screen_parses_achievement_report_text_from_injected_fetch
     assert snapshot.lunch_peak_count == 323
     assert snapshot.lunch_peak_goal == 231
     assert snapshot.dinner_non_peak_count == 374
-    assert snapshot.reject_rate == 12
+    assert snapshot.reject_rate == 11.82
 
 
 def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):

@@ -193,7 +193,7 @@ def parse_achievement_report_text(
 
     current_time = now or datetime.now()
     row = _select_achievement_row(rows, today=current_time.date())
-    reject_rate = max(0, min(100, round(100 - row.acceptance_rate)))
+    reject_rate = max(0, min(100, round(100 - row.acceptance_rate, 2)))
 
     return CurrentScreenSnapshot(
         center_name=center_name.strip() or row.center_label,

@@ -101,7 +101,7 @@ def test_render_current_screen_message_includes_achievement_goals_when_available
         dinner_non_peak_rate=100,
         non_peak_count=670,
         active_riders=0,
-        reject_rate=12,
+        reject_rate=11.82,
     )
 
     assert render_current_screen_message(snapshot, source_label="표준서울마포B이츠앤홀딩스3") == "\n".join(
@@ -115,6 +115,6 @@ def test_render_current_screen_message_includes_achievement_goals_when_available
             "저녁피크 : 433건/330건[100%]",
             "저녁논피크 : 374건/319건[100%]",
             "",
-            "거절율 : 12%",
+            "거절율 : 11.82%",
         ]
     )
