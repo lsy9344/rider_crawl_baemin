@@ -1,10 +1,13 @@
+import json
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from rider_crawl.config import AppConfig, app_state_root
+from rider_crawl.keyword_responder import KeywordResponder
 from rider_crawl.parser import parse_baemin_delivery_history_html
 from rider_crawl.telegram_commands import (
     TelegramUpdatePoller,
@@ -676,3 +679,215 @@ def _config(
         telegram_message_thread_id=message_thread_id,
         crawl_name=crawl_name,
     )
+
+
+def _keyword_responder(
+    tmp_path: Path,
+    *,
+    keywords=("사고", "병원"),
+    auto_message="자동응답",
+    cooldown_seconds=30,
+) -> KeywordResponder:
+    path = tmp_path / "keyword_config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "keywords": list(keywords),
+                "auto_message": auto_message,
+                "cooldown_seconds": cooldown_seconds,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return KeywordResponder(config_path=path)
+
+
+def test_keyword_auto_reply_sends_on_keyword(tmp_path):
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list[tuple[str, str, int | None]] = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(
+            (config.telegram_chat_id, message, message_thread_id)
+        ),
+        keyword_responder=_keyword_responder(tmp_path, auto_message="안내드립니다"),
+    )
+
+    handled = processor.handle_text("-100123", "사고가 났어요")
+
+    assert handled is True
+    assert sent == [("-100123", "안내드립니다", None)]
+
+
+def test_keyword_auto_reply_ignores_unconfigured_chat(tmp_path):
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(message),
+        keyword_responder=_keyword_responder(tmp_path),
+    )
+
+    # 설정된 대상(-100123)이 아닌 다른 그룹방 메시지는 키워드가 있어도 무시한다.
+    handled = processor.handle_text("-999999", "사고")
+
+    assert handled is False
+    assert sent == []
+
+
+def test_keyword_auto_reply_is_topic_aware(tmp_path):
+    configs = [
+        _config(tmp_path, crawl_name="크롤링1", chat_id="-100123", message_thread_id="5"),
+    ]
+    sent: list[tuple[str, int | None]] = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(
+            (message, message_thread_id)
+        ),
+        keyword_responder=_keyword_responder(tmp_path, auto_message="A"),
+    )
+
+    # 설정된 토픽(5)에서 온 메시지에만 같은 토픽으로 응답한다.
+    assert processor.handle_text("-100123", "사고", message_thread_id=5) is True
+    # 다른 토픽(9)은 설정 대상이 아니므로 무시한다.
+    assert processor.handle_text("-100123", "사고", message_thread_id=9) is False
+    assert sent == [("A", 5)]
+
+
+def test_keyword_auto_reply_respects_cooldown(tmp_path):
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(message),
+        keyword_responder=_keyword_responder(tmp_path, cooldown_seconds=30),
+    )
+
+    assert processor.handle_text("-100123", "사고") is True
+    # 쿨다운 이내 반복 키워드는 응답하지 않는다.
+    assert processor.handle_text("-100123", "병원") is False
+    assert len(sent) == 1
+
+
+def test_keyword_auto_reply_does_not_run_without_responder(tmp_path):
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(message),
+    )
+
+    # keyword_responder가 없으면 일반 메시지는 그대로 무시된다(기존 동작 유지).
+    assert processor.handle_text("-100123", "사고") is False
+    assert sent == []
+
+
+def test_keyword_auto_reply_excludes_slash_commands(tmp_path):
+    # P2: /start, /help 등 명령어 메시지는 키워드 자동응답 대상에서 제외한다.
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(message),
+        keyword_responder=_keyword_responder(tmp_path, auto_message="AUTO"),
+    )
+
+    # 키워드가 포함돼 있어도 슬래시 명령어이면 무시한다.
+    assert processor.handle_text("-100123", "/help 사고") is False
+    assert processor.handle_text("-100123", "/start") is False
+    assert processor.handle_text("-100123", "  /help 병원") is False
+    assert sent == []
+
+
+def test_keyword_auto_reply_retries_after_send_failure(tmp_path):
+    # P1: 전송이 실패하면 쿨다운을 기록하지 않아 다음 메시지에서 다시 응답해야 한다.
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    attempts = {"n": 0}
+
+    def flaky_send(config, message, *, message_thread_id=None):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("네트워크 오류")
+
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=flaky_send,
+        keyword_responder=_keyword_responder(tmp_path, cooldown_seconds=30),
+    )
+
+    # 첫 전송은 예외를 그대로 올린다(poller가 재시도하도록).
+    with pytest.raises(RuntimeError):
+        processor.handle_text("-100123", "사고")
+    # 두 번째 메시지: 쿨다운에 막히지 않고 다시 응답해 전송에 성공한다.
+    assert processor.handle_text("-100123", "사고") is True
+    assert attempts["n"] == 2
+
+
+def test_keyword_auto_reply_does_not_double_send_on_concurrent_batch(tmp_path):
+    # P1(race): 같은 batch의 업데이트는 폴러가 병렬 처리한다. 같은 대상에 키워드
+    # 메시지가 동시에 들어와도 대상별 락으로 한 번만 응답해야 한다.
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    sent_lock = threading.Lock()
+
+    def slow_send(config, message, *, message_thread_id=None):
+        # 전송이 느리다고 가정해 두 스레드가 동시에 쿨다운을 통과할 창을 넓힌다.
+        time.sleep(0.05)
+        with sent_lock:
+            sent.append(message)
+
+    processor = TelegramCommandProcessor(
+        configs,
+        send_text=slow_send,
+        keyword_responder=_keyword_responder(tmp_path, cooldown_seconds=30),
+    )
+
+    results: list = []
+    results_lock = threading.Lock()
+
+    def worker():
+        handled = processor.handle_text("-100123", "사고")
+        with results_lock:
+            results.append(handled)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # 정확히 하나만 응답하고, 다른 하나는 쿨다운으로 막혀야 한다.
+    assert sorted(results, reverse=True) == [True, False]
+    assert len(sent) == 1
+
+
+def test_lookup_command_still_takes_precedence_over_keyword(tmp_path):
+    html = (
+        "<table><thead><tr>"
+        "<th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>"
+        "<th>배차취소</th><th>배달취소(라이더귀책)</th>"
+        "<th>오전피크</th><th>오후논피크</th><th>저녁피크</th><th>야간논피크</th>"
+        "</tr></thead><tbody>"
+        "<tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>50</td><td>0</td>"
+        "<td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>"
+        "</tbody></table>"
+    )
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    sent: list = []
+    # 키워드를 '홍길동'으로 설정해, 키워드 경로로 처리되면 자동 메시지("KW!")가 나간다.
+    processor = TelegramCommandProcessor(
+        configs,
+        fetch_html=lambda config: html,
+        send_text=lambda config, message, *, message_thread_id=None: sent.append(message),
+        keyword_responder=_keyword_responder(tmp_path, keywords=("홍길동",), auto_message="KW!"),
+    )
+
+    # '!조회' 명령은 키워드 자동응답보다 우선한다(라이더 조회로 처리).
+    handled = processor.handle_text("-100123", "!홍길동1234")
+
+    assert handled is True
+    # 라이더 조회 경로를 탔으므로 키워드 자동 메시지는 나가지 않는다.
+    assert "KW!" not in sent
+    assert any("홍길동1234" in message for message in sent)
