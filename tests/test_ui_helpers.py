@@ -1514,6 +1514,47 @@ def test_app_configs_from_settings_names_tabs_and_skips_blank_urls(tmp_path):
     assert configs[0].telegram_chat_id == "-100123"
 
 
+def test_state_subdir_uses_monitoring_target_id_when_present():
+    # AC1: 상태 경로의 주 식별자는 안정 ID다 — 탭 표시 순번(index)이 달라도 같은 경로.
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = "abc123"
+
+    assert ui._state_subdir_for(settings, 0) == "targets/abc123"
+    assert ui._state_subdir_for(settings, 4) == "targets/abc123"
+
+
+def test_state_subdir_falls_back_to_crawling_index_when_id_blank():
+    # AC1 #2: 미발급(=ID 빈값) 탭만 legacy 폴백 crawling{n}을 쓴다(주 식별 스킴 아님).
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = ""
+
+    assert ui._state_subdir_for(settings, 0) == "crawling1"
+    assert ui._state_subdir_for(settings, 1) == "crawling2"
+
+
+def test_state_subdir_blank_id_does_not_collapse_to_targets_slash():
+    # AC1 #2: 빈 id(공백뿐 포함)면 strip 후 폴백 — 절대 targets/(슬래시만)로 전탭 충돌하지 않는다.
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = "   "
+
+    result = ui._state_subdir_for(settings, 2)
+
+    assert result == "crawling3"
+    assert not result.startswith("targets/")
+
+
+def test_app_configs_from_settings_uses_target_id_state_subdir_when_issued(tmp_path):
+    # AC1 #1: ID가 발급된 활성 탭은 state_subdir이 targets/<id>로 나가고, crawl_name(표시명)은 유지.
+    settings = _settings(tmp_path)
+    settings.monitoring_target_id = "mt-stable-1"
+
+    active = active_crawling_settings([settings])
+    configs = app_configs_from_settings(active)
+
+    assert configs[0].state_subdir == "targets/mt-stable-1"
+    assert configs[0].crawl_name == "크롤링1"
+
+
 def _settings(
     tmp_path: Path,
     *,

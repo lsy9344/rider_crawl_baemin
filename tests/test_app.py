@@ -279,6 +279,40 @@ def test_run_once_blocks_parallel_cdp_runs_even_when_profile_paths_differ(tmp_pa
     assert blocked is True
 
 
+def test_last_message_path_follows_target_id_not_tab_order(tmp_path):
+    # AC1: state_subdir=targets/<id>면 last_message dedup 경로가 안정 ID를 따른다. 탭을
+    # 재정렬해 config 순서가 바뀌어도(같은 id) 같은 경로를 쓰고, 다른 id는 분리된다.
+    from rider_crawl.app import _last_message_hash_path
+
+    base = _config(tmp_path)
+    tab_a_pos1 = replace(base, state_subdir="targets/id-a")
+    tab_a_pos2 = replace(base, state_subdir="targets/id-a")
+    tab_b = replace(base, state_subdir="targets/id-b")
+
+    assert _last_message_hash_path(tab_a_pos1) == _last_message_hash_path(tab_a_pos2)
+    assert _last_message_hash_path(tab_a_pos1) != _last_message_hash_path(tab_b)
+    # 경로가 실제로 runtime/state/targets/<id> 아래에 떨어진다(슬래시가 중첩 폴더가 됨).
+    assert tab_a_pos1.state_dir.parts[-2:] == ("targets", "id-a")
+
+
+def test_run_lock_path_is_browser_scoped_independent_of_state_subdir(tmp_path):
+    # AC1 #3: state_subdir를 targets/<id>로 바꿔도 run_lock은 건드리지 않는다. run_lock은
+    # 브라우저 스코프(같은 cdp_url)로 묶이므로 state_subdir이 달라도 같은 경로여야 하고, 절대
+    # targets/<id> 아래로 내려가면 안 된다(같은 브라우저 동시 실행 차단 의미 보존).
+    from rider_crawl.app import _run_lock_path
+
+    base = _config(tmp_path)
+    tab_a = replace(base, state_subdir="targets/id-a")
+    tab_b = replace(base, state_subdir="targets/id-b")
+
+    # 같은 브라우저 스코프 → state_subdir이 달라도 동일 run_lock 경로.
+    assert _run_lock_path(tab_a) == _run_lock_path(tab_b)
+    # run_lock은 run_locks 폴더 아래에 있고 state_subdir(targets/<id>)을 경로에 포함하지 않는다.
+    lock_parts = _run_lock_path(tab_a).parts
+    assert "run_locks" in lock_parts
+    assert "targets" not in lock_parts and "id-a" not in lock_parts
+
+
 def _config(
     tmp_path,
     *,

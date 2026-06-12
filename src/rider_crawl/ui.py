@@ -18,6 +18,7 @@ from .app import RunResult, run_once
 from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, DEFAULT_COUPANG_PEAK_DASHBOARD_URL, AppConfig
 from .keyword_responder import KeywordResponder
+from .log_rotation import rotate_if_needed
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
 from .sender import KakaoSendError, TelegramSendError
@@ -91,9 +92,21 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     )
 
 
+def _state_subdir_for(settings: UiSettings, index: int) -> str:
+    # 상태 경로(last_message dedup 등)의 주 식별자는 안정 ID(monitoring_target_id)다. 탭을
+    # 재정렬해도 ID가 따라가므로 다른 대상의 상태와 섞이지 않는다. crawlingN 순번은 2.1
+    # 마이그레이션 전/미저장(=ID 빈값)인 탭에 한해서만 충돌 없는 legacy 폴백으로 쓰고,
+    # 다음 load_all이 안정 ID를 발급·영속화하면 자동 치유된다(주 식별 스킴 아님).
+    # 빈 id를 그대로 쓰면 모든 탭이 ``targets/``(슬래시만)로 충돌하므로 strip 검사 필수.
+    target_id = settings.monitoring_target_id.strip()
+    if target_id:
+        return f"targets/{target_id}"
+    return f"crawling{index + 1}"
+
+
 def app_configs_from_settings(indexed_settings: list[tuple[int, UiSettings]]):
     return [
-        settings.to_app_config(crawl_name=f"크롤링{index + 1}", state_subdir=f"crawling{index + 1}")
+        settings.to_app_config(crawl_name=f"크롤링{index + 1}", state_subdir=_state_subdir_for(settings, index))
         for index, settings in indexed_settings
     ]
 
@@ -521,7 +534,7 @@ class RiderBotUi:
             return
 
         try:
-            message = prepare_chrome(settings.to_app_config(crawl_name=f"크롤링{selected_index + 1}", state_subdir=f"crawling{selected_index + 1}"))
+            message = prepare_chrome(settings.to_app_config(crawl_name=f"크롤링{selected_index + 1}", state_subdir=_state_subdir_for(settings, selected_index)))
         except BrowserLaunchError as exc:
             self.status_var.set("준비 오류")
             self._append_preview(f"[준비 오류]\n{exc}\n")
@@ -611,7 +624,7 @@ class RiderBotUi:
                 self.messages.put(("status", f"{label} 중지됨"))
                 return False
             result = run_once(
-                settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
+                settings.to_app_config(crawl_name=label, state_subdir=_state_subdir_for(settings, tab_index)),
                 send_message=self._send_message_with_kakao_lock,
             )
         except CdpUnavailableError as exc:
@@ -805,7 +818,7 @@ class RiderBotUi:
 
     def _start_telegram_listener(self, tab_index: int, settings: UiSettings) -> None:
         config = settings.to_app_config(
-            crawl_name=f"크롤링{tab_index + 1}", state_subdir=f"crawling{tab_index + 1}"
+            crawl_name=f"크롤링{tab_index + 1}", state_subdir=_state_subdir_for(settings, tab_index)
         )
         if not telegram_configs_by_token([config]):
             self._append_preview(
@@ -968,6 +981,9 @@ class RiderBotUi:
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             path = target_dir / "run_errors.log"
+            # append 직전 크기 기준 rotation(무한 증가 방지, NFR-10). 이미 감싼 try/except
+            # 안이라 rotation 실패도 None 반환으로 흡수되고, 헬퍼 자체도 best-effort다.
+            rotate_if_needed(path)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             message = (
                 f"[{ts}] {prefix}\n"

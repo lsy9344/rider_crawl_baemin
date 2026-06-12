@@ -1,6 +1,8 @@
 import math
 from pathlib import Path
 
+import pytest
+
 from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
 
@@ -579,3 +581,105 @@ def test_to_app_config_does_not_expose_id_fields(tmp_path):
         "legacy_alias",
     ):
         assert not hasattr(config, leaked)
+
+
+def test_save_all_atomic_preserves_original_on_replace_failure(tmp_path, monkeypatch):
+    # AC2 #4: 저장 도중(=os.replace 직전) 강제 종료에도 기존 ui_settings.json은 이전 유효
+    # 상태가 그대로 보존되고 반쪽짜리로 손상되지 않으며, .tmp 잔여물이 남지 않는다.
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].telegram_bot_token = "token"
+    settings[0].telegram_chat_id = "-100123"
+    store.save_all(settings)
+
+    # 활성 탭 ID 발급·영속화까지 끝낸 "직전 유효 상태"를 기준으로 잡는다.
+    settled = store.load_all()
+    before = store.path.read_bytes()
+    settled[0].telegram_chat_id = "-100999"  # 저장 도중 중단될 새 값
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated crash before rename")
+
+    monkeypatch.setattr("rider_crawl.ui_settings.os.replace", boom)
+
+    with pytest.raises(OSError):
+        store.save_all(settled)
+
+    # 원본 파일은 손대지 않은 이전 유효 상태 그대로 load 가능하고 바이트가 동일하다.
+    assert store.path.read_bytes() == before
+    assert store.load_all()[0].telegram_chat_id == "-100123"
+    # 같은 디렉터리에 임시 파일(.tmp) 잔여물이 남지 않는다.
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    assert leftovers == []
+
+
+def test_save_all_atomic_preserves_serialization_format(tmp_path):
+    # AC2 #5: atomic 전환은 직렬화 형식을 바꾸지 않는다 — ensure_ascii=False(한글 비escape)와
+    # {"crawlings":[...]} 구조가 그대로 유지된다.
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].legacy_alias = "실적봇_A"
+
+    store.save_all(settings)
+
+    text = store.path.read_text(encoding="utf-8")
+    assert '"crawlings"' in text
+    assert "실적봇_A" in text  # ensure_ascii=False라 한글이 그대로 보인다
+    assert "\\uc2e4" not in text  # escape됐다면 '실'이 실로 나왔을 것
+
+
+def test_save_single_object_atomic_preserves_original_on_replace_failure(tmp_path, monkeypatch):
+    # AC2 #4: AC는 save_all뿐 아니라 단일 객체 save()도 atomic이라고 명시한다. load()의
+    # persist-on-first-issue가 쓰는 이 경로도 os.replace 직전 강제 종료에 기존 파일을 이전
+    # 유효 상태로 보존하고 .tmp 잔여물을 남기지 않아야 한다(평면 객체 직렬화 형식도 보존).
+    store = UiSettingsStore(tmp_path / "settings.json")
+    original = UiSettings.defaults()
+    original.telegram_bot_token = "token"
+    original.telegram_chat_id = "-100123"
+    store.save(original)
+    before = store.path.read_bytes()
+    assert '"crawlings"' not in before.decode("utf-8")  # save()는 래핑 없는 평면 객체
+
+    crashed = UiSettings.defaults()
+    crashed.telegram_chat_id = "-100999"  # 저장 도중 중단될 새 값
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated crash before rename")
+
+    monkeypatch.setattr("rider_crawl.ui_settings.os.replace", boom)
+
+    with pytest.raises(OSError):
+        store.save(crashed)
+
+    # 원본은 손대지 않은 이전 유효 상태 그대로(바이트 동일)이고 .tmp 잔여물이 없다.
+    assert store.path.read_bytes() == before
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    assert leftovers == []
+
+
+def test_save_all_atomic_cleans_temp_and_preserves_original_on_fsync_failure(tmp_path, monkeypatch):
+    # AC2 #4: 실패 지점이 os.replace 이전(os.fsync)이어도 — temp는 쓰였지만 아직 교체 전 —
+    # 기존 ui_settings.json은 이전 유효 상태로 보존되고 temp(.tmp)는 정리된다(unlink 후 재발생).
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].telegram_bot_token = "token"
+    settings[0].telegram_chat_id = "-100123"
+    store.save_all(settings)
+
+    settled = store.load_all()  # 활성 탭 ID 발급·영속화까지 끝낸 직전 유효 상태
+    before = store.path.read_bytes()
+    settled[0].telegram_chat_id = "-100999"  # fsync 단계에서 중단될 새 값
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated fsync failure before rename")
+
+    monkeypatch.setattr("rider_crawl.ui_settings.os.fsync", boom)
+
+    with pytest.raises(OSError):
+        store.save_all(settled)
+
+    # 교체 전 실패라 원본은 불변이고, temp 잔여물이 남지 않는다.
+    assert store.path.read_bytes() == before
+    assert store.load_all()[0].telegram_chat_id == "-100123"
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    assert leftovers == []

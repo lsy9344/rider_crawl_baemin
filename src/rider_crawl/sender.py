@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen as default_urlopen
 
 from .config import AppConfig
+from .log_rotation import rotate_if_needed
 
 KAKAO_SEND_VERIFY_TIMEOUT_SECONDS = 2.0
 KAKAO_SEND_VERIFY_INTERVAL_SECONDS = 0.1
@@ -410,6 +411,9 @@ def _write_kakao_diagnostics(config: AppConfig) -> object | None:
     try:
         config.log_dir.mkdir(parents=True, exist_ok=True)
         path = config.log_dir / "kakao_diagnostics.log"
+        # append 직전 크기 기준 rotation(무한 증가 방지, NFR-10). 이미 감싼 try/except로
+        # best-effort 유지 — rotation 실패가 진단/전송 경로를 깨지 않는다.
+        rotate_if_needed(path)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         body = "\n".join(f"- {line}" for line in _KAKAO_DIAGNOSTICS)
         with path.open("a", encoding="utf-8") as file:

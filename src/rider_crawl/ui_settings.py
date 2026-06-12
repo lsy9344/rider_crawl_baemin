@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -189,16 +191,48 @@ class UiSettingsStore:
         return settings
 
     def save(self, settings: UiSettings) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        # 직렬화 형식은 그대로 두고(완성된 문자열만 넘긴다) write 방식만 atomic화한다.
+        _atomic_write_text(
+            self.path,
             json.dumps(_to_jsonable(settings), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def save_all(self, settings: list[UiSettings]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"crawlings": [_to_jsonable(item) for item in settings]}
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(self.path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """``text``를 ``path``에 원자적으로 쓴다: 같은 디렉터리 임시 파일 → fsync → os.replace.
+
+    저장 도중 강제 종료(=replace 직전 중단)에도 기존 ``path``는 이전 유효 상태가 그대로
+    보존되고 반쪽짜리로 손상되지 않는다. ``os.replace``는 같은 볼륨에서만 원자적이라 temp는
+    반드시 ``path.parent``에 만든다(다른 디렉터리면 cross-device로 비원자적이 될 수 있다).
+    디렉터리 fsync는 Windows 미지원이라 생략한다(크로스플랫폼 우선). 실패 시 temp를 정리한
+    뒤 예외를 재발생해 호출자(save_settings)가 기존 messagebox/상태 흐름으로 처리하게 둔다.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=path.name + ".",
+        suffix=".tmp",
+        delete=False,
+    )
+    try:
+        with tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
 
 
 def _issue_missing_ids(settings: UiSettings, *, legacy_alias: str) -> bool:
