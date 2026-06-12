@@ -14,5 +14,11 @@ secrets/google/token*
 secrets/google/credentials*
 # PyInstaller rebuild artifacts (the shipped exe in dist/ is tracked via LFS).
 build/
+# 기준선/설정 백업 zip은 실제 secret(.env, runtime/state/ui_settings.json 등)을 포함하므로 절대 커밋하지 않는다.
+backups/
 # 작업지시서/요구사항 PDF 등 외부 문서는 코드 저장소에 두지 않는다.
 *.pdf
+.claude/.story-automator-active
+.claude/
+.codex/
+.agents/
