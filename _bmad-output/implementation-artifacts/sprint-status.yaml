@@ -52,8 +52,8 @@ development_status:
   epic-1-retrospective: done
 
   # ── Epic 2: ID 기반 운영 모델과 안전한 마이그레이션 (P1) ──
-  epic-2: backlog
-  2-1-uisettings에-고객-대상-id-부여와-legacy-alias-보존: backlog
+  epic-2: in-progress
+  2-1-uisettings에-고객-대상-id-부여와-legacy-alias-보존: done
   2-2-대상별-상태-경로-분리와-atomic-write-로그-rotation: backlog
   2-3-플랫폼-중립-target-필드-통일: backlog
   2-4-secret-값-분리-설정-파일은-ref만-보관: backlog

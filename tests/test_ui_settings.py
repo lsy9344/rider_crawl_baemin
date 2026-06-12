@@ -321,3 +321,261 @@ def test_ui_settings_to_app_config_defaults_2fa_disabled():
     assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == ""
     assert config.coupang_login_password == ""
+
+
+# ── Story 2.1: customer/target ID 발급 + legacy_alias 보존 ──
+
+
+def test_ui_settings_round_trip_preserves_id_and_alias_fields(tmp_path):
+    # AC1: 신규 5개 필드가 save/load 라운드트립에서 손실 없이 보존된다(모두 채워 두면
+    # 재발급되지 않으므로 입력값이 그대로 유지된다).
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettings.defaults()
+    settings.customer_id = "cust-1"
+    settings.customer_name = "의정부남부점"
+    settings.platform_account_id = "pa-1"
+    settings.monitoring_target_id = "mt-1"
+    settings.legacy_alias = "크롤링1"
+
+    store.save(settings)
+    loaded = store.load()
+
+    assert loaded.customer_id == "cust-1"
+    assert loaded.customer_name == "의정부남부점"
+    assert loaded.platform_account_id == "pa-1"
+    assert loaded.monitoring_target_id == "mt-1"
+    assert loaded.legacy_alias == "크롤링1"
+
+
+def test_ui_settings_save_all_load_all_preserves_id_and_alias_fields(tmp_path):
+    # AC1: save_all/load_all 라운드트립 보존 + 저장 JSON은 ensure_ascii=False·"crawlings" 구조 유지.
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].customer_id = "cust-1"
+    settings[0].customer_name = "의정부남부점"
+    settings[0].platform_account_id = "pa-1"
+    settings[0].monitoring_target_id = "mt-1"
+    settings[0].legacy_alias = "크롤링1"
+
+    store.save_all(settings)
+    loaded = store.load_all()
+
+    assert loaded[0].customer_id == "cust-1"
+    assert loaded[0].customer_name == "의정부남부점"
+    assert loaded[0].platform_account_id == "pa-1"
+    assert loaded[0].monitoring_target_id == "mt-1"
+    assert loaded[0].legacy_alias == "크롤링1"
+
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert '"crawlings"' in text
+    assert "의정부남부점" in text  # ensure_ascii=False: 한글이 escape 되지 않는다
+    assert "\\u" not in text
+
+
+def test_load_all_issues_stable_monitoring_target_id_across_reloads(tmp_path):
+    # AC3 #6: ID 없던 활성 탭을 처음 로드하면 ID가 발급·영속화되고, 재로드 시 동일 ID가 유지된다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/delivery/history"}]}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path)
+
+    first = store.load_all()
+    issued_id = first[0].monitoring_target_id
+    assert issued_id != ""
+    assert len(issued_id) == 32  # uuid4().hex (불투명 ID)
+
+    second = store.load_all()
+    assert second[0].monitoring_target_id == issued_id
+    assert second[0].customer_id == first[0].customer_id
+    assert second[0].platform_account_id == first[0].platform_account_id
+
+
+def test_load_all_preserves_existing_ids_without_reissue(tmp_path):
+    # AC3 #7: 이미 ID가 있는 탭은 idempotent하게 그대로 보존하고 절대 재발급하지 않는다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/x",'
+        ' "monitoring_target_id": "mt-fixed", "customer_id": "cust-fixed",'
+        ' "platform_account_id": "pa-fixed", "legacy_alias": "내가정한별칭"}]}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path)
+
+    loaded = store.load_all()
+
+    assert loaded[0].monitoring_target_id == "mt-fixed"
+    assert loaded[0].customer_id == "cust-fixed"
+    assert loaded[0].platform_account_id == "pa-fixed"
+    assert loaded[0].legacy_alias == "내가정한별칭"
+
+
+def test_load_all_issues_ids_only_for_active_tabs(tmp_path):
+    # AC3 #8: 활성 탭(performance_url 있음)에만 발급하고, 빈 filler 탭은 ID를 만들지 않는다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/delivery/history"}]}',
+        encoding="utf-8",
+    )
+
+    settings = UiSettingsStore(path).load_all()
+
+    assert settings[0].monitoring_target_id != ""
+    for filler in settings[1:]:
+        assert filler.performance_url == ""
+        assert filler.monitoring_target_id == ""
+        assert filler.customer_id == ""
+        assert filler.platform_account_id == ""
+        assert filler.legacy_alias == ""
+
+
+def test_load_all_does_not_create_file_when_missing(tmp_path):
+    # AC3 가드: 파일이 없으면 발급/영속화하지 않는다(새 파일을 만들지 않는다).
+    path = tmp_path / "does-not-exist.json"
+
+    settings = UiSettingsStore(path).load_all()
+
+    assert path.exists() is False
+    assert len(settings) == 9
+    assert settings[0].monitoring_target_id == ""
+
+
+def test_load_all_seeds_legacy_alias_from_tab_index_and_preserves_existing(tmp_path):
+    # AC2 #4: alias 없는 탭은 크롤링{index}로 seed, 이미 있는 alias는 보존(표시/보조 식별 전용).
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": ['
+        '{"performance_url": "https://example.test/a"},'
+        '{"performance_url": "https://example.test/b", "legacy_alias": "이미있는별칭"}'
+        "]}",
+        encoding="utf-8",
+    )
+
+    settings = UiSettingsStore(path).load_all()
+
+    assert settings[0].legacy_alias == "크롤링1"
+    assert settings[1].legacy_alias == "이미있는별칭"
+
+
+def test_load_single_issues_stable_id_for_single_object_file(tmp_path):
+    # AC3: 단일 객체 파일도 load()에서 활성 탭이면 ID를 발급·영속화해 재로드 시 동일 ID를 읽는다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"performance_url": "https://example.test/delivery/history",'
+        ' "telegram_bot_token": "token", "telegram_chat_id": "-100123"}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path)
+
+    first = store.load()
+    assert first.monitoring_target_id != ""
+    assert first.legacy_alias == "크롤링1"
+
+    second = store.load()
+    assert second.monitoring_target_id == first.monitoring_target_id
+
+
+def test_load_all_issues_three_distinct_independent_ids(tmp_path):
+    # AC3 / Dev Notes: customer_id·platform_account_id·monitoring_target_id는 각각 독립 발급
+    # 하며 같은 값을 재사용하지 않는다 — 세 ID는 서로 달라야 한다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/delivery/history"}]}',
+        encoding="utf-8",
+    )
+
+    tab = UiSettingsStore(path).load_all()[0]
+
+    ids = {tab.customer_id, tab.platform_account_id, tab.monitoring_target_id}
+    assert "" not in ids
+    assert len(ids) == 3  # 셋 다 서로 다른 불투명 ID
+
+
+def test_load_all_does_not_auto_issue_customer_name(tmp_path):
+    # Dev Notes: customer_name은 사람 표시명이라 자동 발급 대상이 아니다 — 활성 탭이어도 비워 둔다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/delivery/history"}]}',
+        encoding="utf-8",
+    )
+
+    tab = UiSettingsStore(path).load_all()[0]
+
+    assert tab.monitoring_target_id != ""  # 다른 ID는 발급됐는데도
+    assert tab.customer_name == ""  # customer_name만은 비어 있다
+
+
+def test_load_all_fills_only_missing_ids_and_preserves_existing(tmp_path):
+    # AC3 #7: idempotency는 레코드가 아니라 필드 단위다. 일부 ID만 있는 탭을 로드하면 기존
+    # 값은 보존하고 비어 있는 ID만 새로 발급한다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/x",'
+        ' "monitoring_target_id": "mt-keep"}]}',
+        encoding="utf-8",
+    )
+
+    tab = UiSettingsStore(path).load_all()[0]
+
+    assert tab.monitoring_target_id == "mt-keep"  # 기존 값 보존
+    assert tab.customer_id != "" and len(tab.customer_id) == 32  # 누락분만 발급
+    assert tab.platform_account_id != "" and len(tab.platform_account_id) == 32
+    assert tab.legacy_alias == "크롤링1"  # alias도 seed
+
+
+def test_load_all_treats_whitespace_only_url_as_inactive(tmp_path):
+    # AC3 #8: 활성 판정은 performance_url.strip()이다 — 공백뿐인 URL은 비활성으로 보고
+    # ID를 발급하지 않으며, 발급이 없으니 파일도 다시 쓰지 않는다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "   "}]}',
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    tab = UiSettingsStore(path).load_all()[0]
+
+    assert tab.monitoring_target_id == ""
+    assert tab.customer_id == ""
+    assert tab.platform_account_id == ""
+    assert path.read_bytes() == before  # 발급이 없으면 원본 파일 무변경
+
+
+def test_load_all_does_not_rewrite_file_when_all_ids_present(tmp_path):
+    # AC3 #7: 모든 ID가 이미 있는 파일을 로드하면 재발급도 영속화도 일어나지 않는다
+    # (persist-on-FIRST-issue) — 원본 파일 바이트가 그대로여야 한다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/x",'
+        ' "monitoring_target_id": "mt-fixed", "customer_id": "cust-fixed",'
+        ' "platform_account_id": "pa-fixed", "legacy_alias": "이미있는별칭"}]}',
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    UiSettingsStore(path).load_all()
+
+    assert path.read_bytes() == before  # 멱등 로드는 파일을 다시 쓰지 않는다
+
+
+def test_to_app_config_does_not_expose_id_fields(tmp_path):
+    # AC1 #3: 신규 ID/alias 필드는 to_app_config()/AppConfig에 연결하지 않는다(런타임 실행
+    # 스냅샷은 본 스토리 범위 밖). AppConfig가 이 필드들을 갖지 않음을 가드한다.
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/rider"
+    settings.customer_id = "cust-1"
+    settings.platform_account_id = "pa-1"
+    settings.monitoring_target_id = "mt-1"
+    settings.legacy_alias = "크롤링1"
+
+    config = settings.to_app_config()
+
+    for leaked in (
+        "customer_id",
+        "customer_name",
+        "platform_account_id",
+        "monitoring_target_id",
+        "legacy_alias",
+    ):
+        assert not hasattr(config, leaked)

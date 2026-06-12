@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,15 @@ class UiSettings:
     gmail_2fa_query: str = DEFAULT_GMAIL_2FA_QUERY
     gmail_credentials_path: str = DEFAULT_GMAIL_CREDENTIALS_PATH
     gmail_token_path: str = DEFAULT_GMAIL_TOKEN_PATH
+    # 운영 추적용 안정 식별자(P1-01). 탭 번호가 아니라 ID로 고객/대상을 추적한다. 로드
+    # 마이그레이션이 활성 탭에만 불투명 ID(uuid4)를 발급·영속화하고(load_all), 기존 탭명은
+    # legacy_alias로 표시/보조 식별만 한다(주 식별자는 monitoring_target_id). state_subdir
+    # 연결·플랫폼 중립 필드·secret 분리는 본 스토리 범위 밖(Story 2.2~2.4).
+    customer_id: str = ""
+    customer_name: str = ""
+    platform_account_id: str = ""
+    monitoring_target_id: str = ""
+    legacy_alias: str = ""
 
     @classmethod
     def defaults(cls) -> "UiSettings":
@@ -133,8 +143,17 @@ class UiSettingsStore:
 
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if isinstance(raw, dict) and isinstance(raw.get("crawlings"), list) and raw["crawlings"]:
-            raw = raw["crawlings"][0]
-        return _settings_from_mapping(raw, UiSettings.defaults())
+            # 다중 탭 파일을 단일 load()로 읽으면 tab 0만 반환한다. 여기서 평면 save()로
+            # 영속화하면 나머지 탭이 유실되므로(원본 보존, NFR-18) ID 발급/영속화는
+            # load_all에 위임하고 기존 동작(tab 0 반환, write 없음)을 그대로 둔다.
+            return _settings_from_mapping(raw["crawlings"][0], UiSettings.defaults())
+
+        settings = _settings_from_mapping(raw, UiSettings.defaults())
+        # 단일 객체 파일이 활성 탭이면 안정 ID를 발급하고, 새로 발급됐으면 한 번 영속화해
+        # 재로드 시 동일 ID가 유지되게 한다(persist-on-first-issue). 파일은 위에서 존재 확인됨.
+        if settings.performance_url.strip() and _issue_missing_ids(settings, legacy_alias="크롤링1"):
+            self.save(settings)
+        return settings
 
     def load_all(self, *, max_tabs: int = 9) -> list[UiSettings]:
         if not self.path.exists():
@@ -152,6 +171,21 @@ class UiSettingsStore:
         for index in range(1, max_tabs + 1):
             source = items[index - 1] if index - 1 < len(items) else {}
             settings.append(_settings_from_mapping(source, UiSettings.default_for_tab(index)))
+
+        # 활성(=performance_url 있는) 탭에만 안정 ID를 발급한다. "활성" 판정은
+        # ui.active_crawling_settings와 동일 의미(performance_url.strip())를 인라인 복제한다
+        # (ui→ui_settings 의존 방향이라 ui import 시 순환 import 발생 — import 금지).
+        # 새로 발급된 ID가 있으면 한 번 영속화해 재로드 시 동일 ID가 유지되게 한다
+        # (persist-on-first-issue). 파일이 없을 때는 위에서 이미 반환했으므로 여기서 write는
+        # 항상 기존 원본 파일에만 일어난다(새 파일 생성 없음). atomic write는 Story 2.2 소유.
+        issued = False
+        for index, item in enumerate(settings, start=1):
+            if not item.performance_url.strip():
+                continue
+            if _issue_missing_ids(item, legacy_alias=f"크롤링{index}"):
+                issued = True
+        if issued:
+            self.save_all(settings)
         return settings
 
     def save(self, settings: UiSettings) -> None:
@@ -165,6 +199,31 @@ class UiSettingsStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"crawlings": [_to_jsonable(item) for item in settings]}
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _issue_missing_ids(settings: UiSettings, *, legacy_alias: str) -> bool:
+    """비어 있는 식별자에만 불투명 ID(uuid4)를 발급하고 legacy_alias를 seed한다.
+
+    이미 값이 있는 필드는 보존한다(idempotent — 재로드/재정렬에도 동일 ID 유지). 각 ID는
+    독립적으로 발급해 같은 값을 재사용하지 않는다. ``customer_name``은 사람 표시명이라 자동
+    발급 대상이 아니므로 비워 둔다(운영자가 이후 채움). 하나라도 새로 채워지면 영속화가
+    필요하다는 뜻으로 ``True``를 반환한다.
+    """
+
+    changed = False
+    if not settings.monitoring_target_id:
+        settings.monitoring_target_id = uuid.uuid4().hex
+        changed = True
+    if not settings.customer_id:
+        settings.customer_id = uuid.uuid4().hex
+        changed = True
+    if not settings.platform_account_id:
+        settings.platform_account_id = uuid.uuid4().hex
+        changed = True
+    if not settings.legacy_alias and legacy_alias:
+        settings.legacy_alias = legacy_alias
+        changed = True
+    return changed
 
 
 def _to_jsonable(settings: UiSettings) -> dict[str, Any]:
