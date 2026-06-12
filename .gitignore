@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 runtime/
 logs/
+# 탭별 로그 디렉터리(크롤링3=logs3 등 log_dir이 logs가 아닌 경우)도 무시한다.
+logs*/
 .env
 secrets/google/*.json
 secrets/google/*.pickle
