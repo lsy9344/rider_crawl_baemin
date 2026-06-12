@@ -1,8 +1,15 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
 
-from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, DEFAULT_BAEMIN_CENTER_NAME, AppConfig
+from rider_crawl.config import (
+    DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
+    DEFAULT_BAEMIN_CENTER_NAME,
+    AppConfig,
+    _require_coupang_center,
+    coupang_center_name_risk,
+)
 
 
 def test_app_config_reads_environment_values(monkeypatch):
@@ -237,3 +244,148 @@ def test_app_config_coupang_platform_uses_coupang_defaults(monkeypatch):
     assert config.peak_dashboard_url == ""
     # 쿠팡에서는 배민 센터 ID 기본값을 넣지 않는다(쿠팡 탭에서 사용하지 않음).
     assert config.baemin_center_id == ""
+
+
+# ── Story 2.3: 플랫폼 중립 Target 필드(read-only alias) + 비차단 위험 분류기 ──
+
+
+def _coupang_app_config(*, baemin_center_name: str = "강남센터", crawl_name: str = "크롤링2") -> AppConfig:
+    return AppConfig(
+        coupang_eats_url="https://partner.coupangeats.com/page/peak-dashboard",
+        baemin_center_name=baemin_center_name,
+        baemin_center_id="DP000",
+        browser_mode="cdp",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=Path("browser"),
+        headless=False,
+        kakao_chat_name="",
+        log_dir=Path("logs"),
+        send_enabled=False,
+        send_only_on_change=False,
+        timezone="Asia/Seoul",
+        run_lock_timeout_seconds=900,
+        page_timeout_seconds=60000,
+        platform_name="coupang",
+        crawl_name=crawl_name,
+    )
+
+
+def test_app_config_neutral_accessors_alias_legacy_fields():
+    # AC1: AppConfig가 같은 중립 이름으로 기존 legacy 필드를 그대로 읽는다(동일 Target 필드 집합).
+    config = _coupang_app_config(baemin_center_name="강남센터", crawl_name="크롤링2")
+
+    assert config.primary_url == config.coupang_eats_url
+    assert config.center_name == config.baemin_center_name
+    assert config.target_external_id == config.baemin_center_id
+    assert config.display_name == config.crawl_name
+
+
+def test_app_config_neutral_accessors_return_raw_value_without_stripping():
+    # Task 2: 중립 접근자는 순수 읽기다 — strip 없이 원본 값을 그대로 돌려준다.
+    config = _coupang_app_config(baemin_center_name="  강남센터  ")
+
+    assert config.center_name == "  강남센터  "
+
+
+def test_coupang_center_name_risk_flags_empty_for_coupang():
+    # AC3 (a): 쿠팡 + 빈 기대 센터/상점명 → 위험으로 분류(비차단).
+    is_risky, reason = coupang_center_name_risk("coupang", "")
+
+    assert is_risky is True
+    assert reason
+
+
+def test_coupang_center_name_risk_flags_baemin_default_for_coupang():
+    # AC3 (b): 쿠팡 + 배민 기본값 → 위험(화면 센터명과 절대 일치하지 않음).
+    is_risky, reason = coupang_center_name_risk("coupang", DEFAULT_BAEMIN_CENTER_NAME)
+
+    assert is_risky is True
+    assert reason
+
+
+def test_coupang_center_name_risk_allows_real_center_for_coupang():
+    # AC3 (c): 쿠팡 + 실제 가공 센터명 → 위험 아님.
+    assert coupang_center_name_risk("coupang", "강남센터") == (False, "")
+
+
+def test_coupang_center_name_risk_ignores_non_coupang_platform():
+    # AC3 (d)/AC6: 배민 탭은 이 분류기에서 위험으로 보지 않는다(어떤 center_name이든).
+    assert coupang_center_name_risk("baemin", "") == (False, "")
+    assert coupang_center_name_risk("baemin", DEFAULT_BAEMIN_CENTER_NAME) == (False, "")
+
+
+def test_coupang_center_name_risk_is_non_blocking_and_never_raises():
+    # AC3 (e)/AC6: 분류만 하고 차단하지 않는다 — 어떤 입력에도 예외를 던지지 않고
+    # (is_risky: bool, reason: str) 튜플만 반환한다(상태 enum 미사용 — Story 2.5 소유).
+    for platform, name in (
+        ("coupang", ""),
+        ("coupang", DEFAULT_BAEMIN_CENTER_NAME),
+        ("coupang", "강남센터"),
+        ("baemin", ""),
+    ):
+        result = coupang_center_name_risk(platform, name)
+        assert isinstance(result, tuple) and len(result) == 2
+        assert isinstance(result[0], bool) and isinstance(result[1], str)
+
+
+def test_coupang_center_name_risk_normalizes_platform_and_strips_center_name():
+    # 쿠팡 판정은 공백/대소문자 무시, center_name은 strip 후 empty/배민-기본값 판정.
+    assert coupang_center_name_risk("  Coupang  ", "   ")[0] is True
+    assert coupang_center_name_risk("coupang", f"  {DEFAULT_BAEMIN_CENTER_NAME}  ")[0] is True
+
+
+def test_coupang_center_name_risk_distinguishes_empty_from_baemin_default_reason():
+    # AC3 #5: 두 위험 조건(empty / 배민-기본값)은 운영자가 어느 쪽인지 알 수 있도록 서로
+    # 다른 사유 문자열을 돌려줘야 한다 — 한 사유로 뭉뚱그리지 않는다.
+    _, empty_reason = coupang_center_name_risk("coupang", "")
+    _, default_reason = coupang_center_name_risk("coupang", DEFAULT_BAEMIN_CENTER_NAME)
+
+    assert empty_reason and default_reason
+    assert empty_reason != default_reason
+
+
+@pytest.mark.parametrize(
+    "center_name",
+    [
+        "",
+        "   ",
+        DEFAULT_BAEMIN_CENTER_NAME,
+        f"  {DEFAULT_BAEMIN_CENTER_NAME}  ",
+        "강남센터",
+        "제이앤에이치플러스 의정부남부",
+    ],
+)
+def test_risk_classifier_agrees_with_require_coupang_center_single_source(center_name):
+    # AC3 / Task 3 (드리프트 방지): 비차단 분류기와 env/CLI raise 경로는 같은 조건 단일
+    # 소스(_coupang_center_name_issue)를 공유한다. 한쪽이 막는 입력은 다른 쪽도 위험으로
+    # 분류해야 한다 — 같은 두 조건이 두 경로에서 어긋나면(드리프트) 실패한다.
+    raised = False
+    try:
+        _require_coupang_center(center_name)
+    except ValueError:
+        raised = True
+
+    is_risky, _ = coupang_center_name_risk("coupang", center_name)
+    assert is_risky is raised
+
+
+def test_app_config_neutral_accessors_are_not_dataclass_fields():
+    # AC2/AC4: 중립 접근자는 @property라 dataclass 필드가 아니다 — dataclasses.fields와
+    # asdict 어디에도 잡히지 않아 직렬화/마이그레이션에 새 키를 만들지 않는다.
+    config = _coupang_app_config()
+
+    field_names = {f.name for f in dataclasses.fields(config)}
+    serialized = dataclasses.asdict(config)
+    for neutral in ("primary_url", "center_name", "target_external_id", "display_name"):
+        assert neutral not in field_names
+        assert neutral not in serialized
+
+
+def test_app_config_neutral_accessors_are_read_only_on_frozen_config():
+    # AC4: AppConfig(frozen=True)에서도 중립 접근자는 읽을 수 있고(@property는 메서드라
+    # frozen과 무관), 읽기 전용 별칭이라 값을 덮어쓸 수 없다(저장 정본은 legacy 필드).
+    config = _coupang_app_config(baemin_center_name="강남센터")
+
+    assert config.center_name == "강남센터"
+    with pytest.raises(AttributeError):
+        config.center_name = "다른센터"

@@ -72,6 +72,15 @@ def test_coupang_crawl_current_screen_accepts_expected_center(tmp_path):
     assert snapshot.center_name == "제이앤에이치플러스 의정부남부"
 
 
+def test_coupang_config_center_name_aliases_baemin_center_name(tmp_path):
+    # Story 2.3 AC1: 쿠팡 검증이 쓰는 baemin_center_name(기대 센터/상점명)을 플랫폼 중립
+    # center_name 접근자가 항상 동일 값으로 노출한다 — _validate_coupang_center 경로가
+    # center_name으로도 동일하게 유지된다는 근거를 잠근다.
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    assert config.center_name == config.baemin_center_name == "제이앤에이치플러스 의정부남부"
+
+
 def test_coupang_crawl_current_screen_rejects_substring_center_match(tmp_path):
     # 화면이 "제이앤에이치플러스 의정부남부"인데 설정이 그 부분 문자열이면, exact가
     # 아니므로 통과하지 않아야 한다(다른 계정/센터 전송 방지).

@@ -657,6 +657,111 @@ def test_save_single_object_atomic_preserves_original_on_replace_failure(tmp_pat
     assert leftovers == []
 
 
+# ── Story 2.3: 플랫폼 중립 Target 필드(read-only alias) + 비차단 위험 분류기 ──
+
+
+def test_ui_settings_neutral_accessors_alias_legacy_fields_for_baemin():
+    # AC1: 배민 탭에서 플랫폼 중립 접근자가 기존 legacy 필드 값을 그대로 반환한다.
+    settings = UiSettings.defaults()
+    settings.platform_name = "baemin"
+    settings.performance_url = "https://example.test/delivery/history"
+    settings.baemin_center_name = "강남센터"
+    settings.baemin_center_id = "DP000"
+    settings.legacy_alias = "크롤링1"
+
+    assert settings.primary_url == settings.performance_url
+    assert settings.center_name == settings.baemin_center_name
+    assert settings.target_external_id == settings.baemin_center_id
+    assert settings.display_name == settings.legacy_alias
+
+
+def test_ui_settings_neutral_accessors_alias_legacy_fields_for_coupang():
+    # AC1: 쿠팡 탭도 같은 중립 필드 이름으로 같은 매핑을 읽는다(동일 Target 필드 집합).
+    # 쿠팡은 baemin_center_name을 기대 센터/상점명으로 재사용하므로 center_name으로 노출된다.
+    settings = UiSettings.defaults()
+    settings.platform_name = "coupang"
+    settings.performance_url = "https://partner.coupangeats.com/page/peak-dashboard"
+    settings.baemin_center_name = "강남센터"
+    settings.baemin_center_id = "DP000"
+    settings.legacy_alias = "크롤링2"
+
+    assert settings.primary_url == settings.performance_url
+    assert settings.center_name == settings.baemin_center_name
+    assert settings.target_external_id == settings.baemin_center_id
+    assert settings.display_name == settings.legacy_alias
+
+
+def test_ui_settings_neutral_accessors_return_raw_value_without_stripping():
+    # Task 1: 중립 접근자는 순수 읽기다 — strip/가공 없이 원본 값을 그대로 돌려준다
+    # (소비자가 기존처럼 .strip()을 호출하므로 여기서 가공하면 의미가 갈라진다).
+    settings = UiSettings.defaults()
+    settings.baemin_center_name = "  강남센터  "
+
+    assert settings.center_name == "  강남센터  "
+
+
+def test_ui_settings_neutral_accessors_are_not_serialized(tmp_path):
+    # AC2/AC4: @property는 dataclass 필드가 아니므로 asdict/저장 JSON에 새 키가 생기지
+    # 않는다. save/load·save_all/load_all 라운드트립 텍스트에 중립 이름 키가 없어야 한다.
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettings.defaults()
+    settings.legacy_alias = "크롤링1"
+    store.save(settings)
+
+    flat_text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    for neutral_key in ('"primary_url"', '"center_name"', '"target_external_id"', '"display_name"'):
+        assert neutral_key not in flat_text
+    # 라운드트립으로 legacy 값은 그대로 보존된다.
+    assert store.load().legacy_alias == "크롤링1"
+
+    # save_all/load_all 경로도 동일하게 중립 키를 직렬화하지 않고 "crawlings" 구조를 유지한다.
+    multi = UiSettingsStore(tmp_path / "missing.json").load_all()
+    multi[0].performance_url = "https://example.test/x"
+    store.save_all(multi)
+    all_text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert '"crawlings"' in all_text
+    for neutral_key in ('"primary_url"', '"center_name"', '"target_external_id"', '"display_name"'):
+        assert neutral_key not in all_text
+
+
+def test_ui_settings_coupang_center_name_risk_delegates_to_classifier():
+    # AC3(편의 접근자): 중립 center_name/platform_name으로 위험 분류기를 바로 호출할 수
+    # 있다(분류만 — 예외/저장/상태 전이 없음).
+    risky = UiSettings.defaults()
+    risky.platform_name = "coupang"
+    risky.baemin_center_name = ""  # 빈 기대 센터/상점명 → 위험
+    is_risky, reason = risky.coupang_center_name_risk()
+    assert is_risky is True
+    assert reason
+
+    safe = UiSettings.defaults()
+    safe.platform_name = "coupang"
+    safe.baemin_center_name = "강남센터"
+    assert safe.coupang_center_name_risk() == (False, "")
+
+    baemin = UiSettings.defaults()  # platform_name == "baemin"
+    baemin.baemin_center_name = ""
+    assert baemin.coupang_center_name_risk() == (False, "")
+
+
+def test_to_app_config_preserves_neutral_target_fields(tmp_path):
+    # AC1: UiSettings→AppConfig 변환 경계를 거쳐도 같은 Target 필드 집합을 읽는다. 두 모델은
+    # primary_url/center_name/target_external_id를 서로 다른 legacy 필드(performance_url↔
+    # coupang_eats_url 등)에 매핑하지만, to_app_config가 값을 옮기므로 중립 이름으로는 동일
+    # 값이 유지된다 — AC1의 양쪽(UiSettings·AppConfig 중립 접근자)을 변환 경로로 잇는다.
+    settings = UiSettings.defaults()
+    settings.platform_name = "coupang"
+    settings.performance_url = "https://partner.coupangeats.com/page/peak-dashboard"
+    settings.baemin_center_name = "강남센터"
+    settings.baemin_center_id = "DP000"
+
+    config = settings.to_app_config()
+
+    assert config.primary_url == settings.primary_url
+    assert config.center_name == settings.center_name
+    assert config.target_external_id == settings.target_external_id
+
+
 def test_save_all_atomic_cleans_temp_and_preserves_original_on_fsync_failure(tmp_path, monkeypatch):
     # AC2 #4: 실패 지점이 os.replace 이전(os.fsync)이어도 — temp는 쓰였지만 아직 교체 전 —
     # 기존 ui_settings.json은 이전 유효 상태로 보존되고 temp(.tmp)는 정리된다(unlink 후 재발생).

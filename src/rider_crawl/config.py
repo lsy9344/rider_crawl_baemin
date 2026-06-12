@@ -133,6 +133,27 @@ class AppConfig:
         base = self.runtime_dir / "state"
         return base / self.state_subdir if self.state_subdir else base
 
+    # 플랫폼 중립 Target 필드(P1-05): 배민·쿠팡이 같은 중립 이름으로 대상을 읽도록, 기존
+    # legacy 필드 위에 얹는 read-only 별칭이다. 저장 정본은 legacy 필드(``coupang_eats_url``
+    # 등)이고 이름을 rename하지 않으므로 30+ 호출부가 안 깨진다(ADD-8). ``@property``는
+    # dataclass 필드가 아니라 ``frozen=True``·직렬화와 무관하다(기존 runtime_dir/state_dir가
+    # 같은 패턴). 순수 읽기라 strip/가공하지 않는다(소비자가 기존처럼 .strip()을 부른다).
+    @property
+    def primary_url(self) -> str:
+        return self.coupang_eats_url
+
+    @property
+    def center_name(self) -> str:
+        return self.baemin_center_name
+
+    @property
+    def target_external_id(self) -> str:
+        return self.baemin_center_id
+
+    @property
+    def display_name(self) -> str:
+        return self.crawl_name
+
 
 def app_state_root() -> Path:
     """Return a fixed app state root that does not depend on the current cwd.
@@ -258,18 +279,65 @@ def _center_id_from_env(platform_name: str) -> str:
     return os.getenv("BAEMIN_CENTER_ID", DEFAULT_BAEMIN_CENTER_ID)
 
 
+def _coupang_center_name_issue(center_name: str) -> str:
+    """쿠팡 기대 센터/상점명의 위험 조건을 단일 소스로 판정한다.
+
+    안전하면 ``""``, 비어 있으면 ``"empty"``, 배민 기본값이면 ``"baemin_default"``를
+    돌려준다. 같은 두 조건을 ``_require_coupang_center``(raise)와 ``coupang_center_name_risk``
+    (비차단 flag)가 공유해 드리프트를 막는다 — 판정만 공유하고 raise/flag 표현은 각자 한다.
+    입력이 이미 strip된 경로(``_center_name_from_env``)도 있으나, 분류기 호출 등 일반 입력을
+    위해 여기서 strip한 뒤 판정한다(이미 strip된 값에는 무영향).
+    """
+
+    name = center_name.strip()
+    if not name:
+        return "empty"
+    if name == DEFAULT_BAEMIN_CENTER_NAME:
+        return "baemin_default"
+    return ""
+
+
+def coupang_center_name_risk(platform_name: str, center_name: str) -> tuple[bool, str]:
+    """쿠팡 기대 센터/상점명이 비었거나 배민 기본값이면 비차단 위험으로 분류한다(FR-20 토대).
+
+    ``_require_coupang_center``/``_validate_coupang_expected_center``가 쓰는 **동일한 두
+    조건**(empty / 배민-기본값)을 **예외 없이** ``(is_risky, reason)``로 노출하는 read-only
+    분류기다. 실제 작업 차단·상태 전이는 Epic 4(FR-14/FR-20) 소유이므로 여기서는 분류만
+    하고 흐름을 막지 않는다. 상태 enum(``CENTER_MISMATCH`` 등)은 Story 2.5 소유라 단순
+    bool + 사유 문자열로 둔다. 배민 탭은 이 분류에서 위험으로 보지 않는다(배민 센터 규칙은
+    별도 — ui._validate_active_baemin_center_identity 소유).
+    """
+
+    if platform_name.strip().casefold() != "coupang":
+        return (False, "")
+    issue = _coupang_center_name_issue(center_name)
+    if issue == "empty":
+        return (
+            True,
+            "쿠팡 기대 센터/상점명이 비어 있습니다. 화면에서 확인된 센터와 대조할 기대값이 필요합니다.",
+        )
+    if issue == "baemin_default":
+        return (
+            True,
+            "쿠팡 기대 센터/상점명이 배민 기본값입니다. 실제 쿠팡 센터/상점명으로 바꿔야 합니다.",
+        )
+    return (False, "")
+
+
 def _require_coupang_center(center_name: str) -> None:
     # 쿠팡 계정/센터/상점은 CDP 포트와 Chrome 프로필 로그인으로만 결정되므로, 포트나
     # 프로필이 꼬이면 다른 쿠팡 계정 실적을 정상처럼 전송할 수 있다. 기대 센터명이
     # 없으면 크롤러가 센터 검증을 건너뛰므로, CLI(--once)도 UI 저장 검증과 동일하게
-    # 명시적으로 기대 센터명을 요구한다.
-    if not center_name:
+    # 명시적으로 기대 센터명을 요구한다. 조건 판정은 ``_coupang_center_name_issue``로
+    # 단일화하되, env/CLI 경로의 raise 동작·메시지는 그대로 보존한다(약화 금지).
+    issue = _coupang_center_name_issue(center_name)
+    if issue == "empty":
         raise ValueError(
             "PERFORMANCE_PLATFORM=coupang에서는 BAEMIN_CENTER_NAME에 "
             "실제 쿠팡 센터/상점명을 입력하세요. 이 값은 화면에서 확인된 센터와 대조해 "
             "다른 쿠팡 계정 실적 전송을 막는 데 쓰입니다."
         )
-    if center_name == DEFAULT_BAEMIN_CENTER_NAME:
+    if issue == "baemin_default":
         raise ValueError(
             "PERFORMANCE_PLATFORM=coupang인데 BAEMIN_CENTER_NAME이 배민 기본값입니다. "
             "실제 쿠팡 센터/상점명으로 바꿔 입력하세요."

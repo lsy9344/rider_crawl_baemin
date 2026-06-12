@@ -55,7 +55,7 @@ development_status:
   epic-2: in-progress
   2-1-uisettings에-고객-대상-id-부여와-legacy-alias-보존: done
   2-2-대상별-상태-경로-분리와-atomic-write-로그-rotation: done
-  2-3-플랫폼-중립-target-필드-통일: backlog
+  2-3-플랫폼-중립-target-필드-통일: done
   2-4-secret-값-분리-설정-파일은-ref만-보관: backlog
   2-5-핵심-도메인-모델과-상태-enum-정의: backlog
   2-6-구독-실행-게이트-중지-고객의-작업-차단: backlog

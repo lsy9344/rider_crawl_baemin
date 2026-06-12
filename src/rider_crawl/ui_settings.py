@@ -16,6 +16,7 @@ from .config import (
     DEFAULT_GMAIL_CREDENTIALS_PATH,
     DEFAULT_GMAIL_TOKEN_PATH,
     AppConfig,
+    coupang_center_name_risk,
 )
 
 
@@ -98,6 +99,33 @@ class UiSettings:
         settings.cdp_url = f"http://127.0.0.1:{9221 + tab_index}"
         settings.browser_user_data_dir = Path(f"runtime/browser-profile-{tab_index}")
         return settings
+
+    # 플랫폼 중립 Target 필드(P1-05): 배민·쿠팡이 같은 중립 이름으로 대상을 읽도록, 기존
+    # legacy 필드 위에 얹는 read-only 별칭이다. 저장 정본은 legacy 필드(``performance_url``
+    # 등)이고 이름을 rename하지 않으므로 30+ 호출부가 안 깨진다(ADD-8). ``@property``는
+    # dataclass 필드가 아니라 ``asdict``/저장 JSON에 새 키를 만들지 않는다(직렬화 불변).
+    # 순수 읽기라 strip/가공하지 않는다(소비자가 기존처럼 .strip()을 부른다).
+    @property
+    def primary_url(self) -> str:
+        return self.performance_url
+
+    @property
+    def center_name(self) -> str:
+        return self.baemin_center_name
+
+    @property
+    def target_external_id(self) -> str:
+        return self.baemin_center_id
+
+    @property
+    def display_name(self) -> str:
+        return self.legacy_alias
+
+    def coupang_center_name_risk(self) -> tuple[bool, str]:
+        # 편의 접근자: 중립 platform_name/center_name으로 비차단 위험 분류기를 호출한다.
+        # bare 이름은 모듈 전역(config에서 import한 함수)으로 해석된다(이 메서드가 아님).
+        # 분류만 하고 예외/저장/상태 전이는 하지 않는다(실제 차단은 Epic 4 소유).
+        return coupang_center_name_risk(self.platform_name, self.center_name)
 
     def to_app_config(self, *, crawl_name: str = "", state_subdir: str = "") -> AppConfig:
         return AppConfig(
