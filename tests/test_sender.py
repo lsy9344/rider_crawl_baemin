@@ -21,6 +21,69 @@ def test_send_kakao_text_refuses_non_windows_runtime(tmp_path):
         send_kakao_text(config, "hello", platform_name="Darwin")
 
 
+class _FocusFakeWindow:
+    def __init__(self, handle: int = 4242) -> None:
+        self.handle = handle
+        self.restored = False
+        self.focused = False
+
+    def restore(self) -> None:
+        self.restored = True
+
+    def set_focus(self) -> None:
+        self.focused = True
+
+
+def test_bring_window_to_front_uses_win32_force_before_title_bar_click(monkeypatch):
+    # set_focus()가 전면 전환에 실패해도, 화면 좌표 클릭에 의존하지 않는 Win32 강제
+    # 전면 전환이 성공하면 타이틀바 클릭으로 떨어지지 않는다(여러 창이 떠 있을 때
+    # 클릭 지점이 가려져 실패하던 문제 방지).
+    window = _FocusFakeWindow()
+    state = {"foreground": False}
+    monkeypatch.setattr(sender_module, "_is_kakaotalk_foreground", lambda _w: state["foreground"])
+    forced: list[int] = []
+
+    def fake_force(handle):
+        forced.append(handle)
+        state["foreground"] = True
+        return True
+
+    monkeypatch.setattr(sender_module, "_force_foreground_win32", fake_force)
+    clicked: list[object] = []
+    monkeypatch.setattr(sender_module, "_click_window_title_bar", lambda w: clicked.append(w))
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _s: None)
+
+    sender_module._bring_window_to_front(window)
+
+    assert forced == [4242]
+    assert clicked == []
+
+
+def test_bring_window_to_front_falls_back_to_click_when_win32_force_does_not_take(monkeypatch):
+    window = _FocusFakeWindow()
+    fg_results = iter([False, False, True])  # check1, check2(after win32), check3(after click)
+    monkeypatch.setattr(sender_module, "_is_kakaotalk_foreground", lambda _w: next(fg_results))
+    monkeypatch.setattr(sender_module, "_force_foreground_win32", lambda _h: True)
+    clicked: list[object] = []
+    monkeypatch.setattr(sender_module, "_click_window_title_bar", lambda w: clicked.append(w))
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _s: None)
+
+    sender_module._bring_window_to_front(window)
+
+    assert clicked == [window]
+
+
+def test_bring_window_to_front_raises_when_all_focus_methods_fail(monkeypatch):
+    window = _FocusFakeWindow()
+    monkeypatch.setattr(sender_module, "_is_kakaotalk_foreground", lambda _w: False)
+    monkeypatch.setattr(sender_module, "_force_foreground_win32", lambda _h: False)
+    monkeypatch.setattr(sender_module, "_click_window_title_bar", lambda _w: None)
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(KakaoSendError, match="전면으로 가져오지"):
+        sender_module._bring_window_to_front(window)
+
+
 def test_focus_last_kakao_chat_window_rejects_different_chat_name(monkeypatch):
     sender_module._LAST_KAKAO_CHAT_HANDLE_BY_CHAT = {"실적봇_B": 123}
     monkeypatch.setattr(sender_module, "_window_from_handle", lambda _handle, _backend: _FakeWindow("실적봇_A"))

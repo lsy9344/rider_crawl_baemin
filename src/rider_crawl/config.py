@@ -201,13 +201,11 @@ def _platform_name(raw: str) -> str:
 
 
 def _peak_dashboard_url_from_env(platform_name: str) -> str:
-    # 피크 대시보드는 쿠팡 전용 보조 URL이다. 배민이면 PEAK_DASHBOARD_URL env가
-    # 있어도 무조건 빈 값으로 둔다. 이 값은 메시지 scope hash에 들어가므로, 배민에서
-    # 값을 채우면 UI 배민 설정(빈 값)과 CLI 배민 설정의 중복 감지 파일이 갈라진다.
-    # 문서/UI 동작과 맞춰 배민은 항상 빈 값으로 통일한다.
-    if platform_name != "coupang":
-        return ""
-    return os.getenv("PEAK_DASHBOARD_URL", DEFAULT_COUPANG_PEAK_DASHBOARD_URL)
+    # ``peak_dashboard_url``(UI의 '보조 URL')은 더 이상 쓰지 않는다. 쿠팡 탭은 로그인
+    # 직후 열리는 peak-dashboard 한 페이지만 주 URL(``coupang_eats_url``)로 읽으므로,
+    # 보조 URL은 항상 빈 값으로 둔다. 배민도 예전부터 빈 값이었다. 두 플랫폼 모두
+    # 빈 값으로 통일해 메시지 scope hash가 UI 설정과 어긋나지 않게 한다.
+    return ""
 
 
 def _primary_url_from_env(platform_name: str) -> str:
@@ -216,7 +214,8 @@ def _primary_url_from_env(platform_name: str) -> str:
         return performance_url
 
     if platform_name == "coupang":
-        return os.getenv("COUPANG_EATS_URL", DEFAULT_COUPANG_RIDER_PERFORMANCE_URL)
+        # 쿠팡은 로그인 직후 열리는 peak-dashboard를 주 페이지로 읽는다.
+        return os.getenv("COUPANG_EATS_URL", DEFAULT_COUPANG_PEAK_DASHBOARD_URL)
 
     baemin_url = os.getenv("BAEMIN_DELIVERY_HISTORY_URL")
     if baemin_url:

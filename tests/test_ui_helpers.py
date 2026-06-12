@@ -41,8 +41,8 @@ def test_coerce_settings_builds_coupang_ui_settings_from_form_values(tmp_path):
     settings = coerce_settings(
         {
             "platform_name": "coupang",
-            "performance_url": " https://partner.coupangeats.com/page/rider-performance ",
-            "peak_dashboard_url": " https://partner.coupangeats.com/page/peak-dashboard ",
+            "performance_url": " https://partner.coupangeats.com/page/peak-dashboard ",
+            "peak_dashboard_url": "",
             "baemin_center_name": "",
             "baemin_center_id": "",
             "browser_mode": "cdp",
@@ -72,8 +72,8 @@ def test_validate_active_tab_isolation_allows_coupang_with_expected_center(tmp_p
     settings = _settings(
         tmp_path,
         platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = "쿠팡강남센터"
     settings.baemin_center_id = ""
@@ -87,8 +87,8 @@ def test_validate_active_tab_isolation_rejects_coupang_without_expected_center(t
     settings = _settings(
         tmp_path,
         platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = ""
     settings.baemin_center_id = ""
@@ -105,8 +105,8 @@ def test_validate_active_tab_isolation_rejects_coupang_with_default_baemin_cente
     settings = _settings(
         tmp_path,
         platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = UiSettings.defaults().baemin_center_name
     settings.baemin_center_id = ""
@@ -115,55 +115,30 @@ def test_validate_active_tab_isolation_rejects_coupang_with_default_baemin_cente
         validate_active_tab_isolation([settings])
 
 
-def test_validate_active_tab_isolation_rejects_coupang_without_peak_dashboard_url(tmp_path):
-    settings = _settings(
-        tmp_path,
-        platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="",
-    )
-
-    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
-        validate_active_tab_isolation([settings])
-
-
 def test_validate_active_tab_isolation_rejects_coupang_with_baemin_primary_url(tmp_path):
+    # 쿠팡 탭의 '실적/달성현황 URL'은 peak-dashboard여야 한다. 배민 URL이 남아 있으면 막는다.
     settings = _settings(
         tmp_path,
         platform_name="coupang",
         performance_url=(
             "https://deliverycenter.baemin.com/delivery/history?page=0&size=20"
         ),
-        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = ""
     settings.baemin_center_id = ""
 
-    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
+    with pytest.raises(ValueError, match="실적/달성현황 URL"):
         validate_active_tab_isolation([settings])
 
 
-def test_validate_active_tab_isolation_rejects_coupang_with_non_coupang_peak_url(tmp_path):
-    settings = _settings(
-        tmp_path,
-        platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://example.test/dashboard",
-    )
-    settings.baemin_center_name = ""
-    settings.baemin_center_id = ""
-
-    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
-        validate_active_tab_isolation([settings])
-
-
-def test_validate_active_tab_isolation_rejects_coupang_peak_url_with_wrong_path(tmp_path):
+def test_validate_active_tab_isolation_rejects_coupang_primary_url_with_wrong_path(tmp_path):
     # 같은 도메인이지만 peak-dashboard가 아닌 경로(rider-performance)는 막아야 한다.
     settings = _settings(
         tmp_path,
         platform_name="coupang",
         performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://partner.coupangeats.com/page/rider-performance",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = ""
     settings.baemin_center_id = ""
@@ -172,51 +147,18 @@ def test_validate_active_tab_isolation_rejects_coupang_peak_url_with_wrong_path(
         validate_active_tab_isolation([settings])
 
 
-def test_validate_active_tab_isolation_rejects_coupang_when_primary_equals_peak(tmp_path):
-    # 주 URL과 피크 URL을 같은 값으로 두면 둘 중 하나는 반드시 강제 경로(주 URL은
-    # rider-performance, 피크 URL은 peak-dashboard)와 어긋나므로 경로 검증에서 걸린다.
-    # 즉 경로 강제만으로 "두 URL이 같은 경우"가 구조적으로 차단된다.
-    same_url = "https://partner.coupangeats.com/page/peak-dashboard"
-    settings = _settings(
-        tmp_path,
-        platform_name="coupang",
-        performance_url=same_url,
-        peak_dashboard_url=same_url,
-    )
-    settings.baemin_center_name = ""
-    settings.baemin_center_id = ""
-
-    # 주 URL이 rider-performance가 아니므로 주 URL 검증에서 먼저 걸린다.
-    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
-        validate_active_tab_isolation([settings])
-
-
 def test_validate_active_tab_isolation_rejects_coupang_primary_url_with_http_scheme(tmp_path):
     # 크롤러 탭 매칭이 scheme까지 비교하므로 http로 저장하면 https 탭을 못 찾는다.
     settings = _settings(
         tmp_path,
         platform_name="coupang",
-        performance_url="http://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="https://partner.coupangeats.com/page/peak-dashboard",
+        performance_url="http://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
     )
     settings.baemin_center_name = ""
     settings.baemin_center_id = ""
 
-    with pytest.raises(ValueError, match="쿠팡 실적 URL"):
-        validate_active_tab_isolation([settings])
-
-
-def test_validate_active_tab_isolation_rejects_coupang_peak_url_with_http_scheme(tmp_path):
-    settings = _settings(
-        tmp_path,
-        platform_name="coupang",
-        performance_url="https://partner.coupangeats.com/page/rider-performance",
-        peak_dashboard_url="http://partner.coupangeats.com/page/peak-dashboard",
-    )
-    settings.baemin_center_name = ""
-    settings.baemin_center_id = ""
-
-    with pytest.raises(ValueError, match="쿠팡 피크 대시보드 URL"):
+    with pytest.raises(ValueError, match="실적/달성현황 URL"):
         validate_active_tab_isolation([settings])
 
 

@@ -26,26 +26,23 @@ def crawl_current_screen(
 def crawl_performance_snapshot(
     config: AppConfig,
     *,
-    fetch_performance_html: Callable[[AppConfig], str] | None = None,
     fetch_peak_dashboard_html: Callable[[AppConfig], str] | None = None,
 ) -> PerformanceSnapshot:
-    performance_html = (
-        fetch_performance_html(config)
-        if fetch_performance_html
-        else fetch_page_html(config, target_url=config.coupang_eats_url)
-    )
+    # 쿠팡 탭은 로그인 직후 열리는 peak-dashboard 한 페이지만 읽는다. 주 URL
+    # (``coupang_eats_url``, UI의 '실적/달성현황 URL')에 peak-dashboard가 들어온다.
+    # rider-performance 페이지는 더 이상 요구하지 않으므로(그 탭이 없어도 오류가 나지
+    # 않는다) ``current_screen``은 ``None``으로 둔다. '수행중인인원' 줄만 그 페이지에서
+    # 왔는데, peak-only로 바꾸면서 메시지에서도 그 줄을 생략한다.
     peak_dashboard_html = (
         fetch_peak_dashboard_html(config)
         if fetch_peak_dashboard_html
-        else fetch_page_html(config, target_url=config.peak_dashboard_url)
+        else fetch_page_html(config, target_url=config.coupang_eats_url)
     )
-    current_screen = parse_current_screen_html(performance_html)
-    _validate_coupang_center(config, current_screen)
-    # 피크 대시보드 HTML도 같은 기대 센터인지 검증한다. 실적 페이지만 검증하면 다른
-    # 계정/오래된 피크 탭이 하나만 열려 있을 때 실적과 피크 지표가 섞일 수 있다.
+    # 피크 대시보드 헤딩에 기대 센터가 노출되면 그것으로 다른 계정/오래된 탭을 막는다.
+    # 헤딩이 없으면(피크 페이지가 센터를 노출하지 않으면) 기존처럼 검증을 건너뛴다.
     _validate_coupang_center_in_peak_html(config, peak_dashboard_html)
     return PerformanceSnapshot(
-        current_screen=current_screen,
+        current_screen=None,
         peak_dashboard=parse_peak_dashboard_html(peak_dashboard_html),
     )
 
@@ -655,12 +652,17 @@ def _wait_for_target_page_ready(
     target_url: str,
     timeout_errors: tuple[type[BaseException], ...],
 ) -> None:
-    if _url_matches(target_url, config.coupang_eats_url):
-        label = "쿠팡이츠 실적 페이지"
-        required_text = "라이더 현황"
-    elif _url_matches(target_url, config.peak_dashboard_url):
+    # 대상 페이지는 어떤 config 필드에 들어 있는지가 아니라 URL 경로로 판별한다. 쿠팡
+    # 탭이 peak-dashboard를 주 URL(``coupang_eats_url``)로 쓰게 되면서, config 필드 비교는
+    # 주/보조 URL이 같은 값일 때 잘못된 분기를 탈 수 있다. 경로로 보면 어느 필드에 있든
+    # 항상 알맞은 준비 텍스트를 기다린다.
+    path = _normalize_path(urlsplit(target_url).path).casefold()
+    if path == "/page/peak-dashboard":
         label = "쿠팡이츠 피크 대시보드"
         required_text = "피크타임별 현황"
+    elif path == "/page/rider-performance":
+        label = "쿠팡이츠 실적 페이지"
+        required_text = "라이더 현황"
     else:
         return
 
@@ -713,7 +715,7 @@ def _html_looks_like_coupang_login_required(html: str) -> bool:
 def _coupang_login_required_message(target_url: str) -> str:
     return (
         "쿠팡이츠 로그인이 만료되었거나 로그인 화면으로 이동했습니다.\n"
-        "Chrome에서 쿠팡이츠에 다시 로그인한 뒤 rider-performance와 peak-dashboard "
-        "페이지를 각각 로그인된 상태로 열어두세요.\n"
+        "Chrome에서 쿠팡이츠에 다시 로그인한 뒤 peak-dashboard 페이지를 "
+        "로그인된 상태로 열어두세요.\n"
         f"대상 URL: {target_url}"
     )

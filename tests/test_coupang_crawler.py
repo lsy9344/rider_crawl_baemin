@@ -105,26 +105,36 @@ def test_coupang_crawl_current_screen_accepts_explicit_alias(tmp_path):
 
 
 def test_coupang_crawl_performance_snapshot_rejects_unexpected_center(tmp_path):
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+    # peak-only로 바뀌어 센터 검증은 peak-dashboard 헤딩으로만 한다. 화면 헤딩 센터가
+    # 기대값과 다르면 거부한다.
     config = _config(tmp_path, baemin_center_name="엉뚱한센터")
 
     with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
         crawl_performance_snapshot(
             config,
-            fetch_performance_html=lambda _config: performance_html,
-            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_CENTER,
         )
 
 
-def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_heading(tmp_path):
-    # 피크 HTML에 센터 헤딩(h1)이 없으면 피크 쪽 추가 검증은 건너뛴다.
-    # 실적 페이지 센터 검증은 이미 통과한 상태다.
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+def test_coupang_crawl_performance_snapshot_omits_current_screen(tmp_path):
+    # 쿠팡 탭은 peak-dashboard 한 페이지만 읽으므로 current_screen은 None이다.
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_performance_html=lambda _config: performance_html,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+    )
+
+    assert snapshot.current_screen is None
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_heading(tmp_path):
+    # 피크 HTML에 센터 헤딩(h1)이 없으면 센터 검증은 건너뛴다(기존 동작 유지).
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
         fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
     )
 
@@ -132,12 +142,10 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_hea
 
 
 def test_coupang_crawl_performance_snapshot_accepts_peak_section_headings_without_center(tmp_path):
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_performance_html=lambda _config: performance_html,
         fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY,
     )
 
@@ -147,24 +155,20 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_section_headings_withou
 def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_matches(tmp_path):
     # 실제 선택 센터 헤딩은 "서초센터"인데, 드롭다운 option에만 기대 센터명이 있는
     # 경우. 헤딩 exact 비교이므로 부수 텍스트 일치로는 통과하면 안 된다(회귀 방지).
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
     with pytest.raises(RuntimeError, match="헤딩과 일치하지 않습니다"):
         crawl_performance_snapshot(
             config,
-            fetch_performance_html=lambda _config: performance_html,
             fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_OTHER_CENTER_HEADING,
         )
 
 
 def test_coupang_crawl_performance_snapshot_accepts_matching_peak_center(tmp_path):
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_performance_html=lambda _config: performance_html,
         fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_CENTER,
     )
 
@@ -173,7 +177,6 @@ def test_coupang_crawl_performance_snapshot_accepts_matching_peak_center(tmp_pat
 
 def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_shift_suffix(tmp_path):
     # 헤딩이 "센터명 시프트(시간)" 형태여도 앞쪽 센터명만 떼어 비교한다.
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     peak_html = _PEAK_DASHBOARD_HTML.replace(
         "<main>",
         "<main>\n  <h1>제이앤에이치플러스 의정부남부 저녁피크(16:55~20:00)</h1>",
@@ -182,7 +185,6 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_shift_suff
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_performance_html=lambda _config: performance_html,
         fetch_peak_dashboard_html=lambda _config: peak_html,
     )
 
@@ -191,7 +193,6 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_shift_suff
 
 def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_spaced_shift_suffix(tmp_path):
     # 실제 표기처럼 시프트명에 공백이 있어도("저녁 피크") 센터명을 잘못 자르지 않는다.
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
     peak_html = _PEAK_DASHBOARD_HTML.replace(
         "<main>",
         "<main>\n  <h1>제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00)</h1>",
@@ -200,7 +201,6 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_spaced_shi
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_performance_html=lambda _config: performance_html,
         fetch_peak_dashboard_html=lambda _config: peak_html,
     )
 
@@ -348,17 +348,15 @@ def test_select_coupang_center_tolerates_pages_without_tabs(tmp_path):
     assert page.clicked_tab_labels == []
 
 
-def test_coupang_crawl_performance_snapshot_parses_performance_and_peak_dashboard(tmp_path):
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
+def test_coupang_crawl_performance_snapshot_parses_peak_dashboard(tmp_path):
     peak_dashboard_html = _PEAK_DASHBOARD_HTML
 
     snapshot = crawl_performance_snapshot(
         _config(tmp_path),
-        fetch_performance_html=lambda _config: performance_html,
         fetch_peak_dashboard_html=lambda _config: peak_dashboard_html,
     )
 
-    assert snapshot.current_screen.active_riders == 7
+    assert snapshot.current_screen is None
     assert snapshot.peak_dashboard.updated_at == "20:38"
     assert snapshot.peak_dashboard.assigned_count == 103
     assert snapshot.peak_dashboard.processed_count == 67
@@ -367,15 +365,11 @@ def test_coupang_crawl_performance_snapshot_parses_performance_and_peak_dashboar
     assert snapshot.peak_dashboard.dinner_non_peak.total == 27
 
 
-def test_coupang_crawl_performance_snapshot_routes_each_page_to_its_own_url(tmp_path, monkeypatch):
+def test_coupang_crawl_performance_snapshot_fetches_only_the_primary_peak_url(tmp_path, monkeypatch):
+    # 쿠팡 탭은 주 URL(coupang_eats_url, '실적/달성현황 URL')에 든 peak-dashboard 한
+    # 페이지만 읽는다. rider-performance 페이지는 더 이상 요청하지 않는다.
     config = _config(tmp_path)
-    performance_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8")
-    peak_dashboard_html = _PEAK_DASHBOARD_HTML
-
-    html_by_url = {
-        config.coupang_eats_url: performance_html,
-        config.peak_dashboard_url: peak_dashboard_html,
-    }
+    html_by_url = {config.coupang_eats_url: _PEAK_DASHBOARD_HTML}
     requested_urls: list[str] = []
 
     def fake_fetch_page_html(_config, *, target_url=None):
@@ -386,8 +380,8 @@ def test_coupang_crawl_performance_snapshot_routes_each_page_to_its_own_url(tmp_
 
     snapshot = crawl_performance_snapshot(config)
 
-    assert requested_urls == [config.coupang_eats_url, config.peak_dashboard_url]
-    assert snapshot.current_screen.active_riders == 7
+    assert requested_urls == [config.coupang_eats_url]
+    assert snapshot.current_screen is None
     assert snapshot.peak_dashboard.updated_at == "20:38"
 
 

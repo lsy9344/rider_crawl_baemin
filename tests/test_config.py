@@ -111,15 +111,17 @@ def test_app_config_reads_coupang_credentials_path(monkeypatch):
 def test_app_config_reads_coupang_environment_values(monkeypatch):
     monkeypatch.delenv("PERFORMANCE_URL", raising=False)
     monkeypatch.setenv("PERFORMANCE_PLATFORM", "coupang")
-    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/rider-performance")
+    monkeypatch.setenv("COUPANG_EATS_URL", "https://example.test/peak-dashboard")
     monkeypatch.setenv("PEAK_DASHBOARD_URL", "https://example.test/peak-dashboard")
     monkeypatch.setenv("BAEMIN_CENTER_NAME", "쿠팡강남센터")
 
     config = AppConfig.from_env()
 
     assert config.platform_name == "coupang"
-    assert config.coupang_eats_url == "https://example.test/rider-performance"
-    assert config.peak_dashboard_url == "https://example.test/peak-dashboard"
+    # 쿠팡은 로그인 직후 열리는 peak-dashboard 한 페이지만 주 URL로 읽는다.
+    assert config.coupang_eats_url == "https://example.test/peak-dashboard"
+    # 보조 URL(peak_dashboard_url)은 더 이상 쓰지 않으므로 PEAK_DASHBOARD_URL env가 있어도 빈 값이다.
+    assert config.peak_dashboard_url == ""
     # 쿠팡 탭은 BAEMIN_CENTER_NAME을 기대 센터/상점명으로 재사용한다.
     assert config.baemin_center_name == "쿠팡강남센터"
 
@@ -230,7 +232,8 @@ def test_app_config_coupang_platform_uses_coupang_defaults(monkeypatch):
 
     config = AppConfig.from_env()
 
-    assert config.coupang_eats_url == "https://partner.coupangeats.com/page/rider-performance"
-    assert config.peak_dashboard_url == "https://partner.coupangeats.com/page/peak-dashboard"
+    # 쿠팡 주 URL 기본값은 로그인 직후 열리는 peak-dashboard다(보조 URL은 사용하지 않음).
+    assert config.coupang_eats_url == "https://partner.coupangeats.com/page/peak-dashboard"
+    assert config.peak_dashboard_url == ""
     # 쿠팡에서는 배민 센터 ID 기본값을 넣지 않는다(쿠팡 탭에서 사용하지 않음).
     assert config.baemin_center_id == ""

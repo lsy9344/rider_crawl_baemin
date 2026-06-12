@@ -47,6 +47,42 @@ def test_render_coupang_performance_message_matches_original_format():
     )
 
 
+def test_render_coupang_performance_message_omits_active_riders_when_current_screen_missing():
+    # 쿠팡 탭은 peak-dashboard 한 페이지만 크롤링하므로 current_screen이 없다(None).
+    # 이때 '수행중인인원' 줄은 생략하고, 나머지 peak 지표는 그대로 보낸다.
+    snapshot = PerformanceSnapshot(
+        current_screen=None,
+        peak_dashboard=PeakDashboardSnapshot(
+            updated_at="20:38",
+            assigned_count=103,
+            processed_count=67,
+            reject_rate=6.5,
+            morning=PeakPeriodSnapshot(done=18, total=9),
+            lunch_peak=PeakPeriodSnapshot(done=45, total=45),
+            lunch_non_peak=PeakPeriodSnapshot(done=10, total=19),
+            dinner_peak=PeakPeriodSnapshot(done=17, total=39),
+            dinner_non_peak=PeakPeriodSnapshot(done=2, total=27),
+        ),
+    )
+
+    assert render_current_screen_message(snapshot, now=WEEKDAY) == "\n".join(
+        [
+            "[실시간 실적봇]",
+            "⏰ 20:38 기준",
+            "",
+            "아침 : 완료 (06:00~10:54)",
+            "점심 피크 : 완료 (10:54~12:59)",
+            "점심 논피크 : 10건/19건 (13:00~16:54)",
+            "저녁 피크 : 17건/39건 (16:55~19:59)",
+            "저녁 논피크 : 2건/27건 (20:00~03:59)",
+            "",
+            "배정 103건 / 처리 67건",
+            "🚨거절률: 6.5%🚨",
+        ]
+    )
+    assert "수행중인인원" not in render_current_screen_message(snapshot, now=WEEKDAY)
+
+
 def test_render_coupang_performance_message_uses_weekend_times_on_weekend():
     snapshot = PerformanceSnapshot(
         current_screen=_current_screen(active_riders=3),

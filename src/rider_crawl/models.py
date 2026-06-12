@@ -58,7 +58,11 @@ class PeakDashboardSnapshot:
 
 @dataclass(frozen=True)
 class PerformanceSnapshot:
-    current_screen: CurrentScreenSnapshot
+    # ``current_screen``(쿠팡 rider-performance 페이지)은 선택값이다. 쿠팡 탭은 로그인
+    # 직후 열리는 peak-dashboard 한 페이지만 크롤링하므로 보통 ``None``이며, 이때
+    # 메시지에서 '수행중인인원' 줄을 생략한다. rider-performance를 함께 읽는 경로가
+    # 다시 필요해지면 이 값을 채워 그 줄을 포함시킬 수 있다.
+    current_screen: CurrentScreenSnapshot | None
     peak_dashboard: PeakDashboardSnapshot
 
 

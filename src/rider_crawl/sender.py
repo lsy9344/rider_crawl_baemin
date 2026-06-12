@@ -1257,12 +1257,82 @@ def _bring_window_to_front(window: object) -> None:
     if _is_kakaotalk_foreground(window):
         return
 
+    # ``set_focus()``는 백그라운드 스레드에서 호출되거나(스케줄러 스레드) UIA 백엔드로
+    # 잡힌 창이면 OS 포그라운드를 바꾸지 못하고 조용히 무시될 수 있다(UIA의 SetFocus는
+    # 요소 키보드 포커스만 바꾸고, 백그라운드 프로세스의 SetForegroundWindow는 Windows
+    # 포그라운드 잠금에 막힌다). 다른 창이 위를 덮고 있어도 동작하는, 화면 좌표에
+    # 의존하지 않는 Win32 강제 전면 전환을 먼저 시도한다(여러 탭/창이 떠 있을 때 특정
+    # 채팅방만 계속 전면 전환에 실패하던 원인).
+    handle = _window_handle(window)
+    if handle is not None and _force_foreground_win32(handle):
+        time.sleep(0.2)
+        if _is_kakaotalk_foreground(window):
+            return
+
+    # 마지막 수단: 타이틀바 클릭. 위 두 방법이 막혔을 때만 쓰며, 클릭 지점이 다른 창에
+    # 가려져 있으면 실패할 수 있어 더 이상 1차 수단으로 의존하지 않는다.
     _click_window_title_bar(window)
     time.sleep(0.2)
     if _is_kakaotalk_foreground(window):
         return
 
     raise KakaoSendError("카카오톡 창을 전면으로 가져오지 못했습니다. 카카오톡 창을 열어둔 뒤 다시 실행하세요.")
+
+
+def _force_foreground_win32(handle: int) -> bool:
+    """Force ``handle`` to the OS foreground without depending on screen pixels.
+
+    백그라운드 스레드에서 ``SetForegroundWindow``는 Windows 포그라운드 잠금에 막혀
+    무시되기 쉽다. 현재 포그라운드 창의 입력 스레드와 대상 창의 입력 스레드에
+    ``AttachThreadInput``으로 붙으면 그 잠금을 우회할 수 있다. 타이틀바 클릭과 달리
+    화면 좌표에 의존하지 않으므로, 다른 창이 위를 덮고 있어도 전면 전환이 된다.
+    실패하거나 Win32 API를 쓸 수 없으면 ``False``를 돌려 호출부가 다음 수단으로 넘어간다.
+    """
+
+    try:
+        import ctypes
+    except Exception:
+        return False
+
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+    except Exception:
+        return False
+
+    SW_RESTORE = 9
+    SW_SHOW = 5
+    try:
+        if user32.IsIconic(handle):
+            user32.ShowWindow(handle, SW_RESTORE)
+
+        current_thread = kernel32.GetCurrentThreadId()
+        foreground = user32.GetForegroundWindow()
+        foreground_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+        target_thread = user32.GetWindowThreadProcessId(handle, None)
+
+        attached_foreground = bool(
+            foreground_thread
+            and foreground_thread != current_thread
+            and user32.AttachThreadInput(current_thread, foreground_thread, True)
+        )
+        attached_target = bool(
+            target_thread
+            and target_thread != current_thread
+            and user32.AttachThreadInput(current_thread, target_thread, True)
+        )
+        try:
+            user32.BringWindowToTop(handle)
+            user32.ShowWindow(handle, SW_SHOW)
+            user32.SetForegroundWindow(handle)
+        finally:
+            if attached_foreground:
+                user32.AttachThreadInput(current_thread, foreground_thread, False)
+            if attached_target:
+                user32.AttachThreadInput(current_thread, target_thread, False)
+        return True
+    except Exception:
+        return False
 
 
 def _is_kakaotalk_foreground(window: object) -> bool:

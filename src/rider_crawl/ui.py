@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
 from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
-from .config import DEFAULT_BAEMIN_CENTER_NAME, AppConfig
+from .config import DEFAULT_BAEMIN_CENTER_NAME, DEFAULT_COUPANG_PEAK_DASHBOARD_URL, AppConfig
 from .keyword_responder import KeywordResponder
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
@@ -34,6 +34,9 @@ TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
 TELEGRAM_FIELD_KEYS = ("telegram_bot_token", "telegram_chat_id", "telegram_message_thread_id")
 KAKAO_FIELD_KEYS = ("kakao_chat_name",)
 MESSENGER_FIELD_KEYS = TELEGRAM_FIELD_KEYS + KAKAO_FIELD_KEYS
+# 플랫폼 선택에 따라 잠그거나 자동 채우는 URL 입력칸. 쿠팡이츠를 고르면 '실적/달성현황
+# URL'에 peak-dashboard가 고정 입력되고, 더 이상 쓰지 않는 '보조 URL'은 비활성화된다.
+PLATFORM_URL_FIELD_KEYS = ("performance_url", "peak_dashboard_url")
 
 
 @dataclass
@@ -317,7 +320,7 @@ class RiderBotUi:
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
             entry = ttk.Entry(frame, textvariable=tab_vars[key])
             entry.grid(row=row, column=1, sticky="ew", pady=4)
-            if key in MESSENGER_FIELD_KEYS:
+            if key in MESSENGER_FIELD_KEYS or key in PLATFORM_URL_FIELD_KEYS:
                 entry_widgets[key] = entry
 
         checks = ttk.Frame(frame)
@@ -363,6 +366,20 @@ class RiderBotUi:
             pady=(8, 0),
         )
         self._bind_messenger_field_states(tab_vars, entry_widgets)
+        self._bind_platform_field_states(tab_vars, entry_widgets)
+
+    def _bind_platform_field_states(
+        self,
+        tab_vars: dict[str, StringVar | BooleanVar],
+        entry_widgets: dict[str, object],
+    ) -> None:
+        platform_var = tab_vars["platform_name"]
+
+        def update_states(*_args: object) -> None:
+            _apply_platform_field_states(entry_widgets, str(platform_var.get()), tab_vars)
+
+        platform_var.trace_add("write", update_states)
+        update_states()
 
     def _bind_messenger_field_states(
         self,
@@ -390,9 +407,10 @@ class RiderBotUi:
             checklist,
             text=(
                 "1. 플랫폼을 배민 또는 쿠팡이츠로 선택하세요. 플랫폼별로 입력 항목이 다릅니다.\n"
-                "2. 배민은 로그인된 달성현황(beta) 페이지를, 쿠팡이츠는 rider-performance와 peak-dashboard를 열어두세요.\n"
-                "3. 쿠팡이츠 탭은 보조 URL(쿠팡 피크 대시보드)을 입력하세요. 센터명 칸은 배민은 센터명, "
-                "쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
+                "2. 배민은 로그인된 달성현황(beta) 페이지를, 쿠팡이츠는 로그인 직후 열리는 peak-dashboard 페이지를 열어두세요.\n"
+                "3. 쿠팡이츠는 '실적/달성현황 URL'에 peak-dashboard가 자동 입력·고정됩니다(보조 URL은 사용하지 않음). "
+                "센터명 칸은 배민은 센터명, 쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다"
+                "(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
                 "5. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
                 "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
@@ -982,6 +1000,41 @@ def _apply_messenger_field_states(entry_widgets: dict[str, object], messenger_na
             widget.configure(state=state)
 
 
+def _apply_platform_field_states(
+    entry_widgets: dict[str, object],
+    platform_name: str,
+    tab_vars: dict[str, StringVar | BooleanVar],
+) -> None:
+    is_coupang = platform_name.strip().casefold() == "coupang"
+    perf_entry = entry_widgets.get("performance_url")
+    peak_entry = entry_widgets.get("peak_dashboard_url")
+    if is_coupang:
+        # 쿠팡은 로그인 직후 열리는 peak-dashboard 한 페이지만 읽는다. '실적/달성현황
+        # URL'에 그 값을 고정 입력하고 읽기 전용으로 잠가 다른 URL이 들어가지 않게 한다.
+        # 보조 URL은 더 이상 쓰지 않으므로 비우고 비활성화한다.
+        if tab_vars["performance_url"].get().strip() != DEFAULT_COUPANG_PEAK_DASHBOARD_URL:
+            tab_vars["performance_url"].set(DEFAULT_COUPANG_PEAK_DASHBOARD_URL)
+        if tab_vars["peak_dashboard_url"].get().strip():
+            tab_vars["peak_dashboard_url"].set("")
+        if perf_entry is not None:
+            perf_entry.configure(state="readonly")
+        if peak_entry is not None:
+            peak_entry.configure(state="disabled")
+    else:
+        if perf_entry is not None:
+            perf_entry.configure(state="normal")
+        if peak_entry is not None:
+            peak_entry.configure(state="normal")
+        # 쿠팡 → 배민으로 바꾸면 잠겨 있던 peak-dashboard 값이 '실적/달성현황 URL'에 남는다.
+        # 배민에는 맞지 않으므로, 쿠팡 URL이 남아 있으면 비워 사용자가 배민 URL을 입력하게 한다.
+        if _looks_like_coupang_url(str(tab_vars["performance_url"].get())):
+            tab_vars["performance_url"].set("")
+
+
+def _looks_like_coupang_url(url: str) -> bool:
+    return (urlsplit(url.strip()).hostname or "").casefold() == _COUPANG_HOST
+
+
 def _validate_unique_active_value(
     indexed_settings: list[tuple[int, UiSettings]],
     *,
@@ -1046,29 +1099,17 @@ def _validate_active_coupang_urls(indexed_settings: list[tuple[int, UiSettings]]
     for index, settings in indexed_settings:
         if settings.platform_name != "coupang":
             continue
-        # 주 URL이 배민 기본값으로 남아 있으면 플랫폼만 쿠팡으로 바꾼 채 저장될 수 있다.
-        # 주 URL이 쿠팡 rider-performance인지 확인해 잘못된 페이지 크롤링을 막는다.
-        # scheme까지 https로 강제한다. 크롤러의 탭 매칭은 scheme까지 비교하므로(
-        # crawler._url_matches), http로 저장하면 "저장은 됐는데 https 탭을 못 찾는"
-        # 상태가 된다. 그래서 UI 저장 단계에서 https가 아니면 막는다.
+        # 쿠팡 탭은 로그인 직후 열리는 peak-dashboard 한 페이지만 읽는다. '실적/달성현황
+        # URL'(주 URL)이 peak-dashboard인지 확인해 잘못된 페이지 크롤링을 막는다. scheme
+        # 까지 https로 강제한다. 크롤러의 탭 매칭은 scheme까지 비교하므로(crawler.
+        # _url_matches), http로 저장하면 "저장은 됐는데 https 탭을 못 찾는" 상태가 된다.
+        # 보조 URL(peak_dashboard_url)은 더 이상 쓰지 않으므로 검증하지 않는다.
         performance_url = settings.performance_url.strip()
         if not performance_url:
-            raise ValueError(f"크롤링{index + 1} 쿠팡 실적 URL(주 URL)을 입력하세요.")
-        if not _is_coupang_performance_url(performance_url):
+            raise ValueError(f"크롤링{index + 1} 쿠팡 실적/달성현황 URL을 입력하세요.")
+        if not _is_coupang_path_url(performance_url, "/page/peak-dashboard"):
             raise ValueError(
-                f"크롤링{index + 1} 쿠팡 실적 URL(주 URL)은 "
-                f"https://{_COUPANG_HOST}/page/rider-performance 형식이어야 합니다."
-            )
-        peak_url = settings.peak_dashboard_url.strip()
-        if not peak_url:
-            raise ValueError(f"크롤링{index + 1} 쿠팡 피크 대시보드 URL을 입력하세요.")
-        # 도메인/scheme만 보면 rider-performance나 같은 도메인의 엉뚱한 경로도 통과한다.
-        # /page/peak-dashboard 경로까지 확인한다. 주 URL은 rider-performance, 피크
-        # URL은 peak-dashboard로 경로가 강제되므로 두 URL이 같아지는 경우도 함께
-        # 차단된다.
-        if not _is_coupang_path_url(peak_url, "/page/peak-dashboard"):
-            raise ValueError(
-                f"크롤링{index + 1} 쿠팡 피크 대시보드 URL은 "
+                f"크롤링{index + 1} 쿠팡 실적/달성현황 URL은 "
                 f"https://{_COUPANG_HOST}/page/peak-dashboard 형식이어야 합니다."
             )
         _validate_coupang_expected_center(index, settings)
@@ -1101,10 +1142,6 @@ def _is_coupang_path_url(url: str, path: str) -> bool:
     host = (parsed.hostname or "").casefold()
     scheme = (parsed.scheme or "").casefold()
     return scheme == "https" and host == _COUPANG_HOST and parsed.path.rstrip("/").casefold() == path
-
-
-def _is_coupang_performance_url(url: str) -> bool:
-    return _is_coupang_path_url(url, "/page/rider-performance")
 
 
 def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:
