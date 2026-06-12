@@ -45,7 +45,7 @@ development_status:
   # ── Epic 1: 기준선 안전망 (P0) ──
   epic-1: in-progress
   1-1-기준선-branch-tag와-설정-백업-생성: done
-  1-2-pytest-기준선-실행과-결과-분류-보관: backlog
+  1-2-pytest-기준선-실행과-결과-분류-보관: done
   1-3-공용-redaction-유틸-추가-및-검증: backlog
   1-4-기존-2탭-수동-회귀-시나리오-문서화: backlog
   1-5-기존-자산-재사용-경계와-금지-행위-명문화: backlog
