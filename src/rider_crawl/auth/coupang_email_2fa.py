@@ -23,15 +23,22 @@ from rider_crawl.config import AppConfig
 # 동시에 도착하는 메일을 ``requested_after`` 컷오프에서 잃지 않도록 둔다.
 _REQUESTED_AFTER_SAFETY_SECONDS = 30
 
+# 인증 화면 조작(클릭·입력) 1회당 타임아웃(ms). 맞는 요소는 보통 즉시 존재하므로,
+# 후보 selector/텍스트마다 페이지 전체 타임아웃(수십 초)을 기다리면 그 사이 인증번호가
+# 만료된다. 짧게 잡아 틀린 후보는 빨리 넘기고, 코드 입력칸을 지체 없이 채운다.
+_INTERACTION_TIMEOUT_MS = 2_000
+
 # 이메일 인증 방식을 고르는 버튼/링크 후보 텍스트. 화면 문구가 바뀔 수 있어 여러 개를 둔다.
 _EMAIL_METHOD_TEXTS = ("이메일로 인증", "이메일 인증", "이메일", "email")
 
-# 인증번호 발송(요청) 버튼 후보 텍스트.
+# 인증번호 발송(요청) 버튼 후보 텍스트. 실측 화면의 실제 버튼("인증코드 전송")을 맨 앞에
+# 둬, 틀린 후보를 하나씩 타임아웃만큼 기다리는 낭비를 줄인다.
 _SEND_CODE_TEXTS = (
+    "인증코드 전송",
     "인증번호 발송",
     "인증번호 받기",
     "인증번호 전송",
-    "인증코드 전송",
+    "인증코드 발송",
     "코드 받기",
     "send code",
     "send",
@@ -154,6 +161,12 @@ def _default_fetch_code(**kwargs: Any) -> str:
 # --- 화면 조작 헬퍼 ----------------------------------------------------------
 
 
+def _interaction_timeout(config: AppConfig) -> int:
+    # 인증 화면 조작은 짧게 시도하고 빨리 넘긴다(코드 만료 방지). 페이지 타임아웃이
+    # 더 작게 설정된 환경에서는 그 값을 따른다.
+    return min(config.page_timeout_seconds, _INTERACTION_TIMEOUT_MS)
+
+
 def _safe_page_text(page: Any) -> str:
     try:
         return str(page.content() or "").casefold()
@@ -185,6 +198,13 @@ def _submit_primary_login(page: Any, config: AppConfig) -> bool:
 
 
 def _load_coupang_credentials(config: AppConfig) -> tuple[str, str] | None:
+    # UI에 입력한 자격증명이 있으면 그것을 먼저 쓴다. 둘 중 하나라도 비면 기존
+    # JSON 파일(``coupang_credentials_path``)로 폴백한다(하위호환).
+    ui_username = str(getattr(config, "coupang_login_id", "") or "").strip()
+    ui_password = str(getattr(config, "coupang_login_password", "") or "")
+    if ui_username and ui_password:
+        return ui_username, ui_password
+
     try:
         raw = json.loads(config.coupang_credentials_path.read_text(encoding="utf-8"))
     except Exception:
@@ -205,7 +225,7 @@ def _fill_first_input(
     value: str,
     config: AppConfig,
 ) -> bool:
-    timeout = min(config.page_timeout_seconds, 5_000)
+    timeout = _interaction_timeout(config)
     for selector in selectors:
         try:
             page.locator(selector).first.fill(value, timeout=timeout)
@@ -242,12 +262,14 @@ def _has_visible_input(page: Any, selectors: tuple[str, ...]) -> bool:
 
 
 def _wait_after_action(page: Any, config: AppConfig) -> None:
+    # networkidle은 보통 빨리 끝나지만, 안 끝나도 인증 화면 조작을 오래 막지 않도록
+    # 상한을 짧게 둔다(idle이면 그 전에 반환된다).
     try:
-        page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 10_000))
+        page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 3_000))
     except Exception:
         pass
     try:
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
     except Exception:
         pass
 
@@ -264,7 +286,7 @@ def _click_first_by_text(
     어떤 후보든 한 번 클릭에 성공하면 ``True``. 화면에 없거나 모두 실패하면 ``False``.
     """
 
-    timeout = min(config.page_timeout_seconds, 5_000)
+    timeout = _interaction_timeout(config)
     for text in texts:
         for role in roles:
             try:
@@ -292,10 +314,13 @@ def _click_first_by_text(
 
 
 def _fill_code_input(page: Any, code: str, config: AppConfig) -> None:
+    # selector마다 페이지 전체 타임아웃(수십 초)을 기다리면, 첫 selector가 안 맞을 때
+    # 그 시간 동안 입력이 지연돼 인증번호가 만료된다. 짧은 타임아웃으로 빠르게 넘긴다.
+    timeout = _interaction_timeout(config)
     for selector in _CODE_INPUT_SELECTORS:
         try:
             locator = page.locator(selector).first
-            locator.fill(code, timeout=config.page_timeout_seconds)
+            locator.fill(code, timeout=timeout)
             return
         except Exception:
             continue

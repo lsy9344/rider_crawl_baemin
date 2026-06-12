@@ -143,6 +143,20 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=run_lock_timeout_seconds,
         page_timeout_seconds=page_timeout_seconds,
+        coupang_auto_email_2fa_enabled=bool(
+            values.get("coupang_auto_email_2fa_enabled", defaults.coupang_auto_email_2fa_enabled)
+        ),
+        coupang_login_id=str(values.get("coupang_login_id", "")).strip(),
+        # 비밀번호는 앞뒤 공백도 의미가 있을 수 있어 strip하지 않는다.
+        coupang_login_password=str(values.get("coupang_login_password", "")),
+        gmail_2fa_query=str(values.get("gmail_2fa_query", defaults.gmail_2fa_query)).strip()
+        or defaults.gmail_2fa_query,
+        gmail_credentials_path=str(
+            values.get("gmail_credentials_path", defaults.gmail_credentials_path)
+        ).strip()
+        or defaults.gmail_credentials_path,
+        gmail_token_path=str(values.get("gmail_token_path", defaults.gmail_token_path)).strip()
+        or defaults.gmail_token_path,
     )
 
 
@@ -217,9 +231,15 @@ class RiderBotUi:
             "interval_minutes": StringVar(value=str(settings.interval_minutes)),
             "page_timeout_seconds": StringVar(value=str(settings.page_timeout_seconds)),
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
+            "coupang_login_id": StringVar(value=settings.coupang_login_id),
+            "coupang_login_password": StringVar(value=settings.coupang_login_password),
+            "gmail_2fa_query": StringVar(value=settings.gmail_2fa_query),
+            "gmail_credentials_path": StringVar(value=settings.gmail_credentials_path),
+            "gmail_token_path": StringVar(value=settings.gmail_token_path),
             "headless": BooleanVar(value=settings.headless),
             "send_enabled": BooleanVar(value=settings.send_enabled),
             "send_only_on_change": BooleanVar(value=settings.send_only_on_change),
+            "coupang_auto_email_2fa_enabled": BooleanVar(value=settings.coupang_auto_email_2fa_enabled),
         }
 
     def _build(self) -> None:
@@ -314,11 +334,21 @@ class RiderBotUi:
             ("메세지 전송 간격(분)", "interval_minutes"),
             ("페이지 타임아웃(ms)", "page_timeout_seconds"),
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
+            ("쿠팡 로그인 아이디(자동복구)", "coupang_login_id"),
+            ("쿠팡 로그인 비밀번호(자동복구)", "coupang_login_password"),
+            ("Gmail 인증메일 검색식(2FA)", "gmail_2fa_query"),
+            ("Gmail 자격증명 파일 경로", "gmail_credentials_path"),
+            ("Gmail 토큰 파일 경로", "gmail_token_path"),
         ]
         entry_widgets = {}
         for row, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-            entry = ttk.Entry(frame, textvariable=tab_vars[key])
+            entry_kwargs: dict[str, Any] = {"textvariable": tab_vars[key]}
+            if key == "coupang_login_password":
+                # 비밀번호는 화면에 가린다. UI 입력값이 ui_settings.json에 평문 저장되는
+                # 점은 텔레그램 토큰 등 기존 비밀값과 동일한 한계다.
+                entry_kwargs["show"] = "*"
+            entry = ttk.Entry(frame, **entry_kwargs)
             entry.grid(row=row, column=1, sticky="ew", pady=4)
             if key in MESSENGER_FIELD_KEYS or key in PLATFORM_URL_FIELD_KEYS:
                 entry_widgets[key] = entry
@@ -365,6 +395,11 @@ class RiderBotUi:
             sticky="w",
             pady=(8, 0),
         )
+        ttk.Checkbutton(
+            checks,
+            text="쿠팡 로그인 만료 시 자동복구(이메일 2FA)",
+            variable=tab_vars["coupang_auto_email_2fa_enabled"],
+        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 0))
         self._bind_messenger_field_states(tab_vars, entry_widgets)
         self._bind_platform_field_states(tab_vars, entry_widgets)
 
@@ -412,7 +447,9 @@ class RiderBotUi:
                 "센터명 칸은 배민은 센터명, 쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다"
                 "(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
-                "5. 2차 인증은 앱이 처리하지 않습니다. 로그인 만료 시 직접 다시 로그인하세요.\n"
+                "5. 쿠팡이츠는 '쿠팡 로그인 만료 시 자동복구'를 켜면 입력한 아이디·비밀번호와 "
+                "Gmail 인증메일(2FA)로 자동 재로그인을 시도합니다(아이디·비밀번호·Gmail 자격증명/토큰 파일 필요). "
+                "꺼져 있으면 로그인 만료 시 직접 다시 로그인하세요.\n"
                 "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
                 "7. 텔레그램은 봇 토큰과 그룹방 chat_id를 입력하고, 토픽 그룹이면 토픽 ID도 입력하세요.\n"
                 "8. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
@@ -587,7 +624,10 @@ class RiderBotUi:
         except BrowserActionRequiredError as exc:
             # 로그인 만료나 중복/누락된 CDP 탭처럼 사용자가 Chrome에서 조치해야 하는
             # 상태다. 자동 복구되지 않으므로 이 탭의 반복 실행을 완전히 멈춘다.
-            self.messages.put(("error", f"{label} {exc}"))
+            # 멈춘 원인을 나중에 확인할 수 있도록 run_errors.log에도 남긴다(과거에는
+            # UI 메시지로만 떠서, 왜 특정 시각 이후 탭이 멈췄는지 로그로 확인할 수 없었다.
+            # 쿠팡 자동 2FA 복구가 실패해 여기로 떨어진 경우도 이 줄로 흔적이 남는다).
+            self._append_run_error(f"{label} 로그인 만료·조치 필요로 자동 중지", exc, log_dir=settings.log_dir)
             if stop_event is not None:
                 stop_event.set()
             self.messages.put(("status", f"{label} 중지됨"))

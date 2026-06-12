@@ -1165,7 +1165,7 @@ def test_cdp_unavailable_waits_full_interval_and_skips_error_log(tmp_path, monke
     )
 
 
-def test_browser_action_required_stops_tab_and_skips_error_log(tmp_path, monkeypatch):
+def test_browser_action_required_stops_tab_and_writes_error_log(tmp_path, monkeypatch):
     from rider_crawl.browser_launcher import BrowserActionRequiredError
 
     ui = RiderBotUi.__new__(RiderBotUi)
@@ -1191,7 +1191,11 @@ def test_browser_action_required_stops_tab_and_skips_error_log(tmp_path, monkeyp
 
     assert result is False
     assert stop_event.is_set()
-    assert log_writes == []
+    # 로그인 만료로 탭이 멈춘 원인을 나중에 확인할 수 있도록 run_errors.log에도 남긴다.
+    assert len(log_writes) == 1
+    prefix, detail = log_writes[0][0], log_writes[0][1]
+    assert "중지" in prefix
+    assert "다시 로그인" in detail
     assert any(
         kind == "error" and "다시 로그인" in payload
         for kind, payload in list(ui.messages.queue)

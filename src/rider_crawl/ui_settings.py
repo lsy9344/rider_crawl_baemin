@@ -9,8 +9,10 @@ from .config import (
     DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
     DEFAULT_BAEMIN_CENTER_ID,
     DEFAULT_BAEMIN_CENTER_NAME,
+    DEFAULT_GMAIL_2FA_QUERY,
+    DEFAULT_GMAIL_CREDENTIALS_PATH,
+    DEFAULT_GMAIL_TOKEN_PATH,
     AppConfig,
-    gmail_2fa_settings_from_env,
 )
 
 
@@ -37,6 +39,14 @@ class UiSettings:
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
+    # 쿠팡이츠 로그인 만료 시 자동복구(이메일 2FA) 설정. .env가 아니라 UI에서 입력받아
+    # 탭별로 저장한다. 기본은 비활성이며, 켜기 전까지는 기존처럼 로그인 만료 시 탭이 멈춘다.
+    coupang_auto_email_2fa_enabled: bool = False
+    coupang_login_id: str = ""
+    coupang_login_password: str = ""
+    gmail_2fa_query: str = DEFAULT_GMAIL_2FA_QUERY
+    gmail_credentials_path: str = DEFAULT_GMAIL_CREDENTIALS_PATH
+    gmail_token_path: str = DEFAULT_GMAIL_TOKEN_PATH
 
     @classmethod
     def defaults(cls) -> "UiSettings":
@@ -101,9 +111,15 @@ class UiSettings:
             page_timeout_seconds=self.page_timeout_seconds,
             crawl_name=crawl_name,
             state_subdir=state_subdir,
-            # Gmail/2FA 설정은 UI JSON이 아니라 환경변수로 제어한다(1차 구현 정책).
-            # from_env와 동일한 단일 소스를 써서 UI 실행 탭도 2FA를 켤 수 있게 한다.
-            **gmail_2fa_settings_from_env(),
+            # 쿠팡 자동 이메일 2FA 복구 설정은 UI에서 입력받아 탭별로 저장한 값을 쓴다
+            # (.env 사용 안 함). poll/코드 자릿수 등 자주 안 바뀌는 값은 AppConfig 기본값을
+            # 그대로 둔다. 빈 경로/검색식은 기본값으로 보정해 잘못된 빈 값으로 덮이지 않게 한다.
+            coupang_auto_email_2fa_enabled=self.coupang_auto_email_2fa_enabled,
+            coupang_login_id=self.coupang_login_id,
+            coupang_login_password=self.coupang_login_password,
+            gmail_2fa_query=self.gmail_2fa_query or DEFAULT_GMAIL_2FA_QUERY,
+            gmail_credentials_path=Path(self.gmail_credentials_path or DEFAULT_GMAIL_CREDENTIALS_PATH),
+            gmail_token_path=Path(self.gmail_token_path or DEFAULT_GMAIL_TOKEN_PATH),
         )
 
 

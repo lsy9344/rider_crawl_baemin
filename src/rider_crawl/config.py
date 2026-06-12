@@ -21,12 +21,15 @@ DEFAULT_PLATFORM_NAME = "baemin"
 DEFAULT_GMAIL_CREDENTIALS_PATH = "secrets/google/credentials.gmail.json"
 DEFAULT_GMAIL_TOKEN_PATH = "secrets/google/token.gmail.json"
 DEFAULT_COUPANG_CREDENTIALS_PATH = "secrets/google/coupang.credentials.json"
-# 기본 Gmail 검색 쿼리는 발신 도메인 + 인증 관련 제목 + 최근 10분으로 좁힌다. 넓게
-# 잡으면(예: from만) 비인증 쿠팡 메일의 숫자를 인증번호로 오인할 위험이 커진다.
-# 운영 준비 단계에서 실제 발신자/제목을 확인해 더 좁게(GMAIL_2FA_QUERY) 덮어쓴다.
-DEFAULT_GMAIL_2FA_QUERY = "from:(coupang.com) subject:(인증 OR verification OR code) newer_than:10m"
+# 기본 Gmail 검색 쿼리는 실측 발신자(donotreply@coupang.com) + 실제 제목 토큰
+# (이메일 인증번호) + 최근 1일로 좁힌다. 주의: Gmail ``newer_than``에는 분 단위가
+# 없다(``d``=일, ``m``=월, ``y``=년). 정확한 시각 컷오프는 ``requested_after``가 따로
+# 거르므로 여기서는 ``newer_than:1d``로 후보만 줄인다. 운영 메일 발신자/제목이 바뀌면
+# GMAIL_2FA_QUERY(또는 UI의 탭별 검색식)로 덮어쓴다.
+DEFAULT_GMAIL_2FA_QUERY = "from:(donotreply@coupang.com) subject:(이메일 인증번호) newer_than:1d"
 DEFAULT_GMAIL_2FA_POLL_SECONDS = 120
-DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS = 5
+# 인증번호 메일이 도착한 뒤 빨리 집어 입력하도록 폴링 간격을 짧게 둔다(코드 만료 방지).
+DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS = 2
 DEFAULT_COUPANG_2FA_CODE_DIGITS = 6
 
 
@@ -67,6 +70,10 @@ class AppConfig:
     gmail_2fa_poll_interval_seconds: int = DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS
     coupang_2fa_code_digits: int = DEFAULT_COUPANG_2FA_CODE_DIGITS
     coupang_credentials_path: Path = Path(DEFAULT_COUPANG_CREDENTIALS_PATH)
+    # UI에서 직접 입력하는 쿠팡 로그인 자격증명. 둘 다 채워져 있으면
+    # ``coupang_credentials_path`` JSON 파일보다 우선해서 쓴다(파일은 하위호환 폴백).
+    coupang_login_id: str = ""
+    coupang_login_password: str = ""
 
     @classmethod
     def from_env(cls) -> "AppConfig":
