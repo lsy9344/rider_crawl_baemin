@@ -774,6 +774,7 @@ def run_agent(
     start_kakao_sender: bool = False,
     kakao_send: Callable[..., Any] | None = None,
     kakao_build_config: Callable[..., Any] | None = None,
+    session_probe: Callable[[], bool] | None = None,
     start_heartbeat: bool = True,
     heartbeat_join_timeout: float = 5.0,
 ) -> AgentRunSummary:
@@ -788,6 +789,12 @@ def run_agent(
     ``execute_job`` 유지) ``kakao_status`` 소스를 배선한다(미배선/비활성이면 4.3 기본
     ``"disabled"`` → 무회귀). 종료 시 ``reporter.stop()``/``runner.stop()``/``kakao_worker.stop()``
     + thread join 으로 정리한다.
+
+    ``session_probe`` (4.7)가 주입되고 노드가 ``KAKAO_SEND`` 를 보유하면
+    :func:`~rider_agent.autostart.kakao_session_allowed` 로 interactive-session 게이트를 적용한다 —
+    비대화형(Session 0)이면 Kakao 워커를 **띄우지 않고**(``kakao_worker=None`` → ``kakao_status``
+    기본 ``"disabled"``) ``on_status``/``log`` 로 surfacing 한다. **``session_probe=None``(미주입)이면
+    게이트 없음 = 4.6 동작 그대로(무회귀).**
     """
 
     identity = load_local_agent_identity(store=store, identity_path=identity_path)
@@ -812,25 +819,44 @@ def run_agent(
     effective_execute_job = execute_job
     effective_kakao_status = kakao_status_provider
     if start_kakao_sender:
-        from rider_agent.workers.kakao_sender import (
-            build_execute_job,
-            start_kakao_sender_worker_if_enabled,
-        )
+        # 4.7 interactive-session 게이트 — Kakao 노드가 비대화형(Session 0 service-only)이면
+        # 워커를 띄우지 않고(fail-closed) on_status/log 로 surfacing 한다. 판정은 autostart 에
+        # 응집(lazy import 로 순환 import 회피 — 4.6 선례). **session_probe=None(미주입)이면 게이트
+        # 통과 = 4.6 동작 그대로(무회귀 절대 불변).**
+        from rider_agent.autostart import kakao_session_allowed
 
-        kakao_worker = start_kakao_sender_worker_if_enabled(
-            capabilities=capabilities,
-            send=kakao_send,
-            build_config=kakao_build_config,
-            sleep=sleep,
-            now=now,
-            log=log,
+        allowed, reason = kakao_session_allowed(
+            capabilities, session_probe=session_probe
         )
-        if kakao_worker is not None:
-            effective_execute_job = build_execute_job(
-                kakao_worker=kakao_worker, fallback=execute_job
+        if not allowed:
+            if log is not None:
+                log(
+                    redact(
+                        f"kakao sender disabled: non-interactive session ({reason})"
+                    )
+                )
+            if on_status is not None:
+                on_status(reason)
+        else:
+            from rider_agent.workers.kakao_sender import (
+                build_execute_job,
+                start_kakao_sender_worker_if_enabled,
             )
-            if effective_kakao_status is None:
-                effective_kakao_status = kakao_worker.kakao_status
+
+            kakao_worker = start_kakao_sender_worker_if_enabled(
+                capabilities=capabilities,
+                send=kakao_send,
+                build_config=kakao_build_config,
+                sleep=sleep,
+                now=now,
+                log=log,
+            )
+            if kakao_worker is not None:
+                effective_execute_job = build_execute_job(
+                    kakao_worker=kakao_worker, fallback=execute_job
+                )
+                if effective_kakao_status is None:
+                    effective_kakao_status = kakao_worker.kakao_status
 
     runner, reporter = build_agent_components(
         identity,

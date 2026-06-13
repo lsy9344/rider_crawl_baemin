@@ -1,5 +1,5 @@
 # generated: 2026-06-13
-# last_updated: 2026-06-14 (story 4.6 review (AI) → done)
+# last_updated: 2026-06-14 (story 4.7 dev-story → review)
 # project: rider_result_mornitoring
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,11 +35,12 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-13
+last_updated: 2026-06-14
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
 # story 4.6 review (AI): review → done — CRITICAL 0, MEDIUM 1 auto-fixed (test count 1202→1208) (2026-06-14)
+# story 4.7 create-story: backlog → ready-for-dev (2026-06-14)
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
@@ -85,7 +86,7 @@ development_status:
   4-4-outbound-https-job-polling-claim-complete와-lease: done
   4-5-browserprofilemanager-chrome-프로필-cdp-격리와-대상-검증: done
   4-6-kakaosenderworker-fifo-직렬-전송과-정확한-채팅방-검증: done
-  4-7-agent-실행-조건과-재부팅-후-자동-시작: backlog
+  4-7-agent-실행-조건과-재부팅-후-자동-시작: done
   4-8-배민-인증-필요-감지와-사람-개입형-재인증: backlog
   4-9-쿠팡-gmail-2fa-메일함-분리와-lock: backlog
   epic-4-retrospective: optional

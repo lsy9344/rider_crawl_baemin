@@ -161,16 +161,93 @@ def _run_agent_loop(
     return 0
 
 
+def _parse_autostart_args(autostart_argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="rider_agent autostart",
+        description="재부팅 후 사용자 로그인 시 Agent 자동 시작을 등록/해제/조회한다.",
+    )
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument(
+        "--register", action="store_true", help="autostart launch 항목을 등록한다(멱등)"
+    )
+    action.add_argument(
+        "--unregister", action="store_true", help="autostart launch 항목을 해제한다(멱등)"
+    )
+    action.add_argument(
+        "--status", action="store_true", help="autostart 등록 여부를 조회한다"
+    )
+    parser.add_argument(
+        "--method",
+        default="startup",
+        choices=("startup", "task_scheduler"),
+        help="등록 메커니즘(기본 startup — 관리자 권한 불요·로그인=interactive)",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="launch 커맨드에 실을 서버 base URL(secret 아님, 미지정 시 미포함)",
+    )
+    return parser.parse_args(autostart_argv)
+
+
+def _run_autostart(
+    autostart_argv: list[str],
+    *,
+    register: object | None = None,
+    unregister: object | None = None,
+    is_registered: object | None = None,
+    build_command: object | None = None,
+) -> int:
+    """autostart 서브커맨드 실행(얇은 wiring). 의존성은 주입 가능(테스트는 fake autostart 주입).
+
+    실제 등록 primitive 를 호출하고(빈 stub 금지) **redact 통과한 고정 메시지 한 줄**만 출력한다 —
+    launch 커맨드/경로/사용자명·token/code 를 출력하지 않는다(secret/운영 식별자 비노출).
+    """
+
+    args = _parse_autostart_args(autostart_argv)
+
+    # autostart import 는 함수 내부 defer — import-safety/runpy 경고 회피(4.1·4.2 패턴).
+    from rider_agent import autostart
+
+    if register is None:
+        register = autostart.register_autostart
+    if unregister is None:
+        unregister = autostart.unregister_autostart
+    if is_registered is None:
+        is_registered = autostart.is_autostart_registered
+    if build_command is None:
+        build_command = autostart.build_agent_launch_command
+
+    if args.unregister:
+        removed = unregister(method=args.method)
+        state = "unregistered" if removed else "not-registered"
+        print(redact(f"autostart {state} (method={args.method})"))
+        return 0
+    if args.status:
+        present = is_registered(method=args.method)
+        state = "registered" if present else "not-registered"
+        print(redact(f"autostart status: {state} (method={args.method})"))
+        return 0
+
+    # 기본/--register: launch 커맨드(=run, token/code 0)를 합성해 등록한다.
+    command = build_command(server_url=args.server_url)
+    register(command=command, method=args.method)
+    print(redact(f"autostart registered (method={args.method})"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # argv 명시 호출(테스트·CLI)만 신뢰한다. 인자 없는 호출은 배너(4.1 계약). runpy 가 pytest
-    # 안에서 __main__ 을 돌리면 sys.argv 가 오염돼 있으므로, 'register'/'run' 이 아닌 토큰은 모두
-    # 배너로 폴백한다(서브파서 invalid-choice 로 비정상 종료하지 않게 — 무회귀).
+    # 안에서 __main__ 을 돌리면 sys.argv 가 오염돼 있으므로, 'register'/'run'/'autostart' 가 아닌
+    # 토큰은 모두 배너로 폴백한다(서브파서 invalid-choice 로 비정상 종료하지 않게 — 무회귀).
     if argv is None:
         argv = []
     if argv and argv[0] == "register":
         return _run_register(argv[1:])
     if argv and argv[0] == "run":
         return _run_agent_loop(argv[1:])
+    if argv and argv[0] == "autostart":
+        return _run_autostart(argv[1:])
     return _print_banner()
 
 
