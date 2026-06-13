@@ -23,7 +23,25 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
 
+from .api import default_resolve_agent_id, jobs_router
+from .db.base import create_engine, create_session_factory
+from .queue.backend import QueueBackend
+from .queue.memory_queue import InMemoryQueueBackend
+from .queue.postgres_queue import PostgresQueueBackend
 from .settings import Settings
+
+
+def _default_queue_backend(settings: Settings) -> QueueBackend:
+    """settings 로 기본 backend 를 고른다 — ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 in-memory.
+
+    엔진 생성은 lazy connect 라 import/기동 시 DB 연결을 강제하지 않는다(미설정 환경 안전).
+    테스트는 ``create_app(queue_backend=...)`` 로 backend 를 직접 주입한다.
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresQueueBackend(create_session_factory(engine))
+    return InMemoryQueueBackend()
 
 
 def _iso_utc_now() -> str:
@@ -51,15 +69,23 @@ def _error_response(
     return JSONResponse(status_code=status_code, content={"error": event})
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    queue_backend: QueueBackend | None = None,
+) -> FastAPI:
     """FastAPI 앱 팩토리.
 
-    테스트는 fake ``settings`` 를 주입할 수 있다(미지정 시 env 에서 로딩).
+    테스트는 fake ``settings`` 와 ``queue_backend``(in-memory/PG)를 주입할 수 있다(미지정 시
+    env 로딩 / settings 기반 기본 backend).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
     # 프로세스 기동 시점(단조 시계) — /metrics uptime 계산 기준.
     app.state.start_monotonic = time.monotonic()
+    # Agent API queue backend(주입 가능 seam) + bearer→agent_id 해석 seam(5.8 이 교체).
+    app.state.queue_backend = queue_backend or _default_queue_backend(app.state.settings)
+    app.state.resolve_agent_id = default_resolve_agent_id
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
     @app.get("/health")
@@ -123,6 +149,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "internal server error",
             error=exc,
         )
+
+    # --- 리소스 라우트 (/v1/) -----------------------------------------------
+    app.include_router(jobs_router)
 
     return app
 

@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14 (story 5.2 dev-story → review)
+last_updated: 2026-06-14 (story 5.3 dev-story → review)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
@@ -101,7 +101,7 @@ development_status:
   epic-5: in-progress
   5-1-fastapi-백엔드-스캐폴딩과-헬스-버전-메트릭-엔드포인트: done
   5-2-postgresql-13-테이블-스키마와-alembic-마이그레이션: done
-  5-3-queuebackend-추상화와-postgresql-job-queue: backlog
+  5-3-queuebackend-추상화와-postgresql-job-queue: done
   5-4-scheduler-interval-jitter-circuit-breaker와-구독-게이트: backlog
   5-5-telegram-webhook과-채널-등록-검증-활성화: backlog
   5-6-admin-운영-대시보드와-상태-심각도-표시: backlog

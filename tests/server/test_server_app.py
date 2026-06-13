@@ -96,7 +96,10 @@ def test_registered_routes_have_no_v1_operational_paths():
     app = create_app(_FAKE_SETTINGS)
     paths = {getattr(r, "path", None) for r in app.routes}
     assert {"/health", "/version", "/metrics"} <= paths
-    assert not any(p and p.startswith("/v1/") for p in paths)
+    # 운영 엔드포인트(health/version/metrics)는 root-level — /v1/ 아래에 두지 않는다.
+    # 리소스 엔드포인트 /v1/jobs/* 는 Story 5.3+ 가 추가하므로 그것까지 금지하지 않는다.
+    for name in ("health", "version", "metrics"):
+        assert f"/v1/{name}" not in paths
 
 
 # ── AC3 — async 핸들러 ────────────────────────────────────────────────────

@@ -375,13 +375,25 @@ def _create_table_block(sql: str, table_name: str) -> str:
     return match.group(0)
 
 
+def _table_migration_text(sql: str, table_name: str) -> str:
+    """테이블 관련 마이그레이션 SQL(CREATE TABLE 블록 + 이후 ALTER TABLE 문)을 모은다.
+
+    Story 5.3 부터 컬럼이 additive(``ALTER TABLE … ADD COLUMN``, 0002 리비전)로 추가되므로
+    CREATE 블록만 보면 신규 컬럼(jobs.lease_expires_at 등)을 drift 로 오탐한다 — 같은 테이블의
+    ALTER 문도 함께 본다(테이블 스코프는 유지해 다른 테이블로 새지 않음).
+    """
+    block = _create_table_block(sql, table_name)
+    alters = re.findall(rf"ALTER TABLE {re.escape(table_name)} .*?;", sql, re.S)
+    return block + "\n" + "\n".join(alters)
+
+
 def test_migration_renders_every_model_column():
     sql = _offline_sql("upgrade")
     offenders = []
     for name, table in Base.metadata.tables.items():
-        block = _create_table_block(sql, name)
+        text = _table_migration_text(sql, name)
         for col in table.columns:
-            if not re.search(rf"\b{re.escape(col.name)}\b", block):
+            if not re.search(rf"\b{re.escape(col.name)}\b", text):
                 offenders.append(f"{name}.{col.name}")
     assert offenders == [], f"모델에 있으나 마이그레이션에 없는 컬럼(drift): {offenders}"
 
@@ -392,7 +404,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    assert heads[0] == "0001_initial_schema"
+    # Story 5.3 이 additive 0002 를 추가 → 단일 head 가 0002 로 이동, 0001→base 선형 체인 유지.
+    assert heads[0] == "0002_jobs_lease_columns"
+    assert (
+        script.get_revision("0002_jobs_lease_columns").down_revision
+        == "0001_initial_schema"
+    )
     assert script.get_revision("0001_initial_schema").down_revision is None
 
 
