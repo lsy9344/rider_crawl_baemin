@@ -535,7 +535,7 @@ def _try_recover_coupang_session(
 
     recover = recover_session or _default_recover_coupang_session
     try:
-        return bool(recover(page, config))
+        succeeded = bool(recover(page, config))
     except Exception as exc:
         # 복구 실패(Gmail 미도착, 입력칸 못 찾음 등)는 자동 복구 불가로 본다. 상위에서
         # 기존 BrowserActionRequiredError를 다시 던져 탭을 중지한다. 다만 과거에는 이
@@ -545,6 +545,15 @@ def _try_recover_coupang_session(
         # Coupang2faError/Gmail2faError 메시지는 코드·토큰 값을 담지 않게 설계돼 있다.
         _log_recovery_failure(config, exc)
         return False
+    if not succeeded:
+        # 예외 없이 False면 자동복구 범위 밖 화면이었다는 뜻이다(CAPTCHA, 아이디/비번
+        # 제출이 안 먹어 로그인 화면에 머묾, 이메일 인증 화면이 아님 등). 예전에는 이
+        # 경우 run_errors.log에 "로그인 만료"만 남아 *왜* 복구가 안 됐는지 알 수 없었다.
+        _log_recovery_failure(
+            config,
+            RuntimeError("자동복구 불가 화면(로그인 제출 실패·CAPTCHA·비대상 화면 등)"),
+        )
+    return succeeded
 
 
 def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:

@@ -194,7 +194,14 @@ def _submit_primary_login(page: Any, config: AppConfig) -> bool:
         return False
     if not _fill_first_input(page, _PASSWORD_INPUT_SELECTORS, password, config):
         return False
-    return _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+    # 제출. 쿠팡 로그인(antd)은 React 상태로 폼 유효성을 판단해서, '로그인' 버튼이
+    # enabled로 보여도 클릭이 no-op이 되는 경우가 있다(라이브에서 클릭 성공으로 잡히는데
+    # 화면·URL이 그대로). 그래서 비밀번호칸 Enter를 주 제출 경로로 두고, 버튼 클릭도
+    # 함께 시도한다(둘 중 하나만 먹어도 제출된다). 실제 제출 성공 여부는 호출부가 이어서
+    # _is_password_login_screen 재확인으로 판정하므로, 여기서는 입력까지 끝났으면 True.
+    _press_enter_first(page, _PASSWORD_INPUT_SELECTORS, config)
+    _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+    return True
 
 
 def _load_coupang_credentials(config: AppConfig) -> tuple[str, str] | None:
@@ -228,8 +235,47 @@ def _fill_first_input(
     timeout = _interaction_timeout(config)
     for selector in selectors:
         try:
-            page.locator(selector).first.fill(value, timeout=timeout)
+            _enter_text(page.locator(selector).first, value, timeout)
             return True
+        except Exception:
+            continue
+    return False
+
+
+def _enter_text(locator: Any, value: str, timeout: int) -> None:
+    """``value``를 실제 키 입력으로 채워, antd/React 컨트롤드 인풋이 값을 인식하게 한다.
+
+    ``.fill()``은 DOM value만 세팅하고 input 이벤트를 한 번만 던진다. 쿠팡 로그인 화면
+    (antd)처럼 React 상태로 폼 유효성을 판단하는 곳에서는 ``.fill()`` 뒤에 '로그인'을
+    눌러도 빈 값으로 보고 제출이 일어나지 않는다(라이브 확인). 실제 타이핑은 키별
+    이벤트를 던져 React가 상태를 확실히 갱신한다. 타이핑 메서드가 없는 구현(테스트의
+    fake page 등)은 ``.fill()``로 폴백한다."""
+    try:
+        locator.click(timeout=timeout)
+        try:
+            locator.press("Control+a", timeout=timeout)
+            locator.press("Delete", timeout=timeout)
+        except Exception:
+            pass
+        locator.press_sequentially(value, timeout=timeout, delay=30)
+        return
+    except (AttributeError, TypeError):
+        pass
+    locator.fill(value, timeout=timeout)
+
+
+def _press_enter_first(page: Any, selectors: tuple[str, ...], config: AppConfig) -> bool:
+    """첫 매칭 입력칸에서 Enter를 눌러 폼을 제출한다(best-effort).
+
+    antd '로그인' 버튼 클릭이 no-op이 되는 경우를 대비한 주 제출 경로다. press를
+    지원하지 않는 구현(fake page 등)은 조용히 건너뛴다."""
+    timeout = _interaction_timeout(config)
+    for selector in selectors:
+        try:
+            page.locator(selector).first.press("Enter", timeout=timeout)
+            return True
+        except (AttributeError, TypeError):
+            return False
         except Exception:
             continue
     return False
@@ -352,7 +398,7 @@ def _fill_code_input(page: Any, code: str, config: AppConfig) -> None:
     for selector in _CODE_INPUT_SELECTORS:
         try:
             locator = page.locator(selector).first
-            locator.fill(code, timeout=timeout)
+            _enter_text(locator, code, timeout)
             return
         except Exception:
             continue
