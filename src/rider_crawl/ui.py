@@ -68,7 +68,6 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
     _validate_active_coupang_urls(active_settings)
-    _validate_active_coupang_auto_2fa_credentials(active_settings)
     _validate_active_telegram_required(active_settings)
     _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
@@ -537,7 +536,16 @@ class RiderBotUi:
         if settings is None:
             return
 
-        threading.Thread(target=self._run_once_background, args=(self._selected_tab_index(), settings), daemon=True).start()
+        tab_index = self._selected_tab_index()
+        # 1회 실행도 이 탭의 자동복구 자격증명만 검증한다(다른 탭과 독립).
+        try:
+            _validate_coupang_auto_2fa_credentials(tab_index, settings)
+        except ValueError as exc:
+            messagebox.showerror("설정 오류", str(exc))
+            self.status_var.set(f"크롤링{tab_index + 1} 설정 오류")
+            return
+
+        threading.Thread(target=self._run_once_background, args=(tab_index, settings), daemon=True).start()
 
     def start(self) -> None:
         # '시작'은 현재 보고 있는 탭 하나만 실행한다. 다른 탭은 영향을 주지 않으므로
@@ -554,6 +562,14 @@ class RiderBotUi:
         if not settings.performance_url.strip():
             self.status_var.set("활성 탭 없음")
             self._append_preview(f"[안내]\n크롤링{tab_index + 1} 실적 URL이 입력되지 않았습니다.\n")
+            return
+
+        # 자동복구가 켜진 이 탭의 IMAP 자격증명만 검증한다(다른 탭은 건드리지 않음).
+        try:
+            _validate_coupang_auto_2fa_credentials(tab_index, settings)
+        except ValueError as exc:
+            messagebox.showerror("설정 오류", str(exc))
+            self.status_var.set(f"크롤링{tab_index + 1} 설정 오류")
             return
 
         stop_event = threading.Event()
@@ -1186,37 +1202,35 @@ def _is_coupang_path_url(url: str, path: str) -> bool:
     return scheme == "https" and host == _COUPANG_HOST and parsed.path.rstrip("/").casefold() == path
 
 
-def _validate_active_coupang_auto_2fa_credentials(
-    indexed_settings: list[tuple[int, UiSettings]],
-) -> None:
-    # 자동복구가 켜진 활성 쿠팡 탭은 4개 자격증명과 지원 인증 이메일 도메인을 저장 시점에
-    # 검증한다. 비면 런타임에야 복구가 조용히 실패하므로 저장 단계에서 막는다. 실패
-    # 메시지에는 실제 비밀번호/앱 비밀번호 값을 절대 넣지 않는다.
-    for index, settings in indexed_settings:
-        if settings.platform_name != "coupang" or not settings.coupang_auto_email_2fa_enabled:
-            continue
-        if not settings.coupang_login_id.strip():
-            raise ValueError(
-                f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 아이디를 입력하세요."
-            )
-        if not settings.coupang_login_password:
-            raise ValueError(
-                f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 비밀번호를 입력하세요."
-            )
-        address = settings.verification_email_address.strip()
-        if not address:
-            raise ValueError(
-                f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 주소를 입력하세요."
-            )
-        if not settings.verification_email_app_password:
-            raise ValueError(
-                f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 앱 비밀번호를 입력하세요."
-            )
-        domain = address.rsplit("@", 1)[-1].strip().casefold() if "@" in address else ""
-        if domain not in IMAP_HOST_BY_DOMAIN:
-            raise ValueError(
-                f"크롤링{index + 1} 인증 이메일은 naver.com 또는 gmail.com 주소여야 합니다."
-            )
+def _validate_coupang_auto_2fa_credentials(index: int, settings: UiSettings) -> None:
+    # 자동복구가 켜진 쿠팡 탭의 4개 자격증명과 지원 인증 이메일 도메인을 검증한다. 비면
+    # 런타임에야 복구가 조용히 실패하므로 막는다. 이 검증은 **시작/실행하는 그 탭에만**
+    # 적용한다(탭은 서로 독립 동작하므로, 다른 탭을 시작할 때 이 탭을 검사하지 않는다).
+    # 실패 메시지에는 실제 비밀번호/앱 비밀번호 값을 절대 넣지 않는다.
+    if settings.platform_name != "coupang" or not settings.coupang_auto_email_2fa_enabled:
+        return
+    if not settings.coupang_login_id.strip():
+        raise ValueError(
+            f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 아이디를 입력하세요."
+        )
+    if not settings.coupang_login_password:
+        raise ValueError(
+            f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 비밀번호를 입력하세요."
+        )
+    address = settings.verification_email_address.strip()
+    if not address:
+        raise ValueError(
+            f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 주소를 입력하세요."
+        )
+    if not settings.verification_email_app_password:
+        raise ValueError(
+            f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 앱 비밀번호를 입력하세요."
+        )
+    domain = address.rsplit("@", 1)[-1].strip().casefold() if "@" in address else ""
+    if domain not in IMAP_HOST_BY_DOMAIN:
+        raise ValueError(
+            f"크롤링{index + 1} 인증 이메일은 naver.com 또는 gmail.com 주소여야 합니다."
+        )
 
 
 def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:

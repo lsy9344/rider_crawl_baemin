@@ -222,72 +222,101 @@ def _coupang_2fa_settings(tmp_path):
     return settings
 
 
-def test_validate_active_tab_isolation_allows_coupang_auto_2fa_with_full_credentials(tmp_path):
-    validate_active_tab_isolation([_coupang_2fa_settings(tmp_path)])
+def test_validate_coupang_auto_2fa_credentials_allows_full_credentials(tmp_path):
+    ui._validate_coupang_auto_2fa_credentials(0, _coupang_2fa_settings(tmp_path))
 
 
-def test_validate_active_tab_isolation_skips_2fa_credentials_when_recovery_off(tmp_path):
-    # 자동복구가 꺼져 있으면 인증 이메일 자격증명이 비어도 저장은 허용된다(기존 동작 불변).
+def test_validate_coupang_auto_2fa_credentials_skips_when_recovery_off(tmp_path):
+    # 자동복구가 꺼져 있으면 인증 이메일 자격증명이 비어도 검증을 건너뛴다(기존 동작 불변).
     settings = _coupang_2fa_settings(tmp_path)
     settings.coupang_auto_email_2fa_enabled = False
     settings.coupang_login_id = ""
     settings.verification_email_address = ""
     settings.verification_email_app_password = ""
 
-    validate_active_tab_isolation([settings])
+    ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_rejects_auto_2fa_without_coupang_login_id(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_rejects_without_coupang_login_id(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.coupang_login_id = ""
 
     with pytest.raises(ValueError, match="쿠팡 로그인 아이디"):
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_rejects_auto_2fa_without_coupang_password(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_rejects_without_coupang_password(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.coupang_login_password = ""
 
     with pytest.raises(ValueError, match="쿠팡 로그인 비밀번호"):
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_rejects_auto_2fa_without_email_address(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_rejects_without_email_address(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.verification_email_address = ""
 
     with pytest.raises(ValueError, match="인증 이메일 주소"):
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_rejects_auto_2fa_without_email_app_password(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_rejects_without_email_app_password(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.verification_email_app_password = ""
 
     with pytest.raises(ValueError, match="앱 비밀번호"):
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_rejects_auto_2fa_unsupported_email_domain(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_rejects_unsupported_email_domain(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.verification_email_address = "rider@daum.net"
 
     with pytest.raises(ValueError, match="naver.com 또는 gmail.com"):
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
 
 
-def test_validate_active_tab_isolation_2fa_error_does_not_leak_password(tmp_path):
+def test_validate_coupang_auto_2fa_credentials_error_does_not_leak_password(tmp_path):
     settings = _coupang_2fa_settings(tmp_path)
     settings.verification_email_app_password = ""
     settings.coupang_login_password = "super-secret-pw"
 
     try:
-        validate_active_tab_isolation([settings])
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
     except ValueError as exc:
         assert "super-secret-pw" not in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_validate_active_tab_isolation_does_not_check_other_tab_2fa_credentials(tmp_path):
+    # 탭은 독립 동작한다: 활성 탭(예: 배민 크롤링1)을 시작/저장할 때, 자동복구가 켜졌지만
+    # 인증 이메일이 비어 있는 다른 쿠팡 탭(크롤링2) 때문에 막히면 안 된다. 인증 이메일
+    # 자격증명 검증은 그 탭을 직접 시작/실행할 때만 한다(_validate_coupang_auto_2fa_credentials).
+    baemin_tab = _settings(
+        tmp_path,
+        performance_url="https://example.test/first",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_chat_id="-100111",
+    )
+    coupang_auto_2fa_no_creds = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_chat_id="-100222",
+    )
+    coupang_auto_2fa_no_creds.baemin_center_name = "쿠팡강남센터"
+    coupang_auto_2fa_no_creds.coupang_auto_email_2fa_enabled = True
+    coupang_auto_2fa_no_creds.verification_email_address = ""
+    coupang_auto_2fa_no_creds.verification_email_app_password = ""
+
+    # 크롤링1을 시작/저장하는 상황: 전체 검증은 크롤링2의 IMAP 자격증명 누락으로 막지 않는다.
+    validate_active_tab_isolation([baemin_tab, coupang_auto_2fa_no_creds])
 
 
 def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
