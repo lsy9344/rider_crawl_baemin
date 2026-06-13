@@ -390,6 +390,21 @@ def test_send_kakao_text_treats_empty_input_placeholder_as_empty(monkeypatch, tm
     send_kakao_text(config, "hello")
 
 
+def test_send_kakao_text_treats_admin_input_placeholder_as_empty(monkeypatch, tmp_path):
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message_input = _ScriptedMessageInput(
+        ["관리자 메시지 입력 RichEdit Control", "hello", "관리자 메시지 입력"]
+    )
+    _patch_kakao_send_window(monkeypatch, message_input)
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    send_kakao_text(config, "hello")
+
+    assert ("press", ("enter",)) in pyautogui.actions
+
+
 def test_send_kakao_text_rejects_when_draft_not_cleared(monkeypatch, tmp_path):
     config = _config(tmp_path, chat_name="실적봇_A")
     # Clear-check reads a non-empty draft: the input was not cleared.
