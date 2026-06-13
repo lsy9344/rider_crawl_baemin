@@ -12,7 +12,10 @@
   지원하지 않으므로 양쪽을 같은 코드로 다루기 위해 폴링으로 맞춘다.
 - **네이버는 선택된 세션이 NOOP로 새 메일을 갱신하지 않는다** → 폴링마다 INBOX 재-SELECT
   (``_find_code_once``마다 ``select_folder``). Gmail도 무해.
-- **INBOX만 본다.** 인증 메일은 INBOX로 도착하므로 Gmail의 한글 특수폴더를 다룰 필요가 없다.
+- **INBOX + 분류/스팸 폴더를 본다.** 네이버는 쿠팡 인증 메일을 INBOX가 아니라 '프로모션'
+  등으로 자동 분류해 넣는 경우가 있다(실측: 프로모션 폴더 수신). 그래서 INBOX만 보면 못
+  찾는다. list_folders로 받은 폴더 중 보낸함/임시/휴지통/전체보관함류만 제외하고 모두
+  검색해, 도착한 폴더와 무관하게(주제+발신 필터로 정확히) 가장 최신 코드를 찾는다.
 - 한글 SUBJECT 서버검색 불안정 → ``SINCE``로 후보만 줄이고 **제목은 클라이언트 필터**.
 - 기존 Gmail API 검색식의 ``from:`` 안전장치는 **FROM 헤더 클라이언트 필터**로 유지한다
   (기본 ``verification_email_sender_keyword="coupang"``).
@@ -119,6 +122,42 @@ def fetch_latest_verification_code(
     )
 
 
+# 보낸함/임시보관함/휴지통/전체보관함/보관 폴더는 수신 인증 메일이 없으므로 제외한다.
+# (특수용도 플래그가 없는 서버 대비, 흔한 폴더명도 함께 제외) 스팸/프로모션/분류 폴더는
+# 인증 메일이 들어올 수 있으므로 검색 대상에 남긴다.
+_SKIP_FOLDER_SPECIAL = {"\\sent", "\\drafts", "\\trash", "\\all", "\\archive", "\\noselect"}
+_SKIP_FOLDER_NAMES = {
+    "sent", "sent messages", "sent mail", "drafts", "trash", "bin",
+    "deleted messages", "deleted items", "보낸메일함", "발신함", "임시보관함", "지운메일함",
+}
+
+
+def _candidate_folders(server: Any) -> list[str]:
+    # INBOX를 맨 앞에 두고, list_folders에서 보낸함/임시/휴지통/전체보관함류만 빼고 모두 본다.
+    try:
+        listed = server.list_folders()
+    except Exception:
+        return ["INBOX"]
+    folders = ["INBOX"]
+    for entry in listed:
+        try:
+            flags, _delim, name = entry
+        except (TypeError, ValueError):
+            continue
+        if not name or name.casefold() == "inbox":
+            continue
+        flagset = {
+            (f.decode("ascii", "ignore") if isinstance(f, bytes) else str(f)).casefold()
+            for f in (flags or ())
+        }
+        if flagset & _SKIP_FOLDER_SPECIAL:
+            continue
+        if name.strip().casefold() in _SKIP_FOLDER_NAMES:
+            continue
+        folders.append(name)
+    return folders
+
+
 def _find_code_once(
     server: Any,
     *,
@@ -127,35 +166,42 @@ def _find_code_once(
     requested_after: datetime,
     code_digits: int,
 ) -> str | None:
-    # 네이버는 선택 세션에 새 메일이 반영 안 되므로 매 폴링 재-SELECT. readonly로 읽음 방지.
-    server.select_folder("INBOX", readonly=True)
-    try:
-        uids = server.search(["SINCE", requested_after.date()])  # SINCE는 '일' 단위까지만
-    except Exception as exc:
-        raise Imap2faError("메일 검색에 실패했습니다.") from exc
-    if not uids:
+    # 네이버는 선택 세션에 새 메일이 반영 안 되므로 매 폴링 재-SELECT(readonly로 읽음 방지).
+    # 네이버가 인증 메일을 INBOX가 아닌 '프로모션' 등으로 분류하므로 후보 폴더를 모두 본다.
+    best_dt: datetime | None = None
+    best_folder: str | None = None
+    best_uid: Any = None
+    for folder in _candidate_folders(server):
+        try:
+            server.select_folder(folder, readonly=True)
+            uids = server.search(["SINCE", requested_after.date()])  # SINCE는 '일' 단위까지만
+        except Exception:
+            continue  # 특정 폴더 접근/검색 실패는 건너뛴다(다른 폴더는 계속 본다).
+        if not uids:
+            continue
+        try:
+            meta = server.fetch(uids, ["INTERNALDATE", "BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)]"])
+        except Exception:
+            continue
+        for uid, data in meta.items():
+            internal = _to_utc(data.get(b"INTERNALDATE"))
+            if internal is None or internal < requested_after:
+                continue
+            headers = data.get(b"BODY[HEADER.FIELDS (SUBJECT FROM)]", b"")
+            subject = _decode_header_value(headers, "Subject")
+            sender = _decode_header_value(headers, "From")
+            if subject_keyword and subject_keyword.casefold() not in subject.casefold():
+                continue
+            if sender_keyword and sender_keyword.casefold() not in sender.casefold():
+                continue
+            if best_dt is None or internal > best_dt:
+                best_dt, best_folder, best_uid = internal, folder, uid
+
+    if best_folder is None:
         return None
 
-    meta = server.fetch(uids, ["INTERNALDATE", "BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)]"])
-    newest_uid, newest_dt = None, None
-    for uid, data in meta.items():
-        internal = _to_utc(data.get(b"INTERNALDATE"))
-        if internal is None or internal < requested_after:
-            continue
-        headers = data.get(b"BODY[HEADER.FIELDS (SUBJECT FROM)]", b"")
-        subject = _decode_header_value(headers, "Subject")
-        sender = _decode_header_value(headers, "From")
-        if subject_keyword and subject_keyword.casefold() not in subject.casefold():
-            continue
-        if sender_keyword and sender_keyword.casefold() not in sender.casefold():
-            continue
-        if newest_dt is None or internal > newest_dt:
-            newest_uid, newest_dt = uid, internal
-
-    if newest_uid is None:
-        return None
-
-    raw = server.fetch([newest_uid], ["BODY.PEEK[]"])[newest_uid][b"BODY[]"]
+    server.select_folder(best_folder, readonly=True)
+    raw = server.fetch([best_uid], ["BODY.PEEK[]"])[best_uid][b"BODY[]"]
     body = _message_text(email.message_from_bytes(raw))
     code = extract_verification_code(body, code_digits=code_digits)
     if code is not None:

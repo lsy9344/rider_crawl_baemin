@@ -50,29 +50,40 @@ def _full_bytes(subject: str, sender: str, body: str) -> bytes:
 
 
 class _FakeImap:
-    """``connect`` 콜러블로 주입하는 fake. IMAPClient 응답 표면을 흉내 낸다."""
+    """``connect`` 콜러블로 주입하는 fake. IMAPClient 응답 표면을 흉내 낸다.
 
-    def __init__(self, messages: dict):
+    폴더별 메일을 담는다(기본 INBOX). ``extra_folders``로 프로모션/스팸 등 다른 폴더에
+    메일을 둘 수 있다(네이버 분류함 수신 시나리오 검증용).
+    """
+
+    def __init__(self, messages: dict, *, extra_folders: dict | None = None):
         # messages: {uid: {internaldate, subject, sender, body}}
-        self._messages = messages
+        self._by_folder = {"INBOX": dict(messages)}
+        for name, msgs in (extra_folders or {}).items():
+            self._by_folder[name] = dict(msgs)
+        self._cur = "INBOX"
         self.select_calls = 0
         self.logged_out = False
 
+    def list_folders(self):
+        return [((), "/", name) for name in self._by_folder]
+
     def select_folder(self, folder, readonly=False):
         self.select_calls += 1
-        assert folder == "INBOX"
         assert readonly is True
+        self._cur = folder
 
     def search(self, criteria):
-        # 서버측 SINCE는 '일' 단위라 후보만 줄인다. fake는 전체 uid를 돌려주고
+        # 서버측 SINCE는 '일' 단위라 후보만 줄인다. fake는 현재 폴더의 전체 uid를 돌려주고
         # INTERNALDATE 컷은 _find_code_once가 한다.
-        return list(self._messages)
+        return list(self._by_folder.get(self._cur, {}))
 
     def fetch(self, uids, data_items):
+        msgs = self._by_folder.get(self._cur, {})
         result = {}
         if any("HEADER.FIELDS" in item for item in data_items):
             for uid in uids:
-                msg = self._messages[uid]
+                msg = msgs[uid]
                 result[uid] = {
                     b"INTERNALDATE": msg["internaldate"],
                     b"BODY[HEADER.FIELDS (SUBJECT FROM)]": _header_bytes(
@@ -81,7 +92,7 @@ class _FakeImap:
                 }
             return result
         for uid in uids:
-            msg = self._messages[uid]
+            msg = msgs[uid]
             result[uid] = {
                 b"BODY[]": _full_bytes(msg["subject"], msg["sender"], msg["body"])
             }
@@ -193,14 +204,10 @@ def test_fetch_re_selects_inbox_each_poll():
     state = {"messages": {}}
 
     class _DelayedImap(_FakeImap):
-        def search(self, criteria):
-            self.select_calls  # no-op
-            return list(self._messages)
-
         def select_folder(self, folder, readonly=False):
             super().select_folder(folder, readonly=readonly)
             if self.select_calls >= 2:
-                self._messages = {1: arrived}
+                self._by_folder["INBOX"] = {1: arrived}
 
     server = _DelayedImap({})
     clock = {"t": _REQUESTED_AFTER}
@@ -214,6 +221,80 @@ def test_fetch_re_selects_inbox_each_poll():
     code = _fetch(server, poll_seconds=60, poll_interval_seconds=5, now=fake_now, sleep=fake_sleep)
     assert code == "555555"
     assert server.select_calls >= 2
+
+
+def test_fetch_finds_code_in_non_inbox_folder():
+    # 네이버는 쿠팡 인증 메일을 INBOX가 아니라 '프로모션' 등으로 분류해 넣기도 한다.
+    # INBOX가 비어 있어도 분류 폴더에서 코드를 찾아야 한다.
+    server = _FakeImap(
+        {},
+        extra_folders={
+            "프로모션": {
+                1: _message(code_text="인증번호 313373", internal=_REQUESTED_AFTER + timedelta(seconds=20))
+            }
+        },
+    )
+    assert _fetch(server) == "313373"
+
+
+def test_fetch_picks_newest_across_folders():
+    # INBOX와 프로모션 양쪽에 인증 메일이 있으면 폴더와 무관하게 가장 최신을 채택한다.
+    server = _FakeImap(
+        {1: _message(code_text="인증번호 111111", internal=_REQUESTED_AFTER + timedelta(seconds=10))},
+        extra_folders={
+            "프로모션": {
+                9: _message(code_text="인증번호 222222", internal=_REQUESTED_AFTER + timedelta(seconds=50))
+            }
+        },
+    )
+    assert _fetch(server) == "222222"
+
+
+class _FolderStub:
+    def __init__(self, listed):
+        self._listed = listed
+
+    def list_folders(self):
+        return self._listed
+
+
+def test_candidate_folders_excludes_sent_drafts_trash_keeps_spam_and_promotions():
+    listed = [
+        ((b"\\HasNoChildren",), "/", "INBOX"),
+        ((b"\\Sent",), "/", "[Gmail]/Sent Mail"),
+        ((b"\\Drafts",), "/", "[Gmail]/Drafts"),
+        ((b"\\Trash",), "/", "[Gmail]/Trash"),
+        ((b"\\All",), "/", "[Gmail]/All Mail"),
+        ((b"\\Junk",), "/", "[Gmail]/Spam"),
+        ((), "/", "Sent Messages"),
+        ((), "/", "Drafts"),
+        ((), "/", "Deleted Messages"),
+        ((), "/", "프로모션"),
+        ((), "/", "Junk"),
+    ]
+    folders = imap_2fa._candidate_folders(_FolderStub(listed))
+
+    assert folders[0] == "INBOX"
+    # 스팸/프로모션/분류 폴더는 검색 대상에 남는다.
+    assert "프로모션" in folders
+    assert "Junk" in folders
+    assert "[Gmail]/Spam" in folders
+    # 보낸함/임시/휴지통/전체보관함은 제외한다(플래그·이름 양쪽으로).
+    assert "[Gmail]/Sent Mail" not in folders
+    assert "[Gmail]/Drafts" not in folders
+    assert "[Gmail]/Trash" not in folders
+    assert "[Gmail]/All Mail" not in folders
+    assert "Sent Messages" not in folders
+    assert "Drafts" not in folders
+    assert "Deleted Messages" not in folders
+
+
+def test_candidate_folders_falls_back_to_inbox_when_list_fails():
+    class _Boom:
+        def list_folders(self):
+            raise RuntimeError("not supported")
+
+    assert imap_2fa._candidate_folders(_Boom()) == ["INBOX"]
 
 
 def test_fetch_logs_out_even_on_failure():
