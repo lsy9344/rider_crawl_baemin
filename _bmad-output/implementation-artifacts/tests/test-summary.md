@@ -1,59 +1,60 @@
-# Test Automation Summary — Story 4.1 (rider_agent 패키지 토대 + 재사용 seam)
+# Test Automation Summary — Story 4.3 (Agent heartbeat 보고)
 
 작성: 2026-06-13 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
 
 ## 컨텍스트
 
-스토리 4.1은 UI/HTTP 엔드포인트가 없는 **패키지 토대 + 단방향 import seam**이라 API/E2E(브라우저) 테스트 대상이 아니다. 프로젝트의 기존 pytest 프레임워크(`pyproject.toml`: `pythonpath=["src"]`, `testpaths=["tests"]`)로 **AST 가드 + 서브프로세스 import-safety + 단위 계약** 형태의 테스트를 생성했다. 외부(브라우저/네트워크/Kakao/Gmail) 미호출, 가짜 값만 사용.
+스토리 4.3은 UI가 없는 **Agent heartbeat primitive**(payload 빌더 + 단발 `send_heartbeat` + 주기 `HeartbeatReporter` loop)다. 서버 수신·offline 판정·Admin은 Epic 5 소유라, 테스트는 **주입 fake transport / 실 `HttpTransport`+fake `urlopen`** 에 대한 client-side 동작 검증 형태다(4.x 표준 — epic-3-retro 108). 외부(브라우저/네트워크/Kakao/Gmail) 미호출, 가짜 값만(`agtok-fake-…`/`agent-fake-…`).
 
-dev-story가 `tests/agent/test_agent_package.py`에 9건을 만든 상태에서, AC/Task/Dev-Notes가 **명시적으로 요구하지만 테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
+dev-story가 `tests/agent/test_heartbeat.py`에 26건을 만든 상태에서, 구현 분기 중 **테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
 
 ## Generated / 보강 테스트
 
-`tests/agent/test_agent_package.py` (+5건, 기존 9 → **14건**). 신규 헬퍼 `_abs_import_modules`(서브모듈 단위 import-edge), `_run_python`(깨끗한 서브프로세스).
+`tests/agent/test_heartbeat.py` (+5건, 기존 26 → **31건**). 기존 헬퍼(`FakeTransport`·`StoppingSleep`) 재사용, 신규 추상화 0.
 
 | # | 테스트 | 커버한 격차 | 근거 |
 |---|--------|-------------|------|
-| Gap1 | `test_main_does_not_import_tkinter_or_legacy_ui` | `__main__`이 `tkinter`/`rider_crawl.ui`/`rider_crawl.app`을 import하지 않음(부작용 0의 정적 근거). 기존엔 exit 0만 보고 레거시 UI 미배선을 단언 안 함 | AC1, Task 3 |
-| Gap2 | `test_reuse_seam_is_import_safe_no_heavy_deps` | reuse seam을 eager import해도 `crawl4ai`/`playwright`/`pyautogui`/`pywinauto`/`pyperclip`/`googleapiclient`가 `sys.modules`에 안 올라옴(깨끗한 서브프로세스). Dev Notes가 "`python -m rider_agent` 성공의 관건"으로 지목한 import-safety가 미검증이었음 | AC1, Dev Notes(재사용 seam 설계) |
-| Gap3 | `test_import_rider_agent_does_not_eager_load_reuse_seam` | `import rider_agent`가 `rider_agent.reuse`를 eager-load하지 않음(가벼운 `__init__`) | Task 1 |
-| Gap4 | `test_main_returns_zero_and_prints_sync_banner` | `main()` 직접 호출이 `0` 반환 + sync 배너(버전·"sync runtime") 출력. runpy/subprocess만 있던 것을 단위 계약으로 보강(실패 위치 좁힘) | AC1 |
-| Gap5 | `test_reuse_all_names_are_resolvable` | `reuse.__all__`의 모든 이름이 실제 attribute로 해석됨(re-export drift 가드) | AC1·재사용 완전성 |
+| Gap1 | `test_reporter_survives_non_transport_exception_and_records_event` | `report_once` 의 일반 예외(`except Exception`) best-effort 흡수 + `_record_error` no-log 분기. 기존엔 `TransportError` 경로만 검증 — 주입 provider/transport 가 일반 예외를 던지면 thread 가 죽지 않는지 미검증이었음 | AC2.5 |
+| Gap2 | `test_reporter_recovers_to_valid_after_revoked` | `401`→revoked surfacing 후 token 재발급 성공 시 `valid` 회복 + `on_status` `[REVOKED, VALID]` 전이. 문서화된 회복 동작인데 기존 커버 0(`_set_status` revoked→valid 분기 포함) | AC2 |
+| Gap3 | `test_send_heartbeat_non_list_commands_parse_to_empty` | `_result_from_response` 의 비-list `commands` → 안전 `[]` 분기. 기존엔 list/누락만 검증(malformed 서버 응답 방어 미검증) | AC1 |
+| Gap4 | `test_heartbeat_url_strips_trailing_slash` | `_heartbeat_url` 의 `rstrip("/")` URL 정규화(`//v1/...` 이중 슬래시 방지). 기존 URL 테스트는 trailing slash 없는 base 만 사용 | AC1 |
+| Gap5 | `test_reporter_stop_method_halts_running_loop` | 공개 `stop()` 메서드로 동작 중 루프 정지. 기존엔 stop_event 를 외부에서 직접 set 만 함 — thread-safe `stop()` 경로 미검증 | AC2 |
 
-기존 9건(유지): 패키지/seam import, `python -m rider_agent` exit 0(runpy+subprocess), 재사용 identity `is` 단언, sync AST 가드, third-party root==`{rider_crawl}`, pyproject 핀 유지, 단방향 import(crawl→agent 0 / agent→server 0).
+기존 26건(유지): payload 7키+`agent_version`, provider 반영, POST URL, interval `[30,60]` clamp(경계), 응답 파싱, 주기 N회 후 정지, 단발 `TransportError` 복원력, `401` revoke surfacing, capabilities 6종 superset, Bearer 헤더+평문 비노출, 실 `HttpTransport` 헤더 병합·op-label·E2E.
 
 ## Coverage
 
 | Acceptance Criterion | 커버 |
 |---|---|
-| AC1 — 패키지·재사용 import·`python -m` 실행·부작용 0 | ✅ 기존 4건 + Gap1(레거시 UI 미배선)/Gap2(import-safety)/Gap3(가벼운 `__init__`)/Gap4(`main()` 단위)/Gap5(re-export 완전성) |
-| AC2 — 새 프레임워크 0·핀 유지 | ✅ 기존 2건(third-party root==`{rider_crawl}`, playwright/crawl4ai 핀) |
-| AC3 — sync 자기 코드·단방향 import | ✅ 기존 3건(AST sync 가드, crawl→agent 0, agent→server 0) |
+| AC1 — 30~60s 주기 POST·5필드+`agent_version` payload·interval clamp·응답 파싱 | ✅ 기존 다수 + Gap3(비-list commands)/Gap4(URL 정규화) |
+| AC2 — offline/버전-drift 판정 입력 제공·best-effort 복원력·401 surfacing | ✅ 기존(주기·503·401) + Gap1(일반 예외 복원력)/Gap2(revoked→valid 회복)/Gap5(`stop()`) |
+| AC3 — capabilities = 처리 가능 job type 6종 superset | ✅ 기존 2건(superset·주입 반영, "정확히 N" lock 없음) |
 
-import-safety가 의존하는 lazy 경계를 소스로 직접 확인 후 단언값 확정: `rider_crawl`의 `crawler/parser/platforms/coupang/message/auth/messengers`는 module-level에서 heavy dep 미import이고, `pyautogui`/`pywinauto`/`pyperclip`/`googleapiclient`/`crawl4ai`는 함수 내부 lazy import.
+`heartbeat.py` 공개 표면 전부 커버: `build_heartbeat_payload`/`send_heartbeat`/`clamp_interval`/`HeartbeatReporter`(`run`·`report_once`·`stop`·`needs_registration`)/`default_metrics`/`HeartbeatResult`. 보강 후 best-effort 일반 예외·revoked→valid 회복·비-list commands·trailing-slash URL·공개 `stop()` 분기까지 커버.
 
 ## Validation Results (단일 정본)
 
 운영 venv `.venv/Scripts/python.exe -m pytest`:
 
-- `tests/agent/test_agent_package.py -q` → **14 passed**
-- 전체 스위트 `-q` → **1008 passed, 0 failed** (기존 1003 + 신규 5, 순수 additive·회귀 0)
+- `tests/agent/test_heartbeat.py -q` → **31 passed**
+- 전체 스위트 `-q` → **1091 passed, 0 failed** (기존 1086 + 신규 5, 순수 additive·회귀 0)
+- `tests/agent/test_agent_package.py tests/agent/test_registration.py -q` → **42 passed** (4.1 sync·third-party root==`{rider_crawl}`·deps-9핀 가드 + 4.2 register 무회귀 green)
 
 ## 범위/누출 검증
 
-- 보호 경로 `git diff -w` 0줄: `src/rider_crawl`·`src/rider_server`·`src/rider_agent`·`pyproject.toml`·`rider_crawl_onefile.spec`·`_bmad-output/project-context.md` 무변경. 변경은 `tests/agent/test_agent_package.py`에 테스트 추가뿐.
-- 누출 grep(봇토큰 `\d{6,}:[\w-]{30,}`/`chat_id=`/휴대폰/이메일/OTP) → 신규 테스트에 0건.
-- 역방향 의존(`rider_crawl`이 `rider_agent` import) → 0건.
+- 이번 QA 라운드 변경은 `tests/agent/test_heartbeat.py` 에 테스트 추가뿐. 프로덕션 코드(`heartbeat.py`/`registration.py`)·`src/rider_crawl`·`src/rider_server`·`pyproject.toml`·`__main__.py` **0줄 변경**.
+- 누출 grep(봇토큰 `\d{6,}:[\w-]{30,}`/`chat_id=`/휴대폰) → 신규 테스트에 0건. `agtok-fake` 리터럴 비-테스트 src 에 0건. 에러 경로에 평문 token 진입 0(token 은 Authorization 헤더에만).
+- 역방향 의존(`rider_crawl`→`rider_agent` import) 신규 0건.
 
 ## 체크리스트 결과(`checklist.md`)
 
-- [x] API 테스트(해당 없음 — 엔드포인트 없는 토대 스토리) / E2E 테스트(해당 없음 — UI 없음); 대신 패키지·실행·import-edge 테스트
-- [x] 표준 프레임워크 API(pytest, `ast`, `subprocess`, `capsys`)
-- [x] happy path(`python -m rider_agent` exit 0, `main()` 0 반환) + 임계 케이스(import-safety 위반·레거시 UI 배선·re-export drift를 실패로 잡음)
-- [x] 전 테스트 통과 / 의미 있는 단언(AST·`sys.modules`) / 명확한 설명 / 하드코딩 sleep 없음 / 순서 독립
-- [x] 요약 작성 · 적정 위치 저장 · 커버리지 명시
+- [x] API/client 테스트(heartbeat = outbound HTTPS client; fake transport/실 `HttpTransport`+fake urlopen) / E2E(해당 없음 — UI 없는 primitive, 서버는 Epic 5)
+- [x] 표준 프레임워크 API(pytest, `parametrize`, `monkeypatch`, fake transport/sleep)
+- [x] happy path(payload·send·주기 N회) + 임계 케이스(일반 예외 복원력·revoked→valid·401·malformed commands)
+- [x] 전 테스트 통과 / 의미 있는 단언 / 명확한 설명(docstring) / 하드코딩 sleep 없음(주입 fake sleep) / 순서 독립(각 케이스 자체 fixture)
+- [x] 요약 작성 · 적정 위치(`tests/agent/`) 저장 · 커버리지 명시
 
 ## Next Steps
 
-- 4.2~4.4(등록/heartbeat/job 루프)에서 `reuse` seam을 실제 호출하는 워커가 생기면 **서버 stub/mock 동작 검증** 형태로 테스트 확장(epic-3-retro 108).
-- import-safety 가드의 heavy-dep 목록은 후속 워커가 새 외부 의존을 lazy로 추가하면 함께 갱신.
+- 4.4 startup `start_heartbeat_thread()` 배선 후 통합 경로(thread 기동·메인 run 루프) 테스트 추가.
+- 실제 provider 소스(`active_jobs` 4.4 / `browser_profiles` 4.5 / `kakao_status` 4.6)가 배선되면 각 스토리에서 provider 주입 케이스로 확장.

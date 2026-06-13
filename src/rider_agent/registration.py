@@ -65,28 +65,55 @@ class Transport(Protocol):
 
     실제 구현은 :class:`HttpTransport`(stdlib ``urllib``). 단위 테스트는 canned 응답을 주는
     fake 로 대체한다. 비-2xx 는 :class:`TransportError` 로 올린다(2xx 만 dict 반환).
+
+    ``headers`` 는 **후방호환 선택 인자**(Story 4.3 추가)다 — register 는 본문의 일회용
+    코드로 인증하므로 헤더를 전달하지 않지만(기본 ``None``), heartbeat(4.3)는
+    ``Authorization: Bearer <token>`` 헤더를 실어야 한다. 새 outbound seam 을 만들지 않고
+    이 단일 seam 을 재사용한다.
     """
 
-    def post_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]: ...
+    def post_json(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class HttpTransport:
-    """stdlib ``urllib`` 기반 JSON POST(새 HTTP 의존 0). ``urlopen`` 주입 가능."""
+    """stdlib ``urllib`` 기반 JSON POST(새 HTTP 의존 0). ``urlopen`` 주입 가능.
+
+    ``op_label`` 은 :class:`TransportError` 메시지의 operation 접두(기본 ``"agent register"``)
+    다 — heartbeat(4.3) 같은 다른 호출자가 ``op_label="agent heartbeat"`` 로 구성하면
+    운영 로그에서 register/heartbeat 실패를 구분할 수 있다(기본값 유지 시 register 동작 불변).
+    """
 
     def __init__(
         self,
         *,
         urlopen: Callable[..., Any] = default_urlopen,
         timeout_seconds: int = 10,
+        op_label: str = "agent register",
     ) -> None:
         self._urlopen = urlopen
         self._timeout = timeout_seconds
+        self._op = op_label
 
-    def post_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
+    def post_json(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        # 기존 Content-Type 을 보존하고 주입 headers 를 병합한다 — Content-Type 을
+        # 덮어쓰지(drop) 않는다(주입 headers 가 우선이되 Content-Type 은 기본 유지).
+        merged_headers = {"Content-Type": "application/json", **(headers or {})}
         request = Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=merged_headers,
             method="POST",
         )
         try:
@@ -94,23 +121,23 @@ class HttpTransport:
         except HTTPError as exc:
             # 4xx/5xx — 본문(에러 메시지)에 secret 이 섞일 수 있으니 읽지 않고 상태코드만 surfacing.
             raise TransportError(
-                "agent register HTTP error", status_code=exc.code
+                f"{self._op} HTTP error", status_code=exc.code
             ) from exc
         except (URLError, OSError) as exc:
-            raise TransportError("agent register request failed") from exc
+            raise TransportError(f"{self._op} request failed") from exc
 
         try:
             with response:
                 raw = response.read().decode("utf-8")
         except Exception as exc:
-            raise TransportError("agent register response unreadable") from exc
+            raise TransportError(f"{self._op} response unreadable") from exc
 
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise TransportError("agent register response was not JSON") from exc
+            raise TransportError(f"{self._op} response was not JSON") from exc
         if not isinstance(data, dict):
-            raise TransportError("agent register response was not an object")
+            raise TransportError(f"{self._op} response was not an object")
         return data
 
 
