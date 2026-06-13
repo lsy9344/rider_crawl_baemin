@@ -1,0 +1,21 @@
+# rider_server Cloud 백엔드 — Story 5.1 최소 compose.
+#
+# 5.1 범위는 backend-api 서비스만 실행·검증한다. scheduler / telegram-dispatcher /
+# admin-ui 는 architecture 트리에 있으나 각 후속 스토리 범위라 placeholder 주석으로만 둔다.
+# env 분리는 deploy/env/ 로 둔다(추후 ECS/Fargate 이전 대비).
+services:
+  backend-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    image: rider-server:dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./env/backend-api.env
+    restart: unless-stopped
+
+  # 후속 스토리 placeholder (5.1 범위 아님):
+  # scheduler:            # Story 5.4 — 스케줄러
+  # telegram-dispatcher:  # Story 5.5 — Telegram webhook/dispatcher
+  # admin-ui:             # Story 5.6 — Admin UI

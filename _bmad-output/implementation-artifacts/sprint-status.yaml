@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14 (epic-4 retrospective → done)
+last_updated: 2026-06-14 (story 5.1 review (AI) → done)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
@@ -44,6 +44,8 @@ project: rider_result_mornitoring
 # story 4.8 create-story: backlog → ready-for-dev (2026-06-14)
 # story 4.9 create-story: backlog → ready-for-dev (2026-06-14)
 # epic-4 retrospective (AI/YOLO): optional → done — 9/9 stories done, suite 1316 passing, 0 regressions (2026-06-14)
+# story 5.1 create-story: backlog → ready-for-dev; epic-5 backlog → in-progress (first story of epic) (2026-06-14)
+# story 5.1 review (AI): review → done — CRITICAL 0, HIGH 0, MEDIUM 2 auto-fixed (File List 보강 + test count 재측정 14→47 신규 / 1330→1363 전체), LOW 3 기록 (2026-06-14)
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
@@ -95,8 +97,8 @@ development_status:
   epic-4-retrospective: optional
 
   # ── Epic 5: 중앙 서버와 운영자 Admin (P4 + 운영 안전 보강) ──
-  epic-5: backlog
-  5-1-fastapi-백엔드-스캐폴딩과-헬스-버전-메트릭-엔드포인트: backlog
+  epic-5: in-progress
+  5-1-fastapi-백엔드-스캐폴딩과-헬스-버전-메트릭-엔드포인트: done
   5-2-postgresql-13-테이블-스키마와-alembic-마이그레이션: backlog
   5-3-queuebackend-추상화와-postgresql-job-queue: backlog
   5-4-scheduler-interval-jitter-circuit-breaker와-구독-게이트: backlog

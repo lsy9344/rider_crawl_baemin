@@ -18,6 +18,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.0",
+  "httpx>=0.27.0",
+]
+# Cloud 백엔드(rider_server, Epic 5) 전용 의존성. rider_agent 의 9-dep stdlib-only
+# 배포 표면을 보호하기 위해 [project].dependencies 와 분리한다(절대 본 deps 에 넣지 말 것).
+server = [
+  "fastapi>=0.136.0,<0.137.0",
+  "uvicorn[standard]>=0.30.0",
 ]
 
 [build-system]
@@ -29,6 +36,8 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 filterwarnings = [
   "ignore:The 'strip_cdata' option of HTMLParser\\(\\) has never done anything and will eventually be removed\\.:DeprecationWarning:lxml.html",
+  # Starlette 1.3.x TestClient 가 httpx2 권장 — 현재 httpx 로도 정상 동작(검증됨), 경고만 억제.
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
 ]
 
 [tool.hatch.build.targets.wheel]

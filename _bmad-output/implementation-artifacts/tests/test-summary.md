@@ -1,95 +1,91 @@
-# Test Automation Summary — Story 4.9 (쿠팡 Gmail 2FA 메일함 분리·lock)
+# Test Automation Summary — Story 5.1 (FastAPI 백엔드 스캐폴딩 · 운영 엔드포인트)
 
 작성: 2026-06-14 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
 
 ## 컨텍스트
 
-스토리 4.9는 UI가 없는 **쿠팡 Gmail 2FA primitive**(`src/rider_agent/auth/coupang_gmail_2fa.py`)
-다 — mailbox 별 token 분리 helper + `MailboxLockRegistry` + 실패 분류기 + bounded 복구
-orchestrator. 실제 `CRAWL_COUPANG` 수집 워커·서버 OAuth onboarding·`gmail_reauth_required_count`
-알림은 Epic 5 소유라, 테스트는 **주입 fake `recover`/`store`(fake codec)/`now`/`sleep`/
-`recover_session`/`fetch_code`** 에 대한 결정적 검증 형태다(4.x 표준). 외부(실 Gmail/실 DPAPI/
-실 쿠팡 화면/실 시계) 미호출, 가짜 값만(`mailbox-fake-…`/`otp-fake-…`/`…-fake-token`).
+스토리 5.1은 `src/rider_server/` 에 처음 올라가는 **실행 가능한 FastAPI 백엔드 스캐폴딩**이다 —
+app factory(`main.py`) · stdlib typed settings(`settings.py`) · `python -m rider_server`
+진입점(`__main__.py`) · 운영 엔드포인트 `/health`·`/version`·`/metrics`(root-level) · 전역 에러
+envelope(`{"error":{"code","message_redacted"}}`, redaction 재사용) · snake_case/ISO-UTC 규약 · Docker.
+UI 없음(HTTP/JSON 백엔드). 검증은 in-process(`TestClient` / `httpx.AsyncClient`+`ASGITransport`)로
+외부 소켓·서비스 미호출, fake 값만(secret-shaped 문자열은 redaction 검증용).
 
-dev-story가 `tests/agent/test_coupang_gmail_2fa.py`에 30건을 만든 상태에서, AC 대비 **테스트가
-비어 있던 격차**를 찾아 자동 보강(auto-apply)했다. **프로덕션 소스 0줄 변경**(QA 워크플로는
-테스트만 생성).
+dev-story가 `tests/server/`에 14건(`test_server_app.py` 11 + `test_server_async_boundary.py` 3)을
+만든 상태에서, AC 대비 **테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
+**프로덕션 소스 0줄 변경**(QA 워크플로는 테스트만 생성, 새 의존성 0).
 
-## Generated / 보강 테스트
+## Generated / 보강 테스트 (신규 33건, 4개 파일)
 
-`tests/agent/test_coupang_gmail_2fa.py` (+8건, 기존 30 → **38건**). 기존 헬퍼(`_store` fake
-codec·`_recover`·`_FakeConfig`) 재사용, 신규 추상화 0.
+### 1) `tests/server/test_server_error_contract.py` (22건) — AC2 에러 규약 심화
+- 405 Method Not Allowed envelope — `/health`·`/version`·`/metrics`(GET 전용) POST → `METHOD_NOT_ALLOWED` (3 params)
+- HTTP 상태코드 → UPPER_SNAKE code 매핑을 **실제 exception handler 경로**로 검증 — 400/401/403/404/409/422/429/503 (8 params) + 상태코드 보존
+- `HTTPException.detail` 의 secret-shaped 문자열 redact(응답 평문 미노출)
+- 500 envelope = 일반 메시지(`internal server error`) + redact 된 `error_message_redacted` 분리
+- 에러 envelope 키 전부 snake_case
+- `HTTPStatus.name` ↔ 기대 매핑 자기검증(non-vacuous, 8 params)
 
-| # | 테스트 | 커버한 격차 | AC |
-|---|--------|-------------|----|
-| G1 | `test_secret_storage_policy_gmail_token_agent_local_otp_not_stored` | `classify_secret_storage`: `gmail_oauth_token`→`agent_local`, `otp`→`not_stored` 저장 분류 정합(docstring 주장만 있고 테스트 0) | AC1.2 |
-| G2 | `test_reauth_predicate_that_raises_fails_closed_to_transient` | 주입 `is_reauth` predicate 가 **던져도** GMAIL_REAUTH 오분류 0 → transient(bounded) fail-closed(predicate 가 분류 오도 불가) | AC3·AC4 |
-| G3 | `test_orchestrator_releases_lock_on_failure_path` | 실패/예외 경로에서도 mailbox lock **항상 해제**(`finally`) → 다음 복구 hang 0. 기존엔 성공 경로 해제만 증명 | AC2.6 |
-| G4 | `test_build_coupang_recover_default_recover_session_consumes_reuse` | 기본 `recover_session` 이 reuse `recover_coupang_session_with_email_2fa` **그 객체**(OTP/컷오프/query 필터/코드 파싱 위임·재구현 0 계약) | AC2.5 |
-| G5 | `test_success_result_surfaces_ref_only_no_plaintext_mailbox` | **성공 경로** 누출 가드 — 평문 mailbox(이메일) 0, 해시 ref 만. 기존 누출 가드는 실패 경로만 | AC3/NFR-5 |
-| G6 | `test_default_registry_serializes_same_mailbox_across_calls` | `locks` 미주입 시 전역 `_DEFAULT_LOCKS` 공유 → 같은 mailbox 호출 간 직렬화(모듈 주석이 경고하는 동작) | AC2 |
-| G7 | `test_success_metrics_surface_attempt_count_on_nth_attempt` | 재시도 후 성공도 `metrics["attempts"]` 운영 표면화(bounded 카운터 관측) | AC4·AC10 |
-| G9 | `test_classify_recovered_false_takes_precedence_over_reauth` | 분류기 우선순위: `recovered=False`(사람 조치) > `is_reauth`(순수 함수 계약) | AC3 |
+### 2) `tests/server/test_server_settings.py` (5건) — Task 2 settings
+- `from_env` 기본값(빈 mapping) / 전체 env 읽기 / 빈 문자열→None 정규화 / 부분 build 메타 독립 정규화 / `Settings` frozen 불변성
 
-기존 30건(유지): token 분리 7(round-trip·ref-only·두 mailbox 다른 ref·교차 resolve 0·미저장
-None·opaque ref·🚨 회귀 트랩 per-mailbox token 경로 분기·fetch_code 위임), lock 4(같은 객체·
-예외 해제·같은 mailbox 직렬 max-active-1·다른 mailbox 병렬), 분류기 8(True/False/reauth/transient/
-모호 fail-closed/secret 미노출/쿠팡≠배민/rider_server enum 부재), orchestrator 7(성공·False 즉시
-멈춤·reauth 즉시 멈춤·transient bounded·N회째 성공·단일 transient 사유·상한 유한), 누출 가드 2,
-import-safety·단방향·sync 2.
+### 3) `tests/server/test_server_entrypoint.py` (3건) — Task 2 진입점
+- `main()` → `uvicorn.run("rider_server.main:app", ...)` import-string·host/port 기본값
+- HOST/PORT env override
+- reload 분기: development → True, production → False
+- (`uvicorn.run` monkeypatch — 실 서버 미기동 / `__main__` 임포트는 함수 내부로 미뤄 runpy 경고 회피)
+
+### 4) `tests/server/test_server_async_e2e.py` (3건) — AC3 async 런타임 e2e
+- 실제 asyncio 이벤트 루프(`asyncio.run` + `httpx.AsyncClient`/`ASGITransport`)에서 `/health` 200 · `/version` 200 · 404 envelope 유지
+- (정적 `iscoroutinefunction` 단언을 넘어 async 런타임을 end-to-end 실증; `pytest-asyncio` 미도입이라 `asyncio.run` 사용)
+
+## 발견한 커버리지 격차 (모두 auto-apply)
+
+| # | 격차 | 보강 | AC |
+|---|------|------|----|
+| G1 | HTTP 상태 매핑이 404 1건 + 순수 `HTTPStatus.name`만(실 handler 미경유) | 400~503 8건 실 핸들러 검증 | AC2 |
+| G2 | 405 Method Not Allowed 경로 미검증 | 운영 3엔드포인트 POST → 405 envelope | AC2 |
+| G3 | `HTTPException.detail` redaction 경로 미검증(기존엔 500/validation만) | detail secret redact 단언 | AC2 |
+| G4 | `settings.py` 직접 테스트 0건(엔드포인트 경유 간접만) | from_env 5건(기본/override/빈값정규화/frozen) | Task2 |
+| G5 | `__main__.main()` 진입점·reload 분기 미검증 | uvicorn 와이어링 3건 | Task2 |
+| G6 | AC3 async 가 정적 단언만(실 이벤트 루프 미경유) | ASGI async e2e 3건 | AC3 |
+
+기존 14건(유지): `/health`·`/version`(full/unset)·`/metrics` shape, root-level(no `/v1/`),
+async 핸들러 정적 단언, 404/422(validation)/500 envelope·redact, async-boundary AST 가드 3.
 
 ## Coverage
 
 | Acceptance Criterion | 커버 |
 |---|---|
-| AC1 — token mailbox 분리·서버 ref 만·고객 간 비공유 | ✅ 기존 7 + G1(저장 분류 정합)/G5(성공 경로 ref-only) |
-| AC2 — 같은 mailbox lock 직렬·다른 병렬·요청시각/필터 검색(reuse 위임)·결정적 해제 | ✅ 기존 4 + G3(실패 경로 해제)/G4(reuse 위임)/G6(기본 등록부 직렬화) |
-| AC3 — 민감값 0 노출·CAPTCHA→USER_ACTION_REQUIRED·reauth→GMAIL_REAUTH_REQUIRED | ✅ 기존 10 + G2(predicate fail-closed)/G5(성공 누출)/G9(분류 우선순위) |
-| AC4 — bounded·반복 인증 요청 0·탭 중지 정책 유지·운영 상태 표면화 | ✅ 기존 7 + G2/G7(성공 attempts) |
+| AC1 — `/health`·`/version`·`/metrics` 동작·Docker | ✅ 기존 5 + 405·async e2e (Docker 실빌드는 WSL 통합 비활성 → dev 가 실소켓 `/health` 200 확인, 자동화 밖) |
+| AC2 — 에러 envelope·UPPER_SNAKE·snake_case·ISO-UTC·root-level·의미있는 status | ✅ 기존 6 + error_contract 22(405·8상태·detail redact·500·snake_case 키) |
+| AC3 — FastAPI async·blocking sync 직접호출 금지 | ✅ 기존 3 정적/AST + async_e2e 3 실 이벤트 루프 |
 
-`coupang_gmail_2fa.py` 공개 표면 전부 커버: `mailbox_token_ref`/`store_mailbox_token`/
-`resolve_mailbox_token`/`mailbox_token_path`/`MailboxLockRegistry`(`lock_for`·`acquire`)/
-`classify_coupang_2fa_outcome`/`recover_coupang_mailbox`/`build_coupang_recover`.
+모듈 커버: `main.py`(3 핸들러 + 3 exception handler) · `settings.py`(from_env 전 분기) · `__main__.py`(reload 분기 포함).
 
 ## Validation Results (단일 정본)
 
 운영 venv `.venv/Scripts/python.exe -m pytest`:
 
-- `tests/agent/test_coupang_gmail_2fa.py -q` → **38 passed**
-- 전체 스위트 `-q` → **1316 passed, 0 failed** (보강 전 1308 + 신규 8, 순수 additive·회귀 0)
-- 4.1 가드 green: sync·단방향(`rider_server` 0)·third-party root==`rider_crawl`·deps 9핀·
-  reuse seam import-safe(`googleapiclient` 미로드). enum/"정확히 N개" lock 0.
+- 신규 4파일 `-v` → **33 passed**
+- 전체 스위트 `-q` → **1363 passed, 0 failed** (보강 전 baseline 1330 + 신규 33, 순수 additive·회귀 0)
+- 가드 green: 9-dep lock(`test_pyproject_dependencies_unchanged_pins`)·단방향 import·rider_agent sync 가드·rider_server async 경계 가드.
 
 ## 범위/누출 검증
 
-- 이번 QA 라운드 변경은 `tests/agent/test_coupang_gmail_2fa.py` 에 테스트 추가뿐. 프로덕션
-  코드(`coupang_gmail_2fa.py`)·`src/rider_crawl`·`src/rider_server`·`pyproject.toml`·`job_loop.py`·
-  `secure_store.py`·`baemin_auth.py`·`reuse.py` **0줄 변경**(`git status`: 신규 모듈/테스트는 `??`,
-  src 트리에 `M` 없음).
-- 누출 가드: 신규 테스트는 가짜 식별자만(`mailbox-fake-…`/`otp-fake-…`/`…-fake-token`). G2/G5
-  는 OTP/token/refresh/평문 mailbox 가 result_json·metrics·error_message_redacted·log 에 0건임을
-  단언(성공·실패 경로 양쪽).
-- 역방향 의존(`rider_crawl`→`rider_agent`) 신규 0건. `coupang_gmail_2fa.py` async 0·`rider_server`
-  import 0(G 테스트는 기존 AST 가드 유지).
+- 이번 QA 라운드 변경은 `tests/server/` 신규 4파일뿐. 프로덕션 코드(`src/rider_server/**`·`src/rider_crawl/**`)·`pyproject.toml` **0줄 변경**(`git status`: 신규 테스트는 `??`, src 트리 `M` 없음 / `pyproject.toml` 의 server extra 는 dev-story 선행 변경이며 본 라운드 미접촉).
+- 새 의존성 0: `TestClient`/`httpx` 는 기존 `dev` extra, async 는 stdlib `asyncio` — 9-dep lock 불변.
+- 누출 가드: secret-shaped 입력(`token=supersecret999`/`password=hunter2`)이 응답·envelope 에 평문 0건임을 단언.
 
 ## 체크리스트 결과(`checklist.md`)
 
-- [x] API/primitive 테스트 생성(쿠팡 2FA 복구 primitive — 주입 fake `recover`/`store`/`now`/`sleep`) / E2E(해당 없음 — UI 없는 라이브러리 primitive, 워커/서버는 Epic 5)
-- [x] 표준 프레임워크 API(pytest, threading, `pytest.raises`, fake codec/sleep)
-- [x] happy path(token round-trip·복구 성공·병렬) + 임계 케이스(CAPTCHA→USER_ACTION_REQUIRED·reauth→GMAIL_REAUTH·transient bounded·predicate fail-closed·누출 가드)
-- [x] 전 테스트 통과(38/38, 전체 1316) / 의미 있는 단언 / 명확한 docstring / 순서 독립(각 케이스 자체 fixture/registry)
-- [x] 요약 작성 · 적정 위치(`tests/agent/`) 저장 · 커버리지 명시
+- [x] API 테스트 생성(운영 엔드포인트·에러 규약·settings·진입점) / E2E(UI 없음 — HTTP/JSON 백엔드, async ASGI e2e 로 대체)
+- [x] 표준 프레임워크 API(pytest, `TestClient`, `httpx.AsyncClient`/`ASGITransport`, `monkeypatch`, `pytest.raises`)
+- [x] happy path(200·snake_case·ISO-UTC) + 임계 케이스(404/405/422/500·8 상태매핑·redact·reload 분기)
+- [x] 전 테스트 통과(33/33, 전체 1363) / 의미 있는 단언 / 명확한 docstring / 순서 독립(각 케이스 자체 app·settings·monkeypatch)
+- [x] no hardcoded waits(async 는 `asyncio.run`, sleep 없음) / 요약 작성 · 적정 위치(`tests/server/`) 저장 · 커버리지·수치 명시
 
 ## Next Steps
 
-- reauth predicate 실 binding(어떤 예외가 Gmail 재승인인지)·실 OAuth token 파일 생성/갱신 위치는
-  **운영/Epic 5 소유** — 본 primitive 는 주입 seam(`is_reauth`/`recover`/`fetch_code`)만 제공.
-  미래 `CRAWL_COUPANG` 워커(`crawl_worker.py`, 미존재)가 primitive 를 소비할 때 통합 경로 테스트 추가.
-- `gmail_reauth_required_count` 알림·서버 측 mailbox lock 관측은 Epic 5 배선 후 검증.
-- CI 비-Windows import-safety 케이스가 실 DPAPI/Gmail 미로드를 계속 보장(회귀 가드).
-
-## 비고
-
-- `time.sleep(0.02)` 사용 2건(G6 + 기존 직렬화 테스트)은 "겹칠 기회"를 만드는 **동시성 오버랩
-  창**으로, polling 대기가 아니라 기존 파일 패턴을 따른 결정적 단언용이다. orchestrator backoff 는
-  주입 `sleep`(`lambda s: None`)이라 실 대기 0 — "하드코딩 대기 금지"의 취지(flaky polling)에 위배 아님.
+- CI(`ci.yml`)에서 server extra(`uv pip install -e ".[server,dev]"`) 설치 후 본 스위트 실행(5.1 AC 밖 권고, retro A1‴ secret 스캔 게이트와 함께).
+- 리소스 엔드포인트(`/v1/agents` 등, 5.3+) 도입 시 `/v1/` 규약·페이지네이션(`{items,next_cursor}`) 계약 테스트 추가.
+- Docker 컨테이너 실빌드(`docker compose -f deploy/docker-compose.yml up --build`) `/health` 200 은 WSL Docker 통합 활성 환경에서 통합 테스트로 승격 고려.
