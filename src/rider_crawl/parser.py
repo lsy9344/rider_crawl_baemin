@@ -377,17 +377,22 @@ def _parse_achievement_rows(text: str, *, center_id: str) -> list[_AchievementRo
 
 
 def _select_achievement_row(rows: list[_AchievementRow], *, today: date) -> _AchievementRow:
+    # 오늘 행이 표에 있으면 **무조건 오늘 행**을 쓴다. 오늘 배달건수가 아직 0이어도
+    # (예: 이른 새벽, 운행 전) 어제 완료 행으로 내려가지 않는다 — 메시지에 항상 당일
+    # 날짜가 찍혀야 하기 때문이다. 오늘 행이 여러 개면 건수 있는 마지막 행을, 없으면
+    # 마지막 오늘 행을 쓴다.
     today_rows = [row for row in rows if row.row_date == today]
-    completed_today = [row for row in today_rows if row.has_delivery_count]
-    if completed_today:
-        return completed_today[-1]
+    if today_rows:
+        completed_today = [row for row in today_rows if row.has_delivery_count]
+        if completed_today:
+            return completed_today[-1]
+        return today_rows[-1]
 
+    # 오늘 행이 아예 없을 때만 과거로 폴백한다(완료된 가장 최근 날 → 그것도 없으면
+    # 가장 최근 과거 날 → 최후엔 표의 최신 행).
     completed_rows = [row for row in rows if row.row_date <= today and row.has_delivery_count]
     if completed_rows:
         return max(completed_rows, key=lambda row: row.row_date)
-
-    if today_rows:
-        return today_rows[-1]
 
     past_rows = [row for row in rows if row.row_date <= today]
     if past_rows:

@@ -381,3 +381,67 @@ def test_recover_does_not_leak_code_in_errors(tmp_path):
         )
     except Coupang2faError as exc:
         assert "999888" not in str(exc)
+
+
+class _FakeMatch:
+    def __init__(self, visible: bool, log: list[str], label: str):
+        self._visible = visible
+        self._log = log
+        self._label = label
+
+    def click(self, **_kwargs):
+        if not self._visible:
+            # Playwright는 숨은 요소 클릭 시 actionability 대기 끝에 타임아웃을 던진다.
+            raise RuntimeError("element is not visible")
+        self._log.append(self._label)
+
+
+class _FakeFilterLocator:
+    """``filter(visible=True)``를 지원하는 locator. 쿠팡 2FA 화면처럼 같은 이름의
+    버튼이 [숨김(앞), 보임(뒤)]로 둘 있는 상황을 모사한다."""
+
+    def __init__(self, matches: list[_FakeMatch], *, visible_only: bool = False):
+        self._matches = matches
+        self._visible_only = visible_only
+
+    def filter(self, *, visible: bool):
+        if not visible:
+            return self
+        return _FakeFilterLocator([m for m in self._matches if m._visible], visible_only=True)
+
+    @property
+    def first(self):
+        return self._matches[0]
+
+
+def test_click_first_visible_skips_hidden_duplicate_button():
+    # 숨은 휴대폰 버튼이 DOM 앞에 있고, 보이는 이메일 버튼이 뒤에 있을 때
+    # 보이는 쪽을 눌러야 한다.
+    log: list[str] = []
+    locator = _FakeFilterLocator(
+        [
+            _FakeMatch(visible=False, log=log, label="hidden-phone"),
+            _FakeMatch(visible=True, log=log, label="visible-email"),
+        ]
+    )
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is True
+    assert log == ["visible-email"]
+
+
+def test_click_first_visible_falls_back_when_filter_unsupported():
+    # .filter 미지원(fake/구버전) locator는 기존 .first.click() 폴백.
+    page = _FakePage(html="", clickable=("인증코드 전송",))
+    locator = page.get_by_text("인증코드 전송", exact=False)
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is True
+    assert page.clicked_texts == ["인증코드 전송"]
+
+
+def test_click_first_visible_returns_false_when_no_visible_match():
+    # 보이는 매칭이 없으면 숨은 요소로 폴백하지 않고 False.
+    log: list[str] = []
+    locator = _FakeFilterLocator([_FakeMatch(visible=False, log=log, label="hidden")])
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is False
+    assert log == []

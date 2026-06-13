@@ -32,8 +32,13 @@ from typing import Any
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
 
-def authorize(credentials_path: Path, token_path: Path) -> str:
-    """Run the local OAuth consent flow once and save the token. Return the email."""
+def authorize(credentials_path: Path, token_path: Path, *, open_browser: bool = True) -> str:
+    """Run the local OAuth consent flow once and save the token. Return the email.
+
+    ``open_browser=False`` 면 브라우저를 자동으로 띄우지 않고, 동의 URL을 stdout에
+    출력만 한다(원격/헤드리스/기본 브라우저 미설정 환경용). 사용자가 그 URL을 같은 PC의
+    브라우저에서 열어 동의하면, 이 프로세스가 localhost 콜백을 받아 token을 저장한다.
+    """
 
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -46,8 +51,15 @@ def authorize(credentials_path: Path, token_path: Path) -> str:
     flow = InstalledAppFlow.from_client_secrets_file(
         str(credentials_path), [GMAIL_READONLY_SCOPE]
     )
-    # 브라우저가 열리고, 로그인한 Gmail 계정의 읽기 전용 권한 동의를 받는다.
-    creds = flow.run_local_server(port=0)
+    # open_browser=True면 브라우저가 열리고, False면 아래 URL만 출력한다. 어느 쪽이든
+    # 로그인한 Gmail 계정의 읽기 전용 권한 동의를 받아 localhost 콜백으로 코드를 받는다.
+    creds = flow.run_local_server(
+        port=0,
+        open_browser=open_browser,
+        authorization_prompt_message=(
+            "아래 URL을 브라우저에서 직접 열어 인증을 진행하세요(같은 PC에서 열어야 콜백이 옵니다):\n{url}"
+        ),
+    )
 
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json(), encoding="utf-8")
@@ -81,9 +93,14 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         help="저장할 token 파일 경로(받은편지함마다 다르게). 예: secrets/google/token.uijeongbu-nambu.json",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="브라우저를 자동으로 열지 않고 동의 URL만 출력(헤드리스/기본 브라우저 미설정 환경).",
+    )
     args = parser.parse_args(argv)
 
-    email = authorize(Path(args.credentials), Path(args.token))
+    email = authorize(Path(args.credentials), Path(args.token), open_browser=not args.no_browser)
     print(f"인증 완료: {email}")
     print(f"token 저장: {args.token}")
     print("이 경로를 UI의 해당 크롤링 탭 'Gmail 토큰 파일 경로'에 입력하세요.")

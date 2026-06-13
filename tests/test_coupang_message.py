@@ -35,7 +35,7 @@ def test_render_coupang_performance_message_matches_original_format():
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
-            "점심 피크 : 완료 (10:54~12:59)",
+            "점심 피크 : 완료 (10:55~12:59)",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
@@ -71,7 +71,7 @@ def test_render_coupang_performance_message_omits_active_riders_when_current_scr
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
-            "점심 피크 : 완료 (10:54~12:59)",
+            "점심 피크 : 완료 (10:55~12:59)",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
@@ -102,7 +102,7 @@ def test_render_coupang_performance_message_uses_weekend_times_on_weekend():
     message = render_current_screen_message(snapshot, now=WEEKEND)
 
     assert "아침 : 완료 (06:00~10:54)" in message
-    assert "점심 피크 : 완료 (10:54~01:59)" in message
+    assert "점심 피크 : 완료 (10:55~01:59)" in message
     assert "점심 논피크 : 10건/19건 (02:00~04:54)" in message
     assert "저녁 피크 : 17건/39건 (04:55~07:59)" in message
     assert "저녁 논피크 : 2건/27건 (20:00~03:59)" in message

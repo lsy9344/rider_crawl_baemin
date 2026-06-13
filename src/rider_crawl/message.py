@@ -9,7 +9,7 @@ from .models import CurrentScreenSnapshot, PeakPeriodSnapshot, PerformanceSnapsh
 # 별도 표를 사용한다. 키는 메시지 라벨, 값은 "시작~끝" 문자열.
 WEEKDAY_PEAK_TIMES = {
     "morning": "06:00~10:54",
-    "lunch_peak": "10:54~12:59",
+    "lunch_peak": "10:55~12:59",
     "lunch_non_peak": "13:00~16:54",
     "dinner_peak": "16:55~19:59",
     "dinner_non_peak": "20:00~03:59",
@@ -17,7 +17,7 @@ WEEKDAY_PEAK_TIMES = {
 
 WEEKEND_PEAK_TIMES = {
     "morning": "06:00~10:54",
-    "lunch_peak": "10:54~01:59",
+    "lunch_peak": "10:55~01:59",
     "lunch_non_peak": "02:00~04:54",
     "dinner_peak": "04:55~07:59",
     "dinner_non_peak": "20:00~03:59",

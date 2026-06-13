@@ -290,27 +290,59 @@ def _click_first_by_text(
     for text in texts:
         for role in roles:
             try:
-                page.get_by_role(role, name=text, exact=False).click(timeout=timeout)
-                return True
+                locator = page.get_by_role(role, name=text, exact=False)
             except TypeError:
                 try:
-                    page.get_by_role(role, name=text).click(timeout=timeout)
-                    return True
+                    locator = page.get_by_role(role, name=text)
                 except Exception:
                     continue
             except Exception:
                 continue
+            if _click_first_visible(locator, timeout):
+                return True
         try:
-            locator = page.get_by_text(text, exact=False).first
+            locator = page.get_by_text(text, exact=False)
         except TypeError:
             # fake page 등 exact 인자를 안 받는 구현 호환.
             locator = page.get_by_text(text)
-        try:
-            locator.click(timeout=timeout)
-            return True
         except Exception:
             continue
+        if _click_first_visible(locator, timeout):
+            return True
     return False
+
+
+def _click_first_visible(locator: Any, timeout: int) -> bool:
+    """주어진 locator의 매칭 중 **화면에 보이는 첫 요소**를 클릭한다.
+
+    쿠팡 2단계 인증 화면은 antd 탭이라, '이메일로 인증'으로 전환해도 비활성(휴대폰)
+    탭의 '인증코드 전송' 버튼이 DOM에 *숨은 채* 남는다. 그러면 같은 이름의 버튼이 둘이
+    되어, ``get_by_role(...).click()``은 strict-mode 위반으로 실패하고 ``.first``는 DOM
+    순서상 앞에 있는 **숨은 휴대폰 버튼**을 집어 클릭이 타임아웃된다(→ 이메일 코드가
+    발송되지 않아 2FA 복구가 통째로 실패). 그래서 ``visible`` 필터로 보이는 요소만
+    남긴 뒤 첫 요소를 누른다.
+
+    ``visible`` 필터(``Locator.filter``)를 지원하지 않는 구현(테스트의 fake page 등)은
+    기존 동작(``.first.click()``)으로 폴백한다.
+    """
+
+    try:
+        visible = locator.filter(visible=True)
+    except (AttributeError, TypeError):
+        # .filter 미지원(fake page 등) → 기존 .first.click() 폴백.
+        try:
+            locator.first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    try:
+        visible.first.click(timeout=timeout)
+        return True
+    except Exception:
+        # 보이는 매칭이 없거나 클릭 실패. 숨은 요소로 폴백하지 않는다(잘못된 탭의
+        # 버튼을 눌러 엉뚱한 수단으로 코드가 나가는 것을 막는다).
+        return False
 
 
 def _fill_code_input(page: Any, code: str, config: AppConfig) -> None:

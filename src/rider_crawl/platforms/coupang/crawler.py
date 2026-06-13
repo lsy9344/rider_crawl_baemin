@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlsplit
 
@@ -534,10 +536,42 @@ def _try_recover_coupang_session(
     recover = recover_session or _default_recover_coupang_session
     try:
         return bool(recover(page, config))
-    except Exception:
+    except Exception as exc:
         # 복구 실패(Gmail 미도착, 입력칸 못 찾음 등)는 자동 복구 불가로 본다. 상위에서
-        # 기존 BrowserActionRequiredError를 다시 던져 탭을 중지한다.
+        # 기존 BrowserActionRequiredError를 다시 던져 탭을 중지한다. 다만 과거에는 이
+        # 실패를 흔적 없이 삼켜, run_errors.log에 "로그인 만료"만 남고 *왜* 2FA 복구가
+        # 안 됐는지(예: 이 탭의 토큰이 보는 inbox로 인증메일이 오지 않음)를 알 수 없었다.
+        # 그래서 어떤 토큰/검색어로 폴링하다 무슨 사유로 실패했는지 한 줄로 남긴다.
+        # Coupang2faError/Gmail2faError 메시지는 코드·토큰 값을 담지 않게 설계돼 있다.
+        _log_recovery_failure(config, exc)
         return False
+
+
+def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:
+    """쿠팡 이메일 2FA 자동복구 실패를 ``<log_dir>/run_errors.log``에 한 줄 남긴다.
+
+    어느 inbox(=어느 토큰 파일)를 폴링하다 실패했는지가 핵심 단서다. 토큰 *파일명*과
+    검색어만 적고, 인증번호·OAuth 토큰 값은 절대 적지 않는다. 로깅 자체가 실패해도
+    복구 흐름을 막지 않도록 모든 예외를 삼킨다.
+    """
+
+    try:
+        log_dir = getattr(config, "log_dir", None) or Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        token_name = getattr(getattr(config, "gmail_token_path", None), "name", "?")
+        query = getattr(config, "gmail_2fa_query", "")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = (
+            f"[{ts}] 쿠팡 이메일 2FA 자동복구 실패 "
+            f"(token={token_name}, query={query!r}): "
+            f"{type(exc).__name__}: {exc}\n"
+            "----------------------------------------\n"
+        )
+        with (log_dir / "run_errors.log").open("a", encoding="utf-8") as file:
+            file.write(line)
+    except Exception:
+        # 로깅 실패는 복구 결과에 영향 주지 않는다.
+        pass
 
 
 def _default_recover_coupang_session(page: Any, config: AppConfig) -> bool:
