@@ -1,5 +1,5 @@
 # generated: 2026-06-13
-# last_updated: 2026-06-13 (story 4.4 dev-story → review)
+# last_updated: 2026-06-13 (story 4.5 create-story → ready-for-dev)
 # project: rider_result_mornitoring
 # project_key: NOKEY
 # tracking_system: file-system
@@ -37,6 +37,8 @@
 generated: 2026-06-13
 last_updated: 2026-06-13
 project: rider_result_mornitoring
+# story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
+# story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
@@ -80,7 +82,7 @@ development_status:
   4-2-등록-코드-입력과-agent-토큰-보안-저장: done
   4-3-agent-heartbeat-보고: done
   4-4-outbound-https-job-polling-claim-complete와-lease: done
-  4-5-browserprofilemanager-chrome-프로필-cdp-격리와-대상-검증: backlog
+  4-5-browserprofilemanager-chrome-프로필-cdp-격리와-대상-검증: done
   4-6-kakaosenderworker-fifo-직렬-전송과-정확한-채팅방-검증: backlog
   4-7-agent-실행-조건과-재부팅-후-자동-시작: backlog
   4-8-배민-인증-필요-감지와-사람-개입형-재인증: backlog

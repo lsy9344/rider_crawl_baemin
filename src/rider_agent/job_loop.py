@@ -691,12 +691,16 @@ def build_agent_components(
     stop_event: threading.Event | None = None,
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
+    browser_profiles_provider: Any = None,
 ) -> tuple[JobRunner, HeartbeatReporter]:
     """:class:`JobRunner` 와 :class:`HeartbeatReporter` 를 구성한다(핵심 배선: active_jobs).
 
     ``HeartbeatReporter(active_jobs_provider=runner.active_jobs)`` 로 배선해 heartbeat 가
     in-flight job 을 실어 서버 lease 연장을 트리거하게 한다(4.3 이 비워둔 ``active_jobs`` 소스).
-    runner/reporter 는 **같은 ``stop_event``** 를 공유해 한쪽 정지가 다른 쪽도 정지시킨다.
+    ``browser_profiles_provider`` 는 4.5 ``BrowserProfileManager.browser_profiles`` 를 주입받아
+    heartbeat ``browser_profiles`` 소스를 채운다(``active_jobs`` 배선과 동형; 미주입이면 4.3
+    기본 빈 리스트 → 무회귀). runner/reporter 는 **같은 ``stop_event``** 를 공유해 한쪽 정지가
+    다른 쪽도 정지시킨다.
     """
 
     shared_stop = stop_event if stop_event is not None else threading.Event()
@@ -724,6 +728,7 @@ def build_agent_components(
         stop_event=shared_stop,
         capabilities=capabilities,
         active_jobs_provider=runner.active_jobs,
+        browser_profiles_provider=browser_profiles_provider,
         on_status=on_status,
         log=log,
     )
@@ -758,6 +763,7 @@ def run_agent(
     stop_event: threading.Event | None = None,
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
+    browser_profiles_provider: Any = None,
     start_heartbeat: bool = True,
     heartbeat_join_timeout: float = 5.0,
 ) -> AgentRunSummary:
@@ -800,6 +806,7 @@ def run_agent(
         stop_event=stop_event,
         on_status=on_status,
         log=log,
+        browser_profiles_provider=browser_profiles_provider,
     )
 
     hb_thread = start_heartbeat_thread(reporter) if start_heartbeat else None

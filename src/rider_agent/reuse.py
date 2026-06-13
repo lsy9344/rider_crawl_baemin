@@ -23,6 +23,23 @@ from __future__ import annotations
 from rider_crawl import crawler, parser
 from rider_crawl.platforms import coupang, crawl_snapshot
 
+# Chrome 실행 + CDP/프로필 격리 가드 — crawl_worker 4.5(BrowserProfileManager)가 소비.
+# ``prepare_chrome`` 한 곳이 원격 CDP 차단·CDP 포트 사용중 차단·프로필 점유 차단·CDP 준비
+# 대기를 이미 수행한다(재구현 금지·import 만 — 함수 본문 실행 없음 → import-safe 유지).
+from rider_crawl.browser_launcher import (
+    BrowserActionRequiredError,
+    BrowserLaunchError,
+    CdpUnavailableError,
+    ensure_local_cdp_address,
+    prepare_chrome,
+)
+
+# 실행 락 — (선택) 교차 프로세스 이중 오픈 방지. scope 정책(cdp 모드=cdp_url)은 app 소유.
+from rider_crawl.lock import RunLock
+
+# 쿠팡 기대 센터/상점명 위험 분류(read-only) — 비었/배민기본값이면 위험으로 surfacing.
+from rider_crawl.config import coupang_center_name_risk
+
 # 렌더 — 현재 화면/실적 스냅샷 → 메시지 문자열.
 from rider_crawl.message import render_current_screen_message
 
@@ -44,6 +61,16 @@ __all__ = [
     "crawler",
     "parser",
     "coupang",
+    # Chrome 실행 + CDP/프로필 격리 가드(4.5)
+    "prepare_chrome",
+    "ensure_local_cdp_address",
+    "BrowserLaunchError",
+    "CdpUnavailableError",
+    "BrowserActionRequiredError",
+    # 실행 락(4.5 — 선택)
+    "RunLock",
+    # 쿠팡 위험 분류(4.5)
+    "coupang_center_name_risk",
     # 렌더
     "render_current_screen_message",
     # Gmail 2FA

@@ -153,6 +153,18 @@ def test_reuse_seam_reexports_same_objects():
     assert reuse.crawler is crawler
     assert reuse.parser is parser
     assert reuse.coupang is coupang
+    # Chrome 실행 + CDP/프로필 격리 가드(4.5) — 재구현 금지(동일 객체 identity 잠금).
+    import rider_crawl.browser_launcher as browser_launcher
+    import rider_crawl.config as config
+    import rider_crawl.lock as lock
+    assert reuse.prepare_chrome is browser_launcher.prepare_chrome
+    assert reuse.ensure_local_cdp_address is browser_launcher.ensure_local_cdp_address
+    assert reuse.BrowserLaunchError is browser_launcher.BrowserLaunchError
+    assert reuse.CdpUnavailableError is browser_launcher.CdpUnavailableError
+    assert reuse.BrowserActionRequiredError is browser_launcher.BrowserActionRequiredError
+    # 실행 락(4.5 — 선택) + 쿠팡 위험 분류(4.5)
+    assert reuse.RunLock is lock.RunLock
+    assert reuse.coupang_center_name_risk is config.coupang_center_name_risk
     # 렌더
     assert reuse.render_current_screen_message is message.render_current_screen_message
     # Gmail 2FA
