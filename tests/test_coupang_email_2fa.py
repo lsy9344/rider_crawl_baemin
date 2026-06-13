@@ -331,6 +331,24 @@ def test_recover_detects_primary_login_by_password_input_when_body_label_is_shor
     ]
 
 
+def test_recover_uses_resend_button_when_code_already_sent(tmp_path):
+    # 이메일 2FA 패널이 이미 1차 발송된 상태로 파킹돼 "인증코드 전송"이 없고 "인증 재요청"만
+    # 보이는 화면에서도, 재요청으로 새 코드를 받아 복구를 이어간다(실측 발견 케이스).
+    page = _FakePage(
+        html="<html>2단계 인증 로그인 이메일로 인증 인증 재요청<input placeholder='인증코드'></html>",
+        clickable=("이메일로 인증", "인증 재요청", "인증 완료"),
+        input_selectors=("input[placeholder*='코드']",),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch("778899"), now=_NOW
+    )
+
+    assert result is True
+    assert "인증 재요청" in page.clicked_texts
+    assert page.filled == [("input[placeholder*='코드']", "778899")]
+
+
 def test_recover_returns_false_when_send_button_missing(tmp_path):
     # 이메일 인증 화면이 아니어서 발송 버튼이 없으면 자동 복구를 포기한다.
     page = _FakePage(html="<html>알 수 없는 화면</html>", clickable=())
