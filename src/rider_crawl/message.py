@@ -87,14 +87,12 @@ def _render_performance_message(
             f"저녁 논피크 : {_format_period(dashboard.dinner_non_peak, times['dinner_non_peak'])}",
             "",
             f"배정 {_format_count(dashboard.assigned_count)}건 / 처리 {_format_count(dashboard.processed_count)}건",
-            f"🚨거절률: {_format_count(dashboard.reject_rate)}%🚨",
+            f"거절률: {_format_count(dashboard.reject_rate)}%",
         ]
     )
-    # '수행중인인원'은 rider-performance 페이지(``current_screen``)에서만 얻는다. 쿠팡 탭은
-    # peak-dashboard 한 페이지만 크롤링하므로 보통 ``current_screen``이 없고, 이때는 줄을
-    # 생략한다. rider-performance도 함께 읽는 경우에만 이 줄을 덧붙인다.
+    # rider-performance 페이지도 함께 읽는 경우 활성 라이더 테이블의 총계를 붙인다.
     if snapshot.current_screen is not None:
-        lines.append(f"🌇수행중인인원 : {snapshot.current_screen.active_riders}명")
+        lines.append(f"수행중인원: {snapshot.current_screen.active_riders}명")
     return "\n".join(lines)
 
 

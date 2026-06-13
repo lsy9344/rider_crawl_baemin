@@ -424,7 +424,14 @@ def _scrapling_text(html: str) -> str:
     try:
         from scrapling.parser import Selector
     except ImportError:
-        return ""
+        try:
+            from scrapling.parser import Adaptor
+        except ImportError:
+            return ""
+
+        page = Adaptor(html)
+        text = page.get_all_text()
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
     page = Selector(html)
     chunks = page.css("body *::text").getall()

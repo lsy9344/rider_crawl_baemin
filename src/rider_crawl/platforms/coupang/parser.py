@@ -35,7 +35,8 @@ def html_to_text(html: str) -> str:
 
 
 def parse_current_screen_html(html: str) -> CurrentScreenSnapshot:
-    return parse_current_screen_text(html_to_text(html))
+    text = html_to_text(html)
+    return parse_current_screen_text(text, active_rider_total=_active_rider_total_from_text(text))
 
 
 def parse_peak_dashboard_html(html: str) -> PeakDashboardSnapshot:
@@ -61,7 +62,7 @@ def parse_peak_dashboard_text(text: str) -> PeakDashboardSnapshot:
     )
 
 
-def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
+def parse_current_screen_text(text: str, *, active_rider_total: int | None = None) -> CurrentScreenSnapshot:
     normalized = _normalize_text(text)
 
     # The page heading carries the center name, shift, time range and status, so
@@ -72,12 +73,17 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
         normalized,
     )
     update_match = re.search(r"(?P<time>\d{1,2}:\d{2})\s*업데이트", normalized)
-    available_match = re.search(r"(?P<current>\d+)\s*/\s*(?P<total>\d+)\s*명", normalized)
+    available_match = re.search(r"(?P<current>\d+)\s*/\s*(?P<total>\d+)(?:\s*명)?", normalized)
 
     if not heading_match or not update_match or not available_match:
         raise MissingPerformanceDataError("required performance summary text was not found")
 
     online_riders = int(parse_count(_required_number_after("온라인", normalized)))
+    active_riders = active_rider_total
+    if active_riders is None:
+        active_riders = _active_rider_total_from_text(normalized)
+    if active_riders is None:
+        active_riders = online_riders
 
     return CurrentScreenSnapshot(
         center_name=heading_match.group("center").strip(),
@@ -97,7 +103,7 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
         lunch_peak_count=parse_count(_required_number_after("점심피크", normalized)),
         dinner_peak_count=parse_count(_required_number_after("저녁피크", normalized)),
         non_peak_count=parse_count(_required_number_after("논피크", normalized)),
-        active_riders=online_riders,
+        active_riders=active_riders,
     )
 
 
@@ -131,7 +137,14 @@ def _scrapling_text(html: str) -> str:
     try:
         from scrapling.parser import Selector
     except ImportError:
-        return ""
+        try:
+            from scrapling.parser import Adaptor
+        except ImportError:
+            return ""
+
+        page = Adaptor(html)
+        text = page.get_all_text()
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
     page = Selector(html)
     chunks = page.css("body *::text").getall()
@@ -141,6 +154,26 @@ def _scrapling_text(html: str) -> str:
 def _normalize_text(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines)
+
+
+def _active_rider_total_from_text(text: str) -> int | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    saw_name_contact = False
+    for line in lines:
+        compact = re.sub(r"\s+", "", line)
+        if "비활성라이더" in compact:
+            break
+        if "활성라이더" in compact:
+            saw_name_contact = False
+            continue
+        if "이름/연락처" in compact:
+            saw_name_contact = True
+            continue
+        if saw_name_contact:
+            match = re.search(r"총\s*(?P<count>\d+)\s*명", line)
+            if match:
+                return int(match.group("count"))
+    return None
 
 
 def _append_input_values(text: str, html: str) -> str:

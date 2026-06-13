@@ -69,6 +69,81 @@ def test_parse_coupang_current_screen_reads_center_and_shift_from_heading_not_ha
     assert snapshot.online_riders == 5
 
 
+def test_parse_coupang_current_screen_uses_active_rider_table_total_for_active_riders():
+    text = "\n".join(
+        [
+            "제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중 라이더 현황",
+            "6.14 오늘)",
+            "01:05 업데이트",
+            "밤논피크 참여 가능",
+            "0 / 15 명",
+            "대기",
+            "0명",
+            "활성 라이더",
+            "이름 / 연락처",
+            "총 4명",
+            "상태",
+            "온라인 0명",
+            "거절/무시: 5.8건",
+            "취소: 1건",
+            "완료: 78.8건",
+            "순서 미준수: 0건",
+            "점심피크: 21.6건",
+            "저녁피크: 15.8건",
+            "논피크: 41.4건",
+            "비활성 라이더",
+            "이름 / 연락처",
+            "총 0명",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.online_riders == 0
+    assert snapshot.active_riders == 4
+
+
+def test_parse_coupang_current_screen_accepts_scrapling_split_available_pair():
+    text = "\n".join(
+        [
+            "제이앤에이치플러스 의정부남부",
+            "밤논피크(20:00~06:00)",
+            "할당량 소진 중",
+            "라이더 현황",
+            "01:05 업데이트",
+            "밤논피크 참여 가능",
+            "0/15",
+            "대기",
+            "0",
+            "활성 라이더",
+            "이름 / 연락처",
+            "총 4명",
+            "상태",
+            "온라인 0명",
+            "거절/무시",
+            "5.8건",
+            "취소",
+            "1건",
+            "완료",
+            "78.8건",
+            "순서 미준수",
+            "0건",
+            "점심피크",
+            "21.6건",
+            "저녁피크",
+            "15.8건",
+            "논피크",
+            "41.4건",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.available_current == 0
+    assert snapshot.available_total == 15
+    assert snapshot.active_riders == 4
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

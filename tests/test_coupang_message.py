@@ -41,8 +41,8 @@ def test_render_coupang_performance_message_matches_original_format():
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
             "",
             "배정 103건 / 처리 67건",
-            "🚨거절률: 6.5%🚨",
-            "🌇수행중인인원 : 3명",
+            "거절률: 6.5%",
+            "수행중인원: 3명",
         ]
     )
 
@@ -77,10 +77,10 @@ def test_render_coupang_performance_message_omits_active_riders_when_current_scr
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
             "",
             "배정 103건 / 처리 67건",
-            "🚨거절률: 6.5%🚨",
+            "거절률: 6.5%",
         ]
     )
-    assert "수행중인인원" not in render_current_screen_message(snapshot, now=WEEKDAY)
+    assert "수행중인원" not in render_current_screen_message(snapshot, now=WEEKDAY)
 
 
 def test_render_coupang_performance_message_uses_weekend_times_on_weekend():

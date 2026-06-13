@@ -5,13 +5,13 @@ from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from rider_crawl.browser_launcher import BrowserActionRequiredError, CdpUnavailableError, ensure_local_cdp_address
-from rider_crawl.config import AppConfig
+from rider_crawl.config import DEFAULT_COUPANG_RIDER_PERFORMANCE_URL, AppConfig
 from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 
-from .parser import parse_current_screen_html, parse_peak_dashboard_html
+from .parser import MissingPerformanceDataError, parse_current_screen_html, parse_peak_dashboard_html
 
 
 def crawl_current_screen(
@@ -28,25 +28,72 @@ def crawl_current_screen(
 def crawl_performance_snapshot(
     config: AppConfig,
     *,
+    fetch_current_screen_html: Callable[[AppConfig], str] | None = None,
     fetch_peak_dashboard_html: Callable[[AppConfig], str] | None = None,
 ) -> PerformanceSnapshot:
-    # 쿠팡 탭은 로그인 직후 열리는 peak-dashboard 한 페이지만 읽는다. 주 URL
-    # (``coupang_eats_url``, UI의 '실적/달성현황 URL')에 peak-dashboard가 들어온다.
-    # rider-performance 페이지는 더 이상 요구하지 않으므로(그 탭이 없어도 오류가 나지
-    # 않는다) ``current_screen``은 ``None``으로 둔다. '수행중인인원' 줄만 그 페이지에서
-    # 왔는데, peak-only로 바꾸면서 메시지에서도 그 줄을 생략한다.
+    current_screen = None
+    if fetch_current_screen_html is not None:
+        current_screen_html = fetch_current_screen_html(config)
+        current_screen = parse_current_screen_html(current_screen_html)
+        _validate_coupang_center(config, current_screen)
+    elif fetch_peak_dashboard_html is None:
+        # rider-performance(현재 화면)는 '수행중인원'(활성 라이더 총계)을 채우는 '보조'
+        # 페이지다. CDP 운영 Chrome엔 보통 peak-dashboard 탭만 떠 있으므로, 이 조회는
+        # 필요하면 같은 세션에 임시 탭을 열어 직접 읽는다(_open_rider_performance_in_new_tab).
+        # 다만 보조 페이지의 '어떤' 실패도 권위 페이지(peak-dashboard) 크롤링을 막지 않게
+        # best-effort로 둔다: 탭 부재/로그인 만료(BrowserActionRequiredError)·파싱 실패
+        # (MissingPerformanceDataError)·센터 불일치/준비 지연/CDP 불가(RuntimeError)면
+        # '수행중인원'만 생략한다. peak-dashboard가 센터를 권위 있게 재검증하고 로그인
+        # 만료도 그쪽에서 감지·복구·중지하므로, 같은 세션의 보조 데이터를 못 얻었다고 전체를
+        # 멈추지 않는다(예상 못 한 버그는 삼키지 않도록 Type/AttributeError 등은 그대로 전파).
+        try:
+            current_screen_html = fetch_page_html(config, target_url=_rider_performance_url(config))
+            current_screen = parse_current_screen_html(current_screen_html)
+            _validate_coupang_center(config, current_screen)
+        except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
+            current_screen = None
+
     peak_dashboard_html = (
         fetch_peak_dashboard_html(config)
         if fetch_peak_dashboard_html
-        else fetch_page_html(config, target_url=config.coupang_eats_url)
+        else fetch_page_html(config, target_url=_peak_dashboard_url(config))
     )
     # 피크 대시보드 헤딩에 기대 센터가 노출되면 그것으로 다른 계정/오래된 탭을 막는다.
     # 헤딩이 없으면(피크 페이지가 센터를 노출하지 않으면) 기존처럼 검증을 건너뛴다.
     _validate_coupang_center_in_peak_html(config, peak_dashboard_html)
     return PerformanceSnapshot(
-        current_screen=None,
+        current_screen=current_screen,
         peak_dashboard=parse_peak_dashboard_html(peak_dashboard_html),
     )
+
+
+def _rider_performance_url(config: AppConfig) -> str:
+    primary = config.coupang_eats_url.strip()
+    if _path_is(primary, "/page/rider-performance"):
+        return primary
+    if _path_is(primary, "/page/peak-dashboard"):
+        return _replace_url_path(primary, "/page/rider-performance")
+    return DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+
+
+def _peak_dashboard_url(config: AppConfig) -> str:
+    if config.peak_dashboard_url.strip():
+        return config.peak_dashboard_url.strip()
+    primary = config.coupang_eats_url.strip()
+    if _path_is(primary, "/page/peak-dashboard"):
+        return primary
+    if _path_is(primary, "/page/rider-performance"):
+        return _replace_url_path(primary, "/page/peak-dashboard")
+    return primary
+
+
+def _path_is(url: str, path: str) -> bool:
+    return _normalize_path(urlsplit(url).path).casefold() == path.casefold()
+
+
+def _replace_url_path(url: str, path: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _validate_coupang_center(config: AppConfig, snapshot: CurrentScreenSnapshot) -> None:
@@ -455,6 +502,19 @@ def _fetch_target_page_content(
             load_timeout_errors=load_timeout_errors,
         )
         if page is None:
+            # rider-performance(보조 '수행중인원' 페이지)는 운영 Chrome에 탭이 안 열려 있을
+            # 수 있다. peak-dashboard만 로그인돼 떠 있고 rider-performance 탭이 없는 경우엔
+            # 같은 로그인 세션에 임시 탭을 새로 열어 직접 이동해 읽고 닫는다(사용자가 보는
+            # 기존 탭은 건드리지 않는다). 그래야 모든 쿠팡이츠 탭에서 '수행중인원'을 채운다.
+            opened = _open_rider_performance_in_new_tab(
+                browser,
+                pages,
+                config,
+                target_url=target_url,
+                load_timeout_errors=load_timeout_errors,
+            )
+            if opened is not None:
+                return opened
             _raise_coupang_page_action_required(pages, target_url)
     try:
         page.wait_for_load_state("networkidle", timeout=10_000)
@@ -514,6 +574,78 @@ def _recover_login_page_to_target(
     _reload_target_page(login_page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
     if _url_matches(str(getattr(login_page, "url", "")), target_url):
         return login_page
+    return None
+
+
+def _open_rider_performance_in_new_tab(
+    browser: Any,
+    pages: list[Any],
+    config: AppConfig,
+    *,
+    target_url: str,
+    load_timeout_errors: tuple[type[BaseException], ...],
+) -> str | None:
+    """Open a temp tab in the logged-in Coupang context to read rider-performance.
+
+    운영 Chrome(CDP)에는 보통 로그인 직후 열린 peak-dashboard 탭만 있고 rider-performance
+    탭은 없다. 그래서 기존 '열린 탭 읽기' 방식으론 '수행중인원'(활성 라이더 총계)을 못
+    채운다. 여기서는 같은 로그인 세션(컨텍스트)에 임시 탭을 새로 열어 rider-performance로
+    직접 이동해 읽고 닫는다(사용자가 보는 기존 탭은 건드리지 않는다).
+
+    다음 경우에는 새 탭을 열지 않고 ``None``을 돌려 호출부의 기존 흐름(조치 필요/중복/
+    복구 오류)을 타게 한다 — peak-dashboard 등 rider-performance가 아닌 대상, 로그인
+    필요 페이지가 떠 있는 상태(복구가 우선), 대상 탭이 이미 한 개 이상 열려 있는 경우
+    (중복이면 중복 오류로 안내), 로그인된 쿠팡 컨텍스트가 없는 경우. 임시 탭에서 로그인
+    화면이 감지되면 ``BrowserActionRequiredError``가 올라가며, 보조 조회는 상위에서
+    best-effort로 삼켜 '수행중인원'만 생략하고 peak-dashboard 조회가 만료를 처리한다.
+    """
+
+    if not _path_is(target_url, "/page/rider-performance"):
+        return None
+    if _login_required_page(pages) is not None:
+        return None
+    # 대상 탭이 '아예 없을' 때만 연다. 한 개라도(또는 중복으로) 있으면 새 탭을 열지 않는다.
+    if any(_url_matches(str(page.url), target_url) for page in pages):
+        return None
+    context = _coupang_logged_in_context(browser)
+    if context is None:
+        return None
+
+    page = context.new_page()
+    try:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+        except load_timeout_errors:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        except load_timeout_errors:
+            pass
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+        if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+            _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+        return page.content()
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def _coupang_logged_in_context(browser: Any) -> Any | None:
+    """Return the CDP browser context that holds a logged-in coupangeats page.
+
+    임시 탭은 반드시 로그인 쿠키를 공유하는 컨텍스트에서 열어야 한다. ``partner.
+    coupangeats.com`` 호스트의 페이지가 떠 있는 컨텍스트를 로그인된 세션으로 보고
+    고른다. 그런 페이지가 없으면(로그아웃/쿠팡 탭 없음) ``None`` — 이땐 임시 탭을 열어도
+    로그인 화면만 뜨므로 열지 않는다.
+    """
+
+    for context in getattr(browser, "contexts", []) or []:
+        for page in getattr(context, "pages", []) or []:
+            host = (urlsplit(str(getattr(page, "url", ""))).hostname or "").casefold()
+            if host == "partner.coupangeats.com":
+                return context
     return None
 
 

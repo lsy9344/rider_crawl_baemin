@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,65 @@ def test_coupang_crawl_performance_snapshot_omits_current_screen(tmp_path):
         fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
     )
 
+    assert snapshot.current_screen is None
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_fetches_current_screen_and_peak_dashboard(tmp_path, monkeypatch):
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+    current_html = """
+    <main>
+      <h1>제이앤에이치플러스 의정부남부</h1>
+      <h2>제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중 라이더 현황</h2>
+      <p>01:05 업데이트</p>
+      <p>밤논피크 참여 가능</p><p>0 / 15 명</p>
+      <p>대기</p><p>0명</p>
+      <section><h3>활성 라이더</h3><p>이름 / 연락처</p><p>총 4명</p></section>
+      <p>온라인 0명</p>
+      <p>거절/무시: 5.8건</p><p>취소: 1건</p><p>완료: 78.8건</p>
+      <p>순서 미준수: 0건</p><p>점심피크: 21.6건</p><p>저녁피크: 15.8건</p><p>논피크: 41.4건</p>
+      <section><h3>비활성 라이더</h3><p>이름 / 연락처</p><p>총 0명</p></section>
+    </main>
+    """
+    html_by_url = {
+        config.coupang_eats_url: current_html,
+        config.peak_dashboard_url: _PEAK_DASHBOARD_HTML,
+    }
+    requested_urls: list[str | None] = []
+
+    def fake_fetch_page_html(_config, *, target_url=None):
+        requested_urls.append(target_url)
+        return html_by_url[target_url]
+
+    monkeypatch.setattr(crawler, "fetch_page_html", fake_fetch_page_html)
+
+    snapshot = crawl_performance_snapshot(config)
+
+    assert requested_urls == [config.coupang_eats_url, config.peak_dashboard_url]
+    assert snapshot.current_screen is not None
+    assert snapshot.current_screen.active_riders == 4
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_skips_current_screen_when_rider_tab_missing(tmp_path, monkeypatch):
+    # rider-performance 탭이 없어 그 페이지 조회가 BrowserActionRequiredError를 던져도,
+    # 로그인 만료가 아니라 단순 탭 부재이므로 크롤링을 막지 않는다. 보조 정보(활성 라이더
+    # 총계)만 생략하고 peak-dashboard 실적은 정상 수집한다.
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+    rider_performance_url = crawler._rider_performance_url(config)
+    requested_urls: list[str | None] = []
+
+    def fake_fetch_page_html(_config, *, target_url=None):
+        requested_urls.append(target_url)
+        if target_url == rider_performance_url:
+            raise BrowserActionRequiredError("열려 있는 Chrome 탭에서 쿠팡이츠 대상 페이지를 찾지 못했습니다.")
+        return _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+    monkeypatch.setattr(crawler, "fetch_page_html", fake_fetch_page_html)
+
+    snapshot = crawl_performance_snapshot(config)
+
+    assert requested_urls == [rider_performance_url, crawler._peak_dashboard_url(config)]
     assert snapshot.current_screen is None
     assert snapshot.peak_dashboard.updated_at == "20:38"
 
@@ -365,11 +425,29 @@ def test_coupang_crawl_performance_snapshot_parses_peak_dashboard(tmp_path):
     assert snapshot.peak_dashboard.dinner_non_peak.total == 27
 
 
-def test_coupang_crawl_performance_snapshot_fetches_only_the_primary_peak_url(tmp_path, monkeypatch):
-    # 쿠팡 탭은 주 URL(coupang_eats_url, '실적/달성현황 URL')에 든 peak-dashboard 한
-    # 페이지만 읽는다. rider-performance 페이지는 더 이상 요청하지 않는다.
-    config = _config(tmp_path)
-    html_by_url = {config.coupang_eats_url: _PEAK_DASHBOARD_HTML}
+def test_coupang_crawl_performance_snapshot_derives_current_url_when_primary_url_is_peak(tmp_path, monkeypatch):
+    # 기존 설정처럼 주 URL에 peak-dashboard가 들어와도 같은 origin의 rider-performance를
+    # 함께 읽어 활성 라이더 총계를 채운다.
+    base_config = _config(tmp_path)
+    config = replace(base_config, coupang_eats_url=base_config.peak_dashboard_url, peak_dashboard_url="")
+    rider_performance_url = "https://partner.coupangeats.com/page/rider-performance"
+    current_html = """
+    <main>
+      <h1>제이앤에이치플러스 의정부남부</h1>
+      <h2>제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중 라이더 현황</h2>
+      <p>01:05 업데이트</p>
+      <p>밤논피크 참여 가능</p><p>0 / 15 명</p>
+      <p>대기</p><p>0명</p>
+      <section><h3>활성 라이더</h3><p>이름 / 연락처</p><p>총 4명</p></section>
+      <p>온라인 0명</p>
+      <p>거절/무시: 5.8건</p><p>취소: 1건</p><p>완료: 78.8건</p>
+      <p>순서 미준수: 0건</p><p>점심피크: 21.6건</p><p>저녁피크: 15.8건</p><p>논피크: 41.4건</p>
+    </main>
+    """
+    html_by_url = {
+        rider_performance_url: current_html,
+        config.coupang_eats_url: _PEAK_DASHBOARD_HTML,
+    }
     requested_urls: list[str] = []
 
     def fake_fetch_page_html(_config, *, target_url=None):
@@ -380,8 +458,9 @@ def test_coupang_crawl_performance_snapshot_fetches_only_the_primary_peak_url(tm
 
     snapshot = crawl_performance_snapshot(config)
 
-    assert requested_urls == [config.coupang_eats_url]
-    assert snapshot.current_screen is None
+    assert requested_urls == [rider_performance_url, config.coupang_eats_url]
+    assert snapshot.current_screen is not None
+    assert snapshot.current_screen.active_riders == 4
     assert snapshot.peak_dashboard.updated_at == "20:38"
 
 
@@ -491,6 +570,60 @@ def test_coupang_fetch_target_page_content_does_not_open_new_tab_when_target_dup
 
     with pytest.raises(BrowserActionRequiredError, match="대상 탭이 여러 개"):
         crawler._fetch_target_page_content(browser, config)
+
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_coupang_fetch_target_page_content_opens_temp_tab_for_missing_rider_performance(tmp_path):
+    # peak-dashboard만 로그인돼 떠 있고 rider-performance 탭이 없으면, 같은 세션에 임시
+    # 탭을 새로 열어 rider-performance를 직접 읽고 닫는다(모든 쿠팡 탭에서 '수행중인원'
+    # 수집을 위함). 기존 peak 탭은 건드리지 않는다.
+    config = _config(tmp_path)
+    rider_url = "https://partner.coupangeats.com/page/rider-performance"
+    peak_page = _FakePage(
+        "https://partner.coupangeats.com/page/peak-dashboard", html="<html>logged in</html>"
+    )
+    browser = _FakeBrowser([peak_page], new_page_html="<html>라이더 현황 총 4명</html>")
+
+    html = crawler._fetch_target_page_content(
+        browser, config, target_url=rider_url, load_timeout_errors=(FakeTimeout,)
+    )
+
+    assert html == "<html>라이더 현황 총 4명</html>"
+    assert browser.contexts[0].new_page_calls == 1
+    temp_tab = browser.contexts[0].opened_pages[0]
+    assert temp_tab.goto_calls == [rider_url]
+    # 임시 탭은 읽은 뒤 닫는다.
+    assert temp_tab.closed is True
+
+
+def test_coupang_fetch_target_page_content_does_not_open_temp_tab_for_missing_peak(tmp_path):
+    # peak-dashboard(권위 페이지)가 없으면 임시 탭을 열지 않고 조치 필요 오류를 낸다.
+    config = _config(tmp_path)
+    peak_url = "https://partner.coupangeats.com/page/peak-dashboard"
+    browser = _FakeBrowser(
+        [_FakePage("https://partner.coupangeats.com/page/other", html="<html>x</html>")]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="열려 있는 Chrome 탭"):
+        crawler._fetch_target_page_content(
+            browser, config, target_url=peak_url, load_timeout_errors=(FakeTimeout,)
+        )
+
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_coupang_fetch_target_page_content_skips_temp_tab_when_no_logged_in_context(tmp_path):
+    # 로그인된 쿠팡 컨텍스트(partner.coupangeats.com 페이지)가 없으면, rider-performance
+    # 라도 임시 탭을 열지 않는다(열어도 로그인 화면만 뜸). 조치 필요 오류로 떨어진다.
+    config = _config(tmp_path)
+    rider_url = "https://partner.coupangeats.com/page/rider-performance"
+    browser = _FakeBrowser([_FakePage("about:blank", html="<html></html>")])
+
+    with pytest.raises(BrowserActionRequiredError, match="열려 있는 Chrome 탭"):
+        crawler._fetch_target_page_content(
+            browser, config, target_url=rider_url, load_timeout_errors=(FakeTimeout,)
+        )
 
     assert browser.contexts[0].new_page_calls == 0
 
@@ -878,9 +1011,19 @@ class _FakePage:
         # ``center_tabs``는 _COUPANG_CENTER_TAB_JS가 돌려주는 값을 흉내 낸다.
         self.center_tabs = center_tabs
         self.clicked_tab_labels: list[str] = []
+        self.goto_calls: list[str] = []
+        self.closed = False
 
     def wait_for_load_state(self, *_args, **_kwargs):
         return None
+
+    def goto(self, url, **_kwargs):
+        self.goto_calls.append(url)
+        self.url = url
+        return None
+
+    def close(self):
+        self.closed = True
 
     def get_by_text(self, text: str):
         self.required_texts.append(text)
@@ -1052,8 +1195,16 @@ class _FakeTabLocator:
 
 
 class _FakeBrowser:
-    def __init__(self, pages: list[_FakePage]) -> None:
-        self.contexts = [_FakeContext(pages)]
+    def __init__(
+        self,
+        pages: list[_FakePage],
+        *,
+        new_page_html: str = "",
+        new_page_center_tabs: list[dict] | None = None,
+    ) -> None:
+        self.contexts = [
+            _FakeContext(pages, new_page_html=new_page_html, new_page_center_tabs=new_page_center_tabs)
+        ]
         self.closed = False
 
     def close(self) -> None:
@@ -1061,12 +1212,22 @@ class _FakeBrowser:
 
 
 class _FakeContext:
-    def __init__(self, pages: list[_FakePage]) -> None:
+    def __init__(
+        self,
+        pages: list[_FakePage],
+        *,
+        new_page_html: str = "",
+        new_page_center_tabs: list[dict] | None = None,
+    ) -> None:
         self.pages = pages
         self.new_page_calls = 0
+        self.opened_pages: list[_FakePage] = []
+        self._new_page_html = new_page_html
+        self._new_page_center_tabs = new_page_center_tabs
 
     def new_page(self):
         self.new_page_calls += 1
-        page = _FakePage("about:blank")
+        page = _FakePage("about:blank", html=self._new_page_html, center_tabs=self._new_page_center_tabs)
         self.pages.append(page)
+        self.opened_pages.append(page)
         return page
