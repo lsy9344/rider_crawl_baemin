@@ -10,7 +10,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
 from .config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
 from .models import CurrentScreenSnapshot
-from .parser import parse_achievement_report_text, parse_current_screen_html
+from .parser import (
+    has_today_delivery_status,
+    parse_achievement_report_text,
+    parse_current_screen_html,
+)
 
 
 def crawl_current_screen(
@@ -228,17 +232,27 @@ async def _collect_baemin_achievement_report_text(page: Any, config: AppConfig) 
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while loop.time() < deadline:
         await _scroll_baemin_report(page)
         for text in await _baemin_report_text_candidates(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
+            # 주간 표 + 설정 센터 행 확인. '오늘 배달현황' 표(실시간 수행건수)까지
+            # 렌더되면 그 텍스트를 확정한다. 아직이면 마지막 후보로 기억해 두고(끝내
+            # 안 떠도 주간만으로 진행) 더 스크롤하며 기다린다.
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         await page.wait_for_timeout(1_000)
 
     if last_report_text:
+        # 마감까지 '오늘 배달현황' 표가 안 떴다(이른 새벽 등). 주간 표만으로 진행한다.
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
@@ -611,17 +625,25 @@ def _collect_baemin_achievement_report_text_sync(page: Any, config: AppConfig) -
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while time.monotonic() < deadline:
         _scroll_baemin_report_sync(page)
         for text in _baemin_report_text_candidates_sync(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
+            # '오늘 배달현황' 표(실시간 수행건수)까지 렌더되면 확정. 아직이면 기억만 하고
+            # 더 기다린다(async _collect_baemin_achievement_report_text와 동일 정책).
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         page.wait_for_timeout(1_000)
 
     if last_report_text:
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"

@@ -115,6 +115,73 @@ def test_parse_achievement_report_text_prefers_today_even_when_today_has_no_coun
     assert snapshot.reject_rate == 100
 
 
+def test_parse_achievement_report_text_merges_today_counts_with_weekly_goal_for_matching_center():
+    # 실제 deliverycenter.baemin.com/delivery/report 프레임 텍스트를 그대로 본뜬 입력.
+    # 분자(수행건수)·달성률은 '오늘 배달현황' 표에서, 분모(목표건수)는 '주간 배달 현황'
+    # 표의 오늘 행에서 와야 한다. 주간 표에는 다른 센터(DP2406141285)가 먼저 섞여 있고
+    # 그 오늘 행 목표는 231/154/245/210이지만, 설정 센터(DP2605181318)의 오늘 행
+    # 목표 363/242/385/330만 분모로 써야 한다.
+    text = "\n".join(
+        [
+            "달성현황",
+            "협력사 아이디",
+            "날짜",
+            "요일",
+            "아침점심",
+            "오후논피",
+            "저녁피크",
+            "심야논피",
+            "수락률",
+            # 다른 센터(DP2406141285) — 분모로 쓰면 안 되는 함정 행
+            "표준서울마포B - DP2406141285",
+            "26-06-14",
+            "일",
+            "0/231 (0%)",
+            "0/154 (0%)",
+            "0/245 (0%)",
+            "0/210 (0%)",
+            "0.00%",
+            # 설정 센터(DP2605181318)의 오늘(6/14) 주간 행 — 분모는 여기서 와야 함
+            "표준서울마포B - DP2605181318",
+            "26-06-14",
+            "일",
+            "0/363 (0%)",
+            "0/242 (0%)",
+            "0/385 (0%)",
+            "0/330 (0%)",
+            "0.00%",
+            # '오늘 배달현황' 표 — 분자(수행건수)와 달성률은 여기서 와야 함
+            "오늘 배달현황",
+            "협력사아이디",
+            "아침점심",
+            "오후논피",
+            "저녁피크",
+            "심야논피",
+            "표준서울마포B - DP2605181318",
+            "471/341 (100%)",
+            "295/242 (100%)",
+            "494/396 (100%)",
+            "489/341 (100%)",
+            "주간 배달 현황",
+            "* 수행건수 / 목표건수 (달성률)",
+        ]
+    )
+
+    snapshot = parse_achievement_report_text(
+        text,
+        center_id="DP2605181318",
+        center_name="표준서울마포B이츠앤홀딩스3",
+        now=datetime(2026, 6, 14, 1, 50),
+    )
+
+    assert snapshot.date_label == "26-06-14"
+    # 분자 = 오늘 배달현황 수행건수, 분모 = 주간(설정 센터) 목표건수, 달성률 = 오늘 표 값
+    assert (snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate) == (471, 363, 100)
+    assert (snapshot.afternoon_non_peak_count, snapshot.afternoon_non_peak_goal, snapshot.afternoon_non_peak_rate) == (295, 242, 100)
+    assert (snapshot.dinner_peak_count, snapshot.dinner_peak_goal, snapshot.dinner_peak_rate) == (494, 385, 100)
+    assert (snapshot.dinner_non_peak_count, snapshot.dinner_non_peak_goal, snapshot.dinner_non_peak_rate) == (489, 330, 100)
+
+
 def test_parse_achievement_report_text_falls_back_to_latest_past_when_no_today_row():
     # 오늘 행이 표에 아예 없으면(데이터가 어제까지만 있는 경우) 가장 최근 완료 과거 행을 쓴다.
     text = "\n".join(

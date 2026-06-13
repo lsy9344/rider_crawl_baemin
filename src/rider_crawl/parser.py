@@ -106,6 +106,16 @@ class _AchievementRow:
         )
 
 
+@dataclass(frozen=True)
+class _TodayDeliveryStatus:
+    # '오늘 배달현황' 표(15분 단위 갱신)의 실시간 수행건수/달성률. 분모(목표건수)는 여기서
+    # 쓰지 않고 '주간 배달 현황' 표의 오늘 행 목표건수를 쓴다(_combine_today_and_weekly).
+    lunch_peak: _AchievementPeriod
+    afternoon_non_peak: _AchievementPeriod
+    dinner_peak: _AchievementPeriod
+    dinner_non_peak: _AchievementPeriod
+
+
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -195,6 +205,20 @@ def parse_achievement_report_text(
     row = _select_achievement_row(rows, today=current_time.date())
     reject_rate = max(0, min(100, round(100 - row.acceptance_rate, 2)))
 
+    # 시간대별 값을 두 표에서 합친다: 분자(수행건수)·달성률은 '오늘 배달현황' 표(실시간),
+    # 분모(목표건수)는 '주간 배달 현황' 표의 오늘 행. 두 표 모두 같은 센터 ID 행만 골라
+    # 쓰므로(_parse_today_delivery_status / _parse_achievement_rows의 center_id 필터),
+    # 주간 표에 다른 센터(예: DP2406141285)가 섞여 있어도 목표건수가 오염되지 않는다.
+    today = _parse_today_delivery_status(text, center_id=center_id)
+    lunch_peak = _combine_today_and_weekly(row.lunch_peak, today.lunch_peak if today else None)
+    afternoon_non_peak = _combine_today_and_weekly(
+        row.afternoon_non_peak, today.afternoon_non_peak if today else None
+    )
+    dinner_peak = _combine_today_and_weekly(row.dinner_peak, today.dinner_peak if today else None)
+    dinner_non_peak = _combine_today_and_weekly(
+        row.dinner_non_peak, today.dinner_non_peak if today else None
+    )
+
     return CurrentScreenSnapshot(
         center_name=center_name.strip() or row.center_label,
         date_label=row.date_label,
@@ -210,19 +234,19 @@ def parse_achievement_report_text(
         cancelled_count=0,
         completed_count=0,
         sequence_violation_count=0,
-        lunch_peak_count=row.lunch_peak.done,
-        lunch_peak_goal=row.lunch_peak.goal,
-        lunch_peak_rate=row.lunch_peak.rate,
-        afternoon_non_peak_count=row.afternoon_non_peak.done,
-        afternoon_non_peak_goal=row.afternoon_non_peak.goal,
-        afternoon_non_peak_rate=row.afternoon_non_peak.rate,
-        dinner_peak_count=row.dinner_peak.done,
-        dinner_peak_goal=row.dinner_peak.goal,
-        dinner_peak_rate=row.dinner_peak.rate,
-        dinner_non_peak_count=row.dinner_non_peak.done,
-        dinner_non_peak_goal=row.dinner_non_peak.goal,
-        dinner_non_peak_rate=row.dinner_non_peak.rate,
-        non_peak_count=row.afternoon_non_peak.done + row.dinner_non_peak.done,
+        lunch_peak_count=lunch_peak.done,
+        lunch_peak_goal=lunch_peak.goal,
+        lunch_peak_rate=lunch_peak.rate,
+        afternoon_non_peak_count=afternoon_non_peak.done,
+        afternoon_non_peak_goal=afternoon_non_peak.goal,
+        afternoon_non_peak_rate=afternoon_non_peak.rate,
+        dinner_peak_count=dinner_peak.done,
+        dinner_peak_goal=dinner_peak.goal,
+        dinner_peak_rate=dinner_peak.rate,
+        dinner_non_peak_count=dinner_non_peak.done,
+        dinner_non_peak_goal=dinner_non_peak.goal,
+        dinner_non_peak_rate=dinner_non_peak.rate,
+        non_peak_count=afternoon_non_peak.done + dinner_non_peak.done,
         active_riders=0,
         reject_rate=reject_rate,
     )
@@ -414,6 +438,66 @@ def _parse_achievement_period(raw: str) -> _AchievementPeriod:
         goal=int(match.group("goal").replace(",", "")),
         rate=round(float(match.group("rate"))),
     )
+
+
+# '오늘 배달현황' 표 한 칸: "수행건수/목표건수 (달성률%)". 주간 표 칸과 형식이 같지만,
+# 센터 라벨 바로 다음 줄이 날짜(26-06-14)가 아니라 이 형식이면 '오늘 배달현황' 데이터 행이다.
+_PERIOD_CELL_PATTERN = re.compile(
+    r"\d+(?:,\d{3})*\s*/\s*\d+(?:,\d{3})*\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)"
+)
+
+
+def _is_period_cell(raw: str) -> bool:
+    return bool(_PERIOD_CELL_PATTERN.fullmatch(raw.strip()))
+
+
+def _parse_today_delivery_status(text: str, *, center_id: str) -> _TodayDeliveryStatus | None:
+    # '오늘 배달현황' 표에서 설정 센터 ID 행의 실시간 수행건수/달성률을 읽는다. 표는
+    # "센터 라벨 → 아침점심/오후논피/저녁피크/심야논피 4칸"으로 이어진다. 주간 표 행은
+    # 센터 라벨 다음이 날짜라 4칸 모두 period 형식이 아니므로 자연히 걸러진다. 같은 센터
+    # ID라도 주간 표 행은 건너뛰고 '오늘 배달현황' 행만 매칭된다.
+    expected_id = center_id.strip().upper()
+    if not expected_id:
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if expected_id not in line.upper():
+            continue
+        cells = lines[index + 1 : index + 5]
+        if len(cells) < 4 or not all(_is_period_cell(cell) for cell in cells):
+            continue
+        try:
+            return _TodayDeliveryStatus(
+                lunch_peak=_parse_achievement_period(cells[0]),
+                afternoon_non_peak=_parse_achievement_period(cells[1]),
+                dinner_peak=_parse_achievement_period(cells[2]),
+                dinner_non_peak=_parse_achievement_period(cells[3]),
+            )
+        except (MissingPerformanceDataError, ValueError):
+            continue
+    return None
+
+
+def has_today_delivery_status(text: str, *, center_id: str) -> bool:
+    """'오늘 배달현황' 표(실시간 수행건수)가 설정 센터 ID로 렌더되어 있으면 True.
+
+    크롤러가 페이지 텍스트를 언제 확정할지 판단할 때 쓴다. 주간 표만 떠 있고 '오늘
+    배달현황' 표가 아직 안 떴으면 분자(수행건수)를 0으로 읽게 되므로, 이 함수가 True가
+    될 때까지 더 기다렸다가 텍스트를 확정한다.
+    """
+    return _parse_today_delivery_status(text, center_id=center_id) is not None
+
+
+def _combine_today_and_weekly(
+    weekly: _AchievementPeriod, today: _AchievementPeriod | None
+) -> _AchievementPeriod:
+    # 분자(수행건수)와 달성률은 '오늘 배달현황' 표에서, 분모(목표건수)는 '주간 배달 현황'
+    # 표의 오늘 행에서 가져온다. '오늘 배달현황' 표를 못 읽으면 기존처럼 주간 표 값만 쓴다.
+    if today is None:
+        return weekly
+    goal = weekly.goal if weekly.goal else today.goal
+    return _AchievementPeriod(done=today.done, goal=goal, rate=today.rate)
 
 
 def _looks_like_achievement_date(raw: str) -> bool:
