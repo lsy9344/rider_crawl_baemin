@@ -55,31 +55,75 @@ When Discord or another messenger is added, create a messenger
 adapter that implements `send_text`, register it with `register_messenger`, and
 then add settings/env selection without changing `app.run_once`.
 
-## Server Domain Boundary (Epic 2)
+## Server Domain Boundary (Epic 2–3)
 
 `rider_server` is a new top-level package holding the platform-neutral domain
-layer introduced in Epic 2. It is pure and dependency-free (no FastAPI,
-SQLAlchemy, or async); it may import `rider_crawl`, but `rider_crawl` never
-depends on it.
+and service layer introduced in Epic 2 and grown in Epic 3 (the `run_once` split
+and the collect/render/dispatch pipeline). It is pure and dependency-free (no
+FastAPI, SQLAlchemy, or async); it may import `rider_crawl`, but `rider_crawl`
+never depends on it. Throughout Epic 3 `src/rider_crawl/` was changed by zero
+lines — every new behaviour is additive inside `rider_server`.
 
-- `rider_server.domain` defines 8 frozen-dataclass models (`Tenant`,
-  `Subscription`, `PlatformAccount`, `MonitoringTarget`, `BrowserProfile`,
-  `MessengerChannel`, `DeliveryRule`, `SecretRef`) plus state-machine and
-  support enums (`CustomerLifecycleState`, `SubscriptionStatus`,
-  `BaeminAuthState`, `Platform`, `Messenger`, `SecretStorageClass`, ...).
-  Credentials are referenced via `SecretRef`, never stored as plaintext.
-- `rider_server.services.subscription_gate.SubscriptionGate` is a pure,
-  deterministic execution gate: it decides whether new crawl/dispatch jobs are
-  allowed from `SubscriptionStatus`, holds undelivered dispatches on suspend,
-  and is fail-closed (unknown states are blocked, succeeded dispatches are never
-  re-sent).
-- `rider_server.migration.runner` orchestrates the deterministic migration of
-  existing active tabs (`runtime/state/ui_settings.json`) into the ID-based
-  domain models: it backs up the original first and stops at `MAPPED`, never
-  activating a target before operator approval.
+- `rider_server.domain` defines 11 frozen-dataclass models — Epic 2 added
+  `Tenant`, `Subscription`, `PlatformAccount`, `MonitoringTarget`,
+  `BrowserProfile`, `MessengerChannel`, `DeliveryRule`, `SecretRef`; Epic 3 added
+  `Snapshot` (9th, normalized crawl result), `Message` (10th, rendered message
+  with stable `text_hash`), and `DeliveryLog` (11th, dispatch result / dedup
+  record). State-machine and support enums include `CustomerLifecycleState`,
+  `SubscriptionStatus`, `BaeminAuthState`, `Platform`, `Messenger`,
+  `SecretStorageClass`, `SnapshotQualityState`, `DeliveryStatus`, and
+  `FailureCategory` (Epic 3 added the last three). Credentials are referenced via
+  `SecretRef`, never stored as plaintext.
+- `rider_server.services` holds pure, deterministic, synchronous policy/transform
+  logic (no FastAPI/SQLAlchemy/async; identifiers and timestamps are
+  caller-injected, so there are no internal `datetime.now()`/`uuid4()` calls):
+  - `SubscriptionGate` (Epic 2) decides whether new crawl/dispatch jobs are
+    allowed from `SubscriptionStatus`, holds undelivered dispatches on suspend,
+    and is fail-closed (unknown states blocked, succeeded dispatches never
+    re-sent).
+  - `CrawlService` / `MessageRenderService` / `DispatchService` (Story 3.1) are
+    the `run_once` collect/render/dispatch split, each independently callable
+    with injectable crawler/sender adapters. The default adapters delegate to the
+    same `rider_crawl` building blocks, so the composed result reproduces
+    `run_once` (`message`/`sent`/`message_hash`); `app.run_once` itself is
+    untouched and stays the legacy compatibility path.
+  - `SnapshotNormalizer` (Story 3.2) wraps parser output into a normalized
+    `Snapshot` and is fail-closed: missing required data raises
+    `MissingSnapshotDataError` (a `MissingPerformanceDataError` subclass) instead
+    of filling defaults, so a bad/partial snapshot never produces a message.
+  - `MessageRenderService.render_message` (Story 3.3) returns a `Message` with a
+    stable `text_hash` equal to the dispatch `message_hash`. `template_version`
+    is a server-side constant (`baemin.realtime.v1` / `coupang.realtime.v1`); it
+    was deliberately *not* added to `rider_crawl/message.py`, keeping the renderer
+    reused byte-for-byte.
+  - `DispatchFanoutService` (Story 3.4) fans one `Message` out to a per-channel
+    `DispatchJob` for each active `DeliveryRule`, with channel isolation (one
+    channel's failure does not invalidate others) and a fail-closed
+    `UnknownChannelError` on dangling channel references.
+  - `IdempotentDeliveryService` (`idempotency.py`, Story 3.5) builds the 5-field
+    dedup key (`target_id + channel_id + collected_at + template_version +
+    message_hash`) and uses insert-then-send so a crash after sending cannot
+    cause a re-send; it records a `DeliveryLog` (`SENT` / `DUPLICATE_BLOCKED`).
+  - `DeliveryFailurePolicy` (Story 3.6) classifies failures into `FailureCategory`
+    and decides retry vs. human intervention with deterministic backoff (no fixed
+    5s / infinite retry); `AUTH_REQUIRED` / target-validation failures go to
+    `HELD` rather than retrying forever.
+  - `CentralTelegramSender` (Story 3.7) is a central, send-only Telegram adapter
+    that reuses the legacy `send_telegram_text` and never imports `getUpdates` /
+    the poller, removing per-Agent polling of a shared bot token.
+- `rider_server.migration.runner` (Epic 2) orchestrates the deterministic
+  migration of existing active tabs (`runtime/state/ui_settings.json`) into the
+  ID-based domain models: it backs up the original first and stops at `MAPPED`,
+  never activating a target before operator approval.
+  `rider_server.migration.cutover` (Story 3.8) adds the dry-run/cutover layer:
+  it runs the new path with no sender, compares the rendered hash against the
+  `MigrationSeed` baseline, blocks activation until an operator approves a diff,
+  guards against old/new dual active send (`DualSendError`), and on rollback
+  disables the new rule while preserving the dedup logs.
 
-DB/ORM/Alembic, Pydantic schemas, and runtime wiring for this layer are out of
-Epic 2 scope (Epic 5).
+DB/ORM/Alembic, Pydantic schemas, and runtime wiring for this layer remain out of
+Epic 2–3 scope (Epic 5); through Epic 3 `rider_server` is defined and tested but
+not yet wired into a running process (the UI still calls `run_once`).
 
 ## Compatibility Notes
 

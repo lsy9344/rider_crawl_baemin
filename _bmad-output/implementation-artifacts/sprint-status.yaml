@@ -72,7 +72,7 @@ development_status:
   3-6-수집-실패와-전송-실패-분리-재시도-실패-상태-관리: done
   3-7-telegram-중앙-전송-도입: done
   3-8-신규-경로-dry-run-비교와-승인-후-활성화: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
   # ── Epic 4: Windows Local Agent (P3) ──
   epic-4: backlog
