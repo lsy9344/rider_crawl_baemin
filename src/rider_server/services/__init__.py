@@ -20,6 +20,13 @@ Story 3.6(P2-06, FR-11·26)이 ``DeliveryFailurePolicy``(실패 분류·error_co
 결정·parser 반복 실패 경고·``attempt_delivery``=``deliver_once`` 위 실패-인지 전송)와 그
 값 객체 ``RetryDecision``/``DeliveryAttemptResult`` 를 additive로 추가했다 —
 ``FailureCategory``/``DeliveryStatus`` 신규 멤버는 domain 소속이라 여기서 재노출하지 않는다.
+Story 3.7(P2-07, FR-24·FR-26, ADD-11)이 ``CentralTelegramSender``(중앙 send-only Telegram
+어댑터 — legacy ``send_telegram_text`` 재사용·transport/token 주입·``dispatch_all``/
+``attempt_delivery`` 의 ``send`` seam 제공)·``TelegramRoute``(전송 scope=(chat_id, thread_id))·
+활성 토픽 충돌 검출(``find_telegram_topic_collisions``/``assert_unique_telegram_topics`` +
+``TelegramTopicCollisionError``)을 additive로 추가했다 — 인바운드 webhook/``/register``·async
+dispatcher·실제 ``DeliveryLog`` 영속은 Epic 5 소유다(``TelegramRoute`` 는 services 값 객체라
+domain 재노출 변화 없음).
 ``pythonpath = ["src"]`` 덕분에 별도 설치 없이
 ``from rider_server.services import SubscriptionGate`` 가 동작한다.
 """
@@ -41,6 +48,13 @@ from .dispatch_service import DispatchResult, DispatchService
 from .idempotency import IdempotentDeliveryService
 from .message_render_service import MessageRenderService
 from .snapshot_normalizer import MissingSnapshotDataError, SnapshotNormalizer
+from .telegram_central_dispatch import (
+    CentralTelegramSender,
+    TelegramRoute,
+    TelegramTopicCollisionError,
+    assert_unique_telegram_topics,
+    find_telegram_topic_collisions,
+)
 from .subscription_gate import (
     DispatchJobStatus,
     GateDecision,
@@ -68,4 +82,9 @@ __all__ = [
     "DeliveryFailurePolicy",
     "RetryDecision",
     "DeliveryAttemptResult",
+    "CentralTelegramSender",
+    "TelegramRoute",
+    "TelegramTopicCollisionError",
+    "find_telegram_topic_collisions",
+    "assert_unique_telegram_topics",
 ]
