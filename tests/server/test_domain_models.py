@@ -262,6 +262,8 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "SecretRef",
         # Story 3.2 — 정규화 Snapshot 레코드(9번째)
         "Snapshot",
+        # Story 3.3 — Message 렌더 레코드(10번째)
+        "Message",
         # 상태머신 enum
         "CustomerLifecycleState",
         "SubscriptionStatus",
@@ -289,6 +291,7 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "DeliveryRule",
         "SecretRef",
         "Snapshot",  # Story 3.2 — 9번째 도메인 모델
+        "Message",  # Story 3.3 — 10번째 도메인 모델
     }
     for name in model_names:
         assert dataclasses.is_dataclass(getattr(domain_pkg, name))

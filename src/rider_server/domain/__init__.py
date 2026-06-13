@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .browser_profile import BrowserProfile
 from .delivery_rule import DeliveryRule
+from .message import Message
 from .messenger_channel import MessengerChannel
 from .monitoring_target import MonitoringTarget
 from .platform_account import PlatformAccount
@@ -42,6 +43,8 @@ __all__ = [
     "SecretRef",
     # Story 3.2 — 정규화 Snapshot 레코드(9번째)
     "Snapshot",
+    # Story 3.3 — Message 렌더 레코드(10번째)
+    "Message",
     # 상태머신 enum
     "CustomerLifecycleState",
     "SubscriptionStatus",
