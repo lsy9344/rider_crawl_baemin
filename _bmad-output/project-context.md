@@ -17,7 +17,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 ## 기술 스택과 버전
 
-- Python `>=3.10` 기준 프로젝트다. 새 코드는 `src/rider_crawl/` 패키지 안에 두고, 테스트는 `tests/`의 pytest 구조를 따른다.
+- Python `>=3.10` 기준 프로젝트다. Agent/크롤러 코드는 `src/rider_crawl/`에, Cloud 도메인·서비스·마이그레이션 코드는 `src/rider_server/`에 둔다(Epic 2 신설). 테스트는 `tests/`의 pytest 구조를 따르고, server 코드 테스트는 `tests/server/` 하위에 둔다.
 - `crawl4ai==0.8.7`은 고정 버전이다. 파서/크롤러 동작이 바뀔 수 있으므로 임의로 업그레이드하지 않는다.
 - `playwright==1.60.0`을 사용해 로그인된 Chrome에 CDP로 연결한다. 기본 운영 방식은 자동 로그인이나 새 세션 생성이 아니라, 사용자가 로그인해 둔 Chrome 화면을 읽는 방식이다.
 - UI는 표준 `tkinter` 기반 데스크톱 앱이다. 웹 프론트엔드나 서버 앱 구조를 가정하지 않는다.
@@ -61,7 +61,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 ### 코드 품질과 스타일 규칙
 
-- 제품 코드는 `src/rider_crawl/`만 기준으로 본다. `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
+- 제품 코드는 `src/rider_crawl/`(기존 Agent/크롤러·UI)와 `src/rider_server/`(Cloud 도메인·서비스·마이그레이션, Epic 2 신설)를 기준으로 본다. `rider_server`는 `rider_crawl`을 import해 재사용할 수 있으나 그 반대 방향 의존(`rider_crawl` → `rider_server`)은 만들지 않는다. `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
 - 새 플랫폼별 구현은 플랫폼 폴더 아래에 둔다. 쿠팡 전용 selector, 로그인 복구, parser 로직을 배민 legacy `crawler.py`/`parser.py`에 섞지 않는다.
 - 함수와 변수는 기존 Python snake_case 스타일을 따른다. 클래스와 dataclass는 PascalCase를 쓴다.
 - 공개 경계 이름은 기존 호환을 우선한다. 예를 들어 `coupang_eats_url`이 현재는 플랫폼별 주 URL처럼 쓰여도, 넓은 변경 없이 이름만 바꾸지 않는다.
@@ -78,7 +78,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 - Chrome은 원격 디버깅 포트와 탭별 프로필을 분리해야 한다. 여러 계정/탭을 다룰 때 같은 CDP 포트나 같은 프로필을 공유하게 만들지 않는다.
 - UI 설정은 `runtime/state/ui_settings.json`에 저장되는 로컬 상태다. 저장 포맷을 바꾸면 기존 사용자의 JSON 마이그레이션을 고려한다.
 - `config.json`은 키워드 자동응답 설정이며 실행 파일 옆 또는 작업 디렉터리에서 읽는다. exe에 번들되는 내부 리소스로 가정하지 않는다.
-- 민감값은 `.env`, `runtime/state/ui_settings.json`, `secrets/google/` 같은 로컬 파일에만 둔다. 코드, 테스트 fixture, 문서 예시에 실제 토큰/비밀번호/chat_id를 넣지 않는다.
+- 민감값은 `.env`, secret store 파일(`runtime/state/secrets.local.json`, gitignore 대상), `secrets/google/` 같은 로컬 파일에만 둔다. 설정 JSON(`runtime/state/ui_settings.json`)에는 평문 token/password를 쓰지 않고 `*_ref`(불투명 핸들)만 남긴다(`LocalFileSecretStore`, Story 2.4). `chat_id`·topic id 등 비밀이 아닌 값은 `ui_settings.json`에 그대로 둔다. 코드, 테스트 fixture, 문서 예시에 실제 토큰/비밀번호/chat_id를 넣지 않는다.
 - Git 상태가 더러울 수 있으므로 관련 없는 변경을 되돌리지 않는다. 특히 BMAD 설치 파일이나 문서 생성물은 제품 코드 변경과 분리해서 본다.
 
 ### 절대 놓치면 안 되는 규칙
@@ -111,4 +111,4 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 - 기술 스택, 실행 구조, 보안 정책이 바뀌면 갱신한다.
 - 오래되었거나 더 이상 특별하지 않은 규칙은 주기적으로 제거한다.
 
-마지막 업데이트: 2026-06-12
+마지막 업데이트: 2026-06-13 (Epic 2 회고 반영: `src/rider_server/` 패키지 신설, secret store/`*_ref` 분리)

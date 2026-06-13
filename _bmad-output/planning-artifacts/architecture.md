@@ -406,7 +406,9 @@ rider_result_mornitoring/
 │   │   ├── browser_launcher.py / lock.py / scheduler.py
 │   │   ├── ui.py / ui_settings.py / config.py
 │   │   ├── keyword_responder.py / telegram_commands.py
-│   │   └── redaction.py            # [신규] 공용 redaction 유틸(P0-04)
+│   │   ├── redaction.py            # [신규] 공용 redaction 유틸(P0-04)
+│   │   ├── log_rotation.py         # [신규] 크기 기준 로그 rotation(Story 2.2)
+│   │   └── secret_store.py         # [신규] secret 분리 — 설정엔 *_ref만(Story 2.4)
 │   │
 │   ├── rider_server/               # [신규 — Cloud Control Plane]
 │   │   ├── __main__.py

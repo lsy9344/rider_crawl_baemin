@@ -55,10 +55,40 @@ When Discord or another messenger is added, create a messenger
 adapter that implements `send_text`, register it with `register_messenger`, and
 then add settings/env selection without changing `app.run_once`.
 
+## Server Domain Boundary (Epic 2)
+
+`rider_server` is a new top-level package holding the platform-neutral domain
+layer introduced in Epic 2. It is pure and dependency-free (no FastAPI,
+SQLAlchemy, or async); it may import `rider_crawl`, but `rider_crawl` never
+depends on it.
+
+- `rider_server.domain` defines 8 frozen-dataclass models (`Tenant`,
+  `Subscription`, `PlatformAccount`, `MonitoringTarget`, `BrowserProfile`,
+  `MessengerChannel`, `DeliveryRule`, `SecretRef`) plus state-machine and
+  support enums (`CustomerLifecycleState`, `SubscriptionStatus`,
+  `BaeminAuthState`, `Platform`, `Messenger`, `SecretStorageClass`, ...).
+  Credentials are referenced via `SecretRef`, never stored as plaintext.
+- `rider_server.services.subscription_gate.SubscriptionGate` is a pure,
+  deterministic execution gate: it decides whether new crawl/dispatch jobs are
+  allowed from `SubscriptionStatus`, holds undelivered dispatches on suspend,
+  and is fail-closed (unknown states are blocked, succeeded dispatches are never
+  re-sent).
+- `rider_server.migration.runner` orchestrates the deterministic migration of
+  existing active tabs (`runtime/state/ui_settings.json`) into the ID-based
+  domain models: it backs up the original first and stops at `MAPPED`, never
+  activating a target before operator approval.
+
+DB/ORM/Alembic, Pydantic schemas, and runtime wiring for this layer are out of
+Epic 2 scope (Epic 5).
+
 ## Compatibility Notes
 
 - Existing public modules (`app.py`, `crawler.py`, `parser.py`, `sender.py`,
   `message.py`, `ui.py`, `ui_settings.py`) are intentionally preserved.
+- Epic 2 added two new modules inside `rider_crawl` alongside the preserved set:
+  `secret_store.py` (a secret-store seam so `ui_settings.json` keeps only opaque
+  `*_ref` handles instead of plaintext) and `log_rotation.py` (size-based
+  rotation for `run_errors.log` / `kakao_diagnostics.log`).
 - The default platform is Baemin, so existing setups keep crawling Baemin unless
   a tab is explicitly switched to Coupang.
 - The default behavior is Baemin crawling plus Telegram Bot API sending.
