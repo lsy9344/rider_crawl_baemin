@@ -16,6 +16,10 @@ Story 3.5(P2-05, FR-10, ADD-5)가 ``IdempotentDeliveryService``(``build_dedup_ke
 dedup key, ``deliver_once``=insert-then-send + ``DeliveryLog`` 생성)를 additive로 추가했다
 (architecture 428 ``idempotency.py`` 정본 — ``DeliveryLog``/``DeliveryStatus`` 는 domain
 소속이라 여기서 재노출하지 않는다).
+Story 3.6(P2-06, FR-11·26)이 ``DeliveryFailurePolicy``(실패 분류·error_code별 backoff 재시도
+결정·parser 반복 실패 경고·``attempt_delivery``=``deliver_once`` 위 실패-인지 전송)와 그
+값 객체 ``RetryDecision``/``DeliveryAttemptResult`` 를 additive로 추가했다 —
+``FailureCategory``/``DeliveryStatus`` 신규 멤버는 domain 소속이라 여기서 재노출하지 않는다.
 ``pythonpath = ["src"]`` 덕분에 별도 설치 없이
 ``from rider_server.services import SubscriptionGate`` 가 동작한다.
 """
@@ -23,6 +27,11 @@ dedup key, ``deliver_once``=insert-then-send + ``DeliveryLog`` 생성)를 additi
 from __future__ import annotations
 
 from .crawl_service import CrawlService
+from .delivery_failure_policy import (
+    DeliveryAttemptResult,
+    DeliveryFailurePolicy,
+    RetryDecision,
+)
 from .dispatch_fanout_service import (
     DispatchFanoutService,
     DispatchJob,
@@ -56,4 +65,7 @@ __all__ = [
     "SnapshotNormalizer",
     "MissingSnapshotDataError",
     "IdempotentDeliveryService",
+    "DeliveryFailurePolicy",
+    "RetryDecision",
+    "DeliveryAttemptResult",
 ]

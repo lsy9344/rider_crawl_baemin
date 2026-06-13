@@ -136,16 +136,51 @@ class SnapshotQualityState(str, Enum):
 
 
 class DeliveryStatus(str, Enum):
-    """전송 결과 상태(Story 3.5 / P2-05, FR-10, data-api-contract ``delivery_logs.status``).
+    """전송 결과 상태(Story 3.5 / P2-05, FR-10 + Story 3.6 / P2-06, FR-26, data-api-contract
+    ``delivery_logs.status``).
 
     **값 정의 vs 로직 경계(2.5 ``SubscriptionStatus``·3.2 ``SnapshotQualityState`` 선례와
-    동형):** 본 스토리는 dedup 결과 어휘 **2개만** 정의한다 — ``SENT``(insert-then-send로
+    동형):** 3.5가 dedup 결과 어휘 **2개**를 정의했다 — ``SENT``(insert-then-send로
     유니크 제약을 먼저 확보한 뒤 성공 전송)과 ``DUPLICATE_BLOCKED``(이미 성공 확보된 dedup
-    key라 재전송 안 함, audit 기록). 채널별 실패 카테고리(``telegram_failure``/
-    ``kakao_failure``)·``AUTH_REQUIRED``·재시도/보류 같은 **실패 운영 상태는 Story 3.6/
-    Epic 5 소유**라 여기에 추가하지 않는다(미래 어휘 선점 금지). ``DUPLICATE_BLOCKED`` 는
-    architecture 324-325의 운영 카테고리·359의 ``DUPLICATE_BLOCKED`` 와 정합(대문자 정본).
+    key라 재전송 안 함, audit 기록). 본 스토리(3.6)가 FR-26의 채널별 운영 상태 **3개**를
+    additive로 채운다 — ``FAILED``(재시도 소진/결정적 실패), ``RETRYING``(backoff 후 재시도
+    예정), ``HELD``(인증 필요 등 사람 개입 보류·무한 재시도 금지). 총 **5 멤버**로 FR-26의
+    "성공·실패·재시도·보류"(+dedup)를 표현한다. 재시도 결정·release·error_code 분류 같은
+    **정책/오케스트레이션**은 ``services.DeliveryFailurePolicy`` 소유(여기는 값 정의만).
+
+    ``HELD`` 는 ``DispatchJobStatus.HELD``(2.6 구독 게이트-facing 보류)와 **다른 타입의
+    동명 멤버**다(전송-결과 보류 vs 구독 중지 보류 — ``CustomerLifecycleState.ACTIVE`` vs
+    ``BaeminAuthState.ACTIVE`` 선례). 필드 타입으로 구별한다(``DeliveryLog.status`` =
+    ``DeliveryStatus``). ``DUPLICATE_BLOCKED`` 는 architecture 324-325의 운영 카테고리·359의
+    ``DUPLICATE_BLOCKED`` 와 정합(대문자 정본).
     """
 
     SENT = "SENT"
     DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
+    FAILED = "FAILED"
+    RETRYING = "RETRYING"
+    HELD = "HELD"
+
+
+class FailureCategory(str, Enum):
+    """전송/수집 실패 운영 카테고리 정본(Story 3.6 / P2-06, FR-11·26, NFR-15,
+    architecture 324-325). ``delivery_logs.error_code``/``jobs.error_code`` 어휘다.
+
+    architecture 324-325/NFR-15 정본과 **정확히 일치**하는 **7 멤버**(``(str, Enum)`` +
+    멤버 이름 == 값(대문자) — 2.5 enum 컨벤션 계승). ``DeliveryFailurePolicy`` 가 이 카테고리로
+    실패를 분류해 재시도 가능(일시)/사람 개입(보류)/결정적(실패) 여부를 판정한다.
+
+    ``AUTH_REQUIRED`` 는 ``CustomerLifecycleState.AUTH_REQUIRED``(고객 lifecycle)·
+    ``BaeminAuthState.AUTH_REQUIRED``(계정 인증)와 **다른 타입의 동명 멤버**다 — 여기서는
+    전송-결과 분류(무한 재시도 금지·사람 개입 신호)다. 필드 타입(``DeliveryLog.error_code``
+    = ``str``)으로 구별한다.
+    """
+
+    CRAWL_FAILURE = "CRAWL_FAILURE"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    RENDER_FAILURE = "RENDER_FAILURE"
+    TELEGRAM_FAILURE = "TELEGRAM_FAILURE"
+    KAKAO_FAILURE = "KAKAO_FAILURE"
+    # 값은 DeliveryStatus.DUPLICATE_BLOCKED(전송 상태)와 같지만 다른 레이어(error_code 분류).
+    DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
+    TARGET_VALIDATION_FAILURE = "TARGET_VALIDATION_FAILURE"

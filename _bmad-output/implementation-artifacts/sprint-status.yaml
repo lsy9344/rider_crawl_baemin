@@ -69,7 +69,7 @@ development_status:
   3-3-message-정의와-안정적-렌더링-분리: done
   3-4-deliveryrule-fan-out-한-대상에서-여러-채널로: done
   3-5-deliverylog와-idempotency-crash-after-send에도-중복-차단: done
-  3-6-수집-실패와-전송-실패-분리-재시도-실패-상태-관리: backlog
+  3-6-수집-실패와-전송-실패-분리-재시도-실패-상태-관리: done
   3-7-telegram-중앙-전송-도입: backlog
   3-8-신규-경로-dry-run-비교와-승인-후-활성화: backlog
   epic-3-retrospective: optional

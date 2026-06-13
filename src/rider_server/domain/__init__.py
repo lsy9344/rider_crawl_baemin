@@ -7,6 +7,8 @@
 
 Story 3.2/3.3/3.5가 계약 backing record를 additive로 추가했다 — Snapshot(9번째)·
 Message(10번째)·DeliveryLog(11번째, 전송 결과·dedup 기록) + DeliveryStatus enum.
+Story 3.6이 FailureCategory(error_code 운영 카테고리 7종) + DeliveryStatus 실패/재시도/
+보류 멤버(FAILED/RETRYING/HELD)를 additive로 추가했다(새 도메인 레코드는 없음 — enum만).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from .states import (
     BrowserProfileState,
     CustomerLifecycleState,
     DeliveryStatus,
+    FailureCategory,
     Messenger,
     MessengerChannelState,
     MonitoringTargetStatus,
@@ -57,6 +60,8 @@ __all__ = [
     "SubscriptionStatus",
     "BaeminAuthState",
     "DeliveryStatus",
+    # Story 3.6 — error_code 운영 카테고리(7종, delivery_logs/jobs.error_code 어휘)
+    "FailureCategory",
     # 지원 enum
     "Platform",
     "Messenger",

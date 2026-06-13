@@ -13,6 +13,7 @@ from rider_server.domain import (
     BaeminAuthState,
     BrowserProfileState,
     CustomerLifecycleState,
+    FailureCategory,
     Messenger,
     MessengerChannelState,
     MonitoringTargetStatus,
@@ -37,6 +38,7 @@ def test_all_enums_are_str_enum_with_name_equals_uppercase_value() -> None:
         MonitoringTargetStatus,
         MessengerChannelState,
         BrowserProfileState,
+        FailureCategory,  # Story 3.6 — error_code 운영 카테고리
     ]
     for enum_cls in enums:
         assert issubclass(enum_cls, str), f"{enum_cls.__name__} must be (str, Enum)"
@@ -111,6 +113,32 @@ def test_baemin_active_and_customer_active_are_different_typed_members() -> None
     assert BaeminAuthState.ACTIVE is not CustomerLifecycleState.ACTIVE
 
 
+def test_failure_category_has_exact_7_members_matching_nfr15() -> None:
+    # Story 3.6 / NFR-15·architecture 324-325: error_code 운영 카테고리 7종 정본(값·이름·순서).
+    expected = [
+        "CRAWL_FAILURE",
+        "AUTH_REQUIRED",
+        "RENDER_FAILURE",
+        "TELEGRAM_FAILURE",
+        "KAKAO_FAILURE",
+        "DUPLICATE_BLOCKED",
+        "TARGET_VALIDATION_FAILURE",
+    ]
+    assert [m.name for m in FailureCategory] == expected
+    assert [m.value for m in FailureCategory] == expected
+    assert len(list(FailureCategory)) == 7
+
+
+def test_failure_category_auth_required_is_distinct_typed_member() -> None:
+    # AUTH_REQUIRED는 CustomerLifecycleState·BaeminAuthState·FailureCategory 3타입 동명 멤버 —
+    # 값은 같고 타입이 다르다(전송-결과 분류 vs 고객/계정 lifecycle). 필드 타입으로 구별.
+    assert FailureCategory.AUTH_REQUIRED == "AUTH_REQUIRED"
+    assert FailureCategory.AUTH_REQUIRED is not CustomerLifecycleState.AUTH_REQUIRED
+    assert FailureCategory.AUTH_REQUIRED is not BaeminAuthState.AUTH_REQUIRED
+    # DUPLICATE_BLOCKED 값은 DeliveryStatus와 같지만 다른 레이어(error_code 분류 vs 전송 상태).
+    assert FailureCategory.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"
+
+
 def test_support_enums_have_expected_members() -> None:
     assert _names(Platform) == {"BAEMIN", "COUPANG"}
     assert _names(Messenger) == {"TELEGRAM", "KAKAO"}
@@ -177,6 +205,7 @@ def test_every_enum_member_json_serializes_to_its_uppercase_name() -> None:
         MonitoringTargetStatus,
         MessengerChannelState,
         BrowserProfileState,
+        FailureCategory,  # Story 3.6 — error_code 운영 카테고리
     ]
     for enum_cls in enums:
         for member in enum_cls:

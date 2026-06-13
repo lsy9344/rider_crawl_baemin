@@ -20,6 +20,7 @@ from rider_server.domain import (
     DeliveryLog,
     DeliveryRule,
     DeliveryStatus,
+    FailureCategory,
     Messenger,
     MessengerChannel,
     MessengerChannelState,
@@ -273,6 +274,8 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "SubscriptionStatus",
         "BaeminAuthState",
         "DeliveryStatus",
+        # Story 3.6 — error_code 운영 카테고리 enum
+        "FailureCategory",
         # 지원 enum
         "Platform",
         "Messenger",
@@ -405,9 +408,39 @@ def test_delivery_log_field_set_and_defaults_match_contract() -> None:
         log.status = DeliveryStatus.DUPLICATE_BLOCKED  # type: ignore[misc]
 
 
-def test_delivery_status_has_exactly_two_members_str_enum() -> None:
-    # AC4: dedup 결과 어휘 2개만(3.6 실패 카테고리 미선점), (str, Enum)·멤버명==대문자값.
-    assert {s.value for s in DeliveryStatus} == {"SENT", "DUPLICATE_BLOCKED"}
-    assert {s.name for s in DeliveryStatus} == {"SENT", "DUPLICATE_BLOCKED"}
+def test_delivery_status_has_exactly_five_members_str_enum() -> None:
+    # Story 3.6 계약 반영 갱신: 3.5의 dedup 결과 2개(SENT/DUPLICATE_BLOCKED)에 FR-26의 채널별
+    # 운영 상태 3개(FAILED/RETRYING/HELD)가 additive로 더해져 5멤버. (str, Enum)·멤버명==대문자값.
+    expected = {"SENT", "DUPLICATE_BLOCKED", "FAILED", "RETRYING", "HELD"}
+    assert {s.value for s in DeliveryStatus} == expected
+    assert {s.name for s in DeliveryStatus} == expected
     assert DeliveryStatus.SENT == "SENT"  # str enum — json 직렬화 시 "SENT"
     assert DeliveryStatus.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"
+    assert DeliveryStatus.FAILED == "FAILED"
+    assert DeliveryStatus.RETRYING == "RETRYING"
+    assert DeliveryStatus.HELD == "HELD"
+
+
+def test_delivery_log_error_code_can_carry_failure_category_value() -> None:
+    # Story 3.6: DeliveryLog 필드는 무증가 — error_code(str | None)에 FailureCategory 값을
+    # 담을 수 있음을 잠근다(3.5는 항상 None, 3.6이 분류 값을 채운다).
+    log = DeliveryLog(
+        id="dl-1",
+        message_id="msg-1",
+        channel_id="ch-kakao",
+        status=DeliveryStatus.FAILED,
+        dedup_key="mt-1|ch-kakao|2026-01-01T00:00:00|tmpl.v1|" + "a" * 64,
+        error_code=FailureCategory.KAKAO_FAILURE.value,
+    )
+    assert log.error_code == "KAKAO_FAILURE"
+    assert log.status is DeliveryStatus.FAILED
+    # 필드 집합은 그대로(무증가).
+    assert _fields(DeliveryLog) == {
+        "id",
+        "message_id",
+        "channel_id",
+        "status",
+        "dedup_key",
+        "error_code",
+        "sent_at",
+    }

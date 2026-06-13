@@ -304,9 +304,13 @@ def test_duplicate_blocked_is_recorded_as_observable_delivery_log():
 # ── AC4 — DeliveryLog/DeliveryStatus 계약·frozen·기본값 ───────────────────────────
 
 
-def test_delivery_status_members_are_exactly_two():
-    # 3.6 실패 카테고리(*_FAILURE/AUTH_REQUIRED) 미선점 — dedup 결과 어휘 2개만.
-    assert {s.name for s in DeliveryStatus} == {"SENT", "DUPLICATE_BLOCKED"}
+def test_delivery_status_members_include_dedup_vocabulary():
+    # Story 3.6 계약 반영 갱신(3.5가 "2개"로 박아둔 lock — 3.6이 실패/재시도/보류 멤버를
+    # additive로 추가하므로 갱신이지 회귀 아님): 3.5의 dedup 결과 어휘 2개는 그대로 보존되고
+    # 3.6이 FAILED/RETRYING/HELD 를 더해 총 5멤버다.
+    names = {s.name for s in DeliveryStatus}
+    assert {"SENT", "DUPLICATE_BLOCKED"} <= names  # 3.5 어휘 보존
+    assert names == {"SENT", "DUPLICATE_BLOCKED", "FAILED", "RETRYING", "HELD"}
     assert DeliveryStatus.SENT == "SENT"  # (str, Enum)
     assert DeliveryStatus.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"
 
