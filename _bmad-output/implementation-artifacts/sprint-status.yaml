@@ -75,8 +75,8 @@ development_status:
   epic-3-retrospective: done
 
   # ── Epic 4: Windows Local Agent (P3) ──
-  epic-4: backlog
-  4-1-rider-agent-패키지-생성과-기존-도메인-재사용: backlog
+  epic-4: in-progress
+  4-1-rider-agent-패키지-생성과-기존-도메인-재사용: done
   4-2-등록-코드-입력과-agent-토큰-보안-저장: backlog
   4-3-agent-heartbeat-보고: backlog
   4-4-outbound-https-job-polling-claim-complete와-lease: backlog

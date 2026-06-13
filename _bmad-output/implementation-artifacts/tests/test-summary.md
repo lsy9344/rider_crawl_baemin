@@ -1,63 +1,59 @@
-# Test Automation Summary — Story 1.1 (기준선 branch/tag·설정 백업)
+# Test Automation Summary — Story 4.1 (rider_agent 패키지 토대 + 재사용 seam)
 
-생성일: 2026-06-13 · 작성: QA 자동화 (bmad-qa-generate-e2e-tests) · 프레임워크: pytest
+작성: 2026-06-13 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
 
 ## 컨텍스트
 
-Story 1.1은 제품 코드 변경이 아니라 **운영 기준선 고정 절차/산출물 스토리**다
-(git tag, 백업 zip, sanitized 설정 샘플, `docs/qa/` 기록 문서). UI·API가 없어
-전통적 E2E 대상은 아니지만, **AC가 보안·무결성 속성**(secret 비노출, 기록 완전성,
-백업 zip 비추적)이라 회귀 가드로 자동화할 가치가 높다. 기존 수동 체크리스트를
-durable pytest 회귀 테스트로 고정했다.
+스토리 4.1은 UI/HTTP 엔드포인트가 없는 **패키지 토대 + 단방향 import seam**이라 API/E2E(브라우저) 테스트 대상이 아니다. 프로젝트의 기존 pytest 프레임워크(`pyproject.toml`: `pythonpath=["src"]`, `testpaths=["tests"]`)로 **AST 가드 + 서브프로세스 import-safety + 단위 계약** 형태의 테스트를 생성했다. 외부(브라우저/네트워크/Kakao/Gmail) 미호출, 가짜 값만 사용.
 
-## Generated Tests
+dev-story가 `tests/agent/test_agent_package.py`에 9건을 만든 상태에서, AC/Task/Dev-Notes가 **명시적으로 요구하지만 테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
 
-### Regression / Security Tests
-- [x] `tests/test_baseline_artifacts.py` — 기준선 산출물 회귀 가드 (24 케이스)
+## Generated / 보강 테스트
 
-## 적용한 갭 (auto-applied)
+`tests/agent/test_agent_package.py` (+5건, 기존 9 → **14건**). 신규 헬퍼 `_abs_import_modules`(서브모듈 단위 import-edge), `_run_python`(깨끗한 서브프로세스).
 
-수동으로만 검증되던 AC들에 자동 회귀 가드가 없던 것이 핵심 갭이었다. 다음을 자동화로 고정:
+| # | 테스트 | 커버한 격차 | 근거 |
+|---|--------|-------------|------|
+| Gap1 | `test_main_does_not_import_tkinter_or_legacy_ui` | `__main__`이 `tkinter`/`rider_crawl.ui`/`rider_crawl.app`을 import하지 않음(부작용 0의 정적 근거). 기존엔 exit 0만 보고 레거시 UI 미배선을 단언 안 함 | AC1, Task 3 |
+| Gap2 | `test_reuse_seam_is_import_safe_no_heavy_deps` | reuse seam을 eager import해도 `crawl4ai`/`playwright`/`pyautogui`/`pywinauto`/`pyperclip`/`googleapiclient`가 `sys.modules`에 안 올라옴(깨끗한 서브프로세스). Dev Notes가 "`python -m rider_agent` 성공의 관건"으로 지목한 import-safety가 미검증이었음 | AC1, Dev Notes(재사용 seam 설계) |
+| Gap3 | `test_import_rider_agent_does_not_eager_load_reuse_seam` | `import rider_agent`가 `rider_agent.reuse`를 eager-load하지 않음(가벼운 `__init__`) | Task 1 |
+| Gap4 | `test_main_returns_zero_and_prints_sync_banner` | `main()` 직접 호출이 `0` 반환 + sync 배너(버전·"sync runtime") 출력. runpy/subprocess만 있던 것을 단위 계약으로 보강(실패 위치 좁힘) | AC1 |
+| Gap5 | `test_reuse_all_names_are_resolvable` | `reuse.__all__`의 모든 이름이 실제 attribute로 해석됨(re-export drift 가드) | AC1·재사용 완전성 |
 
-| 갭 | AC / 요구사항 | 자동 테스트 |
-| --- | --- | --- |
-| sanitized 샘플에 실제 봇 토큰 형태 누출 검사 없음 | AC2/AC5, NFR-5, ADD-15 | `test_no_real_telegram_bot_token_in_artifacts` (5개 파일 파라미터화) |
-| `ui_settings.sample.json` 민감 3필드 placeholder 미보장 | AC2 | `test_ui_settings_sample_telegram_fields_are_placeholders` |
-| 운영 식별자(센터명/ID/카카오 방명) 마스킹 미보장 | AC2 | `test_ui_settings_sample_operating_identifiers_are_placeholders`, `test_env_operating_identifiers_are_placeholders` |
-| `.env.*`의 TELEGRAM_* 빈값 미보장 | AC2/AC5 | `test_env_telegram_secrets_are_empty` |
-| 보험사 실제 전화번호 placeholder 치환 미검증 | AC2 | `test_config_sample_phone_numbers_are_zero_placeholders` |
-| 기록 문서 필수 메타데이터(tag·SHA·zip·sha256·일시) 완전성 미검증 | AC1 | `test_baseline_record_contains_required_metadata` |
-| 백업 zip 비추적(`backups/` ignore) 회귀 가드 없음 | AC3, ADD-15 | `test_gitignore_excludes_backups_dir`, `test_backup_zip_is_git_ignored_if_present` |
-| 기준선 tag annotated·기록 SHA 일치 미검증 | AC1 | `test_baseline_tag_is_annotated_and_matches_record` |
-| JSON 스타일(2칸 들여쓰기, ensure_ascii=False)·대표 1탭 유지 | Task 4 정책 | `test_ui_settings_sample_*` |
-
-설계 원칙: 프로젝트 규칙대로 **실제 secret 값을 테스트에 하드코딩하지 않는다.**
-누출은 실제값이 아니라 secret '패턴'(텔레그램 봇 토큰 형태 `\d{6,}:[\w-]{30,}`,
-0이 아닌 전화번호 숫자열)으로 검사한다. 로컬 전용 산출물(git tag, 백업 zip)은
-존재할 때만 검증하고 fresh checkout/CI에서는 `skip`한다(가짜 실패 방지).
+기존 9건(유지): 패키지/seam import, `python -m rider_agent` exit 0(runpy+subprocess), 재사용 identity `is` 단언, sync AST 가드, third-party root==`{rider_crawl}`, pyproject 핀 유지, 단방향 import(crawl→agent 0 / agent→server 0).
 
 ## Coverage
 
 | Acceptance Criterion | 커버 |
-| --- | --- |
-| AC1 — tag·백업·기록 생성 (P0-01) | ✅ 기록 메타 완전성 + tag annotated/SHA 일치 (tag 있을 때) |
-| AC2 — sanitized 샘플 placeholder (P0-02) | ✅ telegram 3필드·운영 식별자·전화번호 placeholder |
-| AC2/AC5 — 실제 secret 비노출 (NFR-5/ADD-15) | ✅ 5개 커밋 산출물 봇토큰 패턴 0건 + TELEGRAM_* 빈값 |
-| AC3 — 원본 보존 / 백업 비추적 (NFR-18) | ✅ `backups/` gitignore + zip git-ignored 확인 |
+|---|---|
+| AC1 — 패키지·재사용 import·`python -m` 실행·부작용 0 | ✅ 기존 4건 + Gap1(레거시 UI 미배선)/Gap2(import-safety)/Gap3(가벼운 `__init__`)/Gap4(`main()` 단위)/Gap5(re-export 완전성) |
+| AC2 — 새 프레임워크 0·핀 유지 | ✅ 기존 2건(third-party root==`{rider_crawl}`, playwright/crawl4ai 핀) |
+| AC3 — sync 자기 코드·단방향 import | ✅ 기존 3건(AST sync 가드, crawl→agent 0, agent→server 0) |
 
-자동 검증 불가(설계상 skip 처리): 백업 zip의 sha256 무결성(zip이 gitignore라 CI에
-없음), 원본 `runtime/`·`logs/` 미변경(로컬 mtime/내용 기준 — 1.1 dev 단계에서 수동 확인 완료).
+import-safety가 의존하는 lazy 경계를 소스로 직접 확인 후 단언값 확정: `rider_crawl`의 `crawler/parser/platforms/coupang/message/auth/messengers`는 module-level에서 heavy dep 미import이고, `pyautogui`/`pywinauto`/`pyperclip`/`googleapiclient`/`crawl4ai`는 함수 내부 lazy import.
 
-## Validation Results
+## Validation Results (단일 정본)
 
-- 신규 모듈: **24 passed** (`pytest tests/test_baseline_artifacts.py`)
-- 전체 스위트: **421 passed in 2.94s** (기존 397 + 신규 24, 회귀 없음)
-- 누출 정규식 teeth 확인: 가짜 토큰 형태 탐지 ✅ / CDP URL·타임스탬프·placeholder 오탐 0건 ✅
-- 실행: Windows venv `.venv/Scripts/python.exe -m pytest` (Python 3.11.9, pytest 9.0.3)
+운영 venv `.venv/Scripts/python.exe -m pytest`:
+
+- `tests/agent/test_agent_package.py -q` → **14 passed**
+- 전체 스위트 `-q` → **1008 passed, 0 failed** (기존 1003 + 신규 5, 순수 additive·회귀 0)
+
+## 범위/누출 검증
+
+- 보호 경로 `git diff -w` 0줄: `src/rider_crawl`·`src/rider_server`·`src/rider_agent`·`pyproject.toml`·`rider_crawl_onefile.spec`·`_bmad-output/project-context.md` 무변경. 변경은 `tests/agent/test_agent_package.py`에 테스트 추가뿐.
+- 누출 grep(봇토큰 `\d{6,}:[\w-]{30,}`/`chat_id=`/휴대폰/이메일/OTP) → 신규 테스트에 0건.
+- 역방향 의존(`rider_crawl`이 `rider_agent` import) → 0건.
+
+## 체크리스트 결과(`checklist.md`)
+
+- [x] API 테스트(해당 없음 — 엔드포인트 없는 토대 스토리) / E2E 테스트(해당 없음 — UI 없음); 대신 패키지·실행·import-edge 테스트
+- [x] 표준 프레임워크 API(pytest, `ast`, `subprocess`, `capsys`)
+- [x] happy path(`python -m rider_agent` exit 0, `main()` 0 반환) + 임계 케이스(import-safety 위반·레거시 UI 배선·re-export drift를 실패로 잡음)
+- [x] 전 테스트 통과 / 의미 있는 단언(AST·`sys.modules`) / 명확한 설명 / 하드코딩 sleep 없음 / 순서 독립
+- [x] 요약 작성 · 적정 위치 저장 · 커버리지 명시
 
 ## Next Steps
 
-- CI 파이프라인에 포함(이 가드는 외부 입력·네트워크 의존이 없어 CI 친화적).
-- 후속 Story 1.2가 `docs/qa/`에 pytest 기준선 리포트를 추가하므로, 본 가드의
-  기록-문서 컨벤션 검증과 충돌하지 않게 유지.
-- 새 탭/플랫폼 추가로 샘플 구조가 바뀌면 placeholder 가드 케이스를 함께 갱신.
+- 4.2~4.4(등록/heartbeat/job 루프)에서 `reuse` seam을 실제 호출하는 워커가 생기면 **서버 stub/mock 동작 검증** 형태로 테스트 확장(epic-3-retro 108).
+- import-safety 가드의 heavy-dep 목록은 후속 워커가 새 외부 의존을 lazy로 추가하면 함께 갱신.
