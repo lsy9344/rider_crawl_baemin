@@ -118,3 +118,18 @@ class BrowserProfileState(str, Enum):
     READY = "READY"
     IN_USE = "IN_USE"
     INACTIVE = "INACTIVE"
+
+
+class SnapshotQualityState(str, Enum):
+    """Snapshot 데이터 품질 상태(Story 3.2 / P2-02, data-api-contract ``snapshots.quality_state``).
+
+    **값 정의 vs 로직 경계(2.5 ``SubscriptionStatus`` 선례와 동형):** 본 스토리의
+    fail-closed 정규화는 필수데이터 누락 시 ``MISSING_REQUIRED`` Snapshot을 **반환하지
+    않고 예외(``MissingSnapshotDataError``)를 raise** 한다(AC2). 따라서 ``MISSING_REQUIRED``
+    는 정규화 성공 경로에서는 쓰이지 않고, **실패를 기록(persist)할 Epic 5 DB 레이어용
+    어휘**로 값만 미리 둔다(2.5가 ``SubscriptionStatus`` 값만 정의하고 게이트 평가는
+    2.6에 둔 것과 동일). 정규화 성공 → ``OK``.
+    """
+
+    OK = "OK"
+    MISSING_REQUIRED = "MISSING_REQUIRED"

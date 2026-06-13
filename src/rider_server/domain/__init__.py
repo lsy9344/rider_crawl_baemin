@@ -14,6 +14,7 @@ from .messenger_channel import MessengerChannel
 from .monitoring_target import MonitoringTarget
 from .platform_account import PlatformAccount
 from .secret_ref import SecretRef
+from .snapshot import Snapshot
 from .states import (
     BaeminAuthState,
     BrowserProfileState,
@@ -23,6 +24,7 @@ from .states import (
     MonitoringTargetStatus,
     Platform,
     SecretStorageClass,
+    SnapshotQualityState,
     SubscriptionStatus,
 )
 from .subscription import Subscription
@@ -38,6 +40,8 @@ __all__ = [
     "MessengerChannel",
     "DeliveryRule",
     "SecretRef",
+    # Story 3.2 — 정규화 Snapshot 레코드(9번째)
+    "Snapshot",
     # 상태머신 enum
     "CustomerLifecycleState",
     "SubscriptionStatus",
@@ -49,4 +53,5 @@ __all__ = [
     "MonitoringTargetStatus",
     "MessengerChannelState",
     "BrowserProfileState",
+    "SnapshotQualityState",
 ]

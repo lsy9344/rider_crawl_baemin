@@ -260,6 +260,8 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "MessengerChannel",
         "DeliveryRule",
         "SecretRef",
+        # Story 3.2 — 정규화 Snapshot 레코드(9번째)
+        "Snapshot",
         # 상태머신 enum
         "CustomerLifecycleState",
         "SubscriptionStatus",
@@ -271,6 +273,7 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "MonitoringTargetStatus",
         "MessengerChannelState",
         "BrowserProfileState",
+        "SnapshotQualityState",
     }
     assert set(domain_pkg.__all__) == expected
     assert len(domain_pkg.__all__) == len(set(domain_pkg.__all__))  # 중복 없음
@@ -285,6 +288,7 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "MessengerChannel",
         "DeliveryRule",
         "SecretRef",
+        "Snapshot",  # Story 3.2 — 9번째 도메인 모델
     }
     for name in model_names:
         assert dataclasses.is_dataclass(getattr(domain_pkg, name))
