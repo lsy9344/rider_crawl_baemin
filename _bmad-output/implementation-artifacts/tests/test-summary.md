@@ -1,60 +1,95 @@
-# Test Automation Summary — Story 4.3 (Agent heartbeat 보고)
+# Test Automation Summary — Story 4.9 (쿠팡 Gmail 2FA 메일함 분리·lock)
 
-작성: 2026-06-13 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
+작성: 2026-06-14 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
 
 ## 컨텍스트
 
-스토리 4.3은 UI가 없는 **Agent heartbeat primitive**(payload 빌더 + 단발 `send_heartbeat` + 주기 `HeartbeatReporter` loop)다. 서버 수신·offline 판정·Admin은 Epic 5 소유라, 테스트는 **주입 fake transport / 실 `HttpTransport`+fake `urlopen`** 에 대한 client-side 동작 검증 형태다(4.x 표준 — epic-3-retro 108). 외부(브라우저/네트워크/Kakao/Gmail) 미호출, 가짜 값만(`agtok-fake-…`/`agent-fake-…`).
+스토리 4.9는 UI가 없는 **쿠팡 Gmail 2FA primitive**(`src/rider_agent/auth/coupang_gmail_2fa.py`)
+다 — mailbox 별 token 분리 helper + `MailboxLockRegistry` + 실패 분류기 + bounded 복구
+orchestrator. 실제 `CRAWL_COUPANG` 수집 워커·서버 OAuth onboarding·`gmail_reauth_required_count`
+알림은 Epic 5 소유라, 테스트는 **주입 fake `recover`/`store`(fake codec)/`now`/`sleep`/
+`recover_session`/`fetch_code`** 에 대한 결정적 검증 형태다(4.x 표준). 외부(실 Gmail/실 DPAPI/
+실 쿠팡 화면/실 시계) 미호출, 가짜 값만(`mailbox-fake-…`/`otp-fake-…`/`…-fake-token`).
 
-dev-story가 `tests/agent/test_heartbeat.py`에 26건을 만든 상태에서, 구현 분기 중 **테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
+dev-story가 `tests/agent/test_coupang_gmail_2fa.py`에 30건을 만든 상태에서, AC 대비 **테스트가
+비어 있던 격차**를 찾아 자동 보강(auto-apply)했다. **프로덕션 소스 0줄 변경**(QA 워크플로는
+테스트만 생성).
 
 ## Generated / 보강 테스트
 
-`tests/agent/test_heartbeat.py` (+5건, 기존 26 → **31건**). 기존 헬퍼(`FakeTransport`·`StoppingSleep`) 재사용, 신규 추상화 0.
+`tests/agent/test_coupang_gmail_2fa.py` (+8건, 기존 30 → **38건**). 기존 헬퍼(`_store` fake
+codec·`_recover`·`_FakeConfig`) 재사용, 신규 추상화 0.
 
-| # | 테스트 | 커버한 격차 | 근거 |
-|---|--------|-------------|------|
-| Gap1 | `test_reporter_survives_non_transport_exception_and_records_event` | `report_once` 의 일반 예외(`except Exception`) best-effort 흡수 + `_record_error` no-log 분기. 기존엔 `TransportError` 경로만 검증 — 주입 provider/transport 가 일반 예외를 던지면 thread 가 죽지 않는지 미검증이었음 | AC2.5 |
-| Gap2 | `test_reporter_recovers_to_valid_after_revoked` | `401`→revoked surfacing 후 token 재발급 성공 시 `valid` 회복 + `on_status` `[REVOKED, VALID]` 전이. 문서화된 회복 동작인데 기존 커버 0(`_set_status` revoked→valid 분기 포함) | AC2 |
-| Gap3 | `test_send_heartbeat_non_list_commands_parse_to_empty` | `_result_from_response` 의 비-list `commands` → 안전 `[]` 분기. 기존엔 list/누락만 검증(malformed 서버 응답 방어 미검증) | AC1 |
-| Gap4 | `test_heartbeat_url_strips_trailing_slash` | `_heartbeat_url` 의 `rstrip("/")` URL 정규화(`//v1/...` 이중 슬래시 방지). 기존 URL 테스트는 trailing slash 없는 base 만 사용 | AC1 |
-| Gap5 | `test_reporter_stop_method_halts_running_loop` | 공개 `stop()` 메서드로 동작 중 루프 정지. 기존엔 stop_event 를 외부에서 직접 set 만 함 — thread-safe `stop()` 경로 미검증 | AC2 |
+| # | 테스트 | 커버한 격차 | AC |
+|---|--------|-------------|----|
+| G1 | `test_secret_storage_policy_gmail_token_agent_local_otp_not_stored` | `classify_secret_storage`: `gmail_oauth_token`→`agent_local`, `otp`→`not_stored` 저장 분류 정합(docstring 주장만 있고 테스트 0) | AC1.2 |
+| G2 | `test_reauth_predicate_that_raises_fails_closed_to_transient` | 주입 `is_reauth` predicate 가 **던져도** GMAIL_REAUTH 오분류 0 → transient(bounded) fail-closed(predicate 가 분류 오도 불가) | AC3·AC4 |
+| G3 | `test_orchestrator_releases_lock_on_failure_path` | 실패/예외 경로에서도 mailbox lock **항상 해제**(`finally`) → 다음 복구 hang 0. 기존엔 성공 경로 해제만 증명 | AC2.6 |
+| G4 | `test_build_coupang_recover_default_recover_session_consumes_reuse` | 기본 `recover_session` 이 reuse `recover_coupang_session_with_email_2fa` **그 객체**(OTP/컷오프/query 필터/코드 파싱 위임·재구현 0 계약) | AC2.5 |
+| G5 | `test_success_result_surfaces_ref_only_no_plaintext_mailbox` | **성공 경로** 누출 가드 — 평문 mailbox(이메일) 0, 해시 ref 만. 기존 누출 가드는 실패 경로만 | AC3/NFR-5 |
+| G6 | `test_default_registry_serializes_same_mailbox_across_calls` | `locks` 미주입 시 전역 `_DEFAULT_LOCKS` 공유 → 같은 mailbox 호출 간 직렬화(모듈 주석이 경고하는 동작) | AC2 |
+| G7 | `test_success_metrics_surface_attempt_count_on_nth_attempt` | 재시도 후 성공도 `metrics["attempts"]` 운영 표면화(bounded 카운터 관측) | AC4·AC10 |
+| G9 | `test_classify_recovered_false_takes_precedence_over_reauth` | 분류기 우선순위: `recovered=False`(사람 조치) > `is_reauth`(순수 함수 계약) | AC3 |
 
-기존 26건(유지): payload 7키+`agent_version`, provider 반영, POST URL, interval `[30,60]` clamp(경계), 응답 파싱, 주기 N회 후 정지, 단발 `TransportError` 복원력, `401` revoke surfacing, capabilities 6종 superset, Bearer 헤더+평문 비노출, 실 `HttpTransport` 헤더 병합·op-label·E2E.
+기존 30건(유지): token 분리 7(round-trip·ref-only·두 mailbox 다른 ref·교차 resolve 0·미저장
+None·opaque ref·🚨 회귀 트랩 per-mailbox token 경로 분기·fetch_code 위임), lock 4(같은 객체·
+예외 해제·같은 mailbox 직렬 max-active-1·다른 mailbox 병렬), 분류기 8(True/False/reauth/transient/
+모호 fail-closed/secret 미노출/쿠팡≠배민/rider_server enum 부재), orchestrator 7(성공·False 즉시
+멈춤·reauth 즉시 멈춤·transient bounded·N회째 성공·단일 transient 사유·상한 유한), 누출 가드 2,
+import-safety·단방향·sync 2.
 
 ## Coverage
 
 | Acceptance Criterion | 커버 |
 |---|---|
-| AC1 — 30~60s 주기 POST·5필드+`agent_version` payload·interval clamp·응답 파싱 | ✅ 기존 다수 + Gap3(비-list commands)/Gap4(URL 정규화) |
-| AC2 — offline/버전-drift 판정 입력 제공·best-effort 복원력·401 surfacing | ✅ 기존(주기·503·401) + Gap1(일반 예외 복원력)/Gap2(revoked→valid 회복)/Gap5(`stop()`) |
-| AC3 — capabilities = 처리 가능 job type 6종 superset | ✅ 기존 2건(superset·주입 반영, "정확히 N" lock 없음) |
+| AC1 — token mailbox 분리·서버 ref 만·고객 간 비공유 | ✅ 기존 7 + G1(저장 분류 정합)/G5(성공 경로 ref-only) |
+| AC2 — 같은 mailbox lock 직렬·다른 병렬·요청시각/필터 검색(reuse 위임)·결정적 해제 | ✅ 기존 4 + G3(실패 경로 해제)/G4(reuse 위임)/G6(기본 등록부 직렬화) |
+| AC3 — 민감값 0 노출·CAPTCHA→USER_ACTION_REQUIRED·reauth→GMAIL_REAUTH_REQUIRED | ✅ 기존 10 + G2(predicate fail-closed)/G5(성공 누출)/G9(분류 우선순위) |
+| AC4 — bounded·반복 인증 요청 0·탭 중지 정책 유지·운영 상태 표면화 | ✅ 기존 7 + G2/G7(성공 attempts) |
 
-`heartbeat.py` 공개 표면 전부 커버: `build_heartbeat_payload`/`send_heartbeat`/`clamp_interval`/`HeartbeatReporter`(`run`·`report_once`·`stop`·`needs_registration`)/`default_metrics`/`HeartbeatResult`. 보강 후 best-effort 일반 예외·revoked→valid 회복·비-list commands·trailing-slash URL·공개 `stop()` 분기까지 커버.
+`coupang_gmail_2fa.py` 공개 표면 전부 커버: `mailbox_token_ref`/`store_mailbox_token`/
+`resolve_mailbox_token`/`mailbox_token_path`/`MailboxLockRegistry`(`lock_for`·`acquire`)/
+`classify_coupang_2fa_outcome`/`recover_coupang_mailbox`/`build_coupang_recover`.
 
 ## Validation Results (단일 정본)
 
 운영 venv `.venv/Scripts/python.exe -m pytest`:
 
-- `tests/agent/test_heartbeat.py -q` → **31 passed**
-- 전체 스위트 `-q` → **1091 passed, 0 failed** (기존 1086 + 신규 5, 순수 additive·회귀 0)
-- `tests/agent/test_agent_package.py tests/agent/test_registration.py -q` → **42 passed** (4.1 sync·third-party root==`{rider_crawl}`·deps-9핀 가드 + 4.2 register 무회귀 green)
+- `tests/agent/test_coupang_gmail_2fa.py -q` → **38 passed**
+- 전체 스위트 `-q` → **1316 passed, 0 failed** (보강 전 1308 + 신규 8, 순수 additive·회귀 0)
+- 4.1 가드 green: sync·단방향(`rider_server` 0)·third-party root==`rider_crawl`·deps 9핀·
+  reuse seam import-safe(`googleapiclient` 미로드). enum/"정확히 N개" lock 0.
 
 ## 범위/누출 검증
 
-- 이번 QA 라운드 변경은 `tests/agent/test_heartbeat.py` 에 테스트 추가뿐. 프로덕션 코드(`heartbeat.py`/`registration.py`)·`src/rider_crawl`·`src/rider_server`·`pyproject.toml`·`__main__.py` **0줄 변경**.
-- 누출 grep(봇토큰 `\d{6,}:[\w-]{30,}`/`chat_id=`/휴대폰) → 신규 테스트에 0건. `agtok-fake` 리터럴 비-테스트 src 에 0건. 에러 경로에 평문 token 진입 0(token 은 Authorization 헤더에만).
-- 역방향 의존(`rider_crawl`→`rider_agent` import) 신규 0건.
+- 이번 QA 라운드 변경은 `tests/agent/test_coupang_gmail_2fa.py` 에 테스트 추가뿐. 프로덕션
+  코드(`coupang_gmail_2fa.py`)·`src/rider_crawl`·`src/rider_server`·`pyproject.toml`·`job_loop.py`·
+  `secure_store.py`·`baemin_auth.py`·`reuse.py` **0줄 변경**(`git status`: 신규 모듈/테스트는 `??`,
+  src 트리에 `M` 없음).
+- 누출 가드: 신규 테스트는 가짜 식별자만(`mailbox-fake-…`/`otp-fake-…`/`…-fake-token`). G2/G5
+  는 OTP/token/refresh/평문 mailbox 가 result_json·metrics·error_message_redacted·log 에 0건임을
+  단언(성공·실패 경로 양쪽).
+- 역방향 의존(`rider_crawl`→`rider_agent`) 신규 0건. `coupang_gmail_2fa.py` async 0·`rider_server`
+  import 0(G 테스트는 기존 AST 가드 유지).
 
 ## 체크리스트 결과(`checklist.md`)
 
-- [x] API/client 테스트(heartbeat = outbound HTTPS client; fake transport/실 `HttpTransport`+fake urlopen) / E2E(해당 없음 — UI 없는 primitive, 서버는 Epic 5)
-- [x] 표준 프레임워크 API(pytest, `parametrize`, `monkeypatch`, fake transport/sleep)
-- [x] happy path(payload·send·주기 N회) + 임계 케이스(일반 예외 복원력·revoked→valid·401·malformed commands)
-- [x] 전 테스트 통과 / 의미 있는 단언 / 명확한 설명(docstring) / 하드코딩 sleep 없음(주입 fake sleep) / 순서 독립(각 케이스 자체 fixture)
+- [x] API/primitive 테스트 생성(쿠팡 2FA 복구 primitive — 주입 fake `recover`/`store`/`now`/`sleep`) / E2E(해당 없음 — UI 없는 라이브러리 primitive, 워커/서버는 Epic 5)
+- [x] 표준 프레임워크 API(pytest, threading, `pytest.raises`, fake codec/sleep)
+- [x] happy path(token round-trip·복구 성공·병렬) + 임계 케이스(CAPTCHA→USER_ACTION_REQUIRED·reauth→GMAIL_REAUTH·transient bounded·predicate fail-closed·누출 가드)
+- [x] 전 테스트 통과(38/38, 전체 1316) / 의미 있는 단언 / 명확한 docstring / 순서 독립(각 케이스 자체 fixture/registry)
 - [x] 요약 작성 · 적정 위치(`tests/agent/`) 저장 · 커버리지 명시
 
 ## Next Steps
 
-- 4.4 startup `start_heartbeat_thread()` 배선 후 통합 경로(thread 기동·메인 run 루프) 테스트 추가.
-- 실제 provider 소스(`active_jobs` 4.4 / `browser_profiles` 4.5 / `kakao_status` 4.6)가 배선되면 각 스토리에서 provider 주입 케이스로 확장.
+- reauth predicate 실 binding(어떤 예외가 Gmail 재승인인지)·실 OAuth token 파일 생성/갱신 위치는
+  **운영/Epic 5 소유** — 본 primitive 는 주입 seam(`is_reauth`/`recover`/`fetch_code`)만 제공.
+  미래 `CRAWL_COUPANG` 워커(`crawl_worker.py`, 미존재)가 primitive 를 소비할 때 통합 경로 테스트 추가.
+- `gmail_reauth_required_count` 알림·서버 측 mailbox lock 관측은 Epic 5 배선 후 검증.
+- CI 비-Windows import-safety 케이스가 실 DPAPI/Gmail 미로드를 계속 보장(회귀 가드).
+
+## 비고
+
+- `time.sleep(0.02)` 사용 2건(G6 + 기존 직렬화 테스트)은 "겹칠 기회"를 만드는 **동시성 오버랩
+  창**으로, polling 대기가 아니라 기존 파일 패턴을 따른 결정적 단언용이다. orchestrator backoff 는
+  주입 `sleep`(`lambda s: None`)이라 실 대기 0 — "하드코딩 대기 금지"의 취지(flaky polling)에 위배 아님.

@@ -35,13 +35,14 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14
+last_updated: 2026-06-14 (story 4.9 dev-story → review)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
 # story 4.6 review (AI): review → done — CRITICAL 0, MEDIUM 1 auto-fixed (test count 1202→1208) (2026-06-14)
 # story 4.7 create-story: backlog → ready-for-dev (2026-06-14)
 # story 4.8 create-story: backlog → ready-for-dev (2026-06-14)
+# story 4.9 create-story: backlog → ready-for-dev (2026-06-14)
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
@@ -89,7 +90,7 @@ development_status:
   4-6-kakaosenderworker-fifo-직렬-전송과-정확한-채팅방-검증: done
   4-7-agent-실행-조건과-재부팅-후-자동-시작: done
   4-8-배민-인증-필요-감지와-사람-개입형-재인증: done
-  4-9-쿠팡-gmail-2fa-메일함-분리와-lock: backlog
+  4-9-쿠팡-gmail-2fa-메일함-분리와-lock: done
   epic-4-retrospective: optional
 
   # ── Epic 5: 중앙 서버와 운영자 Admin (P4 + 운영 안전 보강) ──
