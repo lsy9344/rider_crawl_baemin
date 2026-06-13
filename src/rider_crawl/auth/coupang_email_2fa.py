@@ -89,7 +89,7 @@ def recover_coupang_session_with_email_2fa(
     """Attempt to recover an expired Coupang session via email 2FA.
 
     성공하면 ``True``, 자동 복구할 수 없는 화면(CAPTCHA, 아이디/비밀번호 입력 등)이면
-    ``False``를 돌려준다. Gmail/입력 단계의 복구 불가 오류는 ``Coupang2faError``로
+    ``False``를 돌려준다. 이메일(IMAP)/입력 단계의 복구 불가 오류는 ``Coupang2faError``로
     올려, 호출부가 기존 ``BrowserActionRequiredError`` 흐름으로 중단하게 한다.
     """
 

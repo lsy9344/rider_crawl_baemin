@@ -283,6 +283,38 @@ def test_imap_connect_strips_app_password_whitespace(monkeypatch):
     assert recorded["password"] == "nudavmiygtfrggeg"
 
 
+def test_imap_connect_disables_time_normalisation(monkeypatch):
+    # INTERNALDATE를 aware로 받기 위해 normalise_times를 끈다. 기본값(True)이면 naive 로컬
+    # 시각이 되어 KST(+9) 머신에서 requested_after(UTC) 컷오프가 9시간 어긋난다.
+    import imapclient
+
+    class _FakeClient:
+        def __init__(self, host, port, ssl, use_uid):
+            self.normalise_times = True
+
+        def login(self, email_address, app_password):
+            pass
+
+    monkeypatch.setattr(imapclient, "IMAPClient", _FakeClient)
+
+    server = imap_2fa._imap_connect("imap.naver.com", 993, "a@naver.com", "pw")
+
+    assert server.normalise_times is False
+
+
+def test_to_utc_converts_aware_internaldate_from_kst():
+    # IMAPClient가 normalise_times=False로 돌려주는 +0900 aware INTERNALDATE가 UTC로
+    # 올바르게 변환되는지 확인한다(12:00 KST == 03:00 UTC).
+    from datetime import datetime, timezone
+
+    from imapclient import datetime_util
+
+    aware = datetime_util.parse_to_datetime(b"01-Jul-2026 12:00:00 +0900", normalise=False)
+    converted = imap_2fa._to_utc(aware)
+
+    assert converted == datetime(2026, 7, 1, 3, 0, 0, tzinfo=timezone.utc)
+
+
 def test_imap_connect_wraps_login_failure_without_password(monkeypatch):
     import imapclient
 

@@ -201,6 +201,11 @@ def _imap_connect(host: str, port: int, email_address: str, app_password: str) -
     # ★ 실측 검증: 공백 포함 입력은 로그인 실패, 공백 제거 시 성공.
     app_password = re.sub(r"\s+", "", app_password or "")
     server = IMAPClient(host, port=port, ssl=True, use_uid=True)
+    # ★ INTERNALDATE는 timezone-aware로 받는다(normalise_times=False). 기본값(True)은
+    # INTERNALDATE를 "naive 로컬 시각"으로 돌려주는데, requested_after는 aware UTC라
+    # KST(+9) 머신에서 컷오프가 9시간 어긋난다(과거 만료 코드를 채택할 위험). aware로
+    # 받으면 _to_utc의 astimezone(UTC)가 올바르게 변환한다.
+    server.normalise_times = False
     try:
         server.login(email_address, app_password)
     except Exception as exc:
