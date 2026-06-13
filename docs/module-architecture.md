@@ -125,6 +125,78 @@ DB/ORM/Alembic, Pydantic schemas, and runtime wiring for this layer remain out o
 Epic 2–3 scope (Epic 5); through Epic 3 `rider_server` is defined and tested but
 not yet wired into a running process (the UI still calls `run_once`).
 
+## Local Agent Boundary (Epic 4)
+
+`rider_agent` is the third top-level package — the Windows Local Agent runtime,
+launched with `python -m rider_agent`. Epic 4 added it as a brand-new runtime
+**without changing a single line of `rider_crawl` or `rider_server`** (verified by
+empty `git diff -w` over both). Its job is to run the real Baemin/Coupang
+collection and KakaoTalk sending on an operator PC while talking to the central
+server (Epic 5) outbound-only.
+
+- **Dependency direction is strictly one-way.** `rider_agent` imports `rider_crawl`
+  only — through a single re-export chokepoint, `reuse.py` (crawler / parser /
+  renderer / Gmail 2FA / KakaoTalk sender). It must **never import `rider_server`**;
+  where it needs a server-side enum value (e.g. `BaeminAuthState`,
+  `FailureCategory`) it mirrors the value as a plain-string constant rather than
+  importing it. The dependency edges `rider_crawl → rider_agent` and
+  `rider_agent → rider_server` are both zero.
+- **Sync runtime, stdlib-only.** Agent code stays synchronous (no `asyncio`,
+  unlike the Cloud async boundary) and adds **no new third-party dependency**:
+  HTTPS via stdlib `urllib`, Windows DPAPI via stdlib `ctypes`/crypt32, periodic
+  loops via `threading`/`time`, port allocation via `socket`. `pyproject.toml`
+  stays at its frozen 9 dependencies (`playwright==1.60.0`, `crawl4ai==0.8.7`).
+- **One AST guard locks the whole package.** `tests/agent/test_agent_package.py`
+  (Story 4.1) `rglob`s `src/rider_agent/**/*.py` and asserts: sync-only, third-party
+  import root is `rider_crawl`, the one-way import edges above, and the 9-dependency
+  pin. Every later module inherits this guard automatically — new modules need no
+  new guard.
+
+The runtime is composed of additive primitives, each delivered by one story:
+
+- `registration.py` + `secure_store.py` (Stories 4.2): one-time registration code →
+  `agent_id`/`agent_token`, stored via `DpapiSecretStore` (Windows DPAPI); the token
+  is never written in plaintext to logs/config/disk (`AgentIdentity.__repr__` masks it).
+- `heartbeat.py` (Story 4.3): periodic 30–60s report (`metrics`, `capabilities`,
+  `active_jobs`, `kakao_status`, `browser_profiles`); the token rides only in the
+  `Authorization: Bearer` header, never the body. Capabilities are plain-string
+  constants (e.g. `CRAWL_BAEMIN`, `CRAWL_COUPANG`, `AUTH_CHECK`, `OPEN_AUTH_BROWSER`,
+  `KAKAO_SEND`, `CAPTURE_DIAGNOSTIC`) so adding job types never breaks a count lock.
+- `job_loop.py` (Story 4.4): outbound HTTPS `claim` / `complete` / `events` plus the
+  `run_agent` bootstrap. The Agent only *cooperatively* records the lease and
+  self-checks before completing; lease issuance, single-claim, extension, stale
+  sweep and reassignment are enforced server-side (Epic 5). Job events/results carry
+  only `message_redacted` / `error_message_redacted`.
+- `browser_profile.py` (Story 4.5): `BrowserProfileManager` isolates Chrome
+  profile + CDP port per target and is fail-closed — duplicate port/profile, a busy
+  CDP endpoint, or an expected-center mismatch (`TARGET_VALIDATION_FAILURE`) stops the
+  work before any message is built. It reuses `rider_crawl`'s existing
+  `prepare_chrome` / center-validation, reimplementing nothing.
+- `workers/kakao_sender.py` (Story 4.6): `KakaoSenderWorker` serializes KakaoTalk
+  sends through a single-consumer `queue.Queue` (FIFO) so one session never types
+  into two rooms in parallel. It reuses `send_kakao_text`'s exact-room verification,
+  never falls back to another room, and — because free-text `redact()` does not mask
+  operational identifiers — never puts a raw room name into a failure message
+  (fixed reason string only).
+- `autostart.py` (Story 4.7): registers Agent auto-start after reboot via a Startup
+  folder `.cmd` (default, no admin rights) or Task Scheduler (`/sc ONLOGON /it`,
+  alternative). KakaoTalk work is gated to an interactive Windows session
+  (Session 0 service mode is refused, fail-closed).
+- `auth/baemin_auth.py` (Story 4.8) vs `auth/coupang_gmail_2fa.py` (Story 4.9) sit
+  in the same subpackage with **opposite policies**. Baemin is human-in-the-loop:
+  it detects `AUTH_REQUIRED` (without ever mapping a parser error such as
+  `MissingPerformanceDataError` to auth) and never acquires, inputs, or bypasses an
+  OTP — an AST import-edge guard forbids Gmail/`pyautogui` imports in that module.
+  Coupang Gmail 2FA *does* auto-recover: it stores an OAuth token per
+  `mailbox_id` (opaque ref, server keeps the ref only), serializes same-mailbox
+  reads through `MailboxLockRegistry`, and uses `dataclasses.replace` to give each
+  mailbox a distinct token-file path so customers never share a token.
+
+Server-side job creation/queue/lease enforcement, the Admin UI, the
+`workers/crawl_worker.py` collection executor, and real OS/browser bindings for the
+auth probes are all Epic 5 — through Epic 4 the Agent is verified against server
+stubs/mocks and injected seams, not a live server.
+
 ## Compatibility Notes
 
 - Existing public modules (`app.py`, `crawler.py`, `parser.py`, `sender.py`,

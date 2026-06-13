@@ -17,7 +17,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 ## 기술 스택과 버전
 
-- Python `>=3.10` 기준 프로젝트다. Agent/크롤러 코드는 `src/rider_crawl/`에, Cloud 도메인·서비스·마이그레이션 코드는 `src/rider_server/`에 둔다(Epic 2 신설). 테스트는 `tests/`의 pytest 구조를 따르고, server 코드 테스트는 `tests/server/` 하위에 둔다.
+- Python `>=3.10` 기준 프로젝트다. 제품 코드는 3개 패키지로 나뉜다: 공유 크롤러·UI 도메인은 `src/rider_crawl/`, Cloud 도메인·서비스·마이그레이션은 `src/rider_server/`(Epic 2 신설), Windows Local Agent 런타임(`python -m rider_agent`)은 `src/rider_agent/`(Epic 4 신설)에 둔다. 테스트는 `tests/`의 pytest 구조를 따르고, server 코드 테스트는 `tests/server/`, agent 코드 테스트는 `tests/agent/` 하위에 둔다.
 - `crawl4ai==0.8.7`은 고정 버전이다. 파서/크롤러 동작이 바뀔 수 있으므로 임의로 업그레이드하지 않는다.
 - `playwright==1.60.0`을 사용해 로그인된 Chrome에 CDP로 연결한다. 기본 운영 방식은 자동 로그인이나 새 세션 생성이 아니라, 사용자가 로그인해 둔 Chrome 화면을 읽는 방식이다.
 - UI는 표준 `tkinter` 기반 데스크톱 앱이다. 웹 프론트엔드나 서버 앱 구조를 가정하지 않는다.
@@ -61,7 +61,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 ### 코드 품질과 스타일 규칙
 
-- 제품 코드는 `src/rider_crawl/`(기존 Agent/크롤러·UI)와 `src/rider_server/`(Cloud 도메인·서비스·마이그레이션, Epic 2 신설)를 기준으로 본다. `rider_server`는 `rider_crawl`을 import해 재사용할 수 있으나 그 반대 방향 의존(`rider_crawl` → `rider_server`)은 만들지 않는다. `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
+- 제품 코드는 `src/rider_crawl/`(공유 크롤러·UI), `src/rider_server/`(Cloud 도메인·서비스·마이그레이션, Epic 2 신설), `src/rider_agent/`(Windows Local Agent 런타임, Epic 4 신설) 3개 패키지를 기준으로 본다. 의존 방향은 단방향이다: `rider_server`와 `rider_agent`는 각각 `rider_crawl`을 import해 재사용할 수 있으나, `rider_crawl` → (`rider_server`/`rider_agent`) 역방향 의존은 만들지 않는다. 또한 `rider_agent`는 `rider_server`를 import조차 하지 않는다(필요한 server 측 enum 값은 plain-string 상수로 미러). `rider_agent`는 Cloud의 async와 섞지 않는 **sync 런타임**이고 stdlib만 쓴다(신규 third-party 의존성 추가 금지 — `pyproject.toml` deps 9개 고정). 이 규약들은 `tests/agent/test_agent_package.py`의 AST `rglob` 가드로 강제된다. `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
 - 새 플랫폼별 구현은 플랫폼 폴더 아래에 둔다. 쿠팡 전용 selector, 로그인 복구, parser 로직을 배민 legacy `crawler.py`/`parser.py`에 섞지 않는다.
 - 함수와 변수는 기존 Python snake_case 스타일을 따른다. 클래스와 dataclass는 PascalCase를 쓴다.
 - 공개 경계 이름은 기존 호환을 우선한다. 예를 들어 `coupang_eats_url`이 현재는 플랫폼별 주 URL처럼 쓰여도, 넓은 변경 없이 이름만 바꾸지 않는다.
@@ -111,4 +111,4 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 - 기술 스택, 실행 구조, 보안 정책이 바뀌면 갱신한다.
 - 오래되었거나 더 이상 특별하지 않은 규칙은 주기적으로 제거한다.
 
-마지막 업데이트: 2026-06-13 (Epic 2 회고 반영: `src/rider_server/` 패키지 신설, secret store/`*_ref` 분리)
+마지막 업데이트: 2026-06-14 (Epic 4 회고 반영: `src/rider_agent/` Windows Local Agent 패키지 신설, 단방향 import·sync 런타임·stdlib-only 규약, `tests/agent/` AST 가드)
