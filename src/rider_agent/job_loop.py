@@ -692,6 +692,7 @@ def build_agent_components(
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
+    kakao_status_provider: Any = None,
 ) -> tuple[JobRunner, HeartbeatReporter]:
     """:class:`JobRunner` 와 :class:`HeartbeatReporter` 를 구성한다(핵심 배선: active_jobs).
 
@@ -699,8 +700,10 @@ def build_agent_components(
     in-flight job 을 실어 서버 lease 연장을 트리거하게 한다(4.3 이 비워둔 ``active_jobs`` 소스).
     ``browser_profiles_provider`` 는 4.5 ``BrowserProfileManager.browser_profiles`` 를 주입받아
     heartbeat ``browser_profiles`` 소스를 채운다(``active_jobs`` 배선과 동형; 미주입이면 4.3
-    기본 빈 리스트 → 무회귀). runner/reporter 는 **같은 ``stop_event``** 를 공유해 한쪽 정지가
-    다른 쪽도 정지시킨다.
+    기본 빈 리스트 → 무회귀). ``kakao_status_provider`` 는 4.6
+    ``KakaoSenderWorker.kakao_status`` 를 주입받아 heartbeat ``kakao_status`` 소스를 채운다
+    (동형; 미주입이면 4.3 기본 ``"disabled"`` → 무회귀). runner/reporter 는 **같은
+    ``stop_event``** 를 공유해 한쪽 정지가 다른 쪽도 정지시킨다.
     """
 
     shared_stop = stop_event if stop_event is not None else threading.Event()
@@ -729,6 +732,7 @@ def build_agent_components(
         capabilities=capabilities,
         active_jobs_provider=runner.active_jobs,
         browser_profiles_provider=browser_profiles_provider,
+        kakao_status_provider=kakao_status_provider,
         on_status=on_status,
         log=log,
     )
@@ -744,6 +748,8 @@ class AgentRunSummary:
     runner: JobRunner | None = None
     reporter: HeartbeatReporter | None = None
     heartbeat_thread: threading.Thread | None = None
+    #: 활성 노드에서 기동된 4.6 KakaoSenderWorker(미배선/비활성이면 ``None``).
+    kakao_worker: Any = None
 
 
 def run_agent(
@@ -764,16 +770,24 @@ def run_agent(
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
+    kakao_status_provider: Any = None,
+    start_kakao_sender: bool = False,
+    kakao_send: Callable[..., Any] | None = None,
+    kakao_build_config: Callable[..., Any] | None = None,
     start_heartbeat: bool = True,
     heartbeat_join_timeout: float = 5.0,
 ) -> AgentRunSummary:
-    """architecture-contract startup 을 구현한다: identity 로드 → token 검증 → heartbeat thread
-    기동 → 메인 run 루프. 모든 주입점(transport/store/sleep/now/execute_job/stop_event)을
-    노출해 테스트가 결정적으로 검증한다.
+    """architecture-contract startup 을 구현한다: identity 로드 → token 검증 → (활성 시) Kakao
+    sender 워커 기동 → heartbeat thread 기동 → 메인 run 루프. 모든 주입점(transport/store/
+    sleep/now/execute_job/stop_event)을 노출해 테스트가 결정적으로 검증한다.
 
     identity 없음/token revoke 면 명확히 surfacing 하고 **루프에 진입하지 않는다**(재등록 필요).
-    종료 시 ``reporter.stop()`` + thread join 으로 정리한다. ``start_kakao_sender_worker_if_
-    enabled()``(4.6)는 배선하지 않는다(seam 만, 빈 호출 금지).
+    ``start_kakao_sender`` 가 True 이고 ``capabilities`` 에 ``KAKAO_SEND`` 가 있으면
+    :func:`~rider_agent.workers.kakao_sender.start_kakao_sender_worker_if_enabled` 로 FIFO 단일-
+    세션 직렬 워커를 띄우고, ``KAKAO_SEND`` job 을 그 워커로 라우팅하며(그 외 type 은 기존
+    ``execute_job`` 유지) ``kakao_status`` 소스를 배선한다(미배선/비활성이면 4.3 기본
+    ``"disabled"`` → 무회귀). 종료 시 ``reporter.stop()``/``runner.stop()``/``kakao_worker.stop()``
+    + thread join 으로 정리한다.
     """
 
     identity = load_local_agent_identity(store=store, identity_path=identity_path)
@@ -791,13 +805,40 @@ def run_agent(
             on_status(validation.status)
         return AgentRunSummary(started=False, token_status=validation.status)
 
+    # 활성 노드면 4.6 KakaoSenderWorker 를 띄우고 KAKAO_SEND 라우팅 + kakao_status 소스를
+    # 배선한다(4.4 가 남긴 startup seam 의 실제 배선). 워커 모듈은 reuse seam(rider_crawl)을
+    # 끌어오므로 활성일 때만 lazy import 해 import-safety/무회귀를 유지한다.
+    kakao_worker = None
+    effective_execute_job = execute_job
+    effective_kakao_status = kakao_status_provider
+    if start_kakao_sender:
+        from rider_agent.workers.kakao_sender import (
+            build_execute_job,
+            start_kakao_sender_worker_if_enabled,
+        )
+
+        kakao_worker = start_kakao_sender_worker_if_enabled(
+            capabilities=capabilities,
+            send=kakao_send,
+            build_config=kakao_build_config,
+            sleep=sleep,
+            now=now,
+            log=log,
+        )
+        if kakao_worker is not None:
+            effective_execute_job = build_execute_job(
+                kakao_worker=kakao_worker, fallback=execute_job
+            )
+            if effective_kakao_status is None:
+                effective_kakao_status = kakao_worker.kakao_status
+
     runner, reporter = build_agent_components(
         identity,
         transport=transport,
         base_url=base_url,
         sleep=sleep,
         now=now,
-        execute_job=execute_job,
+        execute_job=effective_execute_job,
         capabilities=capabilities,
         max_jobs=max_jobs,
         short_poll_interval_seconds=short_poll_interval_seconds,
@@ -807,6 +848,7 @@ def run_agent(
         on_status=on_status,
         log=log,
         browser_profiles_provider=browser_profiles_provider,
+        kakao_status_provider=effective_kakao_status,
     )
 
     hb_thread = start_heartbeat_thread(reporter) if start_heartbeat else None
@@ -815,6 +857,8 @@ def run_agent(
     finally:
         reporter.stop()
         runner.stop()
+        if kakao_worker is not None:
+            kakao_worker.stop()
         if hb_thread is not None:
             hb_thread.join(timeout=heartbeat_join_timeout)
 
@@ -824,4 +868,5 @@ def run_agent(
         runner=runner,
         reporter=reporter,
         heartbeat_thread=hb_thread,
+        kakao_worker=kakao_worker,
     )
