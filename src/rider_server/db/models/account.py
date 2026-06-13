@@ -10,7 +10,7 @@ dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하�
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Integer, String
+from sqlalchemy import Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -41,6 +41,13 @@ class MonitoringTarget(Base):
     url: Mapped[str] = mapped_column(String, nullable=False, default="")
     interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String, nullable=False)  # MonitoringTargetStatus 값
+    # ── 5.4 스케줄링 컬럼(additive, 0003 마이그레이션) ──────────────────────────
+    # due 질의/멱등 전진용. null=즉시 due 또는 미초기화(5.4 scheduler 가 conditional UPDATE 로 전진).
+    next_run_at: Mapped[datetime | None] = ts(nullable=True)
+    last_enqueued_at: Mapped[datetime | None] = ts(nullable=True)  # 멱등/가시성
+
+    # due 스캔(next_run_at <= now) 최소화 — scheduler tick 성능.
+    __table_args__ = (Index("ix_monitoring_targets_next_run_at", "next_run_at"),)
 
 
 class AuthSession(Base):

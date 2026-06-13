@@ -404,8 +404,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # Story 5.3 이 additive 0002 를 추가 → 단일 head 가 0002 로 이동, 0001→base 선형 체인 유지.
-    assert heads[0] == "0002_jobs_lease_columns"
+    # Story 5.4 가 additive 0003 을 추가 → 단일 head 가 0003 으로 이동, 0001→0002→0003 선형 체인.
+    assert heads[0] == "0003_monitoring_targets_scheduling"
+    assert (
+        script.get_revision("0003_monitoring_targets_scheduling").down_revision
+        == "0002_jobs_lease_columns"
+    )
     assert (
         script.get_revision("0002_jobs_lease_columns").down_revision
         == "0001_initial_schema"
