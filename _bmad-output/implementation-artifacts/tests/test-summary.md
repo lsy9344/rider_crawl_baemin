@@ -1,91 +1,90 @@
-# Test Automation Summary — Story 5.1 (FastAPI 백엔드 스캐폴딩 · 운영 엔드포인트)
+# Test Automation Summary — Story 5.2 (PostgreSQL 14 테이블 스키마 + Alembic 마이그레이션)
 
 작성: 2026-06-14 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest
 
 ## 컨텍스트
 
-스토리 5.1은 `src/rider_server/` 에 처음 올라가는 **실행 가능한 FastAPI 백엔드 스캐폴딩**이다 —
-app factory(`main.py`) · stdlib typed settings(`settings.py`) · `python -m rider_server`
-진입점(`__main__.py`) · 운영 엔드포인트 `/health`·`/version`·`/metrics`(root-level) · 전역 에러
-envelope(`{"error":{"code","message_redacted"}}`, redaction 재사용) · snake_case/ISO-UTC 규약 · Docker.
-UI 없음(HTTP/JSON 백엔드). 검증은 in-process(`TestClient` / `httpx.AsyncClient`+`ASGITransport`)로
-외부 소켓·서비스 미호출, fake 값만(secret-shaped 문자열은 redaction 검증용).
+스토리 5.2 는 5.1 FastAPI 런타임 위에 처음 올라가는 **PostgreSQL/SQLAlchemy/Alembic 영속
+레이어**다 — `db/base.py`(async engine/session·`Base`·naming_convention) · 14개 ORM 모델
+(`db/models/`) · Alembic async 스캐폴드 + 초기 마이그레이션(`migrations/`). API 라우트·실제
+CRUD 흐름·Pydantic 스키마는 5.2 범위 밖이라 **HTTP/E2E UI 테스트 대상이 아니다**. 검증 대상은
+**DB 스키마 계약과 마이그레이션 fidelity**다.
 
-dev-story가 `tests/server/`에 14건(`test_server_app.py` 11 + `test_server_async_boundary.py` 3)을
-만든 상태에서, AC 대비 **테스트가 비어 있던 격차**를 찾아 자동 보강(auto-apply)했다.
-**프로덕션 소스 0줄 변경**(QA 워크플로는 테스트만 생성, 새 의존성 0).
-
-## Generated / 보강 테스트 (신규 33건, 4개 파일)
-
-### 1) `tests/server/test_server_error_contract.py` (22건) — AC2 에러 규약 심화
-- 405 Method Not Allowed envelope — `/health`·`/version`·`/metrics`(GET 전용) POST → `METHOD_NOT_ALLOWED` (3 params)
-- HTTP 상태코드 → UPPER_SNAKE code 매핑을 **실제 exception handler 경로**로 검증 — 400/401/403/404/409/422/429/503 (8 params) + 상태코드 보존
-- `HTTPException.detail` 의 secret-shaped 문자열 redact(응답 평문 미노출)
-- 500 envelope = 일반 메시지(`internal server error`) + redact 된 `error_message_redacted` 분리
-- 에러 envelope 키 전부 snake_case
-- `HTTPStatus.name` ↔ 기대 매핑 자기검증(non-vacuous, 8 params)
-
-### 2) `tests/server/test_server_settings.py` (5건) — Task 2 settings
-- `from_env` 기본값(빈 mapping) / 전체 env 읽기 / 빈 문자열→None 정규화 / 부분 build 메타 독립 정규화 / `Settings` frozen 불변성
-
-### 3) `tests/server/test_server_entrypoint.py` (3건) — Task 2 진입점
-- `main()` → `uvicorn.run("rider_server.main:app", ...)` import-string·host/port 기본값
-- HOST/PORT env override
-- reload 분기: development → True, production → False
-- (`uvicorn.run` monkeypatch — 실 서버 미기동 / `__main__` 임포트는 함수 내부로 미뤄 runpy 경고 회피)
-
-### 4) `tests/server/test_server_async_e2e.py` (3건) — AC3 async 런타임 e2e
-- 실제 asyncio 이벤트 루프(`asyncio.run` + `httpx.AsyncClient`/`ASGITransport`)에서 `/health` 200 · `/version` 200 · 404 envelope 유지
-- (정적 `iscoroutinefunction` 단언을 넘어 async 런타임을 end-to-end 실증; `pytest-asyncio` 미도입이라 `asyncio.run` 사용)
+dev-story 가 `tests/server/test_db_schema.py` 에 39건((a)metadata + (b)offline SQL +
+(c)Postgres-gated)을 만든 상태에서, AC 대비 **커버리지 격차**를 찾아 DB 없이 동작하는 테스트
+26건을 자동 보강(auto-apply)했다. **프로덕션 코드·마이그레이션 0줄 변경**(테스트만 생성, 새 의존성 0).
 
 ## 발견한 커버리지 격차 (모두 auto-apply)
 
 | # | 격차 | 보강 | AC |
 |---|------|------|----|
-| G1 | HTTP 상태 매핑이 404 1건 + 순수 `HTTPStatus.name`만(실 handler 미경유) | 400~503 8건 실 핸들러 검증 | AC2 |
-| G2 | 405 Method Not Allowed 경로 미검증 | 운영 3엔드포인트 POST → 405 envelope | AC2 |
-| G3 | `HTTPException.detail` redaction 경로 미검증(기존엔 500/validation만) | detail secret redact 단언 | AC2 |
-| G4 | `settings.py` 직접 테스트 0건(엔드포인트 경유 간접만) | from_env 5건(기본/override/빈값정규화/frozen) | Task2 |
-| G5 | `__main__.main()` 진입점·reload 분기 미검증 | uvicorn 와이어링 3건 | Task2 |
-| G6 | AC3 async 가 정적 단언만(실 이벤트 루프 미경유) | ASGI async e2e 3건 | AC3 |
+| G1 | PK/FK **결정적 제약 이름**(naming_convention)이 `uq_…` 외엔 미검증 — autogenerate drift 0 의 토대인데 pk_/fk_ 이름이 비잠금 | `test_pk_constraint_names_follow_naming_convention`, `test_fk_constraint_names_follow_naming_convention` | AC2 |
+| G2 | FK 가 **올바른 부모 `id`** 를 가리키는지, audit_logs **무FK(다형 참조)** 설계가 미검증(필드 존재만 확인) | `test_foreign_keys_point_to_correct_parents` (11), `test_tables_without_fk_have_none` (3) | AC2 |
+| G3 | FK 컬럼이 `<entity>_id` + UUID 타입인지 미검증 | `test_fk_columns_are_entity_id_uuid` | AC2 |
+| G4 | 테이블 복수 snake_case / 컬럼 snake_case 규약 미검증 | `test_all_table_names_are_plural_snake_case`, `test_all_column_names_are_snake_case` | AC2 |
+| G5 | JSON 컬럼(quotas·normalized_json·capacity_json·diff_redacted)의 이식 JSON(JSONB) 타입 per-column 미검증(offline SQL 의 `JSONB` 1회 존재만 확인) | `test_json_columns_use_portable_json_type` (4) | AC2 |
+| G6 | `dedup_key` **NOT NULL** 미잠금 — Postgres 는 NULL 중복을 허용하므로 NOT NULL 없이는 유니크가 재시도를 못 막을 수 있음 | `test_dedup_key_is_not_nullable` | AC3 |
+| G7 | **모델↔마이그레이션 drift**: `center_name` 은 모델·마이그레이션엔 있으나 REQUIRED_FIELDS 에 없어, 마이그레이션에서 빠져도 기존 (a)가 못 잡음. "autogenerate drift 0" 은 실DB 후속으로 미뤄짐 | `test_migration_renders_every_model_column` (전 모델 컬럼 전수 대조) | AC1 |
+| G8 | 리비전 그래프 결정성(단일 head·initial base=None) 미검증 | `test_single_migration_head_with_initial_base` | AC1/AC3 |
 
-기존 14건(유지): `/health`·`/version`(full/unset)·`/metrics` shape, root-level(no `/v1/`),
-async 핸들러 정적 단언, 404/422(validation)/500 envelope·redact, async-boundary AST 가드 3.
+## Generated 테스트 (신규 26건 — 모두 `tests/server/test_db_schema.py` 에 추가)
+
+### (d) FK 관계 무결성·제약 네이밍 (metadata, DB 불필요)
+- [x] `test_foreign_keys_point_to_correct_parents` (11 params) — 각 `<entity>_id` → 부모 테이블·`id` 정합
+- [x] `test_tables_without_fk_have_none` (3 params) — tenants·agents·audit_logs 무FK 설계 잠금
+- [x] `test_fk_columns_are_entity_id_uuid` — FK 컬럼명 `_id` + UUID 타입
+- [x] `test_pk_constraint_names_follow_naming_convention` — 전 테이블 `pk_<table>`
+- [x] `test_fk_constraint_names_follow_naming_convention` — `fk_<table>_<col>_<reftable>`
+
+### (e) 테이블/컬럼 네이밍 규약 (metadata, DB 불필요)
+- [x] `test_all_table_names_are_plural_snake_case`
+- [x] `test_all_column_names_are_snake_case`
+
+### (f) JSON→JSONB 이식 타입 (metadata, DB 불필요)
+- [x] `test_json_columns_use_portable_json_type` (4 params)
+
+### (g) dedup NOT NULL (metadata, DB 불필요)
+- [x] `test_dedup_key_is_not_nullable`
+
+### (h) 모델↔마이그레이션 drift·리비전 그래프 (Alembic offline SQL, DB 불필요)
+- [x] `test_migration_renders_every_model_column` — 모든 모델 컬럼이 offline CREATE TABLE 에 렌더됨
+- [x] `test_single_migration_head_with_initial_base` — 단일 head, 0001 base down_revision None
+
+기존 39건 유지: (a) 14표·required fields·UUID PK·`_at` tz-aware·native-enum 0·평문 secret 0·`*_ref` 존재·dedup 유니크·account_id 보존, (b) offline 14 CREATE/DROP·JSONB·uq, (c) Postgres-gated 온라인.
 
 ## Coverage
 
 | Acceptance Criterion | 커버 |
 |---|---|
-| AC1 — `/health`·`/version`·`/metrics` 동작·Docker | ✅ 기존 5 + 405·async e2e (Docker 실빌드는 WSL 통합 비활성 → dev 가 실소켓 `/health` 200 확인, 자동화 밖) |
-| AC2 — 에러 envelope·UPPER_SNAKE·snake_case·ISO-UTC·root-level·의미있는 status | ✅ 기존 6 + error_contract 22(405·8상태·detail redact·500·snake_case 키) |
-| AC3 — FastAPI async·blocking sync 직접호출 금지 | ✅ 기존 3 정적/AST + async_e2e 3 실 이벤트 루프 |
-
-모듈 커버: `main.py`(3 핸들러 + 3 exception handler) · `settings.py`(from_env 전 분기) · `__main__.py`(reload 분기 포함).
+| AC1 — 빈 DB → 14 테이블 재현 + required fields | ✅ 14 CREATE TABLE(offline) + 14 컬럼셋 + **전 모델 컬럼 drift 가드** + 단일 head/initial base. 실DB 재현은 (c) Postgres-gated. |
+| AC2 — DB 네이밍 정본 | ✅ 복수 snake_case 테이블 · snake_case 컬럼 · UUID PK `id` · **FK `<entity>_id`→부모 검증** · **pk_/fk_/uq_ 결정적 이름** · `_at` tz-aware · native ENUM 0 · secret `*_ref` 만(평문 0) · JSON→JSONB. |
+| AC3 — dedup 유니크 | ✅ `uq_delivery_logs_dedup_key`(단일 컬럼) + **`dedup_key` NOT NULL** + offline round-trip(14 DROP). 실DB IntegrityError 차단·round-trip 은 (c) Postgres-gated. |
 
 ## Validation Results (단일 정본)
 
 운영 venv `.venv/Scripts/python.exe -m pytest`:
 
-- 신규 4파일 `-v` → **33 passed**
-- 전체 스위트 `-q` → **1363 passed, 0 failed** (보강 전 baseline 1330 + 신규 33, 순수 additive·회귀 0)
-- 가드 green: 9-dep lock(`test_pyproject_dependencies_unchanged_pins`)·단방향 import·rider_agent sync 가드·rider_server async 경계 가드.
+- `tests/server/test_db_schema.py` → **65 passed, 1 skipped** (보강 전 39 → +26)
+- 전체 스위트 `-q` → **1428 passed, 1 skipped** (보강 전 baseline 1402 + 신규 26, 순수 additive·회귀 0)
+- 1 skipped = (c) Postgres-gated 온라인(현 WSL/venv 에 Postgres 부재 — `TEST_DATABASE_URL` 미설정)
+- 가드 green(전체 스위트 통과로 확인): 9-dep lock(`test_pyproject_dependencies_unchanged_pins`)·단방향 import·rider_server async 경계.
 
 ## 범위/누출 검증
 
-- 이번 QA 라운드 변경은 `tests/server/` 신규 4파일뿐. 프로덕션 코드(`src/rider_server/**`·`src/rider_crawl/**`)·`pyproject.toml` **0줄 변경**(`git status`: 신규 테스트는 `??`, src 트리 `M` 없음 / `pyproject.toml` 의 server extra 는 dev-story 선행 변경이며 본 라운드 미접촉).
-- 새 의존성 0: `TestClient`/`httpx` 는 기존 `dev` extra, async 는 stdlib `asyncio` — 9-dep lock 불변.
-- 누출 가드: secret-shaped 입력(`token=supersecret999`/`password=hunter2`)이 응답·envelope 에 평문 0건임을 단언.
+- 이번 QA 라운드 변경은 `tests/server/test_db_schema.py` 1개 파일뿐. 프로덕션 코드(`src/rider_server/db/**`)·마이그레이션(`migrations/**`)·`pyproject.toml` **0줄 변경**.
+- 새 의존성 0: 신규 테스트는 기존 `sqlalchemy`/`alembic`(server extra)·stdlib `re` 만 사용 — 9-dep lock 불변.
+- fixture 누출 가드: 모든 신규 테스트는 DB 연결 없이 `Base.metadata`/offline SQL 만 검사(실 토큰/전화/이메일/chat_id 0).
 
 ## 체크리스트 결과(`checklist.md`)
 
-- [x] API 테스트 생성(운영 엔드포인트·에러 규약·settings·진입점) / E2E(UI 없음 — HTTP/JSON 백엔드, async ASGI e2e 로 대체)
-- [x] 표준 프레임워크 API(pytest, `TestClient`, `httpx.AsyncClient`/`ASGITransport`, `monkeypatch`, `pytest.raises`)
-- [x] happy path(200·snake_case·ISO-UTC) + 임계 케이스(404/405/422/500·8 상태매핑·redact·reload 분기)
-- [x] 전 테스트 통과(33/33, 전체 1363) / 의미 있는 단언 / 명확한 docstring / 순서 독립(각 케이스 자체 app·settings·monkeypatch)
-- [x] no hardcoded waits(async 는 `asyncio.run`, sleep 없음) / 요약 작성 · 적정 위치(`tests/server/`) 저장 · 커버리지·수치 명시
+- [x] API/스키마 테스트 생성(DB 스키마·마이그레이션 계약) / E2E(UI 없음 — DB 레이어, 실DB e2e 는 (c) Postgres-gated 가 담당)
+- [x] 표준 프레임워크 API(pytest, SQLAlchemy `inspect`/metadata, Alembic `command`/`ScriptDirectory`)
+- [x] happy path(14표 재현·정상 제약) + 임계 케이스(drift 누락·잘못된 FK·평문 secret·native ENUM·NULL dedup·다형 무FK)
+- [x] 전 테스트 통과(65/65 run, 전체 1428) / 의미 있는 단언(offenders 리스트로 실패 진단) / 명확한 docstring / 순서 독립(각 테스트 자체 metadata·offline SQL)
+- [x] no hardcoded waits(동기 메타데이터/offline 렌더, sleep 0) / 요약 작성·적정 위치(`tests/server/`)·커버리지·수치 명시
 
 ## Next Steps
 
-- CI(`ci.yml`)에서 server extra(`uv pip install -e ".[server,dev]"`) 설치 후 본 스위트 실행(5.1 AC 밖 권고, retro A1‴ secret 스캔 게이트와 함께).
-- 리소스 엔드포인트(`/v1/agents` 등, 5.3+) 도입 시 `/v1/` 규약·페이지네이션(`{items,next_cursor}`) 계약 테스트 추가.
-- Docker 컨테이너 실빌드(`docker compose -f deploy/docker-compose.yml up --build`) `/health` 200 은 WSL Docker 통합 활성 환경에서 통합 테스트로 승격 고려.
+- Postgres 가용 환경(CI/로컬)에서 `TEST_DATABASE_URL` 설정 후 (c) 게이트 온라인 테스트 실행 → AC1·AC3 실DB literal fidelity 확정.
+- 실DB `alembic revision --autogenerate` drift-0 실측(현재 DB-less drift 가드 + 결정적 제약 이름으로 1차 보장).
+- 5.3+ repository/CRUD·job claim(`FOR UPDATE SKIP LOCKED`) 도입 시 트랜잭션·동시성 계약 테스트 추가.

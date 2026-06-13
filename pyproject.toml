@@ -25,6 +25,11 @@ dev = [
 server = [
   "fastapi>=0.136.0,<0.137.0",
   "uvicorn[standard]>=0.30.0",
+  # Epic 5 영속 레이어(Story 5.2): SQLAlchemy 2.x async ORM + Alembic + asyncpg 드라이버.
+  # 반드시 server extra 로만 — [project].dependencies(9개 고정)를 건드리지 않는다.
+  "sqlalchemy[asyncio]>=2.0,<2.1",
+  "alembic>=1.18,<1.19",
+  "asyncpg>=0.29",
 ]
 
 [build-system]

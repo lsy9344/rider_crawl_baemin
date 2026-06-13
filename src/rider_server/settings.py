@@ -31,6 +31,10 @@ class Settings:
     app_version: str
     build_sha: str | None
     build_time: str | None
+    # Story 5.2: DB 연결 문자열(예 ``postgresql+asyncpg://…``). env 에서만 읽고
+    # 평문 비밀을 설정 객체에 싣지 않는다(미설정 시 None). 기존 4-필드 positional
+    # 생성과 호환되도록 default 를 가진 마지막 필드로 둔다.
+    database_url: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -42,4 +46,5 @@ class Settings:
             # 빈 문자열도 "미설정"으로 취급해 None 으로 정규화한다.
             build_sha=env.get("BUILD_SHA") or None,
             build_time=env.get("BUILD_TIME") or None,
+            database_url=env.get("DATABASE_URL") or None,
         )
