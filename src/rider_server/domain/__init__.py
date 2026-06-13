@@ -4,11 +4,15 @@
 순수 정의로 둔다. ``from rider_server.domain import Tenant, CustomerLifecycleState`` 처럼
 명시적으로 재노출한다. DB/ORM/Alembic·Pydantic 스키마·wiring은 본 스토리 범위 밖
 (Epic 5 / Story 2.7).
+
+Story 3.2/3.3/3.5가 계약 backing record를 additive로 추가했다 — Snapshot(9번째)·
+Message(10번째)·DeliveryLog(11번째, 전송 결과·dedup 기록) + DeliveryStatus enum.
 """
 
 from __future__ import annotations
 
 from .browser_profile import BrowserProfile
+from .delivery_log import DeliveryLog
 from .delivery_rule import DeliveryRule
 from .message import Message
 from .messenger_channel import MessengerChannel
@@ -20,6 +24,7 @@ from .states import (
     BaeminAuthState,
     BrowserProfileState,
     CustomerLifecycleState,
+    DeliveryStatus,
     Messenger,
     MessengerChannelState,
     MonitoringTargetStatus,
@@ -45,10 +50,13 @@ __all__ = [
     "Snapshot",
     # Story 3.3 — Message 렌더 레코드(10번째)
     "Message",
+    # Story 3.5 — DeliveryLog 전송 결과·dedup 레코드(11번째)
+    "DeliveryLog",
     # 상태머신 enum
     "CustomerLifecycleState",
     "SubscriptionStatus",
     "BaeminAuthState",
+    "DeliveryStatus",
     # 지원 enum
     "Platform",
     "Messenger",

@@ -17,7 +17,9 @@ from rider_server.domain import (
     BrowserProfile,
     BrowserProfileState,
     CustomerLifecycleState,
+    DeliveryLog,
     DeliveryRule,
+    DeliveryStatus,
     Messenger,
     MessengerChannel,
     MessengerChannelState,
@@ -264,10 +266,13 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "Snapshot",
         # Story 3.3 — Message 렌더 레코드(10번째)
         "Message",
+        # Story 3.5 — DeliveryLog 전송 결과·dedup 레코드(11번째)
+        "DeliveryLog",
         # 상태머신 enum
         "CustomerLifecycleState",
         "SubscriptionStatus",
         "BaeminAuthState",
+        "DeliveryStatus",
         # 지원 enum
         "Platform",
         "Messenger",
@@ -292,6 +297,7 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "SecretRef",
         "Snapshot",  # Story 3.2 — 9번째 도메인 모델
         "Message",  # Story 3.3 — 10번째 도메인 모델
+        "DeliveryLog",  # Story 3.5 — 11번째 도메인 모델
     }
     for name in model_names:
         assert dataclasses.is_dataclass(getattr(domain_pkg, name))
@@ -370,3 +376,38 @@ def test_secret_ref_holds_only_opaque_handle_no_plaintext_leak() -> None:
         "coupang_password",
     )
     assert "vault://t/pass-ref" in repr(ref)  # 불투명 핸들만 노출(평문 비밀번호/토큰 아님)
+
+
+# --- Story 3.5: DeliveryLog(11번째 모델) + DeliveryStatus 계약 정본 잠금 ---
+
+
+def test_delivery_log_field_set_and_defaults_match_contract() -> None:
+    # AC4: data-api-contract delivery_logs 컬럼 집합·기본값(error_code/sent_at=None) 잠금.
+    assert _fields(DeliveryLog) == {
+        "id",
+        "message_id",
+        "channel_id",
+        "status",
+        "dedup_key",
+        "error_code",
+        "sent_at",
+    }
+    log = DeliveryLog(
+        id="dl-1",
+        message_id="msg-1",
+        channel_id="ch-tg",
+        status=DeliveryStatus.SENT,
+        dedup_key="mt-1|ch-tg|2026-01-01T00:00:00|tmpl.v1|" + "a" * 64,
+    )
+    assert log.error_code is None  # 3.6 소유 — 본 스토리는 항상 None
+    assert log.sent_at is None  # 미주입 시 None(SENT만 호출부가 sent_at 주입)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        log.status = DeliveryStatus.DUPLICATE_BLOCKED  # type: ignore[misc]
+
+
+def test_delivery_status_has_exactly_two_members_str_enum() -> None:
+    # AC4: dedup 결과 어휘 2개만(3.6 실패 카테고리 미선점), (str, Enum)·멤버명==대문자값.
+    assert {s.value for s in DeliveryStatus} == {"SENT", "DUPLICATE_BLOCKED"}
+    assert {s.name for s in DeliveryStatus} == {"SENT", "DUPLICATE_BLOCKED"}
+    assert DeliveryStatus.SENT == "SENT"  # str enum — json 직렬화 시 "SENT"
+    assert DeliveryStatus.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"

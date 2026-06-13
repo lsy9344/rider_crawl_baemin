@@ -133,3 +133,19 @@ class SnapshotQualityState(str, Enum):
 
     OK = "OK"
     MISSING_REQUIRED = "MISSING_REQUIRED"
+
+
+class DeliveryStatus(str, Enum):
+    """전송 결과 상태(Story 3.5 / P2-05, FR-10, data-api-contract ``delivery_logs.status``).
+
+    **값 정의 vs 로직 경계(2.5 ``SubscriptionStatus``·3.2 ``SnapshotQualityState`` 선례와
+    동형):** 본 스토리는 dedup 결과 어휘 **2개만** 정의한다 — ``SENT``(insert-then-send로
+    유니크 제약을 먼저 확보한 뒤 성공 전송)과 ``DUPLICATE_BLOCKED``(이미 성공 확보된 dedup
+    key라 재전송 안 함, audit 기록). 채널별 실패 카테고리(``telegram_failure``/
+    ``kakao_failure``)·``AUTH_REQUIRED``·재시도/보류 같은 **실패 운영 상태는 Story 3.6/
+    Epic 5 소유**라 여기에 추가하지 않는다(미래 어휘 선점 금지). ``DUPLICATE_BLOCKED`` 는
+    architecture 324-325의 운영 카테고리·359의 ``DUPLICATE_BLOCKED`` 와 정합(대문자 정본).
+    """
+
+    SENT = "SENT"
+    DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
