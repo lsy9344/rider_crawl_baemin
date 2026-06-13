@@ -1,0 +1,994 @@
+"""Story 4.4 — outbound job 폴링/claim/complete 루프 + lease 인지 + startup 배선 검증.
+
+외부 호출 없음: transport 는 fake(URL 라우팅 + canned/에러), 루프는 **주입 fake sleep + stop
+event + 호출 카운터 + 주입 now/executor** 로 실 네트워크·실 thread 장기 대기·실 시계 없이
+결정적 검증한다. 값은 명백한 가짜값만(``agtok-fake-…``/``agent-fake-…``/``job-fake-…``). 실제
+봇 토큰/chat_id/전화/이메일/OTP 원문 없음(누출 가드).
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+
+import pytest
+
+from rider_agent.heartbeat import HeartbeatReporter, build_heartbeat_payload
+from rider_agent.job_loop import (
+    CLAIM_PATH,
+    DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
+    EVENT_TYPE_JOB_STARTED,
+    ERROR_UNSUPPORTED_JOB_TYPE,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SUCCESS,
+    AgentRunSummary,
+    ClaimedJob,
+    JobResult,
+    build_agent_components,
+    claim_jobs,
+    complete_job,
+    default_execute_job,
+    emit_job_event,
+    make_failure_result,
+    make_job_event,
+    make_success_result,
+    run_agent,
+    start_heartbeat_thread,
+    _coerce_lease_epoch,
+)
+from rider_agent.registration import (
+    DEFAULT_SERVER_BASE_URL,
+    SERVER_URL_ENV,
+    TransportError,
+)
+from rider_agent.secure_store import (
+    TOKEN_STATUS_MISSING,
+    TOKEN_STATUS_REVOKED,
+    TOKEN_STATUS_VALID,
+    AgentIdentity,
+    save_agent_identity,
+)
+
+# 매 주기 claim/complete/events 헤더에 실리는 반복 노출 표면이라 누출 단언의 핵심 대상.
+FAKE_TOKEN = "agtok-fake-job-loop-secret"
+
+_IDENTITY = AgentIdentity(
+    agent_id="agent-fake-1",
+    agent_token=FAKE_TOKEN,
+    tenant_scope={"tenant": "t-fake"},
+    config_version="cfg-fake-1",
+)
+
+# 먼 미래 lease(서버 부여값) — self-check 가 만료로 보지 않게(year ~2128).
+FUTURE_LEASE = 5_000_000_000.0
+
+_JOB_DICT = {
+    "job_id": "job-fake-1",
+    "type": "CRAWL_BAEMIN",
+    "target_id": "target-fake-1",
+    "lease_expires_at": FUTURE_LEASE,
+    "payload": {"some": "data"},
+}
+
+
+def _job(job_id="job-fake-1", *, lease_expires_at=FUTURE_LEASE, type="CRAWL_BAEMIN"):
+    return ClaimedJob(
+        job_id=job_id, type=type, target_id="target-fake-1", lease_expires_at=lease_expires_at
+    )
+
+
+class FakeTransport:
+    """주입 fake transport: URL(claim/events/complete) 라우팅 + (url, body, headers) 캡처.
+
+    ``claim_script`` 는 claim 호출에 순서대로 적용하는 응답/예외 리스트다(소진 후 빈 jobs).
+    ``claim_error`` 가 주어지면 매 claim 호출마다 그 예외를 던진다(영속 401/5xx 재현).
+    """
+
+    def __init__(
+        self,
+        *,
+        claim_script=None,
+        claim_error=None,
+        complete_error=None,
+        events_error=None,
+    ) -> None:
+        self.claim_script = list(claim_script) if claim_script is not None else []
+        self._claim_idx = 0
+        self.claim_error = claim_error
+        self.complete_error = complete_error
+        self.events_error = events_error
+        self.calls: list[tuple[str, dict, dict | None]] = []
+
+    def post_json(self, url, body, *, headers=None) -> dict:
+        self.calls.append((url, body, headers))
+        if url.endswith(CLAIM_PATH):
+            return self._next_claim()
+        if url.endswith("/events"):
+            if self.events_error is not None:
+                raise self.events_error
+            return {}
+        if url.endswith("/complete"):
+            if self.complete_error is not None:
+                raise self.complete_error
+            return {}
+        return {}  # heartbeat 등 기타 — 안전 빈 응답.
+
+    def _next_claim(self) -> dict:
+        if self.claim_error is not None:
+            raise self.claim_error
+        if self._claim_idx < len(self.claim_script):
+            item = self.claim_script[self._claim_idx]
+            self._claim_idx += 1
+        else:
+            item = {"jobs": []}
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def calls_for(self, suffix: str) -> list[tuple[str, dict, dict | None]]:
+        return [c for c in self.calls if c[0].endswith(suffix)]
+
+
+class StoppingSleep:
+    """주입 fake sleep: 총 N 회 호출 후 stop_event 를 set(결정적, 실 대기 0). thread-safe."""
+
+    def __init__(self, stop_event: threading.Event, *, stop_after: int) -> None:
+        self._stop_event = stop_event
+        self._stop_after = stop_after
+        self._lock = threading.Lock()
+        self.intervals: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        with self._lock:
+            self.intervals.append(seconds)
+            if len(self.intervals) >= self._stop_after:
+                self._stop_event.set()
+
+
+class SequenceClock:
+    """주입 fake now: 값 리스트를 순서대로 돌려준다(소진 후 마지막 값 유지)."""
+
+    def __init__(self, values) -> None:
+        self._values = list(values)
+        self._i = 0
+
+    def __call__(self) -> float:
+        idx = min(self._i, len(self._values) - 1)
+        self._i += 1
+        return self._values[idx]
+
+
+class FakeStore:
+    """최소 SecretStore — token 1개 보관/조회(비-Windows 에서도 동작, codec 불요)."""
+
+    def __init__(self, *, token: str | None = None) -> None:
+        self._token = token
+        self._data: dict[str, str] = {}
+
+    def put(self, value, *, ref="") -> str:
+        self._data[ref] = value
+        return ref
+
+    def resolve(self, ref) -> str | None:
+        if ref in self._data:
+            return self._data[ref]
+        return self._token
+
+
+def _runner(transport, **kwargs):
+    """JobRunner 생성 헬퍼 — stop/sleep 기본 배선 + 주입 override."""
+
+    from rider_agent.job_loop import JobRunner
+
+    stop = kwargs.pop("stop_event", None) or threading.Event()
+    sleep = kwargs.pop("sleep", None) or StoppingSleep(stop, stop_after=2)
+    kwargs.setdefault("now", lambda: 0.0)
+    return JobRunner(_IDENTITY, transport=transport, stop_event=stop, sleep=sleep, **kwargs)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC1 — claim/complete/events client (URL·본문·파싱)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_claim_jobs_posts_to_claim_path_with_body_and_parses_jobs():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+
+    jobs = claim_jobs(_IDENTITY, transport=transport, base_url="https://srv.test", max_jobs=3)
+
+    url, body, _headers = transport.calls[0]
+    assert url == "https://srv.test" + CLAIM_PATH
+    assert body == {
+        "agent_id": "agent-fake-1",
+        "capabilities": list(body["capabilities"]),
+        "max_jobs": 3,
+    }
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.job_id == "job-fake-1"
+    assert job.type == "CRAWL_BAEMIN"
+    assert job.target_id == "target-fake-1"
+    assert job.lease_expires_at == FUTURE_LEASE
+    assert job.payload["payload"] == {"some": "data"}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},  # jobs 누락
+        {"jobs": "not-a-list"},  # 비-list
+        {"jobs": [None, 42, {"no_job_id": 1}]},  # 비-dict/누락 항목
+        "not-a-dict",  # 비-dict 응답
+    ],
+)
+def test_claim_jobs_fail_closed_on_malformed_response(response):
+    transport = FakeTransport(claim_script=[response])
+
+    assert claim_jobs(_IDENTITY, transport=transport) == []
+
+
+def test_complete_job_posts_to_complete_path_with_result_fields():
+    transport = FakeTransport()
+    result = JobResult(
+        status=JOB_STATUS_SUCCESS,
+        result_json={"ok": True},
+        error_code=None,
+        error_message_redacted=None,
+        metrics={"n": 1},
+        agent_id="agent-fake-1",
+        started_at=100.0,
+        finished_at=200.0,
+    )
+
+    complete_job(_IDENTITY, "job-fake-1", result, transport=transport, base_url="https://srv.test")
+
+    url, body, _headers = transport.calls[0]
+    assert url == "https://srv.test/v1/jobs/job-fake-1/complete"
+    # AC1 핵심 필드 + AC3 필드 모두 포함.
+    assert set(body) >= {
+        "status",
+        "result_json",
+        "error_code",
+        "error_message_redacted",
+        "metrics",
+        "agent_id",
+        "started_at",
+        "finished_at",
+    }
+    assert body["status"] == JOB_STATUS_SUCCESS
+    assert body["result_json"] == {"ok": True}
+    assert body["metrics"] == {"n": 1}
+
+
+def test_claim_url_falls_back_to_env_then_default(monkeypatch):
+    monkeypatch.setenv(SERVER_URL_ENV, "https://env.test")
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+    claim_jobs(_IDENTITY, transport=transport)
+    assert transport.calls[0][0] == "https://env.test" + CLAIM_PATH
+
+    monkeypatch.delenv(SERVER_URL_ENV, raising=False)
+    transport2 = FakeTransport(claim_script=[{"jobs": []}])
+    claim_jobs(_IDENTITY, transport=transport2)
+    assert transport2.calls[0][0] == DEFAULT_SERVER_BASE_URL + CLAIM_PATH
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC4 — job events: redact 된 진행 이벤트(secret/OTP/raw error/HTML 비포함)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_make_job_event_redacts_message():
+    event = make_job_event(
+        "DIAGNOSTIC",
+        "warn",
+        "token=agtok-fake-leak-77 email=foo@bar.com phone 010-1234-5678",
+        artifact_refs=["artifact:ref-1"],
+    )
+
+    assert "agtok-fake-leak-77" not in event.message_redacted
+    assert "foo@bar.com" not in event.message_redacted
+    assert "010-1234-5678" not in event.message_redacted
+    assert event.artifact_refs == ("artifact:ref-1",)
+
+
+def test_emit_job_event_posts_to_events_path_with_redacted_body():
+    transport = FakeTransport()
+    event = make_job_event(
+        "PROGRESS",
+        "info",
+        "diagnostic token=agtok-fake-leak-88 user foo@bar.com",
+        artifact_refs=["artifact:sanitized-1"],
+    )
+
+    emit_job_event(_IDENTITY, "job-fake-1", event, transport=transport, base_url="https://srv.test")
+
+    url, body, _headers = transport.calls[0]
+    assert url == "https://srv.test/v1/jobs/job-fake-1/events"
+    assert set(body) == {"event_type", "severity", "message_redacted", "artifact_refs"}
+    assert body["event_type"] == "PROGRESS"
+    assert body["severity"] == "info"
+    # raw secret/email 이 본문에 없음.
+    serialized = json.dumps(body)
+    assert "agtok-fake-leak-88" not in serialized
+    assert "foo@bar.com" not in serialized
+    assert body["artifact_refs"] == ["artifact:sanitized-1"]
+
+
+def test_event_type_severity_not_enum_locked():
+    # 후속 워커가 임의 event_type/severity 를 늘려도 무탈(평문 문자열, "정확히 N" lock 없음).
+    event = make_job_event("FUTURE_CUSTOM_EVENT", "critical", "ok")
+    assert event.event_type == "FUTURE_CUSTOM_EVENT"
+    assert event.severity == "critical"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC3 / 기본 executor — 결과 헬퍼 + UNSUPPORTED_JOB_TYPE
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_default_execute_job_returns_unsupported_failure():
+    result = default_execute_job(_job(type="WEIRD_FUTURE_TYPE"))
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_UNSUPPORTED_JOB_TYPE
+    assert "WEIRD_FUTURE_TYPE" in (result.error_message_redacted or "")
+
+
+def test_make_failure_result_redacts_error_message():
+    result = make_failure_result(
+        "AGENT_JOB_EXECUTION_ERROR",
+        "boom token=agtok-fake-leak-99",
+        error=RuntimeError("secret email leak@bar.com"),
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert "agtok-fake-leak-99" not in (result.error_message_redacted or "")
+    assert "leak@bar.com" not in (result.error_message_redacted or "")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC1 — JobRunner: claim 한 job 만 실행 + short-poll + token 게이트
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_runner_executes_only_claimed_job_then_completes():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    executed: list[ClaimedJob] = []
+
+    def execute(job):
+        executed.append(job)
+        return make_success_result(result_json={"ok": True})
+
+    runner = _runner(transport, execute_job=execute)
+    runner.run()
+
+    # claim 한 그 job 만 1회 실행.
+    assert len(executed) == 1
+    assert executed[0].job_id == "job-fake-1"
+    # 성공 보고됨(complete 1회).
+    assert len(transport.calls_for("/complete")) == 1
+    # claim 직후 started 이벤트 1회.
+    started = transport.calls_for("/events")
+    assert len(started) == 1
+    assert started[0][1]["event_type"] == EVENT_TYPE_JOB_STARTED
+
+
+def test_runner_empty_claim_skips_execute_and_sleeps():
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+    executed: list[ClaimedJob] = []
+
+    runner = _runner(transport, execute_job=lambda j: executed.append(j))
+    runner.run()
+
+    assert executed == []
+    assert transport.calls_for("/complete") == []
+    # job 없을 때 short-poll 만큼 sleep.
+    assert runner._short_poll_interval == DEFAULT_SHORT_POLL_INTERVAL_SECONDS
+
+
+def test_runner_token_gate_blocks_claim_when_revoked():
+    transport = FakeTransport()
+    statuses: list[str] = []
+
+    runner = _runner(
+        transport,
+        token_check=lambda identity: False,  # 서버 검사 실패 → revoked
+        on_status=statuses.append,
+    )
+    runner.run()
+
+    # claim 미전송(=job 미수신, FR-16).
+    assert transport.calls == []
+    assert runner.needs_registration is True
+    assert runner.token_status == TOKEN_STATUS_REVOKED
+    assert statuses == [TOKEN_STATUS_REVOKED]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC1.3 — best-effort 복원력(단발 실패가 thread 를 죽이지 않음, 매 주기 sleep)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_runner_survives_claim_transport_error_and_continues():
+    transport = FakeTransport(
+        claim_script=[TransportError("agent jobs HTTP error", status_code=503), {"jobs": []}]
+    )
+    logs: list[str] = []
+
+    runner = _runner(transport, log=logs.append)
+    runner.run()
+
+    # 첫 주기 5xx 에도 루프가 죽지 않고 다음 주기로 진행(>=2회 claim).
+    assert len(transport.calls_for(CLAIM_PATH)) == 2
+    assert runner.last_error_event is not None
+    # 5xx 는 revoke 가 아니다 — 2차 성공으로 valid 유지.
+    assert runner.token_status == TOKEN_STATUS_VALID
+    assert runner.needs_registration is False
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+def test_runner_surfaces_revoked_on_401_claim_without_crash_or_spin():
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    statuses: list[str] = []
+    logs: list[str] = []
+    transport = FakeTransport(
+        claim_error=TransportError("agent jobs HTTP error", status_code=401)
+    )
+
+    runner = _runner(
+        transport, stop_event=stop, sleep=sleep, on_status=statuses.append, log=logs.append
+    )
+    runner.run()
+
+    # 매 주기 401 이어도 crash 없이 루프 진행 → 주입 sleep 으로만 정지(무한 즉시 스핀 없음).
+    assert len(transport.calls_for(CLAIM_PATH)) == 2
+    assert sleep.intervals  # 매 주기 끝에 sleep.
+    assert runner.needs_registration is True
+    assert runner.token_status == TOKEN_STATUS_REVOKED
+    assert statuses == [TOKEN_STATUS_REVOKED]  # 상태 변화 시에만 1회.
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+def test_runner_survives_executor_exception_and_reports_failure():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    logs: list[str] = []
+
+    def execute(job):
+        raise RuntimeError("worker exploded token=agtok-fake-leak-1")
+
+    runner = _runner(transport, execute_job=execute, log=logs.append)
+    runner.run()
+
+    # executor 예외에도 루프가 죽지 않고 complete 로 실패 보고.
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    body = completes[0][1]
+    assert body["status"] == JOB_STATUS_FAILED
+    assert body["error_code"] == "AGENT_JOB_EXECUTION_ERROR"
+    # 다음 주기 claim 도 호출됨(루프 생존).
+    assert len(transport.calls_for(CLAIM_PATH)) == 2
+    # 에러 본문/로그에 raw secret 비노출.
+    assert "agtok-fake-leak-1" not in json.dumps(body)
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC2 — lease: 기록 + active_jobs 노출 + self-check + 서버 거부 흡수
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_runner_records_lease_and_exposes_active_jobs_in_flight():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    captured: dict = {}
+    holder: dict = {}
+
+    def execute(job):
+        # 실행 중(in-flight)에 active_jobs 스냅샷 캡처.
+        captured["active"] = holder["runner"].active_jobs()
+        return make_success_result()
+
+    runner = _runner(transport, execute_job=execute)
+    holder["runner"] = runner
+    runner.run()
+
+    # in-flight 동안 lease_expires_at 가 active_jobs 로 노출됨(heartbeat 연장 입력).
+    assert captured["active"] == [
+        {"job_id": "job-fake-1", "lease_expires_at": FUTURE_LEASE}
+    ]
+    # complete 후 in-flight 에서 제거.
+    assert runner.active_jobs() == []
+
+
+def test_runner_abandons_on_expired_lease_instead_of_reporting_success():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    # started=100, finished=200, lease-check now=5000 > lease=1000 → 만료.
+    clock = SequenceClock([100.0, 200.0, 5000.0])
+    job_expired = dict(_JOB_DICT, lease_expires_at=1000.0)
+    transport.claim_script = [{"jobs": [job_expired]}]
+
+    runner = _runner(transport, now=clock, execute_job=lambda j: make_success_result())
+    runner.run()
+
+    # 성공으로 complete 하지 않는다(서버가 회수했을 수 있음 — 이중 성공 방지).
+    assert transport.calls_for("/complete") == []
+    assert runner.last_abandoned_job_id == "job-fake-1"
+    assert runner.active_jobs() == []
+
+
+def test_runner_fail_closed_when_lease_missing():
+    # lease_expires_at 누락 → self-check fail-closed(만료로 간주 → 성공 보고 안 함).
+    job_no_lease = {"job_id": "job-fake-1", "type": "CRAWL_BAEMIN"}
+    transport = FakeTransport(claim_script=[{"jobs": [job_no_lease]}])
+
+    runner = _runner(transport, execute_job=lambda j: make_success_result())
+    runner.run()
+
+    assert transport.calls_for("/complete") == []
+    assert runner.last_abandoned_job_id == "job-fake-1"
+
+
+@pytest.mark.parametrize("status_code", [409, 410])
+def test_runner_absorbs_complete_rejection_without_crash(status_code):
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=status_code),
+    )
+    logs: list[str] = []
+
+    runner = _runner(transport, execute_job=lambda j: make_success_result(), log=logs.append)
+    runner.run()
+
+    # 서버 거부(lease lost/이미 재할당)를 crash 없이 흡수·기록·in-flight 제거.
+    assert len(transport.calls_for("/complete")) == 1
+    assert runner.last_error_event is not None
+    assert runner.active_jobs() == []
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+def test_runner_result_carries_agent_id_and_injected_timestamps():
+    transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    clock = SequenceClock([100.0, 200.0, 300.0])  # started, finished, lease-check
+
+    runner = _runner(
+        transport, now=clock, execute_job=lambda j: make_success_result(metrics={"n": 1})
+    )
+    runner.run()
+
+    body = transport.calls_for("/complete")[0][1]
+    assert body["agent_id"] == "agent-fake-1"
+    assert body["started_at"] == 100.0
+    assert body["finished_at"] == 200.0
+    assert body["status"] == JOB_STATUS_SUCCESS
+    assert body["metrics"] == {"n": 1}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC2 — heartbeat active_jobs 배선 + start_heartbeat_thread
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_build_components_wires_runner_active_jobs_into_reporter():
+    runner, reporter = build_agent_components(_IDENTITY, transport=FakeTransport())
+    runner._track(_job())
+
+    # reporter 의 active_jobs provider 가 runner in-flight 를 반영(="heartbeat 로 연장" 배선).
+    assert reporter._active_jobs_provider() == runner.active_jobs()
+    assert reporter._active_jobs_provider() == [
+        {"job_id": "job-fake-1", "lease_expires_at": FUTURE_LEASE}
+    ]
+    # heartbeat payload 의 active_jobs 가 실제로 채워진다.
+    payload = build_heartbeat_payload(
+        _IDENTITY, active_jobs_provider=reporter._active_jobs_provider
+    )
+    assert payload["active_jobs"] == [
+        {"job_id": "job-fake-1", "lease_expires_at": FUTURE_LEASE}
+    ]
+
+
+def test_start_heartbeat_thread_runs_then_stops():
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport()
+    reporter = HeartbeatReporter(_IDENTITY, transport=transport, sleep=sleep, stop_event=stop)
+
+    thread = start_heartbeat_thread(reporter)
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert thread.daemon is True
+    # heartbeat 가 적어도 1회 전송됨(/v1/agents/heartbeat).
+    assert any(url.endswith("/v1/agents/heartbeat") for url, _b, _h in transport.calls)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 4 — run_agent 오케스트레이션(startup 배선)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_run_agent_does_not_start_loop_without_identity(tmp_path):
+    statuses: list[str] = []
+    transport = FakeTransport()
+
+    summary = run_agent(
+        transport=transport,
+        store=FakeStore(token=None),
+        identity_path=tmp_path / "agent_config.json",  # 없는 파일 → identity 없음
+        on_status=statuses.append,
+    )
+
+    assert isinstance(summary, AgentRunSummary)
+    assert summary.started is False
+    assert summary.token_status == TOKEN_STATUS_MISSING
+    # 루프 미진입 → claim/heartbeat 미전송.
+    assert transport.calls == []
+    assert statuses == [TOKEN_STATUS_MISSING]
+
+
+def test_run_agent_starts_loop_and_stops_cleanly(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,  # 단일 thread 로 결정적 검증(heartbeat thread 는 별도 테스트).
+    )
+
+    assert summary.started is True
+    assert summary.runner is not None
+    assert summary.reporter is not None
+    # active_jobs 배선 확인(reporter provider == runner.active_jobs 동작).
+    assert summary.reporter._active_jobs_provider() == summary.runner.active_jobs()
+
+
+def test_run_agent_spawns_and_joins_heartbeat_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=3)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=True,
+    )
+
+    assert summary.started is True
+    assert summary.heartbeat_thread is not None
+    # run_agent 의 finally 가 reporter.stop()+join 으로 정리 → thread 종료.
+    assert not summary.heartbeat_thread.is_alive()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# token-auth 헤더 + 평문 비노출(핵심 가드)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_claim_complete_events_carry_bearer_header_without_plaintext_in_body():
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+    claim_jobs(_IDENTITY, transport=transport)
+    complete_job(_IDENTITY, "job-fake-1", make_success_result(), transport=transport)
+    emit_job_event(
+        _IDENTITY, "job-fake-1", make_job_event("PROGRESS", "info", "ok"), transport=transport
+    )
+
+    for _url, body, headers in transport.calls:
+        assert headers == {"Authorization": f"Bearer {FAKE_TOKEN}"}
+        # token 은 헤더에만 — 본문 어디에도 평문 없음.
+        assert FAKE_TOKEN not in json.dumps(body)
+
+
+def test_no_plaintext_token_in_logs_or_error_event_on_failure():
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=1)
+    logs: list[str] = []
+    transport = FakeTransport(
+        claim_error=TransportError("agent jobs HTTP error", status_code=500)
+    )
+
+    runner = _runner(transport, stop_event=stop, sleep=sleep, log=logs.append)
+    runner.run()
+
+    joined = " ".join(logs) + json.dumps(runner.last_error_event or {})
+    assert FAKE_TOKEN not in joined
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 5 — __main__ run 서브커맨드(thin wiring, 무회귀, redaction)
+# ══════════════════════════════════════════════════════════════════════════
+# NOTE: rider_agent.__main__ 은 함수 내부에서 lazy import 한다. 모듈 상단에서 import 하면
+# pytest collection 시점에 __main__ 이 sys.modules 에 올라가 4.1 runpy 테스트가 RuntimeWarning
+# 을 낸다(무회귀 유지) — memory/agent-main-runpy-warning.
+
+
+def test_run_agent_loop_cli_started_prints_redacted(capsys):
+    from rider_agent import __main__ as agent_main
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    rc = agent_main._run_agent_loop(
+        ["--server-url", "https://srv.test"],
+        transport=object(),
+        store=object(),
+        identity_path="cfg",
+        runner=fake_run_agent,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "stopped" in out
+    assert captured["base_url"] == "https://srv.test"
+    # token 평문 미출력.
+    assert FAKE_TOKEN not in out
+
+
+def test_run_agent_loop_cli_not_started_returns_1_without_leak(capsys):
+    from rider_agent import __main__ as agent_main
+
+    def fake_run_agent(**kwargs):
+        return AgentRunSummary(started=False, token_status=TOKEN_STATUS_MISSING)
+
+    rc = agent_main._run_agent_loop(
+        [],
+        transport=object(),
+        store=object(),
+        identity_path="cfg",
+        runner=fake_run_agent,
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "not started" in out
+    assert "register" in out
+    assert FAKE_TOKEN not in out
+
+
+def test_main_routes_run_subcommand(monkeypatch):
+    from rider_agent import __main__ as agent_main
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_loop(run_argv, **_kwargs):
+        captured["argv"] = run_argv
+        return 5
+
+    monkeypatch.setattr(agent_main, "_run_agent_loop", fake_loop)
+    assert agent_main.main(["run", "--server-url", "https://x"]) == 5
+    assert captured["argv"] == ["--server-url", "https://x"]
+
+
+def test_main_without_subcommand_still_prints_banner(capsys):
+    # 무회귀: run 추가 후에도 인자 없는 호출은 배너(4.1 계약).
+    from rider_agent import __main__ as agent_main
+
+    assert agent_main.main([]) == 0
+    assert "sync runtime" in capsys.readouterr().out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QA E2E gap coverage (qa-generate-e2e-tests) — AC 분기 보강
+# 위 35 케이스가 비운 동작 분기를 채운다(외부 호출 0, 가짜 값만, 주입 sleep/now/stop).
+# ══════════════════════════════════════════════════════════════════════════
+
+
+# ── AC1.2 — capabilities 기본 DEFAULT_CAPABILITIES 이되 주입 가능 ──────────────
+
+
+def test_claim_jobs_uses_injected_capabilities():
+    # 기본값(DEFAULT_CAPABILITIES) 대신 주입한 capabilities 가 claim 본문에 그대로 실린다.
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    claim_jobs(
+        _IDENTITY,
+        transport=transport,
+        capabilities=["CRAWL_BAEMIN", "KAKAO_SEND"],
+    )
+
+    _url, body, _headers = transport.calls[0]
+    assert body["capabilities"] == ["CRAWL_BAEMIN", "KAKAO_SEND"]
+
+
+def test_runner_passes_injected_capabilities_through_to_claim():
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    runner = _runner(transport, capabilities=("KAKAO_SEND",))
+    runner.run()
+
+    claim_body = transport.calls_for(CLAIM_PATH)[0][1]
+    assert claim_body["capabilities"] == ["KAKAO_SEND"]
+
+
+# ── AC1.3 / AC2.5 — complete 거부 분기(401 revoked / 일반 5xx) ─────────────────
+
+
+def test_runner_surfaces_revoked_on_complete_401():
+    # complete 가 401 이면 lease-lost(409/410)와 달리 재등록 필요로 surfacing 한다.
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=1)  # 1주기만 — 다음 claim 성공이 상태를 되돌리지 않게.
+    statuses: list[str] = []
+    logs: list[str] = []
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=401),
+    )
+
+    runner = _runner(
+        transport,
+        stop_event=stop,
+        sleep=sleep,
+        execute_job=lambda j: make_success_result(),
+        on_status=statuses.append,
+        log=logs.append,
+    )
+    runner.run()
+
+    assert len(transport.calls_for("/complete")) == 1
+    assert runner.needs_registration is True
+    assert runner.token_status == TOKEN_STATUS_REVOKED
+    assert statuses == [TOKEN_STATUS_REVOKED]
+    assert runner.active_jobs() == []  # in-flight 정리.
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+def test_runner_records_error_on_generic_complete_failure_and_survives():
+    # 409/410/401 이 아닌 일반 실패(5xx)도 crash 없이 흡수·기록·in-flight 제거하고 루프 생존.
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=1)
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=500),
+    )
+
+    runner = _runner(
+        transport,
+        stop_event=stop,
+        sleep=sleep,
+        execute_job=lambda j: make_success_result(),
+    )
+    runner.run()
+
+    assert len(transport.calls_for("/complete")) == 1
+    assert runner.last_error_event is not None
+    # 5xx 는 revoke 가 아니다 — 상태 유지.
+    assert runner.token_status == TOKEN_STATUS_VALID
+    assert runner.needs_registration is False
+    assert runner.active_jobs() == []
+
+
+# ── AC1.3 / AC4 — started 이벤트 보고 실패가 루프/job 을 죽이지 않는다(best-effort) ──
+
+
+def test_runner_survives_started_event_failure_and_still_completes():
+    # /events(started) 가 실패해도 job 은 정상 실행·complete 된다(이벤트는 진행에 영향 없음).
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        events_error=TransportError("agent jobs HTTP error", status_code=500),
+    )
+    executed: list[ClaimedJob] = []
+    logs: list[str] = []
+
+    def execute(job):
+        executed.append(job)
+        return make_success_result()
+
+    runner = _runner(transport, execute_job=execute, log=logs.append)
+    runner.run()
+
+    assert len(executed) == 1  # 이벤트 실패에도 job 실행됨.
+    assert len(transport.calls_for("/complete")) == 1  # 그리고 complete 됨.
+    assert runner.last_error_event is not None  # 이벤트 실패가 redact 되어 기록됨.
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+# ── AC2.5 — lease self-check 는 success 만 막는다(실패 결과는 lease 무관하게 보고) ──
+
+
+def test_runner_reports_failure_result_even_when_lease_expired():
+    # 실패 결과는 lease 가 만료돼도 그대로 보고한다(self-check 는 잘못된 '성공'만 막는다).
+    job_expired = dict(_JOB_DICT, lease_expires_at=1000.0)
+    transport = FakeTransport(claim_script=[{"jobs": [job_expired]}])
+
+    def execute(job):
+        return make_failure_result("AGENT_JOB_EXECUTION_ERROR", "boom")
+
+    # now=5000 > lease=1000 이지만 결과가 FAILED 라 abandon 하지 않는다.
+    runner = _runner(transport, now=lambda: 5000.0, execute_job=execute)
+    runner.run()
+
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    assert completes[0][1]["status"] == JOB_STATUS_FAILED
+    assert runner.last_abandoned_job_id is None  # abandon 아님.
+
+
+# ── AC1 — claim 한 job 이 여러 개면 모두 실행·complete 한다 ──────────────────────
+
+
+def test_runner_processes_multiple_claimed_jobs():
+    job1 = dict(_JOB_DICT)
+    job2 = dict(_JOB_DICT, job_id="job-fake-2")
+    transport = FakeTransport(claim_script=[{"jobs": [job1, job2]}])
+    executed: list[str] = []
+
+    def execute(job):
+        executed.append(job.job_id)
+        return make_success_result()
+
+    runner = _runner(transport, execute_job=execute)
+    runner.run()
+
+    assert executed == ["job-fake-1", "job-fake-2"]
+    assert len(transport.calls_for("/complete")) == 2
+    assert runner.active_jobs() == []  # 둘 다 in-flight 에서 제거.
+
+
+# ── AC1.2 — run_agent startup 게이트: 토큰 revoke 면 루프 미진입 ─────────────────
+
+
+def test_run_agent_does_not_start_loop_when_token_revoked(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+    statuses: list[str] = []
+    transport = FakeTransport()
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        token_check=lambda identity: False,  # 서버 검사 실패 → revoked
+        on_status=statuses.append,
+    )
+
+    assert summary.started is False
+    assert summary.token_status == TOKEN_STATUS_REVOKED
+    assert transport.calls == []  # claim/heartbeat 미전송(루프 미진입).
+    assert statuses == [TOKEN_STATUS_REVOKED]
+
+
+# ── AC2.5 — lease 시각 파싱(self-check 입력): 다양한 형태 + fail-closed ──────────
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (5_000_000_000.0, 5_000_000_000.0),  # epoch float
+        (5_000_000_000, 5_000_000_000.0),  # epoch int
+        ("5000000000", 5_000_000_000.0),  # 숫자 문자열
+        (None, None),  # 누락
+        ("", None),  # 빈 문자열
+        ("not-a-timestamp", None),  # 비-숫자/비-ISO → fail-closed
+        (True, None),  # bool 은 epoch 로 취급하지 않는다(가드)
+    ],
+)
+def test_coerce_lease_epoch_parses_or_fails_closed(value, expected):
+    assert _coerce_lease_epoch(value) == expected
+
+
+def test_coerce_lease_epoch_parses_iso8601_forms():
+    # ISO 8601(`+00:00` 과 `Z` 접미사 둘 다)을 같은 양수 epoch 로 변환한다.
+    offset_form = _coerce_lease_epoch("2128-01-01T00:00:00+00:00")
+    z_form = _coerce_lease_epoch("2128-01-01T00:00:00Z")
+
+    assert isinstance(offset_form, float)
+    assert offset_form > 4_000_000_000.0
+    assert z_form == offset_form

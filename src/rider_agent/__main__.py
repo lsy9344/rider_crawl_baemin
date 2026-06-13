@@ -1,12 +1,16 @@
-"""``python -m rider_agent`` 진입점 — 동기(sync) thin CLI (Story 4.1 + 4.2).
+"""``python -m rider_agent`` 진입점 — 동기(sync) thin CLI (Story 4.1 + 4.2 + 4.4).
 
 서브커맨드가 없으면 4.1 의 sync 시작 배너를 그대로 출력한다(무회귀). ``register`` 서브커맨드는
 Story 4.2 가 추가한 **얇은** 등록 진입이다 — 핵심 로직은 ``registration.register_agent`` 에 있고,
 여기서는 인자 파싱 → 실제 transport/store/identity_path 주입 → 호출 → **redaction 통과한** 한 줄
-결과 출력만 한다. token/registration code 를 출력하지 않는다.
+결과 출력만 한다. ``run`` 서브커맨드는 Story 4.4 가 추가한 **얇은** job 루프 진입이다 — 핵심
+로직은 ``job_loop.run_agent`` 에 있고, 여기서는 실제 HttpTransport(op_label="agent jobs")/
+store/identity_path 주입 → 호출만 한다(둘 다 token/registration code 를 출력하지 않는다).
 
 GUI(tkinter)/레거시 UI(``rider_crawl.ui``/``rider_crawl.app``)는 import 하지 않는다(4.1 가드).
-network 부작용은 ``register`` 를 **명시적으로 호출할 때만** 발생한다(인자 없는 실행은 무부작용).
+무거운 import(job_loop/registration/secure_store)는 **함수 내부로 defer** 해 인자 없는 배너 경로의
+무부작용과 runpy RuntimeWarning 회피를 지킨다. network 부작용은 ``register``/``run`` 을
+**명시적으로 호출할 때만** 발생한다(인자 없는 실행은 무부작용).
 """
 
 from __future__ import annotations
@@ -92,14 +96,81 @@ def _run_register(
     return 0
 
 
+def _parse_run_args(run_argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="rider_agent run",
+        description="outbound HTTPS job 폴링/claim/complete 루프를 시작한다(inbound 포트 미개방).",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="서버 base URL(미지정 시 RIDER_AGENT_SERVER_URL env 또는 기본값)",
+    )
+    return parser.parse_args(run_argv)
+
+
+def _run_agent_loop(
+    run_argv: list[str],
+    *,
+    transport: object | None = None,
+    store: object | None = None,
+    identity_path: object | None = None,
+    runner: object | None = None,
+) -> int:
+    """run 서브커맨드 실행. 의존성은 주입 가능(테스트는 fake transport/store/runner 주입).
+
+    실 CLI 의 ``run_agent`` 는 무한 루프(정상)다 — 테스트는 fake ``runner`` 또는 즉시 정지하는
+    ``stop_event``/주입 sleep 으로 hang 을 막는다. 출력은 token/code 미포함(redact 통과).
+    """
+
+    args = _parse_run_args(run_argv)
+
+    from rider_agent.job_loop import run_agent
+    from rider_agent.registration import HttpTransport
+    from rider_agent.secure_store import (
+        DpapiSecretStore,
+        default_identity_path,
+        default_secret_store_path,
+    )
+
+    if runner is None:
+        runner = run_agent
+    if store is None:
+        store = DpapiSecretStore(default_secret_store_path())
+    if identity_path is None:
+        identity_path = default_identity_path()
+    if transport is None:
+        transport = HttpTransport(op_label="agent jobs")
+
+    summary = runner(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        base_url=args.server_url,
+    )
+
+    if not getattr(summary, "started", False):
+        print(
+            redact(
+                "agent loop not started: valid identity/token required "
+                "(run `rider_agent register --code ...` first)"
+            )
+        )
+        return 1
+    print(redact("agent loop stopped"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # argv 명시 호출(테스트·CLI)만 신뢰한다. 인자 없는 호출은 배너(4.1 계약). runpy 가 pytest
-    # 안에서 __main__ 을 돌리면 sys.argv 가 오염돼 있으므로, 'register' 가 아닌 토큰은 모두
+    # 안에서 __main__ 을 돌리면 sys.argv 가 오염돼 있으므로, 'register'/'run' 이 아닌 토큰은 모두
     # 배너로 폴백한다(서브파서 invalid-choice 로 비정상 종료하지 않게 — 무회귀).
     if argv is None:
         argv = []
     if argv and argv[0] == "register":
         return _run_register(argv[1:])
+    if argv and argv[0] == "run":
+        return _run_agent_loop(argv[1:])
     return _print_banner()
 
 
