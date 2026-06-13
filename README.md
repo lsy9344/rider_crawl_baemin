@@ -276,6 +276,8 @@ Windows:
 - 쿠팡이츠 탭: `rider-performance`(실적)와 `peak-dashboard`(피크 대시보드) 두 페이지를 모두 읽어 실시간 실적 메시지를 만듭니다. 실적 페이지에서 수행 중인 인원을, 피크 대시보드에서 업데이트 시각·배정/처리 물량·거절률·피크타임별 목표/완료를 읽습니다.
 - CDP 연결이 실패하면 새 로그인 창을 만들지 않고 오류를 표시합니다. CDP로 붙은 Chrome은 사용자가 직접 띄운 창이므로 수집 후 닫지 않습니다.
 - 쿠팡이츠 로그인이 만료되면 기본적으로는 자동 로그인이나 2차 인증 처리를 하지 않고 해당 크롤링 탭의 반복 실행을 중지합니다. Chrome에서 다시 로그인한 뒤 `rider-performance`와 `peak-dashboard` 두 페이지를 로그인된 상태로 열어두고 `시작`을 다시 누르세요.
-- (선택) `COUPANG_AUTO_EMAIL_2FA_ENABLED=true`로 켜면 쿠팡이츠 로그인 만료를 감지했을 때 자동 복구를 한 번 시도합니다. 1차 로그인 화면이면 `COUPANG_CREDENTIALS_PATH`의 계정 파일로 로그인하고, 이어서 이메일 인증을 선택하고 인증번호 발송 후, Gmail API(`gmail.readonly`)로 발송 시각 이후 도착한 인증번호 메일을 읽어 입력합니다. 인증에 성공하면 대상 페이지를 다시 준비시켜 수집을 이어가고, 실패하거나 CAPTCHA 화면이면 기존처럼 탭을 중지합니다.
-  - 사전 준비: Google Cloud Console에서 OAuth Desktop 클라이언트와 Gmail API를 만든 뒤 클라이언트 JSON을 `secrets/google/credentials.gmail.json`에 두고, 최초 1회 로컬에서 Gmail 승인을 실행해 `secrets/google/token.gmail.json`을 만듭니다. 이 인증 파일은 Git에 올리지 않습니다.
-  - 관련 환경변수: `COUPANG_CREDENTIALS_PATH`, `GMAIL_CREDENTIALS_PATH`, `GMAIL_TOKEN_PATH`, `GMAIL_2FA_QUERY`(실제 발신자/제목에 맞게 좁히기), `GMAIL_2FA_POLL_SECONDS`, `GMAIL_2FA_POLL_INTERVAL_SECONDS`, `COUPANG_2FA_CODE_DIGITS`. 인증번호와 토큰 값은 로그에 남기지 않습니다.
+- (선택) UI의 각 크롤링 탭에서 '쿠팡 로그인 만료 시 자동복구(이메일 2FA)'를 켜면 쿠팡이츠 로그인 만료를 감지했을 때 자동 복구를 한 번 시도합니다. 1차 로그인 화면이면 탭에 입력한 쿠팡 아이디·비밀번호로 로그인하고, 이어서 이메일 인증을 선택하고 인증번호 발송 후, 인증 이메일(IMAP)에서 발송 시각 이후 도착한 인증번호 메일을 읽어 입력합니다. 인증에 성공하면 대상 페이지를 다시 준비시켜 수집을 이어가고, 실패하거나 CAPTCHA 화면이면 기존처럼 탭을 중지합니다.
+  - 인증 이메일은 **Gmail/Naver를 IMAP(주소+앱 비밀번호)로 통일**합니다. 공급자(naver/gmail)는 입력한 인증 이메일 주소의 도메인으로 자동 결정합니다(별도 선택 없음). Gmail OAuth/토큰 파일은 더 이상 사용하지 않습니다.
+  - 사전 준비: 인증 메일을 받는 계정에서 **IMAP 사용**을 켜고(네이버: 메일 환경설정 → IMAP/SMTP, Gmail: 설정 → 전달/POP/IMAP), 2단계 인증 계정은 **앱 비밀번호**를 발급합니다. 호스트는 `imap.naver.com:993(SSL)` 또는 `imap.gmail.com:993(SSL)`입니다.
+  - 입력 항목(탭별): 쿠팡 로그인 아이디/비밀번호, 인증 이메일 주소(naver/gmail), 인증 이메일 비밀번호(앱 비밀번호), 인증 메일 제목 키워드(기본 `인증번호`). 자동복구를 켠 쿠팡 탭은 이 4개 자격증명과 지원 도메인이 채워져 있어야 저장됩니다. 입력값은 텔레그램 토큰 등 기존 비밀값처럼 `ui_settings.json`에 평문 저장됩니다(위험 감수). 인증번호와 비밀번호 값은 로그에 남기지 않으며, 메일은 읽음 처리하지 않습니다(IMAP `BODY.PEEK` + readonly).
+  - CLI(`--once`) 실행은 탭을 특정할 수 없어 이메일 자동복구를 지원하지 않습니다(기본 off 유지). UI에서 탭별로 켜서 사용하세요.

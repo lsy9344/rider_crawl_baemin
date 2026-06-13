@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -97,15 +98,42 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     assert config.run_lock_timeout_seconds == 900
     assert config.crawl_name == ""
     assert config.state_subdir == ""
-    assert config.coupang_credentials_path == Path("secrets/google/coupang.credentials.json")
 
 
-def test_app_config_reads_coupang_credentials_path(monkeypatch):
-    monkeypatch.setenv("COUPANG_CREDENTIALS_PATH", "C:/safe/coupang.credentials.json")
+def test_app_config_email_2fa_defaults(monkeypatch):
+    # 자동복구 기본 비활성. 자격증명은 env에서 읽지 않고 UI 주입 전엔 빈 값이며,
+    # 제목/발신자 키워드·폴링·자리수만 AppConfig 기본값을 쓴다.
+    for key in ("COUPANG_AUTO_EMAIL_2FA_ENABLED", "GMAIL_2FA_QUERY", "COUPANG_CREDENTIALS_PATH"):
+        monkeypatch.setenv(key, "true")
 
     config = AppConfig.from_env()
 
-    assert config.coupang_credentials_path == Path("C:/safe/coupang.credentials.json")
+    assert config.coupang_auto_email_2fa_enabled is False
+    assert config.coupang_login_id == ""
+    assert config.coupang_login_password == ""
+    assert config.verification_email_address == ""
+    assert config.verification_email_app_password == ""
+    assert config.verification_email_subject_keyword == "인증번호"
+    assert config.verification_email_sender_keyword == "coupang"
+    assert config.email_2fa_poll_seconds == 120
+    assert config.email_2fa_poll_interval_seconds == 5
+    assert config.coupang_2fa_code_digits == 6
+
+
+def test_app_config_repr_masks_secrets():
+    # 쿠팡 비밀번호·인증 이메일 앱 비밀번호·텔레그램 토큰은 repr에 노출되지 않아야 한다.
+    config = replace(
+        _config_with_log_dir("logs"),
+        telegram_bot_token="tok-secret",
+        coupang_login_password="coupang-secret",
+        verification_email_app_password="imap-secret",
+    )
+
+    rendered = repr(config)
+
+    assert "tok-secret" not in rendered
+    assert "coupang-secret" not in rendered
+    assert "imap-secret" not in rendered
 
 
 def test_app_config_reads_coupang_environment_values(monkeypatch):

@@ -9,9 +9,8 @@ from .config import (
     DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
     DEFAULT_BAEMIN_CENTER_ID,
     DEFAULT_BAEMIN_CENTER_NAME,
-    DEFAULT_GMAIL_2FA_QUERY,
-    DEFAULT_GMAIL_CREDENTIALS_PATH,
-    DEFAULT_GMAIL_TOKEN_PATH,
+    DEFAULT_EMAIL_2FA_SENDER_KEYWORD,
+    DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD,
     AppConfig,
 )
 
@@ -41,12 +40,16 @@ class UiSettings:
     page_timeout_seconds: int
     # 쿠팡이츠 로그인 만료 시 자동복구(이메일 2FA) 설정. .env가 아니라 UI에서 입력받아
     # 탭별로 저장한다. 기본은 비활성이며, 켜기 전까지는 기존처럼 로그인 만료 시 탭이 멈춘다.
+    # 인증 이메일은 Gmail/Naver를 IMAP(주소+앱 비밀번호)로 통일하며, 공급자는 주소
+    # 도메인으로 자동 결정한다. (구) gmail_2fa_query / gmail_credentials_path /
+    # gmail_token_path는 폐기됐고, 옛 저장 파일의 그 키들은 로드 시 무시된다.
     coupang_auto_email_2fa_enabled: bool = False
     coupang_login_id: str = ""
     coupang_login_password: str = ""
-    gmail_2fa_query: str = DEFAULT_GMAIL_2FA_QUERY
-    gmail_credentials_path: str = DEFAULT_GMAIL_CREDENTIALS_PATH
-    gmail_token_path: str = DEFAULT_GMAIL_TOKEN_PATH
+    verification_email_address: str = ""
+    verification_email_app_password: str = ""
+    verification_email_subject_keyword: str = DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+    verification_email_sender_keyword: str = DEFAULT_EMAIL_2FA_SENDER_KEYWORD
 
     @classmethod
     def defaults(cls) -> "UiSettings":
@@ -112,14 +115,19 @@ class UiSettings:
             crawl_name=crawl_name,
             state_subdir=state_subdir,
             # 쿠팡 자동 이메일 2FA 복구 설정은 UI에서 입력받아 탭별로 저장한 값을 쓴다
-            # (.env 사용 안 함). poll/코드 자릿수 등 자주 안 바뀌는 값은 AppConfig 기본값을
-            # 그대로 둔다. 빈 경로/검색식은 기본값으로 보정해 잘못된 빈 값으로 덮이지 않게 한다.
+            # (.env 사용 안 함). poll/코드 자릿수/발신자 키워드 등 자주 안 바뀌는 값은
+            # AppConfig 기본값을 그대로 둔다. 빈 제목 키워드는 기본값으로 보정한다.
             coupang_auto_email_2fa_enabled=self.coupang_auto_email_2fa_enabled,
             coupang_login_id=self.coupang_login_id,
             coupang_login_password=self.coupang_login_password,
-            gmail_2fa_query=self.gmail_2fa_query or DEFAULT_GMAIL_2FA_QUERY,
-            gmail_credentials_path=Path(self.gmail_credentials_path or DEFAULT_GMAIL_CREDENTIALS_PATH),
-            gmail_token_path=Path(self.gmail_token_path or DEFAULT_GMAIL_TOKEN_PATH),
+            verification_email_address=self.verification_email_address.strip(),
+            verification_email_app_password=self.verification_email_app_password,
+            verification_email_subject_keyword=(
+                self.verification_email_subject_keyword or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+            ),
+            verification_email_sender_keyword=(
+                self.verification_email_sender_keyword or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+            ),
         )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,20 +16,15 @@ DEFAULT_COUPANG_RIDER_PERFORMANCE_URL = "https://partner.coupangeats.com/page/ri
 DEFAULT_COUPANG_PEAK_DASHBOARD_URL = "https://partner.coupangeats.com/page/peak-dashboard"
 DEFAULT_PLATFORM_NAME = "baemin"
 
-# 쿠팡이츠 이메일 2차 인증 자동 복구 기본값. 기본은 모두 "비활성/읽기 전용"이며,
-# 운영 검증 전까지는 기존 동작(로그인 만료 시 탭 중지)을 유지한다.
-DEFAULT_GMAIL_CREDENTIALS_PATH = "secrets/google/credentials.gmail.json"
-DEFAULT_GMAIL_TOKEN_PATH = "secrets/google/token.gmail.json"
-DEFAULT_COUPANG_CREDENTIALS_PATH = "secrets/google/coupang.credentials.json"
-# 기본 Gmail 검색 쿼리는 실측 발신자(donotreply@coupang.com) + 실제 제목 토큰
-# (이메일 인증번호) + 최근 1일로 좁힌다. 주의: Gmail ``newer_than``에는 분 단위가
-# 없다(``d``=일, ``m``=월, ``y``=년). 정확한 시각 컷오프는 ``requested_after``가 따로
-# 거르므로 여기서는 ``newer_than:1d``로 후보만 줄인다. 운영 메일 발신자/제목이 바뀌면
-# GMAIL_2FA_QUERY(또는 UI의 탭별 검색식)로 덮어쓴다.
-DEFAULT_GMAIL_2FA_QUERY = "from:(donotreply@coupang.com) subject:(이메일 인증번호) newer_than:1d"
-DEFAULT_GMAIL_2FA_POLL_SECONDS = 120
+# 쿠팡이츠 이메일 2차 인증 자동 복구 기본값. 자격증명은 .env/토큰 파일이 아니라 UI 탭에서
+# 입력받으며, 자주 안 바뀌는 값(제목/발신자 키워드, 폴링)만 여기 기본값으로 둔다.
+# 제목 키워드는 인증 메일 후보를 좁히고, 발신자 키워드는 기존 Gmail 검색식의 from: 안전
+# 장치를 IMAP FROM 헤더 필터로 대체한다(같은 시간대 다른 인증메일 오인 방지).
+DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD = "인증번호"
+DEFAULT_EMAIL_2FA_SENDER_KEYWORD = "coupang"
+DEFAULT_EMAIL_2FA_POLL_SECONDS = 120
 # 인증번호 메일이 도착한 뒤 빨리 집어 입력하도록 폴링 간격을 짧게 둔다(코드 만료 방지).
-DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS = 2
+DEFAULT_EMAIL_2FA_POLL_INTERVAL_SECONDS = 5
 DEFAULT_COUPANG_2FA_CODE_DIGITS = 6
 
 
@@ -49,7 +44,8 @@ class AppConfig:
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
-    telegram_bot_token: str = ""
+    # telegram_bot_token도 민감값이라 repr 노출을 막는다(쿠팡/인증 이메일 비밀번호와 동일).
+    telegram_bot_token: str = field(default="", repr=False)
     telegram_chat_id: str = ""
     telegram_message_thread_id: str = ""
     messenger_name: str = "telegram"
@@ -62,18 +58,19 @@ class AppConfig:
     platform_name: str = DEFAULT_PLATFORM_NAME
     # 쿠팡이츠 이메일 2차 인증 자동 복구 설정. 기본값은 비활성이며, 켜기 전까지는
     # 기존처럼 로그인 만료를 감지하면 탭을 중지한다(BrowserActionRequiredError).
+    # 모든 자격증명은 .env/토큰 파일이 아니라 UI 탭에서 입력받아 주입한다.
     coupang_auto_email_2fa_enabled: bool = False
-    gmail_credentials_path: Path = Path(DEFAULT_GMAIL_CREDENTIALS_PATH)
-    gmail_token_path: Path = Path(DEFAULT_GMAIL_TOKEN_PATH)
-    gmail_2fa_query: str = DEFAULT_GMAIL_2FA_QUERY
-    gmail_2fa_poll_seconds: int = DEFAULT_GMAIL_2FA_POLL_SECONDS
-    gmail_2fa_poll_interval_seconds: int = DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS
-    coupang_2fa_code_digits: int = DEFAULT_COUPANG_2FA_CODE_DIGITS
-    coupang_credentials_path: Path = Path(DEFAULT_COUPANG_CREDENTIALS_PATH)
-    # UI에서 직접 입력하는 쿠팡 로그인 자격증명. 둘 다 채워져 있으면
-    # ``coupang_credentials_path`` JSON 파일보다 우선해서 쓴다(파일은 하위호환 폴백).
+    # UI에서 직접 입력하는 쿠팡 로그인 자격증명(JSON 파일 폴백 없음).
     coupang_login_id: str = ""
-    coupang_login_password: str = ""
+    coupang_login_password: str = field(default="", repr=False)
+    # 인증 이메일 자격증명(IMAP). 공급자(naver/gmail)는 주소 도메인으로 자동 결정한다.
+    verification_email_address: str = ""
+    verification_email_app_password: str = field(default="", repr=False)
+    verification_email_subject_keyword: str = DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+    verification_email_sender_keyword: str = DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+    email_2fa_poll_seconds: int = DEFAULT_EMAIL_2FA_POLL_SECONDS
+    email_2fa_poll_interval_seconds: int = DEFAULT_EMAIL_2FA_POLL_INTERVAL_SECONDS
+    coupang_2fa_code_digits: int = DEFAULT_COUPANG_2FA_CODE_DIGITS
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -102,7 +99,6 @@ class AppConfig:
             messenger_name=os.getenv("MESSENGER_NAME", "telegram"),
             crawl_name=os.getenv("CRAWL_NAME", ""),
             state_subdir=os.getenv("STATE_SUBDIR", ""),
-            **gmail_2fa_settings_from_env(),
         )
 
     @property
@@ -160,37 +156,6 @@ def app_state_root() -> Path:
         return package_root
 
     return (Path.home() / ".rider_crawl").resolve()
-
-
-def gmail_2fa_settings_from_env() -> dict[str, object]:
-    """Read Gmail/2FA settings from the environment.
-
-    이 설정군은 (저장된 UI JSON이 아니라) 환경변수로만 제어한다(1차 구현 정책). 그래서
-    ``AppConfig.from_env``와 UI 실행 경로(``UiSettings.to_app_config``)가 같은 값을 쓰도록
-    단일 소스로 분리했다. 둘 다 이 함수를 호출해 동일한 기본값/덮어쓰기 규칙을 공유한다.
-    """
-
-    load_dotenv(dotenv_path=Path(".env"))
-    return {
-        "coupang_auto_email_2fa_enabled": _env_bool("COUPANG_AUTO_EMAIL_2FA_ENABLED", default=False),
-        "gmail_credentials_path": Path(
-            os.getenv("GMAIL_CREDENTIALS_PATH", DEFAULT_GMAIL_CREDENTIALS_PATH)
-        ),
-        "gmail_token_path": Path(os.getenv("GMAIL_TOKEN_PATH", DEFAULT_GMAIL_TOKEN_PATH)),
-        "gmail_2fa_query": os.getenv("GMAIL_2FA_QUERY", DEFAULT_GMAIL_2FA_QUERY),
-        "gmail_2fa_poll_seconds": int(
-            os.getenv("GMAIL_2FA_POLL_SECONDS", str(DEFAULT_GMAIL_2FA_POLL_SECONDS))
-        ),
-        "gmail_2fa_poll_interval_seconds": int(
-            os.getenv("GMAIL_2FA_POLL_INTERVAL_SECONDS", str(DEFAULT_GMAIL_2FA_POLL_INTERVAL_SECONDS))
-        ),
-        "coupang_2fa_code_digits": int(
-            os.getenv("COUPANG_2FA_CODE_DIGITS", str(DEFAULT_COUPANG_2FA_CODE_DIGITS))
-        ),
-        "coupang_credentials_path": Path(
-            os.getenv("COUPANG_CREDENTIALS_PATH", DEFAULT_COUPANG_CREDENTIALS_PATH)
-        ),
-    }
 
 
 def _env_bool(name: str, *, default: bool) -> bool:

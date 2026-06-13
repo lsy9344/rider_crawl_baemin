@@ -1,7 +1,5 @@
-import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -10,7 +8,7 @@ from rider_crawl.auth.coupang_email_2fa import (
     Coupang2faError,
     recover_coupang_session_with_email_2fa,
 )
-from rider_crawl.auth.gmail import Gmail2faError
+from rider_crawl.auth.imap_2fa import Imap2faError
 from rider_crawl.config import AppConfig
 
 
@@ -154,15 +152,23 @@ def test_recover_clicks_email_method_send_and_fills_code(tmp_path):
         captured.update(kwargs)
         return "246802"
 
-    result = recover_coupang_session_with_email_2fa(
-        page, _config(tmp_path), fetch_code=_fetch, now=_NOW
+    config = replace(
+        _config(tmp_path),
+        verification_email_address="rider@naver.com",
+        verification_email_app_password="app-pass",
     )
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
 
     assert result is True
     assert "이메일" in page.clicked_texts
     assert "인증번호 발송" in page.clicked_texts
     assert "확인" in page.clicked_texts
     assert page.filled == [("input[name='code']", "246802")]
+    # 주입 fetcher가 탭에 입력한 IMAP 자격증명/키워드를 그대로 받았는지 검증한다.
+    assert captured["email_address"] == "rider@naver.com"
+    assert captured["app_password"] == "app-pass"
+    assert captured["subject_keyword"] == "인증번호"
+    assert captured["sender_keyword"] == "coupang"
     # 발송 클릭 직전 시각에서 안전 여유를 뺀 시각을 requested_after로 넘긴다. 클릭과
     # 동시에 도착한 메일이 컷오프에서 잘리지 않도록 now()보다 약간 과거여야 한다.
     assert captured["requested_after"] < _NOW()
@@ -236,13 +242,12 @@ def test_recover_prefers_tab_and_button_roles_over_broad_text_matches(tmp_path):
     assert page.filled == [("input[placeholder*='코드']", "135790")]
 
 
-def test_recover_logs_in_with_saved_credentials_before_email_2fa(tmp_path):
-    credentials_path = tmp_path / "coupang.credentials.json"
-    credentials_path.write_text(
-        json.dumps({"username": "worker-id", "password": "worker-password"}),
-        encoding="utf-8",
+def test_recover_logs_in_with_ui_credentials_before_email_2fa(tmp_path):
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
     )
-    config = replace(_config(tmp_path), coupang_credentials_path=credentials_path)
     page = _FakePage(
         html="<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>",
         role_clickable=(
@@ -284,12 +289,11 @@ def test_recover_logs_in_with_saved_credentials_before_email_2fa(tmp_path):
 
 
 def test_recover_detects_primary_login_by_password_input_when_body_label_is_short(tmp_path):
-    credentials_path = tmp_path / "coupang.credentials.json"
-    credentials_path.write_text(
-        json.dumps({"username": "worker-id", "password": "worker-password"}),
-        encoding="utf-8",
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
     )
-    config = replace(_config(tmp_path), coupang_credentials_path=credentials_path)
     page = _FakePage(
         html="<html>Vendor Portal 아이디 비밀번호 로그인</html>",
         role_clickable=(
@@ -338,7 +342,7 @@ def test_recover_returns_false_when_send_button_missing(tmp_path):
     assert result is False
 
 
-def test_recover_raises_when_gmail_fetch_fails(tmp_path):
+def test_recover_raises_when_imap_fetch_fails(tmp_path):
     page = _FakePage(
         html="<html>이메일 인증</html>",
         clickable=("이메일", "인증번호 발송"),
@@ -346,12 +350,72 @@ def test_recover_raises_when_gmail_fetch_fails(tmp_path):
     )
 
     def _fetch(**_kwargs):
-        raise Gmail2faError("인증 메일 미도착")
+        raise Imap2faError("인증 메일 미도착")
 
     with pytest.raises(Coupang2faError):
         recover_coupang_session_with_email_2fa(
             page, _config(tmp_path), fetch_code=_fetch, now=_NOW
         )
+
+
+def test_recover_proceeds_when_screen_domain_matches_tab_address(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 abc@naver.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@naver.com")
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
+
+    assert result is True
+    assert called["hit"] is True
+    assert page.filled == [("input[name='code']", "246802")]
+
+
+def test_recover_stops_when_screen_domain_differs_from_tab_address(tmp_path):
+    # 탭에 입력한 주소 도메인과 화면에 노출된 인증 이메일 도메인이 다르면, 이 메일함으로는
+    # 코드가 오지 않는 오설정이므로 폴링을 시작하지 않고 중단한다(코드/비번 미노출).
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 abc@naver.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@gmail.com")
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
+
+    assert result is False
+    assert called["hit"] is False  # 도메인 불일치면 fetcher를 호출하지 않는다.
+    assert page.filled == []
+
+
+def test_recover_skips_cross_check_when_screen_domain_masked(tmp_path):
+    # 화면이 도메인을 일부 마스킹(na***.com)하면 지원 도메인과 매칭되지 않으므로 교차검증을
+    # 생략하고 주 결정(탭 입력 주소)을 신뢰해 진행한다.
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 ri***@na***.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@naver.com")
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("111222"), now=_NOW
+    )
+
+    assert result is True
+    assert page.filled == [("input[name='code']", "111222")]
 
 
 def test_recover_raises_when_code_input_missing(tmp_path):

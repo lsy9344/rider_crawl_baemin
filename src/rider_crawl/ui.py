@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
+from .auth.imap_2fa import IMAP_HOST_BY_DOMAIN
 from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, DEFAULT_COUPANG_PEAK_DASHBOARD_URL, AppConfig
 from .keyword_responder import KeywordResponder
@@ -67,6 +68,7 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
     _validate_active_coupang_urls(active_settings)
+    _validate_active_coupang_auto_2fa_credentials(active_settings)
     _validate_active_telegram_required(active_settings)
     _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
@@ -147,16 +149,15 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
             values.get("coupang_auto_email_2fa_enabled", defaults.coupang_auto_email_2fa_enabled)
         ),
         coupang_login_id=str(values.get("coupang_login_id", "")).strip(),
-        # 비밀번호는 앞뒤 공백도 의미가 있을 수 있어 strip하지 않는다.
+        # 비밀번호류는 앞뒤 공백도 의미가 있을 수 있어 strip하지 않는다(IMAP 로그인 직전에
+        # 앱 비밀번호의 모든 공백을 제거한다 — imap_2fa._imap_connect).
         coupang_login_password=str(values.get("coupang_login_password", "")),
-        gmail_2fa_query=str(values.get("gmail_2fa_query", defaults.gmail_2fa_query)).strip()
-        or defaults.gmail_2fa_query,
-        gmail_credentials_path=str(
-            values.get("gmail_credentials_path", defaults.gmail_credentials_path)
+        verification_email_address=str(values.get("verification_email_address", "")).strip(),
+        verification_email_app_password=str(values.get("verification_email_app_password", "")),
+        verification_email_subject_keyword=str(
+            values.get("verification_email_subject_keyword", defaults.verification_email_subject_keyword)
         ).strip()
-        or defaults.gmail_credentials_path,
-        gmail_token_path=str(values.get("gmail_token_path", defaults.gmail_token_path)).strip()
-        or defaults.gmail_token_path,
+        or defaults.verification_email_subject_keyword,
     )
 
 
@@ -233,9 +234,9 @@ class RiderBotUi:
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
             "coupang_login_id": StringVar(value=settings.coupang_login_id),
             "coupang_login_password": StringVar(value=settings.coupang_login_password),
-            "gmail_2fa_query": StringVar(value=settings.gmail_2fa_query),
-            "gmail_credentials_path": StringVar(value=settings.gmail_credentials_path),
-            "gmail_token_path": StringVar(value=settings.gmail_token_path),
+            "verification_email_address": StringVar(value=settings.verification_email_address),
+            "verification_email_app_password": StringVar(value=settings.verification_email_app_password),
+            "verification_email_subject_keyword": StringVar(value=settings.verification_email_subject_keyword),
             "headless": BooleanVar(value=settings.headless),
             "send_enabled": BooleanVar(value=settings.send_enabled),
             "send_only_on_change": BooleanVar(value=settings.send_only_on_change),
@@ -336,16 +337,16 @@ class RiderBotUi:
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
             ("쿠팡 로그인 아이디(자동복구)", "coupang_login_id"),
             ("쿠팡 로그인 비밀번호(자동복구)", "coupang_login_password"),
-            ("Gmail 인증메일 검색식(2FA)", "gmail_2fa_query"),
-            ("Gmail 자격증명 파일 경로", "gmail_credentials_path"),
-            ("Gmail 토큰 파일 경로", "gmail_token_path"),
+            ("인증 이메일 주소(naver/gmail)", "verification_email_address"),
+            ("인증 이메일 비밀번호(앱 비밀번호)", "verification_email_app_password"),
+            ("인증 메일 제목 키워드(기본 인증번호)", "verification_email_subject_keyword"),
         ]
         entry_widgets = {}
         for row, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
             entry_kwargs: dict[str, Any] = {"textvariable": tab_vars[key]}
-            if key == "coupang_login_password":
-                # 비밀번호는 화면에 가린다. UI 입력값이 ui_settings.json에 평문 저장되는
+            if key in ("coupang_login_password", "verification_email_app_password"):
+                # 비밀번호류는 화면에 가린다. UI 입력값이 ui_settings.json에 평문 저장되는
                 # 점은 텔레그램 토큰 등 기존 비밀값과 동일한 한계다.
                 entry_kwargs["show"] = "*"
             entry = ttk.Entry(frame, **entry_kwargs)
@@ -447,8 +448,9 @@ class RiderBotUi:
                 "센터명 칸은 배민은 센터명, 쿠팡은 기대 센터/상점명으로 두 플랫폼 모두 필수입니다"
                 "(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
-                "5. 쿠팡이츠는 '쿠팡 로그인 만료 시 자동복구'를 켜면 입력한 아이디·비밀번호와 "
-                "Gmail 인증메일(2FA)로 자동 재로그인을 시도합니다(아이디·비밀번호·Gmail 자격증명/토큰 파일 필요). "
+                "5. 쿠팡이츠는 '쿠팡 로그인 만료 시 자동복구'를 켜면 입력한 쿠팡 아이디·비밀번호와 "
+                "인증 이메일(naver/gmail)로 자동 재로그인을 시도합니다. 인증 이메일 주소와 앱 비밀번호를 "
+                "입력하세요(메일 IMAP 사용 설정 + 2단계 인증 앱 비밀번호 필요). "
                 "꺼져 있으면 로그인 만료 시 직접 다시 로그인하세요.\n"
                 "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
                 "7. 텔레그램은 봇 토큰과 그룹방 chat_id를 입력하고, 토픽 그룹이면 토픽 ID도 입력하세요.\n"
@@ -1182,6 +1184,39 @@ def _is_coupang_path_url(url: str, path: str) -> bool:
     host = (parsed.hostname or "").casefold()
     scheme = (parsed.scheme or "").casefold()
     return scheme == "https" and host == _COUPANG_HOST and parsed.path.rstrip("/").casefold() == path
+
+
+def _validate_active_coupang_auto_2fa_credentials(
+    indexed_settings: list[tuple[int, UiSettings]],
+) -> None:
+    # 자동복구가 켜진 활성 쿠팡 탭은 4개 자격증명과 지원 인증 이메일 도메인을 저장 시점에
+    # 검증한다. 비면 런타임에야 복구가 조용히 실패하므로 저장 단계에서 막는다. 실패
+    # 메시지에는 실제 비밀번호/앱 비밀번호 값을 절대 넣지 않는다.
+    for index, settings in indexed_settings:
+        if settings.platform_name != "coupang" or not settings.coupang_auto_email_2fa_enabled:
+            continue
+        if not settings.coupang_login_id.strip():
+            raise ValueError(
+                f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 아이디를 입력하세요."
+            )
+        if not settings.coupang_login_password:
+            raise ValueError(
+                f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 비밀번호를 입력하세요."
+            )
+        address = settings.verification_email_address.strip()
+        if not address:
+            raise ValueError(
+                f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 주소를 입력하세요."
+            )
+        if not settings.verification_email_app_password:
+            raise ValueError(
+                f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 앱 비밀번호를 입력하세요."
+            )
+        domain = address.rsplit("@", 1)[-1].strip().casefold() if "@" in address else ""
+        if domain not in IMAP_HOST_BY_DOMAIN:
+            raise ValueError(
+                f"크롤링{index + 1} 인증 이메일은 naver.com 또는 gmail.com 주소여야 합니다."
+            )
 
 
 def _validate_active_telegram_required(indexed_settings: list[tuple[int, UiSettings]]) -> None:

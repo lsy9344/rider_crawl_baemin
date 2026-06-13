@@ -1,22 +1,23 @@
 """쿠팡이츠 이메일 2차 인증 자동 복구.
 
 로그인 만료 화면에서 이메일 인증 방식을 고르고, 인증번호 발송 버튼을 누른 뒤
-Gmail에서 받은 코드를 입력칸에 넣어 제출한다. 자동 복구가 가능한 화면이면 ``True``,
-CAPTCHA·아이디/비밀번호 입력 등 1차 구현 범위 밖이면 ``False``를 반환한다.
+인증 이메일(IMAP, Gmail/Naver 공용)에서 받은 코드를 입력칸에 넣어 제출한다. 자동 복구가
+가능한 화면이면 ``True``, CAPTCHA·아이디/비밀번호 입력 등 1차 구현 범위 밖이면 ``False``를
+반환한다.
 
 selector는 운영 PC에서 실제 쿠팡 인증 화면 기준으로 보정한다. 그래서 화면 조작을
 얇은 헬퍼로 분리하고, 후보 selector를 여러 개 두어 화면 변화에 견디게 했다.
 
-보안: 인증번호와 토큰 값은 예외 메시지/로그에 넣지 않는다.
+보안: 인증번호와 앱 비밀번호 값은 예외 메시지/로그에 넣지 않는다.
 """
 
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from rider_crawl.auth.gmail import Gmail2faError, fetch_latest_verification_code
+from rider_crawl.auth.imap_2fa import IMAP_HOST_BY_DOMAIN, Imap2faError, domain_of
 from rider_crawl.config import AppConfig
 
 # 발송 클릭 직전 시각에서 빼 둘 안전 여유(초). 로컬/Gmail 서버 시계 오차와, 클릭과
@@ -72,6 +73,11 @@ _PASSWORD_INPUT_SELECTORS = (
 )
 _LOGIN_BUTTON_TEXTS = ("로그인", "login")
 
+# 화면 교차검증용 이메일 주소 패턴. 쿠팡 인증 화면에 노출되는 인증 이메일(일부 마스킹될
+# 수 있음)의 도메인을, 탭에 입력한 인증 이메일 도메인과 대조한다. ``*``는 마스킹 문자.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%*+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+_SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
+
 
 def recover_coupang_session_with_email_2fa(
     page: Any,
@@ -117,6 +123,11 @@ def recover_coupang_session_with_email_2fa(
         # 발송 버튼을 못 찾으면 이메일 인증 화면이 아니라고 보고 자동 복구를 포기한다.
         return False
 
+    # 탭에 입력한 인증 이메일과 화면에 노출된 도메인이 어긋나면, 이 메일함으로는 인증번호가
+    # 오지 않는 오설정이다(다른 메일 계정으로 코드가 감). 폴링을 시작하기 전에 중단한다.
+    if not _account_matches_screen(page, config.verification_email_address):
+        return False
+
     code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
 
     _fill_code_input(page, code, config)
@@ -125,7 +136,7 @@ def recover_coupang_session_with_email_2fa(
 
 
 class Coupang2faError(RuntimeError):
-    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/토큰을 넣지 않는다."""
+    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/앱 비밀번호를 넣지 않는다."""
 
 
 def _fetch_code(
@@ -134,28 +145,52 @@ def _fetch_code(
     requested_after: datetime,
     fetch_code: Callable[..., str] | None,
 ) -> str:
-    fetcher = fetch_code or _default_fetch_code
+    fetcher = fetch_code or _imap_fetch
     try:
         code = fetcher(
-            credentials_path=config.gmail_credentials_path,
-            token_path=config.gmail_token_path,
-            query=config.gmail_2fa_query,
+            email_address=config.verification_email_address,
+            app_password=config.verification_email_app_password,
+            subject_keyword=config.verification_email_subject_keyword,
+            sender_keyword=config.verification_email_sender_keyword,
             requested_after=requested_after,
-            poll_seconds=config.gmail_2fa_poll_seconds,
-            poll_interval_seconds=config.gmail_2fa_poll_interval_seconds,
+            poll_seconds=config.email_2fa_poll_seconds,
+            poll_interval_seconds=config.email_2fa_poll_interval_seconds,
             code_digits=config.coupang_2fa_code_digits,
         )
-    except Gmail2faError as exc:
-        # Gmail 조회 실패는 자동 복구 불가. 코드 값은 애초에 메시지에 없다.
+    except Imap2faError as exc:
+        # IMAP 조회 실패는 자동 복구 불가. 코드/앱 비밀번호 값은 애초에 메시지에 없다.
         raise Coupang2faError(str(exc)) from exc
 
     if not code:
-        raise Coupang2faError("Gmail에서 인증번호를 받지 못했습니다.")
+        raise Coupang2faError("이메일에서 인증번호를 받지 못했습니다.")
     return code
 
 
-def _default_fetch_code(**kwargs: Any) -> str:
+def _imap_fetch(**kwargs: Any) -> str:
+    from rider_crawl.auth.imap_2fa import fetch_latest_verification_code
+
     return fetch_latest_verification_code(**kwargs)
+
+
+# --- 화면 도메인 교차검증 ----------------------------------------------------
+
+
+def _onscreen_domains(page: Any) -> set[str]:
+    text = _safe_page_text(page)  # 이미 casefold 된 page.content()
+    # 화면이 도메인을 일부 마스킹(예: na***.com)하면 지원 도메인과 매칭되지 않으므로,
+    # 완전한 지원 도메인(naver.com/gmail.com 등)만 hard block 기준으로 삼는다.
+    return {
+        domain
+        for m in _EMAIL_RE.finditer(text)
+        if (domain := m.group(1).casefold()) in _SUPPORTED_SCREEN_DOMAINS
+    }
+
+
+def _account_matches_screen(page: Any, account_address: str) -> bool:
+    screen = _onscreen_domains(page)
+    if not screen:
+        return True  # 화면에 (완전한) 지원 도메인이 없으면 교차검증 생략(주 결정만 신뢰).
+    return domain_of(account_address) in screen
 
 
 # --- 화면 조작 헬퍼 ----------------------------------------------------------
@@ -205,25 +240,13 @@ def _submit_primary_login(page: Any, config: AppConfig) -> bool:
 
 
 def _load_coupang_credentials(config: AppConfig) -> tuple[str, str] | None:
-    # UI에 입력한 자격증명이 있으면 그것을 먼저 쓴다. 둘 중 하나라도 비면 기존
-    # JSON 파일(``coupang_credentials_path``)로 폴백한다(하위호환).
+    # 쿠팡 로그인 자격증명은 UI 탭 입력에서만 온다(JSON 파일 폴백 폐기). 둘 중 하나라도
+    # 비면 1차 로그인 자동 제출을 하지 않는다.
     ui_username = str(getattr(config, "coupang_login_id", "") or "").strip()
     ui_password = str(getattr(config, "coupang_login_password", "") or "")
     if ui_username and ui_password:
         return ui_username, ui_password
-
-    try:
-        raw = json.loads(config.coupang_credentials_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    username = str(raw.get("username") or "").strip()
-    password = str(raw.get("password") or "")
-    if not username or not password:
-        return None
-    return username, password
+    return None
 
 
 def _fill_first_input(

@@ -6,7 +6,9 @@ binaries = []
 # psutil은 '준비하기'가 같은 프로필을 점유한 Chrome을 감지해 빈 창 폭주를 막는 데
 # 쓰인다(browser_launcher._chrome_running_for_profile). lazy import라 누락돼도 죽지는
 # 않지만, 빠지면 안전장치가 조용히 비활성화되므로 exe에 명시적으로 포함한다.
-hiddenimports = ['playwright.async_api', 'playwright.sync_api', 'pywinauto', 'psutil']
+# imapclient는 이메일 2FA 자동복구에서 lazy import(imap_2fa._imap_connect)라 정적 스캔에
+# 안 잡힐 수 있으므로 명시한다(빠지면 자동복구가 ImportError로 실패).
+hiddenimports = ['playwright.async_api', 'playwright.sync_api', 'pywinauto', 'psutil', 'imapclient']
 tmp_ret = collect_all('playwright')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

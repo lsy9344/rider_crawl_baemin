@@ -289,30 +289,41 @@ def test_ui_settings_to_app_config_uses_ui_2fa_fields():
     settings.coupang_auto_email_2fa_enabled = True
     settings.coupang_login_id = "worker-id"
     settings.coupang_login_password = "worker-password"
-    settings.gmail_2fa_query = "from:(no-reply@coupang.com) subject:(인증)"
-    settings.gmail_credentials_path = "C:/safe/credentials.gmail.json"
-    settings.gmail_token_path = "C:/safe/token.gmail.json"
+    settings.verification_email_address = "  rider@naver.com  "
+    settings.verification_email_app_password = "abcd efgh ijkl mnop"
+    settings.verification_email_subject_keyword = "인증코드"
 
     config = settings.to_app_config()
 
     assert config.coupang_auto_email_2fa_enabled is True
     assert config.coupang_login_id == "worker-id"
     assert config.coupang_login_password == "worker-password"
-    assert config.gmail_2fa_query == "from:(no-reply@coupang.com) subject:(인증)"
-    assert config.gmail_credentials_path == Path("C:/safe/credentials.gmail.json")
-    assert config.gmail_token_path == Path("C:/safe/token.gmail.json")
+    # 주소는 strip하고, 앱 비밀번호는 (공백 포함 의미 보존을 위해) 그대로 저장한다.
+    assert config.verification_email_address == "rider@naver.com"
+    assert config.verification_email_app_password == "abcd efgh ijkl mnop"
+    assert config.verification_email_subject_keyword == "인증코드"
+    # 발신자 키워드는 UI에 노출하지 않고 기본값을 유지한다.
+    assert config.verification_email_sender_keyword == "coupang"
 
 
 def test_ui_settings_to_app_config_2fa_does_not_read_env(monkeypatch):
     # 정책 변경: to_app_config는 더 이상 환경변수/.env를 읽지 않는다. env가 켜져 있어도
     # UI 설정이 비활성이면 비활성이어야 한다.
     monkeypatch.setenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", "true")
-    monkeypatch.setenv("GMAIL_2FA_QUERY", "from:(env@coupang.com)")
 
     config = UiSettings.defaults().to_app_config()
 
     assert config.coupang_auto_email_2fa_enabled is False
-    assert config.gmail_2fa_query != "from:(env@coupang.com)"
+
+
+def test_ui_settings_to_app_config_defaults_subject_keyword():
+    # 빈 제목 키워드는 기본값으로 보정한다.
+    settings = UiSettings.defaults()
+    settings.verification_email_subject_keyword = ""
+
+    config = settings.to_app_config()
+
+    assert config.verification_email_subject_keyword == "인증번호"
 
 
 def test_ui_settings_to_app_config_defaults_2fa_disabled():
@@ -321,3 +332,30 @@ def test_ui_settings_to_app_config_defaults_2fa_disabled():
     assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == ""
     assert config.coupang_login_password == ""
+    assert config.verification_email_address == ""
+    assert config.verification_email_app_password == ""
+
+
+def test_ui_settings_load_ignores_legacy_gmail_keys(tmp_path):
+    # 옛 탭 JSON의 gmail_* 키는 dataclass 필드가 아니므로 로드 시 자연스럽게 무시된다.
+    # 새 인증 이메일 필드는 빈 값으로 남아 사용자가 앱 비밀번호를 새로 입력하게 한다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://partner.coupangeats.com/page/peak-dashboard",
+          "gmail_2fa_query": "from:(old@coupang.com)",
+          "gmail_credentials_path": "secrets/google/credentials.gmail.json",
+          "gmail_token_path": "secrets/google/token.gmail.json"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert not hasattr(loaded, "gmail_2fa_query")
+    assert loaded.verification_email_address == ""
+    assert loaded.verification_email_app_password == ""
+    assert loaded.verification_email_subject_keyword == "인증번호"
+    assert loaded.verification_email_sender_keyword == "coupang"

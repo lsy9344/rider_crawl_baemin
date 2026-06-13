@@ -651,6 +651,28 @@ def test_coupang_login_required_stops_tab_when_auto_2fa_disabled(tmp_path):
     assert recover_calls == []
 
 
+def test_log_recovery_failure_masks_email_and_omits_token_query(tmp_path):
+    from dataclasses import replace
+
+    config = replace(
+        _config(tmp_path, coupang_auto_email_2fa_enabled=True),
+        verification_email_address="rider1234@naver.com",
+        verification_email_app_password="super-secret-app-pass",
+    )
+
+    crawler._log_recovery_failure(config, RuntimeError("인증 메일 미도착"))
+
+    log_text = (config.log_dir / "run_errors.log").read_text(encoding="utf-8")
+    # 공급자와 마스킹 주소(로컬파트 첫 글자 + 도메인)만 남긴다.
+    assert "provider=naver" in log_text
+    assert "r***@naver.com" in log_text
+    # 전체 이메일 주소·앱 비밀번호·옛 token/query 흔적은 남기지 않는다.
+    assert "rider1234@naver.com" not in log_text
+    assert "super-secret-app-pass" not in log_text
+    assert "token=" not in log_text
+    assert "query=" not in log_text
+
+
 def test_coupang_login_required_recovers_when_auto_2fa_enabled_and_recovery_succeeds(tmp_path):
     config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
     # 첫 준비 대기에서는 로그인 만료로 실패하고, 복구 후 다시 열면 준비가 된다.

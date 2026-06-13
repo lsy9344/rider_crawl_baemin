@@ -542,7 +542,7 @@ def _try_recover_coupang_session(
         # 실패를 흔적 없이 삼켜, run_errors.log에 "로그인 만료"만 남고 *왜* 2FA 복구가
         # 안 됐는지(예: 이 탭의 토큰이 보는 inbox로 인증메일이 오지 않음)를 알 수 없었다.
         # 그래서 어떤 토큰/검색어로 폴링하다 무슨 사유로 실패했는지 한 줄로 남긴다.
-        # Coupang2faError/Gmail2faError 메시지는 코드·토큰 값을 담지 않게 설계돼 있다.
+        # Coupang2faError/Imap2faError 메시지는 코드·앱 비밀번호 값을 담지 않게 설계돼 있다.
         _log_recovery_failure(config, exc)
         return False
     if not succeeded:
@@ -556,23 +556,46 @@ def _try_recover_coupang_session(
     return succeeded
 
 
+_EMAIL_PROVIDER_BY_DOMAIN = {
+    "naver.com": "naver",
+    "mail.naver.com": "naver",
+    "gmail.com": "gmail",
+    "googlemail.com": "gmail",
+}
+
+
+def _email_domain(address: str) -> str:
+    return address.rsplit("@", 1)[-1].strip().casefold() if "@" in (address or "") else ""
+
+
+def _mask_email_address(address: str) -> str:
+    # 전체 이메일 주소는 기록하지 않는다. 로컬파트는 첫 글자만 남기고 가린다(도메인은 단서로 유지).
+    address = str(address or "")
+    if "@" not in address:
+        return "?"
+    local, _, domain = address.partition("@")
+    head = local[:1] if local else ""
+    return f"{head}***@{domain}"
+
+
 def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:
     """쿠팡 이메일 2FA 자동복구 실패를 ``<log_dir>/run_errors.log``에 한 줄 남긴다.
 
-    어느 inbox(=어느 토큰 파일)를 폴링하다 실패했는지가 핵심 단서다. 토큰 *파일명*과
-    검색어만 적고, 인증번호·OAuth 토큰 값은 절대 적지 않는다. 로깅 자체가 실패해도
-    복구 흐름을 막지 않도록 모든 예외를 삼킨다.
+    어느 메일 계정으로 폴링하다 실패했는지가 핵심 단서다. 공급자(naver/gmail)와 마스킹된
+    인증 이메일 주소(로컬파트 첫 글자 + 도메인)만 적고, 앱 비밀번호·인증번호·전체 이메일
+    주소는 절대 적지 않는다. 로깅 자체가 실패해도 복구 흐름을 막지 않도록 모든 예외를 삼킨다.
     """
 
     try:
         log_dir = getattr(config, "log_dir", None) or Path("logs")
         log_dir.mkdir(parents=True, exist_ok=True)
-        token_name = getattr(getattr(config, "gmail_token_path", None), "name", "?")
-        query = getattr(config, "gmail_2fa_query", "")
+        address = str(getattr(config, "verification_email_address", "") or "")
+        provider = _EMAIL_PROVIDER_BY_DOMAIN.get(_email_domain(address), "?")
+        masked = _mask_email_address(address)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = (
             f"[{ts}] 쿠팡 이메일 2FA 자동복구 실패 "
-            f"(token={token_name}, query={query!r}): "
+            f"(provider={provider}, email={masked}): "
             f"{type(exc).__name__}: {exc}\n"
             "----------------------------------------\n"
         )

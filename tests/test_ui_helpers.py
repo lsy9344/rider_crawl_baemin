@@ -68,6 +68,49 @@ def test_coerce_settings_builds_coupang_ui_settings_from_form_values(tmp_path):
     assert settings.baemin_center_id == ""
 
 
+def test_coerce_settings_collects_verification_email_fields(tmp_path):
+    settings = coerce_settings(
+        {
+            "platform_name": "coupang",
+            "performance_url": "https://partner.coupangeats.com/page/peak-dashboard",
+            "peak_dashboard_url": "",
+            "baemin_center_name": "쿠팡강남센터",
+            "baemin_center_id": "",
+            "browser_mode": "cdp",
+            "cdp_url": "http://127.0.0.1:9222",
+            "browser_user_data_dir": str(tmp_path / "browser"),
+            "log_dir": str(tmp_path / "logs"),
+            "kakao_chat_name": "",
+            "telegram_bot_token": "token",
+            "telegram_chat_id": "-100123",
+            "telegram_message_thread_id": "",
+            "messenger_name": "telegram",
+            "interval_minutes": "35",
+            "page_timeout_seconds": "60000",
+            "run_lock_timeout_seconds": "900",
+            "headless": False,
+            "send_enabled": True,
+            "send_only_on_change": False,
+            "coupang_auto_email_2fa_enabled": True,
+            "coupang_login_id": "  worker-id  ",
+            "coupang_login_password": "  pw-with-spaces  ",
+            "verification_email_address": "  rider@naver.com  ",
+            "verification_email_app_password": "abcd efgh",
+            "verification_email_subject_keyword": "  인증코드  ",
+        }
+    )
+
+    assert settings.coupang_auto_email_2fa_enabled is True
+    assert settings.coupang_login_id == "worker-id"
+    # 비밀번호류는 strip하지 않는다(앞뒤 공백 의미 보존).
+    assert settings.coupang_login_password == "  pw-with-spaces  "
+    assert settings.verification_email_address == "rider@naver.com"
+    assert settings.verification_email_app_password == "abcd efgh"
+    assert settings.verification_email_subject_keyword == "인증코드"
+    # 발신자 키워드는 UI에 노출하지 않고 기본값을 유지한다.
+    assert settings.verification_email_sender_keyword == "coupang"
+
+
 def test_validate_active_tab_isolation_allows_coupang_with_expected_center(tmp_path):
     settings = _settings(
         tmp_path,
@@ -160,6 +203,91 @@ def test_validate_active_tab_isolation_rejects_coupang_primary_url_with_http_sch
 
     with pytest.raises(ValueError, match="실적/달성현황 URL"):
         validate_active_tab_isolation([settings])
+
+
+def _coupang_2fa_settings(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+    )
+    settings.baemin_center_name = "쿠팡강남센터"
+    settings.baemin_center_id = ""
+    settings.coupang_auto_email_2fa_enabled = True
+    settings.coupang_login_id = "worker-id"
+    settings.coupang_login_password = "worker-password"
+    settings.verification_email_address = "rider@naver.com"
+    settings.verification_email_app_password = "app-pass"
+    return settings
+
+
+def test_validate_active_tab_isolation_allows_coupang_auto_2fa_with_full_credentials(tmp_path):
+    validate_active_tab_isolation([_coupang_2fa_settings(tmp_path)])
+
+
+def test_validate_active_tab_isolation_skips_2fa_credentials_when_recovery_off(tmp_path):
+    # 자동복구가 꺼져 있으면 인증 이메일 자격증명이 비어도 저장은 허용된다(기존 동작 불변).
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.coupang_auto_email_2fa_enabled = False
+    settings.coupang_login_id = ""
+    settings.verification_email_address = ""
+    settings.verification_email_app_password = ""
+
+    validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_auto_2fa_without_coupang_login_id(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.coupang_login_id = ""
+
+    with pytest.raises(ValueError, match="쿠팡 로그인 아이디"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_auto_2fa_without_coupang_password(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.coupang_login_password = ""
+
+    with pytest.raises(ValueError, match="쿠팡 로그인 비밀번호"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_auto_2fa_without_email_address(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.verification_email_address = ""
+
+    with pytest.raises(ValueError, match="인증 이메일 주소"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_auto_2fa_without_email_app_password(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.verification_email_app_password = ""
+
+    with pytest.raises(ValueError, match="앱 비밀번호"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_rejects_auto_2fa_unsupported_email_domain(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.verification_email_address = "rider@daum.net"
+
+    with pytest.raises(ValueError, match="naver.com 또는 gmail.com"):
+        validate_active_tab_isolation([settings])
+
+
+def test_validate_active_tab_isolation_2fa_error_does_not_leak_password(tmp_path):
+    settings = _coupang_2fa_settings(tmp_path)
+    settings.verification_email_app_password = ""
+    settings.coupang_login_password = "super-secret-pw"
+
+    try:
+        validate_active_tab_isolation([settings])
+    except ValueError as exc:
+        assert "super-secret-pw" not in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
