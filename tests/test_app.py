@@ -418,3 +418,31 @@ def test_message_scope_key_includes_platform_and_peak_dashboard_url(tmp_path):
     )
 
     assert app._message_scope_key(baemin) != app._message_scope_key(coupang)
+
+
+def test_message_scope_key_unchanged_by_secret_store_roundtrip(tmp_path):
+    # Story 2.4 AC3: 평문 token을 store로 빼고 ref→resolve로 되돌려도 dedup 정본인
+    # _message_scope_key 결과가 store 도입 전과 바이트 동일해야 한다(중복 판단 회귀 0).
+    import rider_crawl.app as app
+    from rider_crawl.secret_store import LocalFileSecretStore
+    from rider_crawl.ui_settings import UiSettings, UiSettingsStore
+
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+    settings.monitoring_target_id = "mt-1"
+    settings.telegram_bot_token = "tok-fake"
+    settings.telegram_chat_id = "-100123"
+    store.save(settings)
+
+    # 평문→ref→resolve 왕복을 거친 config
+    roundtrip_config = store.load().to_app_config()
+
+    # store 도입 전처럼 평문을 직접 가진 동일 config
+    direct = UiSettings.defaults()
+    direct.performance_url = "https://example.test/x"
+    direct.telegram_bot_token = "tok-fake"
+    direct.telegram_chat_id = "-100123"
+
+    assert app._message_scope_key(roundtrip_config) == app._message_scope_key(direct.to_app_config())

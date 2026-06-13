@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from rider_crawl.config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
+from rider_crawl.secret_store import LocalFileSecretStore
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
 
 
@@ -609,7 +610,9 @@ def test_save_all_atomic_preserves_original_on_replace_failure(tmp_path, monkeyp
     assert store.path.read_bytes() == before
     assert store.load_all()[0].telegram_chat_id == "-100123"
     # 같은 디렉터리에 임시 파일(.tmp) 잔여물이 남지 않는다.
-    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    # secret store 백엔드(secrets.local.json)는 정상 sibling이라 제외하고, atomic write의 핵심
+    # 보장인 "임시(.tmp) 잔여물 없음"만 확인한다(Story 2.4로 secret이 별도 파일로 분리됨).
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
 
 
@@ -653,7 +656,9 @@ def test_save_single_object_atomic_preserves_original_on_replace_failure(tmp_pat
 
     # 원본은 손대지 않은 이전 유효 상태 그대로(바이트 동일)이고 .tmp 잔여물이 없다.
     assert store.path.read_bytes() == before
-    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    # secret store 백엔드(secrets.local.json)는 정상 sibling이라 제외하고, atomic write의 핵심
+    # 보장인 "임시(.tmp) 잔여물 없음"만 확인한다(Story 2.4로 secret이 별도 파일로 분리됨).
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
 
 
@@ -786,5 +791,322 @@ def test_save_all_atomic_cleans_temp_and_preserves_original_on_fsync_failure(tmp
     # 교체 전 실패라 원본은 불변이고, temp 잔여물이 남지 않는다.
     assert store.path.read_bytes() == before
     assert store.load_all()[0].telegram_chat_id == "-100123"
-    leftovers = [p.name for p in store.path.parent.iterdir() if p.name != store.path.name]
+    # secret store 백엔드(secrets.local.json)는 정상 sibling이라 제외하고, atomic write의 핵심
+    # 보장인 "임시(.tmp) 잔여물 없음"만 확인한다(Story 2.4로 secret이 별도 파일로 분리됨).
+    leftovers = [p.name for p in store.path.parent.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+# ── Story 2.4: secret 값 분리(설정 JSON엔 *_ref만, 평문은 로컬 store) ──
+# 모든 secret 테스트는 명백한 가짜값(tok-fake/pw-fake/id-fake)만 쓰고 tmp_path store를 주입한다
+# (실 runtime/·ui_settings.json·secrets.local.json 미변형 — A1 게이트, AC6/7).
+
+
+def test_save_strips_plaintext_secret_and_writes_only_ref(tmp_path):
+    # AC1: 평문 secret을 채운 UiSettings를 save하면 설정 JSON 텍스트에 평문 값이 0건이고
+    # *_ref 키만 남으며, 실제 값은 설정 파일 밖 store에 보관된다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+    settings.monitoring_target_id = "mt-1"
+    settings.telegram_bot_token = "tok-fake"
+    settings.coupang_login_password = "pw-fake"
+    settings.coupang_login_id = "id-fake"
+
+    store.save(settings)
+
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    for secret in ("tok-fake", "pw-fake", "id-fake"):
+        assert secret not in text
+    assert "telegram_bot_token_ref" in text
+    assert "coupang_login_password_ref" in text
+    assert "coupang_login_id_ref" in text
+    assert '"crawlings"' not in text  # 평면 객체 직렬화 형식 보존
+    # 평문은 설정 파일 밖 store에서만 복원된다.
+    assert backend.resolve(settings.telegram_bot_token_ref) == "tok-fake"
+    assert backend.resolve(settings.coupang_login_password_ref) == "pw-fake"
+    assert backend.resolve(settings.coupang_login_id_ref) == "id-fake"
+
+
+def test_save_all_strips_plaintext_secret_and_preserves_format(tmp_path):
+    # AC1: save_all 경로도 평문 0·ref만 + ensure_ascii=False·{"crawlings":[...]} 구조 보존.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettingsStore(tmp_path / "missing.json").load_all()
+    settings[0].performance_url = "https://example.test/x"
+    settings[0].monitoring_target_id = "mt-1"
+    settings[0].telegram_bot_token = "tok-fake"
+    settings[0].coupang_login_password = "pw-fake"
+
+    store.save_all(settings)
+
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert "tok-fake" not in text
+    assert "pw-fake" not in text
+    assert '"crawlings"' in text
+    assert backend.resolve(settings[0].telegram_bot_token_ref) == "tok-fake"
+    assert backend.resolve(settings[0].coupang_login_password_ref) == "pw-fake"
+
+
+def test_load_all_migrates_legacy_plaintext_secret_to_ref_only(tmp_path):
+    # AC1/AC2: legacy 평문이 든 파일을 load_all하면 신규 파일엔 평문이 복사되지 않고 ref만
+    # 남으며(persist-on-first-issue), in-memory 평문은 무회귀로 보존되고 store.resolve가 원본과
+    # 동일하다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"crawlings": [{"performance_url": "https://example.test/x",'
+        ' "telegram_bot_token": "tok-fake",'
+        ' "coupang_login_password": "pw-fake",'
+        ' "coupang_login_id": "id-fake"}]}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path, backend)
+
+    loaded = store.load_all()
+
+    assert loaded[0].telegram_bot_token == "tok-fake"
+    assert loaded[0].coupang_login_password == "pw-fake"
+    assert loaded[0].coupang_login_id == "id-fake"
+    text = path.read_text(encoding="utf-8")
+    for secret in ("tok-fake", "pw-fake", "id-fake"):
+        assert secret not in text
+    assert "telegram_bot_token_ref" in text
+    assert backend.resolve(loaded[0].telegram_bot_token_ref) == "tok-fake"
+    assert backend.resolve(loaded[0].coupang_login_password_ref) == "pw-fake"
+    assert backend.resolve(loaded[0].coupang_login_id_ref) == "id-fake"
+
+
+def test_load_single_migrates_legacy_plaintext_to_ref_only(tmp_path):
+    # AC1: 단일 객체 파일 load()도 legacy 평문을 store로 이관하고 신규 파일엔 ref만 남긴다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"performance_url": "https://example.test/x", "telegram_bot_token": "tok-fake"}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path, backend)
+
+    loaded = store.load()
+
+    assert loaded.telegram_bot_token == "tok-fake"  # in-memory 보존
+    text = path.read_text(encoding="utf-8")
+    assert "tok-fake" not in text
+    assert "telegram_bot_token_ref" in text
+    assert backend.resolve(loaded.telegram_bot_token_ref) == "tok-fake"
+
+
+def test_load_all_does_not_write_store_or_settings_when_file_missing(tmp_path):
+    # AC3 가드: 파일이 없으면 설정/​store 어느 것도 새로 만들지 않는다(fail-safe).
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "missing.json"
+
+    UiSettingsStore(path, backend).load_all()
+
+    assert path.exists() is False
+    assert (tmp_path / "store.json").exists() is False
+
+
+def test_ref_only_file_resolves_to_byte_identical_plaintext_in_app_config(tmp_path):
+    # AC3 무회귀: ref만 있는 신규 파일을 load → to_app_config가 store resolve로 이전과 바이트
+    # 동일한 평문을 AppConfig에 채운다(sender·dedup·쿠팡 2FA 무회귀의 핵심).
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    original = UiSettings.defaults()
+    original.performance_url = "https://example.test/x"
+    original.monitoring_target_id = "mt-1"
+    original.telegram_bot_token = "tok-fake"
+    original.coupang_login_password = "pw-fake"
+    original.coupang_login_id = "id-fake"
+    store.save(original)
+
+    config = store.load().to_app_config()
+
+    assert config.telegram_bot_token == "tok-fake"
+    assert config.coupang_login_password == "pw-fake"
+    assert config.coupang_login_id == "id-fake"
+
+
+def test_resolve_missing_store_value_is_fail_closed_empty(tmp_path):
+    # AC7 fail-closed: ref는 있는데 store에 값이 없으면 빈 평문(전송 비활성) — 예외/평문 노출 없음.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"performance_url": "https://example.test/x",'
+        ' "telegram_bot_token_ref": "local:mt-1:telegram_bot_token"}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path, backend)
+
+    loaded = store.load()
+
+    assert loaded.telegram_bot_token == ""
+    assert loaded.to_app_config().telegram_bot_token == ""
+
+
+def test_migration_precedence_plaintext_wins_over_existing_ref(tmp_path):
+    # AC1/Task5 precedence: 한 raw에 평문과 *_ref가 둘 다 있으면 평문을 정본으로 재이관(ref
+    # 덮어쓰기)하고 신규 파일엔 평문 잔존 0을 보장한다(ADD-15).
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"performance_url": "https://example.test/x", "monitoring_target_id": "mt-1",'
+        ' "telegram_bot_token": "tok-fresh",'
+        ' "telegram_bot_token_ref": "local:mt-1:telegram_bot_token"}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path, backend)
+
+    loaded = store.load()
+
+    assert loaded.telegram_bot_token == "tok-fresh"  # 평문이 정본
+    text = path.read_text(encoding="utf-8")
+    assert "tok-fresh" not in text
+    assert backend.resolve(loaded.telegram_bot_token_ref) == "tok-fresh"
+
+
+def test_gmail_oauth_token_is_path_ref_only_in_settings_json(tmp_path):
+    # AC2 #5(c): Gmail OAuth token은 설정 JSON에 값이 아니라 경로(ref)만 있다(이미 그러함 —
+    # 분류 명문화용). UiSettings엔 토큰 값 필드가 없고 gmail_token_path(경로)만 직렬화된다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.gmail_token_path = "secrets/google/token.gmail.json"
+
+    store.save(settings)
+
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert "secrets/google/token.gmail.json" in text  # 경로(ref)만 존재
+    assert not hasattr(settings, "gmail_oauth_token")  # 토큰 값 필드 자체가 없다
+
+
+def test_round_trip_does_not_reissue_ref_when_already_migrated(tmp_path):
+    # AC3 안정성: 이미 ref로 마이그레이션된 파일을 다시 load하면 재기록(영속화)이 일어나지
+    # 않는다(persist-on-FIRST-issue) — 원본 바이트가 그대로여야 한다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+    settings.monitoring_target_id = "mt-1"
+    settings.customer_id = "cust-1"
+    settings.platform_account_id = "pa-1"
+    settings.legacy_alias = "크롤링1"
+    settings.telegram_bot_token = "tok-fake"
+    store.save(settings)
+    before = store.path.read_bytes()
+
+    store.load()
+
+    assert store.path.read_bytes() == before  # ref만 남은 파일의 멱등 로드는 재기록 없음
+
+
+# ── QA gap 보강(Story 2.4): 다중 탭 격리·프로세스 재시작 지속성·기본 wiring·fallback·무-secret ──
+# 모두 가짜값(tok-*/pw-*/id-*)·tmp_path만 쓴다(A1 게이트, AC6/7).
+
+
+def test_save_all_keeps_per_tab_secrets_isolated_with_distinct_refs(tmp_path):
+    # GAP(AC1/AC3): 두 활성 탭이 **서로 다른** secret을 가지면 ref가 충돌하지 않고 각 탭이
+    # 자기 값으로만 resolve돼야 한다(탭 간 secret 누출/ref 충돌 0). 신규 인스턴스로 재로드해
+    # 디스크 정본에서 격리가 유지됨까지 확인한다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    tabs = UiSettingsStore(tmp_path / "missing.json").load_all()
+    for i, (target, token) in enumerate((("mt-a", "tok-a"), ("mt-b", "tok-b"))):
+        tabs[i].performance_url = f"https://example.test/{target}"
+        tabs[i].monitoring_target_id = target
+        tabs[i].customer_id = f"cust-{target}"
+        tabs[i].platform_account_id = f"pa-{target}"
+        tabs[i].telegram_bot_token = token
+
+    store.save_all(tabs)
+
+    assert tabs[0].telegram_bot_token_ref != tabs[1].telegram_bot_token_ref
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert "tok-a" not in text and "tok-b" not in text
+
+    fresh = UiSettingsStore(
+        tmp_path / "settings.json", LocalFileSecretStore(tmp_path / "store.json")
+    ).load_all()
+    assert fresh[0].to_app_config().telegram_bot_token == "tok-a"
+    assert fresh[1].to_app_config().telegram_bot_token == "tok-b"
+
+
+def test_secret_persistence_survives_fresh_store_instances_restart(tmp_path):
+    # GAP(AC1.3/AC3.6): 기존 무회귀 테스트는 같은 store 인스턴스로 save→load 한다. 여기서는
+    # 별도(새) UiSettingsStore + LocalFileSecretStore 인스턴스가 **같은 디스크 경로**를 다시
+    # 읽어 to_app_config가 바이트 동일 평문을 채우는지 확인한다(프로세스 재시작 시나리오).
+    saver = UiSettingsStore(tmp_path / "settings.json", LocalFileSecretStore(tmp_path / "store.json"))
+    original = UiSettings.defaults()
+    original.performance_url = "https://example.test/x"
+    original.monitoring_target_id = "mt-1"
+    original.customer_id = "cust-1"
+    original.platform_account_id = "pa-1"
+    original.legacy_alias = "크롤링1"
+    original.telegram_bot_token = "tok-fake"
+    original.coupang_login_password = "pw-fake"
+    original.coupang_login_id = "id-fake"
+    saver.save(original)
+
+    reopened = UiSettingsStore(
+        tmp_path / "settings.json", LocalFileSecretStore(tmp_path / "store.json")
+    )
+    config = reopened.load().to_app_config()
+
+    assert config.telegram_bot_token == "tok-fake"
+    assert config.coupang_login_password == "pw-fake"
+    assert config.coupang_login_id == "id-fake"
+
+
+def test_default_store_wiring_writes_separate_secrets_file(tmp_path):
+    # GAP(AC3.6/7): 운영 기본 wiring(ui.py처럼 backend 미주입)은 설정 파일 옆 **별도**
+    # secrets.local.json을 만들고, ui_settings.json엔 평문이 없어야 한다. 기본 wiring으로 다시
+    # 열어도 평문이 resolve되는지 확인한다.
+    store = UiSettingsStore(tmp_path / "settings.json")  # backend 미주입 = 기본 LocalFileSecretStore
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+    settings.monitoring_target_id = "mt-1"
+    settings.telegram_bot_token = "tok-fake"
+
+    store.save(settings)
+
+    assert (tmp_path / "secrets.local.json").exists()  # 설정 파일과 분리된 sibling
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert "tok-fake" not in text
+    reopened = UiSettingsStore(tmp_path / "settings.json")  # 같은 기본 wiring으로 재오픈
+    assert reopened.load().to_app_config().telegram_bot_token == "tok-fake"
+
+
+def test_save_strips_secret_with_content_ref_when_no_target_id(tmp_path):
+    # GAP(AC1/Task5 fail-safe): monitoring_target_id가 없는(미식별/비활성) 설정도 평문이 그대로
+    # 직렬화되면 안 된다. target_id가 없으면 store가 내용 기반 fallback ref를 발급하고 평문은
+    # 설정 JSON에서 제거돼야 한다.
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.telegram_bot_token = "tok-fake"  # monitoring_target_id는 비움(기본 "")
+
+    store.save(settings)
+
+    text = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert "tok-fake" not in text
+    ref = settings.telegram_bot_token_ref
+    assert ref.startswith("local:")  # 내용 기반 fallback 핸들
+    assert backend.resolve(ref) == "tok-fake"
+
+
+def test_save_without_secrets_issues_no_ref_and_creates_no_store_file(tmp_path):
+    # GAP(absorb 가드): secret이 하나도 없으면 ref를 발급하지 않고 store 파일도 만들지 않는다
+    # (불필요한 secret 산출물·churn 0).
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+
+    store.save(settings)
+
+    assert settings.telegram_bot_token_ref == ""
+    assert settings.coupang_login_password_ref == ""
+    assert settings.coupang_login_id_ref == ""
+    assert (tmp_path / "store.json").exists() is False
+    assert (tmp_path / "settings.json").exists()  # 설정 자체는 정상 기록

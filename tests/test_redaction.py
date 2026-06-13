@@ -106,6 +106,24 @@ def test_ac2_ref_keys_are_preserved():
     assert redact("password_ref=vault://x") == "password_ref=vault://x"
 
 
+def test_story_2_4_secret_ref_keys_preserved_and_plaintext_keys_masked():
+    # Story 2.4: 새 ``*_ref`` 키(로컬 store 핸들)는 참조라 보존되고, 평문 secret 어간 키는
+    # 여전히 마스킹된다(redaction 무약화). ref 값은 secret 이 아니므로 그대로 추적 가능하다.
+    data = {
+        "telegram_bot_token_ref": "local:mt-1/telegram_bot_token",
+        "coupang_login_password_ref": "local:mt-1/coupang_login_password",
+        "coupang_login_id_ref": "local:mt-1/coupang_login_id",
+        "telegram_bot_token": FAKE_TOKEN,
+        "coupang_login_password": FAKE_PASSWORD,
+    }
+    out = redact_mapping(data)
+    assert out["telegram_bot_token_ref"] == "local:mt-1/telegram_bot_token"
+    assert out["coupang_login_password_ref"] == "local:mt-1/coupang_login_password"
+    assert out["coupang_login_id_ref"] == "local:mt-1/coupang_login_id"
+    assert out["telegram_bot_token"] == REDACTED
+    assert out["coupang_login_password"] == REDACTED
+
+
 # --- AC2: 운영 식별자 (보존 기본 / 옵션 마스킹) ----------------------------
 
 

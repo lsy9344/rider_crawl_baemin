@@ -18,6 +18,15 @@ from .config import (
     AppConfig,
     coupang_center_name_risk,
 )
+from .secret_store import LocalFileSecretStore, SecretStore
+
+# 직렬화에서 제외(비영속)하고 로컬 store로 분리하는 평문 secret 필드. 각 필드는 대응
+# ``<field>_ref``를 갖는다(아래 dataclass). OTP/2FA는 비저장 분류라 여기 없다.
+_SECRET_FIELDS: tuple[str, ...] = (
+    "telegram_bot_token",
+    "coupang_login_password",
+    "coupang_login_id",
+)
 
 
 @dataclass
@@ -60,6 +69,13 @@ class UiSettings:
     platform_account_id: str = ""
     monitoring_target_id: str = ""
     legacy_alias: str = ""
+    # secret 분리(P1-06): 설정 JSON에는 평문 token/password 대신 ``*_ref``(로컬 store 핸들)만
+    # 남긴다. 평문 ``telegram_bot_token``/``coupang_login_*`` 필드는 dataclass에 유지하되
+    # 직렬화에서 제외(_to_jsonable)해 "비영속(transient)"으로 강등한다 — 로드 시 store에서
+    # resolve해 in-memory 평문을 채우므로 to_app_config·UI StringVar·소비자는 무변경(무회귀).
+    telegram_bot_token_ref: str = ""
+    coupang_login_password_ref: str = ""
+    coupang_login_id_ref: str = ""
 
     @classmethod
     def defaults(cls) -> "UiSettings":
@@ -164,8 +180,14 @@ class UiSettings:
 
 
 class UiSettingsStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, secret_store: SecretStore | None = None) -> None:
         self.path = path
+        # 기본 store는 설정 파일 옆의 **별도** 파일(secrets.local.json). ui.py 진입점은 기본
+        # store를 쓰므로 시그니처 호환(기본 인자)으로 두어 호출부 무변경을 유지하고, 테스트는
+        # tmp_path store를 주입해 실 파일을 만지지 않는다(AC6/7).
+        self.secret_store: SecretStore = secret_store or LocalFileSecretStore(
+            path.parent / "secrets.local.json"
+        )
 
     def load(self) -> UiSettings:
         if not self.path.exists():
@@ -175,13 +197,22 @@ class UiSettingsStore:
         if isinstance(raw, dict) and isinstance(raw.get("crawlings"), list) and raw["crawlings"]:
             # 다중 탭 파일을 단일 load()로 읽으면 tab 0만 반환한다. 여기서 평면 save()로
             # 영속화하면 나머지 탭이 유실되므로(원본 보존, NFR-18) ID 발급/영속화는
-            # load_all에 위임하고 기존 동작(tab 0 반환, write 없음)을 그대로 둔다.
-            return _settings_from_mapping(raw["crawlings"][0], UiSettings.defaults())
+            # load_all에 위임하고 기존 동작(tab 0 반환, write 없음)을 그대로 둔다. secret은
+            # 표시용으로 in-memory resolve만 하고(평문 잔존 이관은 load_all 소유), 쓰지 않는다.
+            settings = _settings_from_mapping(raw["crawlings"][0], UiSettings.defaults())
+            self._resolve_secrets(settings)
+            return settings
 
         settings = _settings_from_mapping(raw, UiSettings.defaults())
-        # 단일 객체 파일이 활성 탭이면 안정 ID를 발급하고, 새로 발급됐으면 한 번 영속화해
-        # 재로드 시 동일 ID가 유지되게 한다(persist-on-first-issue). 파일은 위에서 존재 확인됨.
+        # 단일 객체 파일이 활성 탭이면 안정 ID를 발급하고, legacy 평문 secret이 있으면 store로
+        # 이관해야 하므로, 둘 중 하나라도 발생하면 한 번 영속화한다(persist-on-first-issue). 그
+        # 결과 재로드 시 동일 ID가 유지되고 신규 파일엔 ref만 남는다. 파일은 위에서 존재 확인됨.
+        needs_persist = False
         if settings.performance_url.strip() and _issue_missing_ids(settings, legacy_alias="크롤링1"):
+            needs_persist = True
+        if self._resolve_secrets(settings):
+            needs_persist = True
+        if needs_persist:
             self.save(settings)
         return settings
 
@@ -208,26 +239,63 @@ class UiSettingsStore:
         # 새로 발급된 ID가 있으면 한 번 영속화해 재로드 시 동일 ID가 유지되게 한다
         # (persist-on-first-issue). 파일이 없을 때는 위에서 이미 반환했으므로 여기서 write는
         # 항상 기존 원본 파일에만 일어난다(새 파일 생성 없음). atomic write는 Story 2.2 소유.
-        issued = False
+        needs_persist = False
         for index, item in enumerate(settings, start=1):
             if not item.performance_url.strip():
                 continue
             if _issue_missing_ids(item, legacy_alias=f"크롤링{index}"):
-                issued = True
-        if issued:
+                needs_persist = True
+        # ID 발급 이후에 secret을 처리한다: legacy 평문은 발급된 target_id 기반 결정적 ref로
+        # 이관되고(아래 save_all → _absorb_secrets), ref만 있는 신규 파일은 in-memory로 resolve
+        # 된다. legacy 평문 이관이 한 건이라도 있으면 한 번 영속화해 신규 파일엔 ref만 남긴다.
+        for item in settings:
+            if self._resolve_secrets(item):
+                needs_persist = True
+        if needs_persist:
             self.save_all(settings)
         return settings
 
     def save(self, settings: UiSettings) -> None:
-        # 직렬화 형식은 그대로 두고(완성된 문자열만 넘긴다) write 방식만 atomic화한다.
+        # 직렬화 직전 평문 secret을 store로 빼고(ref 확정) 직렬화에서는 ref만 남긴다. 형식은
+        # 그대로 두고(완성된 문자열만 넘긴다) write 방식만 atomic화한다.
+        self._absorb_secrets(settings)
         _atomic_write_text(
             self.path,
             json.dumps(_to_jsonable(settings), ensure_ascii=False, indent=2),
         )
 
     def save_all(self, settings: list[UiSettings]) -> None:
+        for item in settings:
+            self._absorb_secrets(item)
         payload = {"crawlings": [_to_jsonable(item) for item in settings]}
         _atomic_write_text(self.path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _absorb_secrets(self, settings: UiSettings) -> None:
+        # 직렬화 직전: 비어있지 않은 평문 secret을 store로 빼고 대응 ``*_ref``를 채운다. 평문
+        # 자체는 _to_jsonable에서 제외된다. store를 먼저 영속화(ref 확정)한 뒤 호출부가 설정
+        # JSON을 atomic write하므로, 크래시 시에도 "설정엔 ref, 값은 store"가 깨지지 않는다.
+        # 평문과 ``*_ref``가 둘 다 있는(반쪽 마이그레이션) 경우 평문을 정본으로 재이관해
+        # ref를 덮어쓴다 — 신규 파일에 평문 잔존 0을 보장한다(ADD-15).
+        for field in _SECRET_FIELDS:
+            plaintext = getattr(settings, field)
+            if plaintext:
+                ref = self.secret_store.put(plaintext, ref=_secret_ref(settings, field))
+                setattr(settings, f"{field}_ref", ref)
+
+    def _resolve_secrets(self, settings: UiSettings) -> bool:
+        # 로드 직후: ``*_ref``만 있는 신규 파일은 store.resolve로 in-memory 평문을 복원한다
+        # (store에 값이 없으면 빈 평문 — fail-closed). legacy 평문이 그대로 있으면(평문 우선)
+        # 손대지 않고 ``True``를 반환해 호출부가 한 번 영속화(save)하게 한다 — save가 평문을
+        # store로 흡수하고 신규 파일엔 ref만 남긴다(2.1 persist-on-first-issue와 동일 정신).
+        legacy_plaintext = False
+        for field in _SECRET_FIELDS:
+            plaintext = getattr(settings, field)
+            ref = getattr(settings, f"{field}_ref")
+            if plaintext:
+                legacy_plaintext = True
+            elif ref:
+                setattr(settings, field, self.secret_store.resolve(ref) or "")
+        return legacy_plaintext
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -288,10 +356,26 @@ def _issue_missing_ids(settings: UiSettings, *, legacy_alias: str) -> bool:
     return changed
 
 
+def _secret_ref(settings: UiSettings, field: str) -> str:
+    # 결정적 핸들: target_id가 있으면 재로드/재정렬에도 안정적인 per-field ref를 만든다
+    # (dedup/diff 안정 + 테스트 결정적). 없으면 빈 문자열을 넘겨 store가 내용 기반 ref를
+    # 발급하게 한다(inactive 탭 등 ID 미발급 케이스의 fail-safe). 필드 구분자는 ``:``가 아니라
+    # ``/``를 쓴다 — ``<digits>:<word>``는 redaction의 Telegram 토큰 형태 정규식에 걸려 ref가
+    # 로그에서 마스킹되는데(추적성 저하), ``/``는 ``vault://…`` 선례처럼 redaction이 보존한다.
+    target = settings.monitoring_target_id
+    if not target:
+        return ""
+    return f"local:{target}/{field}"
+
+
 def _to_jsonable(settings: UiSettings) -> dict[str, Any]:
     data = asdict(settings)
     data["browser_user_data_dir"] = str(settings.browser_user_data_dir)
     data["log_dir"] = str(settings.log_dir)
+    # 평문 secret은 설정 JSON에 절대 쓰지 않는다(P1-06/ADD-15) — ``*_ref``만 남긴다. 키 자체는
+    # 빈 문자열로 유지해 기존 평면 구조/하위호환을 깨지 않는다(값만 비운다).
+    for field in _SECRET_FIELDS:
+        data[field] = ""
     return data
 
 
