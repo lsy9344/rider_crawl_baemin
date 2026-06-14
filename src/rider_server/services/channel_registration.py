@@ -334,6 +334,13 @@ class ChannelRegistrationService:
         if channel is None:
             raise ChannelNotFoundError(channel_id)
         assert_channel_transition(channel.state, MessengerChannelState.VERIFIED)
+        # NOTE(5.10/AC3 kill switch): ``send_test`` 는 실 ``send`` (검증용 test 메시지)다. 현재
+        #   ``verify`` 를 호출하는 live route/webhook 이 없어(인바운드 webhook 은 ``register`` 만
+        #   처리) 현존 reachable chokepoint 가 아니므로 본 스토리는 게이트를 배선하지 않았다.
+        #   향후 운영자 채널 검증 route 가 ``verify`` 를 ``send_test=CentralTelegramSender.send`` 로
+        #   배선하면, 그 호출부에 ``recovery.effective_send_enabled(send_enabled=..,
+        #   sending_enabled=app.state.sending_enabled)`` 게이트를 compose해야 한다(test_send·중앙
+        #   dispatch 루프와 동일 — 미발송 fail-closed, 우회 금지).
         await asyncio.to_thread(send_test, channel)
         verified = replace(channel, state=MessengerChannelState.VERIFIED)
         await self._repo.save(verified)

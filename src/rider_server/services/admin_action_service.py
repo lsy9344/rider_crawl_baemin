@@ -35,6 +35,8 @@ from typing import Protocol
 from rider_crawl.redaction import redact, redact_mapping
 from rider_server.domain import (
     AuditResult,
+    DeliveryLog,
+    DeliveryStatus,
     MonitoringTarget,
     MonitoringTargetStatus,
     Subscription,
@@ -48,6 +50,7 @@ from rider_server.queue.states import (
 )
 from rider_server.services.dispatch_fanout_service import DispatchJob
 from rider_server.services.idempotency import IdempotentDeliveryService
+from rider_server.services.recovery import effective_send_enabled
 from rider_server.services.subscription_gate import (
     DispatchJobStatus,
     HeldDisposition,
@@ -556,13 +559,57 @@ class AdminActionService:
         actor_id: str | None,
         at: datetime,
         source: str | None = None,
+        sending_enabled: bool = True,
     ):
         """단일 ``job`` 1건만 ``deliver_once`` 로 멱등 전송한다(fan-out 0, dedup 우회 0).
 
         ``IdempotentDeliveryService.deliver_once`` 의 ``reserve`` seam 을 그대로 통과하므로 같은
         dedup key 재시도는 ``DUPLICATE_BLOCKED`` 로 차단된다(우회 경로 신설 금지, AC1). 실 고객
         fan-out 은 호출하지 않는다 — 운영자가 지정한 **테스트 채널 1건** 만 받는다.
+
+        **전역 dispatch kill switch(5.10/AC3).** 실전송 = ``send_enabled``(운영자가 지정한 단일
+        테스트 채널이므로 True) **AND** ``sending_enabled``(환경 전역 복구 플래그). 새 차단 로직을
+        만들지 않고 :func:`recovery.effective_send_enabled` 를 재사용한다. ``sending_enabled``
+        가 False(복구/신규 환경 기본 OFF)면 주입 ``send`` 를 **호출하지 않고** 미발송 결과
+        (``DeliveryStatus.HELD``, ``sent_at=None``) + ``result=DENIED`` audit 를 남긴다 —
+        ``deliver_once`` 본문·시그니처·``reserve→send`` 순서·crash-after-send 안전을 건드리지
+        않는다(게이트는 실 ``send`` 호출부인 이 service 에서 분기). 미래 중앙 dispatch 런타임
+        루프가 도입되면 그 실 ``send`` 호출부에도 동일 게이트(``effective_send_enabled``)를
+        compose해야 한다(우회 금지).
         """
+
+        if not effective_send_enabled(send_enabled=True, sending_enabled=sending_enabled):
+            blocked = DeliveryLog(
+                id=log_id_for(job),
+                message_id=job.message_id,
+                channel_id=job.channel_id,
+                status=DeliveryStatus.HELD,
+                dedup_key=IdempotentDeliveryService.build_dedup_key(
+                    target_id=job.target_id,
+                    channel_id=job.channel_id,
+                    collected_at=collected_at,
+                    template_version=job.template_version,
+                    message_hash=job.message_hash,
+                ),
+                error_code=None,
+                sent_at=None,
+            )
+            audit = self._audit(
+                actor_id=actor_id,
+                action=ACTION_TEST_SEND,
+                target_type=TARGET_TYPE_TARGET,
+                target_id=job.target_id,
+                at=at,
+                diff={
+                    "channel_id": job.channel_id,
+                    "status": blocked.status.value,
+                    "sending_enabled": False,
+                },
+                source=source,
+                result=AuditResult.DENIED.value,
+            )
+            await self._repo.record_audit(audit)
+            return blocked
 
         result = IdempotentDeliveryService.deliver_once(
             job,

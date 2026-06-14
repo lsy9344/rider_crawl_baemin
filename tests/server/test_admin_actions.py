@@ -513,6 +513,7 @@ def test_route_test_send_single_channel_when_seam_wired() -> None:
         )
 
     app.state.admin_test_send = _seam
+    app.state.sending_enabled = True  # 5.10 kill switch: 실전송하려면 전역 발송이 켜져 있어야 함.
     client = TestClient(app)
 
     resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})

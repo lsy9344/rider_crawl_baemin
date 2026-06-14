@@ -21,6 +21,7 @@ from rider_server.scheduler import policy
 from rider_server.scheduler.service import (
     REASON_ACTIVE_JOB_EXISTS,
     REASON_BREAKER_OPEN,
+    REASON_ENQUEUED,
     REASON_RACE_LOST,
     REASON_THROTTLED_CAPACITY,
     REASON_UNKNOWN_PLATFORM,
@@ -328,6 +329,84 @@ def test_hundred_targets_capacity_bound_prevents_storm() -> None:
     backend = InMemoryQueueBackend()
     result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
     assert result.enqueued_count == 10
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Story 5.10 / AC1 — 100 fake target scheduling smoke로 확장성 입증(NFR-26, P4 smoke)
+# (재구현 금지: 위 5.4 smoke 두 건은 무변경 유지. 본 smoke 는 AC1 문구를 명시적으로 단정한다 —
+#  단일 tick·exception/race/throttle 0·전부 PENDING·jitter 분산으로 storm 미발생.)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_jitter_spread() -> None:
+    """AC1: 100 대상 전부 due·capacity=100 → 단일 tick 에서 (1) enqueued_count==100,
+    (2) 모든 outcome reason==REASON_ENQUEUED(예외/RACE_LOST/THROTTLED_CAPACITY 0),
+    (3) 각 job 이 queue 에 PENDING 으로 기록(상태 전환 정상), (4) next_run_at ≥85 distinct
+    seconds 분산(같은 초 몰림=job storm 차단).
+    """
+
+    targets = [_target(f"target-{i}", interval=_INTERVAL_MIN) for i in range(100)]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        capacity=_capacity(n=100),  # 슬롯 100 — 부족으로 인한 throttle 0(순수 확장성 입증).
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    # (1) 100개 전부 enqueue(예외/누락 0).
+    assert result.enqueued_count == 100
+    assert len(result.outcomes) == 100
+
+    # (2) 모든 결정이 ENQUEUED — race loss / capacity throttle / 미지 플랫폼 0.
+    reasons = {o.reason for o in result.outcomes}
+    assert reasons == {REASON_ENQUEUED}
+    assert all(o.enqueued for o in result.outcomes)
+    assert all(o.reason != REASON_RACE_LOST for o in result.outcomes)
+    assert all(o.reason != REASON_THROTTLED_CAPACITY for o in result.outcomes)
+
+    # (3) 각 job 이 queue 에 PENDING 으로 기록(상태 전환 정상 — 단순 enqueue 카운트만 보지 않음).
+    for o in result.outcomes:
+        snap = backend.job_snapshot(o.job_id)
+        assert snap is not None
+        assert snap.status == "PENDING"
+
+    # (4) jitter 로 next_run_at 이 여러 초로 분산 → 같은 초 몰림(storm) 미발생(결정적 ≥85).
+    next_runs = [repo.next_run_at_of(f"target-{i}") for i in range(100)]
+    distinct_seconds = {dt.replace(microsecond=0) for dt in next_runs}
+    assert len(distinct_seconds) >= 85, f"next_run_at 분산 부족(storm 위험): {len(distinct_seconds)}"
+
+
+def test_5_10_hundred_targets_second_cycle_also_spread_no_storm() -> None:
+    """AC1(2.3): 첫 tick 후 같은 due 윈도가 닫히고(전진), T+interval 재-tick 에서도 결정적 jitter
+    가 분산을 유지해 두 번째 주기에도 storm 이 없다(결정적 jitter 특성). 첫 tick 직후 재-tick 은
+    next_run_at 전진으로 due 아님(중복 0)도 함께 잠근다.
+    """
+
+    targets = [_target(f"target-{i}", interval=_INTERVAL_MIN) for i in range(100)]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        capacity=_capacity(n=100),
+    )
+    backend = InMemoryQueueBackend()
+    svc = SchedulerService()
+
+    first = asyncio.run(svc.run_tick(repo, backend, now=_NOW))
+    assert first.enqueued_count == 100
+
+    # 같은 시각 재-tick → 전부 전진했으므로 due 아님(중복 enqueue 0 — storm 재발 차단).
+    immediate = asyncio.run(svc.run_tick(repo, backend, now=_NOW))
+    assert immediate.enqueued_count == 0
+
+    # 두 번째 주기: 전진된 next_run_at 의 최댓값(now + interval + jitter, jitter≤interval)을 지나
+    # 전부 다시 due 가 되는 시점(now + 2·interval + 여유)에서 재-tick. 결정적 jitter 가 같은
+    # 분산을 유지해 두 번째 주기에도 storm 이 없다.
+    next_cycle = _NOW + timedelta(minutes=2 * _INTERVAL_MIN, seconds=1)
+    second = asyncio.run(svc.run_tick(repo, backend, now=next_cycle))
+    assert second.enqueued_count == 100
+    next_runs = [repo.next_run_at_of(f"target-{i}") for i in range(100)]
+    distinct_seconds = {dt.replace(microsecond=0) for dt in next_runs}
+    assert len(distinct_seconds) >= 85, f"두 번째 주기 분산 부족: {len(distinct_seconds)}"
 
 
 # ══════════════════════════════════════════════════════════════════════════

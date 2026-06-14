@@ -33,9 +33,12 @@ from rider_server.queue.states import (
 )
 from rider_server.security import AdminRole, require_role
 from rider_server.services.admin_action_service import (
+    ACTION_TEST_SEND,
+    TARGET_TYPE_TARGET,
     UNAUTHENTICATED_ACTOR,
     AdminActionNotFound,
 )
+from rider_server.services.recovery import effective_send_enabled
 from rider_server.services.subscription_gate import HeldDisposition, SubscriptionStatus
 
 router = APIRouter(prefix="/admin", tags=["admin-actions"])
@@ -264,6 +267,29 @@ async def test_send(
     channel_id = (await _form(request)).get("channel_id", "").strip()
     if not channel_id:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "테스트 채널 channel_id 가 필요합니다")
+    # 전역 dispatch kill switch(5.10/AC3): 복구/신규 환경(``sending_enabled`` 기본 OFF)에서는
+    # seam(실 ``send``) 을 **호출하기 전에** 차단한다(fail-closed — seam 이 게이트를 잊고 우회하지
+    # 못하게 라우트가 1차 게이트). service.test_send 도 같은 게이트를 갖지만(직접 호출자/미래
+    # seam 방어), 여기서 우회 불가를 보장한다. 차단 시도도 ``result=DENIED`` audit(5.8 선례).
+    # NOTE: enqueue-only 액션(test-crawl/auth-check/retry)·구조적 미발송 dry-run 은 실 ``send`` 를
+    #       호출하지 않으므로 게이트 대상이 아니다(Task 1.3). 미래 중앙 dispatch 루프 도입 시 그
+    #       실 ``send`` 호출부에 동일 ``effective_send_enabled`` 게이트를 compose해야 한다.
+    sending_enabled = getattr(request.app.state, "sending_enabled", False)
+    if not effective_send_enabled(send_enabled=True, sending_enabled=sending_enabled):
+        await _service(request).record_denied(
+            actor_id=_resolve_actor(request),
+            action=ACTION_TEST_SEND,
+            source=_resolve_source(request),
+            reason="전역 발송 비활성(sending_enabled=False) — test send 차단",
+            at=_now(),
+            target_type=TARGET_TYPE_TARGET,
+            target_id=target_id,
+        )
+        return _fragment(
+            request,
+            "전역 발송 차단(sending_enabled=False) — test send 미발송(fail-closed)",
+            ok=False,
+        )
     try:
         result = await seam(
             _service(request),

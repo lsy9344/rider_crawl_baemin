@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14 (story 5.9 review (AI): review → done — CRITICAL 0, MEDIUM 1 auto-fixed)
+last_updated: 2026-06-14 (story 5.10 review AI: review → done — CRITICAL 0/HIGH 0, MEDIUM 1+LOW 2 auto-fixed, test count 1912→1915)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
@@ -48,6 +48,7 @@ project: rider_result_mornitoring
 # story 5.1 review (AI): review → done — CRITICAL 0, HIGH 0, MEDIUM 2 auto-fixed (File List 보강 + test count 재측정 14→47 신규 / 1330→1363 전체), LOW 3 기록 (2026-06-14)
 # story 5.2 create-story: backlog → ready-for-dev (PostgreSQL 14테이블 ORM+Alembic; "13"은 도메인 모델 수·"14"는 Required Tables 수) (2026-06-14)
 # story 5.8 review (AI): review → done — CRITICAL 0, HIGH 0, MEDIUM 1 auto-fixed (test count 1804→1815), LOW 3 follow-up 기록 (2026-06-14)
+# story 5.10 review (AI): review → done — CRITICAL 0, HIGH 0, MEDIUM 1 auto-fixed (test count 1912→1915 재측정), LOW 2 auto-fixed (verify 미래 게이트 NOTE + orphan tmp 삭제); kill switch 2계층 배선·AC1 smoke·AC2/AC3 추적성 매트릭스 검증 (2026-06-14)
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
@@ -109,6 +110,6 @@ development_status:
   5-7-admin-수동-운영-액션과-고객-구독-상태-전이: done
   5-8-audit-log와-admin-접근-보안: done
   5-9-7개-모니터링-지표-알림과-운영-runbook: done
-  5-10-100-fake-target-부하-smoke와-negative-safety-test: backlog
+  5-10-100-fake-target-부하-smoke와-negative-safety-test: done
   5-11-admin-엔티티-생성-편집-crud-ui: backlog
   epic-5-retrospective: optional
