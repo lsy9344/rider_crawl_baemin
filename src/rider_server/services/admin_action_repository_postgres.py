@@ -85,6 +85,10 @@ def _audit_values(audit: AuditEntry) -> dict:
         "target_id": target_uuid,
         "diff_redacted": diff,
         "created_at": audit.created_at,
+        # Story 5.8: readiness gate 7필드 — source/reason/result(redaction 통과값·기계가독 result).
+        "source": audit.source,
+        "reason": audit.reason,
+        "result": audit.result,
     }
 
 

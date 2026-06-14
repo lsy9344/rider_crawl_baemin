@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from ..security.access import enforce_session
 from .dashboard_service import DashboardRepository, DashboardService
 from .severity import (
     SEVERITY_CRITICAL,
@@ -70,16 +71,18 @@ templates.env.filters["severity_class"] = _severity_class
 
 # ── 인증 seam(5.8 이 MFA/4역할/세션으로 교체) ───────────────────────────────────────
 
-def _default_require_admin_session(request: Request) -> None:
-    """기본 admin 세션 seam(5.6 최소 — full MFA/4역할/audit 는 5.8).
+async def _default_require_admin_session(request: Request) -> None:
+    """기본 admin 세션 seam(5.8 — fail-closed VIEWER 게이트).
 
-    5.6 단계엔 운영자 인증 인프라가 아직 없어 **seam 만** 둔다(5.3 ``resolve_agent_id`` 가
-    full lifecycle 을 5.8 로 미룬 선례와 동일). 기본값은 통과(no-op)이며, 대시보드는 읽기
-    전용·secret 미노출이라 비프로덕션에서 안전하다. 운영/테스트는 ``app.state.require_admin_
-    session`` 을 실제 강제기(401/403 raise)로 교체해 보호한다.
+    5.6 의 permissive no-op 기본을 5.8 이 **deny** 로 바꾼다(게이트레일 #4). 주입된
+    ``app.state.resolve_admin_principal`` seam 으로 principal 을 해석해 VIEWER 수준 세션을
+    강제한다(principal 미해결 → 401, IP 불허 → 403 — :func:`enforce_session`). 읽기 전용
+    대시보드라 MFA·audit-on-deny 는 두지 않는다(게이트레일 #1: 읽기 경로는 write-free).
+    운영/테스트는 ``app.state.resolve_admin_principal`` 로 principal 을 주입하거나
+    ``app.state.require_admin_session`` 자체를 교체해 통과/거부를 제어한다.
     """
 
-    return None
+    await enforce_session(request)
 
 
 async def require_admin_session(request: Request) -> None:

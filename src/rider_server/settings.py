@@ -41,6 +41,14 @@ class Settings:
     # 주입 seam 책임이고, 기존 positional 생성 호환을 위해 default 를 가진 마지막 필드로 둔다.
     telegram_webhook_secret_ref: str | None = None
     telegram_bot_token_ref: str | None = None
+    # Story 5.8: Admin 접근 보안·복구 non-sending 설정(신규 third-party deps 0 — stdlib 파싱).
+    #   * sending_enabled: 복구/신규 환경 실전송 게이트(기본 OFF — fail-closed, NFR-9·25).
+    #   * admin_ip_allowlist: Admin 접근 허용 source IP/CIDR(빈 tuple = 추가 제한 없음, opt-in).
+    #   * admin_mfa_required: privileged 액션의 MFA 강제 토글(기본 True — 게이트레일 #4).
+    # 기존 positional 생성 호환을 위해 default 를 가진 마지막 필드들로 둔다.
+    sending_enabled: bool = False
+    admin_ip_allowlist: tuple[str, ...] = ()
+    admin_mfa_required: bool = True
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -56,4 +64,26 @@ class Settings:
             # ``*_ref`` 핸들(평문 secret 아님) — 미설정/빈 문자열은 None 으로 정규화한다.
             telegram_webhook_secret_ref=env.get("TELEGRAM_WEBHOOK_SECRET_REF") or None,
             telegram_bot_token_ref=env.get("TELEGRAM_BOT_TOKEN_REF") or None,
+            # 복구 non-sending: 기본 OFF(미설정 시 차단). truthy("1"/"true"/"yes"/"on")만 활성화.
+            sending_enabled=_env_bool(env.get("RIDER_SENDING_ENABLED"), default=False),
+            admin_ip_allowlist=_env_tuple(env.get("RIDER_ADMIN_IP_ALLOWLIST")),
+            admin_mfa_required=_env_bool(env.get("RIDER_ADMIN_MFA_REQUIRED"), default=True),
         )
+
+
+def _env_bool(value: str | None, *, default: bool) -> bool:
+    """env 문자열을 bool 로 — ``1``/``true``/``yes``/``on`` → True, ``0``/``false``/… → False.
+
+    미설정(None)/빈 문자열은 ``default``. fail-closed 정책은 호출부의 default 선택으로 표현한다
+    (sending_enabled default False = 복구 차단, mfa_required default True = MFA 강제).
+    """
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_tuple(value: str | None) -> tuple[str, ...]:
+    """콤마 구분 env 문자열을 정규화된 tuple 로(빈 항목 제거). 미설정/빈 문자열은 빈 tuple."""
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())

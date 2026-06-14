@@ -34,6 +34,7 @@ from typing import Protocol
 
 from rider_crawl.redaction import redact, redact_mapping
 from rider_server.domain import (
+    AuditResult,
     MonitoringTarget,
     MonitoringTargetStatus,
     Subscription,
@@ -69,12 +70,21 @@ ACTION_SUBSCRIPTION_SUSPEND = "SUBSCRIPTION_SUSPEND"
 ACTION_SUBSCRIPTION_RESUME = "SUBSCRIPTION_RESUME"
 ACTION_HELD_DISPATCH_DISCARD = "HELD_DISPATCH_DISCARD"
 ACTION_HELD_DISPATCH_RESUME = "HELD_DISPATCH_RESUME"
+# ── 5.8 audit action 코드(token revoke/rotate + 접근 거부/break-glass) ─────────────
+ACTION_AGENT_TOKEN_REVOKE = "AGENT_TOKEN_REVOKE"
+ACTION_AGENT_TOKEN_ROTATE = "AGENT_TOKEN_ROTATE"
+ACTION_EXTERNAL_TOKEN_ROTATE = "EXTERNAL_TOKEN_ROTATE"
+ACTION_ACCESS_DENIED = "ACCESS_DENIED"
+ACTION_BREAK_GLASS_OVERRIDE = "BREAK_GLASS_OVERRIDE"
 
 # ── target_type 코드(audit_logs.target_type) ─────────────────────────────────────
 TARGET_TYPE_TARGET = "monitoring_target"
 TARGET_TYPE_JOB = "job"
 TARGET_TYPE_SUBSCRIPTION = "subscription"
 TARGET_TYPE_DISPATCH = "dispatch"
+TARGET_TYPE_AGENT = "agent"
+TARGET_TYPE_CHANNEL = "messenger_channel"
+TARGET_TYPE_ACCESS = "admin_access"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -107,10 +117,15 @@ class HeldDispatchRef:
 
 @dataclass(frozen=True)
 class AuditEntry:
-    """``audit_logs`` INSERT 1건(AC3). ``diff_redacted`` 는 redaction 통과 dict(secret 0).
+    """``audit_logs`` INSERT 1건(5.7 AC3 + 5.8 AC1). ``diff_redacted`` 는 redaction 통과 dict(secret 0).
 
     ``actor_id`` 는 seam 이 준 식별자(UUID 문자열 또는 미인증 sentinel) — PG 는 UUID 면 컬럼에,
     아니면 컬럼은 NULL 로 두고 ``diff_redacted`` 에 보존한다(미인증도 추적 가능).
+
+    5.8 이 readiness gate 7필드를 채우려 ``source``(변경 출처/역할/IP), ``reason``(운영자 자유
+    텍스트), ``result``(:class:`AuditResult` 값 — 성공/실패/거부)를 **first-class 필드** 로 둔다.
+    ``source``/``reason`` 은 redaction 통과값(평문 secret 0)이고 ``result`` 기본값은 ``SUCCESS``
+    (거부 경로는 ``DENIED`` 를 명시). 기존 6필드 positional 생성과 호환되도록 default 를 둔다.
     """
 
     actor_id: str | None
@@ -119,6 +134,9 @@ class AuditEntry:
     target_id: str | None
     diff_redacted: dict
     created_at: datetime
+    source: str | None = None
+    reason: str | None = None
+    result: str = AuditResult.SUCCESS.value
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -223,11 +241,15 @@ class AdminActionService:
         *,
         actor_id: str | None,
         action: str,
-        target_type: str,
+        target_type: str | None,
         target_id: str | None,
         at: datetime,
         diff: dict,
+        source: str | None = None,
+        reason: str | None = None,
+        result: str = AuditResult.SUCCESS.value,
     ) -> AuditEntry:
+        # source/reason 은 자유 텍스트라 free-text redact 통과(평문 secret 0 — 게이트레일 #5).
         return AuditEntry(
             actor_id=actor_id,
             action=action,
@@ -235,7 +257,67 @@ class AdminActionService:
             target_id=target_id,
             diff_redacted=build_diff_redacted(diff),
             created_at=at,
+            source=redact(source) if source else None,
+            reason=redact(reason) if reason else None,
+            result=result,
         )
+
+    # ── 5.8 AC1·AC2: 접근 거부/break-glass 도 audit(보안 audit — 시도 자체를 남긴다) ──
+    async def record_denied(
+        self,
+        *,
+        actor_id: str | None,
+        action: str,
+        source: str | None,
+        reason: str | None,
+        at: datetime,
+        target_type: str | None = TARGET_TYPE_ACCESS,
+        target_id: str | None = None,
+    ) -> None:
+        """권한·MFA·IP·fail-closed 거부를 ``result=DENIED`` 로 기록한다(AC1·AC2).
+
+        보안 audit 의 핵심은 성공뿐 아니라 **거부된 시도** 도 남기는 것이다 — security 레이어
+        (``require_role``)가 거부 직전 이 메서드를 호출한다. routes.py(읽기 전용)가 아니라
+        service 경유라 read-only 가드(audit-on-deny 는 service 에서)와 정합(게이트레일 #1).
+        """
+
+        audit = self._audit(
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            at=at,
+            diff={"reason": reason} if reason else {},
+            source=source,
+            reason=reason,
+            result=AuditResult.DENIED.value,
+        )
+        await self._repo.record_audit(audit)
+
+    async def record_break_glass(
+        self,
+        *,
+        actor_id: str | None,
+        source: str | None,
+        reason: str | None,
+        at: datetime,
+        target_type: str | None = TARGET_TYPE_ACCESS,
+        target_id: str | None = None,
+    ) -> None:
+        """break-glass(긴급 override) 사용을 강하게 audit 한다(AC2 — 모든 break-glass 기록)."""
+
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_BREAK_GLASS_OVERRIDE,
+            target_type=target_type,
+            target_id=target_id,
+            at=at,
+            diff={"reason": reason} if reason else {},
+            source=source,
+            reason=reason,
+            result=AuditResult.SUCCESS.value,
+        )
+        await self._repo.record_audit(audit)
 
     async def _scoped_target(self, target_id: str, *, tenant_id: str) -> MonitoringTarget:
         target = await self._repo.get_target(target_id)
@@ -265,6 +347,7 @@ class AdminActionService:
         actor_id: str | None,
         reason: str,
         at: datetime,
+        source: str | None = None,
     ) -> MonitoringTarget:
         """운영 활성/비활성 토글 — ``ACTIVE``↔``PAUSED`` 만(``INACTIVE`` soft delete 는 5.11).
 
@@ -290,6 +373,8 @@ class AdminActionService:
                 "to_status": new_status.value,
                 "reason": reason,
             },
+            source=source,
+            reason=reason,
         )
         await self._repo.transition_target(updated, audit)
         return updated
@@ -304,6 +389,7 @@ class AdminActionService:
         actor_id: str | None,
         reason: str,
         at: datetime,
+        source: str | None = None,
     ) -> None:
         """대상에 Agent 를 배정한다(affinity). 대상 tenant scope 검증 후 audit 와 함께 영속."""
 
@@ -315,6 +401,8 @@ class AdminActionService:
             target_id=target_id,
             at=at,
             diff={"agent_id": agent_id, "reason": reason},
+            source=source,
+            reason=reason,
         )
         await self._repo.assign_agent(target_id=target_id, agent_id=agent_id, audit=audit)
 
@@ -327,6 +415,7 @@ class AdminActionService:
         actor_id: str | None,
         reason: str,
         at: datetime,
+        source: str | None = None,
     ) -> str:
         """job 을 ``PENDING`` 재진입시킨다 — ``assert_transition`` 통과 시에만(우회 금지).
 
@@ -353,6 +442,8 @@ class AdminActionService:
                 "to_status": JOB_STATUS_PENDING,
                 "reason": reason,
             },
+            source=source,
+            reason=reason,
         )
         await self._repo.transition_job(job_id, status=JOB_STATUS_PENDING, audit=audit)
         return JOB_STATUS_PENDING
@@ -366,6 +457,7 @@ class AdminActionService:
         tenant_id: str,
         actor_id: str | None,
         at: datetime,
+        source: str | None = None,
     ) -> str:
         """대상에 대해 CRAWL job 1건만 enqueue 한다(``QueueBackend.enqueue`` 재사용).
 
@@ -384,6 +476,7 @@ class AdminActionService:
             target_id=target_id,
             at=at,
             diff={"job_id": job_id, "job_type": job_type},
+            source=source,
         )
         await self._repo.record_audit(audit)
         return job_id
@@ -396,6 +489,7 @@ class AdminActionService:
         tenant_id: str,
         actor_id: str | None,
         at: datetime,
+        source: str | None = None,
     ) -> str:
         """대상에 대해 ``AUTH_CHECK`` job 1건을 트리거한다(인증 상태 재확인)."""
 
@@ -412,6 +506,7 @@ class AdminActionService:
             target_id=target_id,
             at=at,
             diff={"job_id": job_id},
+            source=source,
         )
         await self._repo.record_audit(audit)
         return job_id
@@ -425,6 +520,7 @@ class AdminActionService:
         tenant_id: str,
         actor_id: str | None,
         at: datetime,
+        source: str | None = None,
     ) -> str:
         """주입된 ``render()`` 로 메시지 텍스트만 만든다 — 실발송·``DeliveryLog`` 0(FR-3 dry-run).
 
@@ -441,6 +537,7 @@ class AdminActionService:
             target_id=target_id,
             at=at,
             diff={"preview": redact(text)[:200], "sent": False},
+            source=source,
         )
         await self._repo.record_audit(audit)
         return text
@@ -458,6 +555,7 @@ class AdminActionService:
         tenant_id: str,
         actor_id: str | None,
         at: datetime,
+        source: str | None = None,
     ):
         """단일 ``job`` 1건만 ``deliver_once`` 로 멱등 전송한다(fan-out 0, dedup 우회 0).
 
@@ -484,6 +582,7 @@ class AdminActionService:
                 "channel_id": job.channel_id,
                 "status": result.status.value,
             },
+            source=source,
         )
         await self._repo.record_audit(audit)
         return result
@@ -497,6 +596,7 @@ class AdminActionService:
         tenant_id: str,
         actor_id: str | None,
         at: datetime,
+        source: str | None = None,
     ) -> Subscription:
         """``SubscriptionGate.suspend`` 결과(새 ``Subscription`` + ``SubscriptionStateChange``)를 persist."""
 
@@ -513,6 +613,8 @@ class AdminActionService:
                 "to_status": change.to_status.value,
                 "reason": change.reason,
             },
+            source=source,
+            reason=reason,
         )
         await self._repo.transition_subscription(new_sub, audit)
         return new_sub
@@ -526,6 +628,7 @@ class AdminActionService:
         actor_id: str | None,
         at: datetime,
         to_status: SubscriptionStatus = SubscriptionStatus.PAYMENT_ACTIVE,
+        source: str | None = None,
     ) -> Subscription:
         """``SubscriptionGate.resume`` 결과를 persist — 복구는 구독 상태만 바꾼다(불변식 ②).
 
@@ -548,6 +651,8 @@ class AdminActionService:
                 "to_status": change.to_status.value,
                 "reason": change.reason,
             },
+            source=source,
+            reason=reason,
         )
         await self._repo.transition_subscription(new_sub, audit)
         return new_sub
@@ -562,6 +667,7 @@ class AdminActionService:
         actor_id: str | None,
         reason: str,
         at: datetime,
+        source: str | None = None,
     ) -> str:
         """복구 시 보류된 Dispatch 를 운영자 결정으로 처리한다 — ``SubscriptionGate.dispose_held``.
 
@@ -595,6 +701,8 @@ class AdminActionService:
                 "disposition": disposition.value,
                 "reason": reason,
             },
+            source=source,
+            reason=reason,
         )
         await self._repo.transition_dispatch(
             dispatch_id, status=new_status.value, audit=audit

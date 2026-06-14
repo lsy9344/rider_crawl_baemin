@@ -276,6 +276,8 @@ def test_package_all_reexports_eight_models_and_all_enums() -> None:
         "DeliveryStatus",
         # Story 3.6 — error_code 운영 카테고리 enum
         "FailureCategory",
+        # Story 5.8 — audit 결과 어휘 enum
+        "AuditResult",
         # 지원 enum
         "Platform",
         "Messenger",

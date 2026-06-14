@@ -184,3 +184,18 @@ class FailureCategory(str, Enum):
     # 값은 DeliveryStatus.DUPLICATE_BLOCKED(전송 상태)와 같지만 다른 레이어(error_code 분류).
     DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
     TARGET_VALIDATION_FAILURE = "TARGET_VALIDATION_FAILURE"
+
+
+class AuditResult(str, Enum):
+    """Admin audit 액션의 기계가독 결과(Story 5.8 / AC1).
+
+    ``audit_logs.result`` 어휘 — readiness gate 7필드 중 ``result``(actor/source/diff/target/
+    reason/timestamp/**result**)를 채운다. 보안 audit 의 핵심은 성공뿐 아니라 **거부 시도까지**
+    남기는 것이라, ``DENIED``(권한·MFA·IP·fail-closed 거부)를 1급 결과로 둔다. 값 정의만 —
+    어떤 액션이 어떤 결과를 내는지는 ``AdminActionService``/``security`` 레이어 소유(2.5 enum
+    컨벤션: ``(str, Enum)`` + 멤버 이름 == 대문자 값, native PG ENUM 아님·String 컬럼).
+    """
+
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    DENIED = "DENIED"

@@ -81,7 +81,12 @@ REQUIRED_FIELDS = {
     },
     "jobs": {"id", "type", "target_id", "agent_id", "status", "run_after", "attempts", "error_code"},
     "auth_sessions": {"id", "account_id", "state", "reason", "requested_at", "resolved_at"},
-    "audit_logs": {"actor_id", "action", "target_type", "target_id", "diff_redacted", "created_at"},
+    # Story 5.8: source/reason/result additive(readiness gate 7필드 — actor/source/diff/
+    # target/reason/timestamp/result). created_at 이 timestamp, diff_redacted 가 diff 역할.
+    "audit_logs": {
+        "actor_id", "action", "target_type", "target_id", "diff_redacted", "created_at",
+        "source", "reason", "result",
+    },
 }
 
 # 평문 secret 컬럼명 금지(NFR-8) — ``*_ref`` 만 허용. exact-name 매칭(username_ref ≠ username).
@@ -404,8 +409,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # Story 5.5 가 additive 0004 를 추가 → 단일 head 가 0004 로 이동, 0001→0002→0003→0004 선형 체인.
-    assert heads[0] == "0004_messenger_channel_registration"
+    # Story 5.8 이 additive 0005 를 추가 → 단일 head 가 0005 로 이동, 0001→…→0004→0005 선형 체인.
+    assert heads[0] == "0005_audit_fields_and_agent_token_revoke"
+    assert (
+        script.get_revision("0005_audit_fields_and_agent_token_revoke").down_revision
+        == "0004_messenger_channel_registration"
+    )
     assert (
         script.get_revision("0004_messenger_channel_registration").down_revision
         == "0003_monitoring_targets_scheduling"

@@ -42,6 +42,7 @@ from rider_server.admin.severity import (
     SEVERITY_WARNING,
 )
 from rider_server.main import create_app
+from rider_server.security import AdminPrincipal, AdminRole
 from rider_server.settings import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,16 @@ _NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
 _TENANT = "tn-1"
 _OTHER_TENANT = "tn-2"
+
+# Story 5.8: 기본 seam 이 fail-closed deny 라 읽기 테스트는 VIEWER principal 을 주입해 통과시킨다
+# (의도된 보안 강화 — story 4.5). 거부 테스트는 require_admin_session seam 을 직접 교체한다.
+_VIEWER = AdminPrincipal(actor_id="00000000-0000-0000-0000-0000000000aa", role=AdminRole.VIEWER,
+                         mfa_verified=True, source="ADMIN_UI/viewer")
+
+
+def _allow_viewer(app):
+    app.state.resolve_admin_principal = lambda request: _VIEWER
+    return app
 
 
 def _target(
@@ -170,7 +181,7 @@ def test_auth_required_rows_are_tenant_scoped() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _client(repo: DashboardRepository) -> TestClient:
-    app = create_app(_FAKE_SETTINGS, dashboard_repository=repo)
+    app = _allow_viewer(create_app(_FAKE_SETTINGS, dashboard_repository=repo))
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -420,7 +431,9 @@ class _RecordingRepo(InMemoryDashboardRepository):
 
 def test_full_page_invokes_only_read_methods() -> None:
     repo = _RecordingRepo()
-    TestClient(create_app(_FAKE_SETTINGS, dashboard_repository=repo)).get(f"/admin?tenant={_TENANT}")
+    TestClient(_allow_viewer(create_app(_FAKE_SETTINGS, dashboard_repository=repo))).get(
+        f"/admin?tenant={_TENANT}"
+    )
     # 풀 페이지는 4개 read 포트만 호출(write/전이 호출 0 — 읽기 전용 런타임).
     assert set(repo.calls) == {
         "target_health",

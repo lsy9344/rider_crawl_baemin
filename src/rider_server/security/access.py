@@ -1,0 +1,210 @@
+"""Admin 접근 강제(게이트) — MFA·4역할·IP allowlist + audit-on-deny — Story 5.8 / AC2.
+
+:mod:`principal` 의 순수 정책(역할 rank·principal) 위에 **fail-closed 강제기** 를 얹는다. 모든
+기본값은 **deny**(게이트레일 #4): principal 미해결 → 401, IP 불허 → 403, MFA 미검증(privileged)
+→ 403, 역할 부족 → 403. 거부된 시도는 ``result=DENIED`` 로 **audit**(보안 audit 핵심 — 시도
+자체를 남긴다). audit-write 는 routes.py(읽기 전용)가 아니라 :class:`AdminActionService` 경유라
+read-only 가드(게이트레일 #1)와 정합한다.
+
+**자격 저장·MFA 챌린지 인프라는 외부**(auth front/IdP/config registry — 신규 DB 테이블 0). 서버는
+주입된 principal 의 ``role``/``mfa_verified``/``source`` 를 **강제·audit** 만 한다. 운영/테스트는
+``app.state.resolve_admin_principal`` seam(``request → AdminPrincipal | None``)으로 principal 을
+주입하고, ``app.state.admin_ip_allowlist``/``admin_mfa_required`` 로 강제 정책을 설정한다.
+
+IP allowlist 판정(:func:`ip_allowed`)은 stdlib ``ipaddress`` 만 쓰는 **순수 함수** 라 always-run
+단위로 잠근다(신규 deps 0 — 게이트레일 #7; memory pg-gated-files-hide-pure-helpers).
+"""
+
+from __future__ import annotations
+
+import inspect
+import ipaddress
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from http import HTTPStatus
+
+from fastapi import HTTPException, Request
+
+from rider_server.services.admin_action_service import (
+    ACTION_ACCESS_DENIED,
+    AdminActionService,
+)
+
+from .principal import (
+    AdminPrincipal,
+    AdminRole,
+    is_privileged,
+    role_satisfies,
+)
+
+
+# ── 순수 정책: source IP 도출 + allowlist 판정(stdlib ipaddress, 신규 deps 0) ───────
+
+def source_ip(request: Request) -> str:
+    """요청의 source IP 를 도출한다 — ``X-Forwarded-For`` 선두 토큰 우선(reverse-proxy), 없으면
+    ``request.client.host``. 둘 다 없으면 빈 문자열(미상 → allowlist 가 설정돼 있으면 거부됨).
+    """
+
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    client = request.client
+    return client.host if client is not None else ""
+
+
+def ip_allowed(ip: str, allowlist: Sequence[str]) -> bool:
+    """``ip`` 가 ``allowlist`` 에 속하면 True(allowlist 미설정이면 제한 없음 → True).
+
+    allowlist 항목은 정확 IP(``203.0.113.5``) 또는 CIDR 네트워크(``10.0.0.0/8``)다. ``ip`` 가
+    파싱 불가하면 **fail-closed(False)** — allowlist 가 설정된 상태에서 source 를 모르면 거부.
+    빈 allowlist 는 "추가 제한 없음"으로 해석한다(IP allowlist 는 opt-in 추가 제한, AC2).
+    """
+
+    if not allowlist:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False  # source 미상 → 거부(fail-closed)
+    for entry in allowlist:
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                if addr in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif addr == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue  # 잘못된 allowlist 항목은 무시(나머지로 판정)
+    return False
+
+
+# ── app.state seam 접근자 + 기본값(fail-closed) ─────────────────────────────────
+
+def _default_resolve_admin_principal(request: Request) -> AdminPrincipal | None:
+    """principal 해석 기본 seam — 자격/MFA 인프라 부재라 **None**(fail-closed deny, 401).
+
+    운영/테스트는 ``app.state.resolve_admin_principal`` 을 외부 auth front 신뢰 헤더 해석기 또는
+    주입 principal 로 교체한다(5.3 ``resolve_agent_id``·5.6 ``require_admin_session`` 선례).
+    """
+
+    return None
+
+
+def _now() -> datetime:
+    """audit timestamp — 라우트/게이트는 주입 불가한 실 ``now()`` 를 쓴다(시각 단언은 service 레이어)."""
+
+    return datetime.now(timezone.utc)
+
+
+async def resolve_principal(request: Request) -> AdminPrincipal | None:
+    """주입된 ``app.state.resolve_admin_principal`` seam 으로 principal 을 해석한다(sync/async 모두)."""
+
+    seam = getattr(
+        request.app.state, "resolve_admin_principal", _default_resolve_admin_principal
+    )
+    result = seam(request)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _allowlist(request: Request) -> Sequence[str]:
+    return getattr(request.app.state, "admin_ip_allowlist", ()) or ()
+
+
+def _mfa_required(request: Request) -> bool:
+    return bool(getattr(request.app.state, "admin_mfa_required", True))
+
+
+def _action_service(request: Request) -> AdminActionService | None:
+    return getattr(request.app.state, "admin_action_service", None)
+
+
+async def _audit_denied(
+    request: Request, principal: AdminPrincipal | None, code: str, min_role: AdminRole
+) -> None:
+    """거부 시도를 ``result=DENIED`` 로 audit(service 경유 — read-only 가드 정합).
+
+    ``principal`` 이 None(미인증 401)일 때는 audit-write 를 하지 않는다 — 미인증 POST 폭주가
+    audit write 를 증폭하는 것을 막는다(보안 audit 의 핵심 가치는 **인증된 주체의 무권한 시도**
+    를 남기는 것 = insider 추적). 인증된 주체의 거부(IP/MFA/역할)는 반드시 남긴다.
+    """
+
+    if principal is None:
+        return
+    service = _action_service(request)
+    if service is None:
+        return
+    await service.record_denied(
+        actor_id=principal.actor_id,
+        action=ACTION_ACCESS_DENIED,
+        source=principal.source or source_ip(request),
+        reason=f"{code}: {request.method} {request.url.path} (min_role={min_role.value})",
+        at=_now(),
+    )
+
+
+async def _audit_break_glass(request: Request, principal: AdminPrincipal) -> None:
+    service = _action_service(request)
+    if service is None:
+        return
+    await service.record_break_glass(
+        actor_id=principal.actor_id,
+        source=principal.source or source_ip(request),
+        reason=f"BREAK_GLASS: {request.method} {request.url.path}",
+        at=_now(),
+    )
+
+
+# ── 강제기: 세션(VIEWER) + 역할 게이트(privileged) ───────────────────────────────
+
+async def enforce_session(request: Request) -> AdminPrincipal:
+    """VIEWER 수준 세션 강제(읽기 전용 대시보드용) — principal 해석 + IP allowlist 만.
+
+    읽기 경로라 **write-free**(audit-on-deny 0 — 게이트레일 #1: 읽기 전용은 write 금지).
+    principal 미해결 → 401, IP 불허 → 403. 통과 principal 은 ``request.state.admin_principal`` 에
+    저장해 하위 actor/source 도출에 쓴다.
+    """
+
+    principal = await resolve_principal(request)
+    if principal is None:
+        raise HTTPException(HTTPStatus.UNAUTHORIZED, "admin authentication required")
+    if not ip_allowed(source_ip(request), _allowlist(request)):
+        raise HTTPException(HTTPStatus.FORBIDDEN, "source not allowed")
+    request.state.admin_principal = principal
+    return principal
+
+
+def require_role(min_role: AdminRole):
+    """``min_role`` 이상 역할을 요구하는 라우트 의존성을 만든다(fail-closed + audit-on-deny).
+
+    순서: principal 해석(None→401) → IP allowlist(불허→403) → MFA(privileged·강제 시 미검증→403)
+    → 역할 rank(부족→403). 거부는 모두 ``DENIED`` audit(인증된 주체일 때). break-glass 가
+    privileged 게이트를 통과하면 강하게 audit 한다(AC2 — 모든 break-glass 사용 기록). 통과
+    principal 은 ``request.state.admin_principal`` 에 저장한다(라우트 actor/source 도출).
+    """
+
+    async def _dep(request: Request) -> AdminPrincipal:
+        principal = await resolve_principal(request)
+        if principal is None:
+            raise HTTPException(
+                HTTPStatus.UNAUTHORIZED, "admin authentication required"
+            )
+        if not ip_allowed(source_ip(request), _allowlist(request)):
+            await _audit_denied(request, principal, "IP_NOT_ALLOWED", min_role)
+            raise HTTPException(HTTPStatus.FORBIDDEN, "source not allowed")
+        if is_privileged(min_role) and _mfa_required(request) and not principal.mfa_verified:
+            await _audit_denied(request, principal, "MFA_REQUIRED", min_role)
+            raise HTTPException(HTTPStatus.FORBIDDEN, "MFA verification required")
+        if not role_satisfies(principal.role, min_role):
+            await _audit_denied(request, principal, "ROLE_INSUFFICIENT", min_role)
+            raise HTTPException(HTTPStatus.FORBIDDEN, "insufficient admin role")
+        if principal.role is AdminRole.BREAK_GLASS and is_privileged(min_role):
+            await _audit_break_glass(request, principal)
+        request.state.admin_principal = principal
+        return principal
+
+    return _dep

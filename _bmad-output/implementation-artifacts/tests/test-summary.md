@@ -1,68 +1,67 @@
-# Test Automation Summary — Story 5.7 (Admin 수동 운영 액션과 고객/구독 상태 전이)
+# Test Automation Summary — Story 5.8 (Audit log와 Admin 접근 보안)
 
 작성: 2026-06-14 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest (`.venv/Scripts/python.exe -m pytest`, `pythonpath=["src"]`) · 모드: 발견 갭 자동 적용
 
-> 본 파일은 5.7 스냅샷이며, 동일 내용이 `test-summary.md`(QA 런 정본)에도 반영됐다. **제품 코드 무변경 — 테스트만 추가.**
+> 본 파일은 QA 런 정본이며 5.8 스냅샷이다. **제품 코드 무변경 — 테스트만 추가.**
 
 ## 결과 요약
 
 | 구분 | dev-exit | post-QA(현재) | 증감 |
 | --- | --- | --- | --- |
-| 전체 스위트 passed | 1739 | **1757** | **+18** |
-| 전체 스위트 skipped | 36 | 36 | 0 |
-| Story 5.7 always-run | 35 | **53** | **+18** |
-| Story 5.7 PG-gated(skip) | 6 | 6 | 0 |
+| 전체 스위트 passed | 1804 | **1815** | **+11** |
+| 전체 스위트 skipped | 41 | 41 | 0 |
+| 5.8 보강 3파일 always-run | 34 | **45** | **+11** |
+| 5.8 PG-gated(skip) | 5 | 5 | 0 |
 
-전체 회귀: `1757 passed, 36 skipped` — 신규 갭 테스트 18개, **회귀 0**. 이 수치가 review 정본(dev-exit 35 는 QA 추가로 stale — memory/stale-test-count-a2).
+전체 회귀: `1815 passed, 41 skipped` — 신규 갭 테스트 11개, **회귀 0**. 이 수치가 review 정본(dev-exit 1804 는 QA 추가로 stale — memory/stale-test-count-a2). 모든 신규 테스트는 **always-run**(무 DB)이라 CI PG skip 환경에서도 실행된다.
 
 ## 발견·채운 갭
 
-기존 35 always-run + 6 PG-gated 는 핵심 불변식(suspend/resume·HELD dispose·dedup 우회 0·fan-out 0·SUCCEEDED 거부)을 잘 잠갔으나, **(a) `assign_agent`·`auth_check` 가 PG-gated 에만 있어 always-run 부재, (b) tenant scope 가 구독/target 만 검증되고 retry/dispose 미검증, (c) 라우트 11개 중 5개만 커버(activate·test-crawl·auth-check·dry-run·assign·retry-happy·dispose-happy 미검증), (d) record형 audit(AGENT_ASSIGN/TEST_CRAWL/AUTH_CHECK/HELD dispose) 기록 미검증**에 갭이 있었다.
+기존 always-run 은 핵심 불변식(4역할 rank·IP allowlist·MFA·revoke→401·non-sending AND·redaction)을 잘 잠갔으나, **(a) 읽기 경로 `enforce_session` 의 deny 분기(401/403, write-free)가 happy-path 만 커버, (b) 미인증 POST 가 audit 를 증폭하지 않는 anti-flooding 불변식 미검증, (c) `_audit_values` 순수 매핑(actor UUID/sentinel·7필드 passthrough)·`PostgresAgentTokenRepository.is_revoked` fail-closed 가 PG-gated 파일에만 가려짐, (d) token rotate 라우트·채널 rotate happy-path 라우트 커버리지 부재**에 갭이 있었다(memory/pg-gated-files-hide-pure-helpers).
 
-### `tests/server/test_admin_actions.py` (+15)
+### `tests/server/test_admin_security.py` (+5) — AC2 접근 제어
 
-service(always-run, 무 DB · fake repo · 주입 시각/actor):
-- `test_assign_agent_persists_affinity_and_audit` — Agent 배정 affinity 영속 + AGENT_ASSIGN audit(agent_id 불투명 id 보존). **이전 always-run 부재**(memory/pg-gated-files-hide-pure-helpers).
-- `test_assign_agent_cross_tenant_blocked` — 배정 cross-tenant 차단(`agent_for` 변경/누출 0).
-- `test_auth_check_enqueues_auth_check_job_and_audit` — AUTH_CHECK job 1건 PENDING enqueue + audit. **이전 always-run·PG 모두 부재**.
-- `test_retry_cross_tenant_blocked` — job retry 가 job.tenant≠요청 tenant 면 차단(전이 0).
-- `test_dispose_cross_tenant_blocked` — HELD dispose cross-tenant 차단(전이/누출 0).
+- `test_enforce_session_get_no_principal_is_401_and_write_free` — 읽기 전용 GET 의 fail-closed(principal 미해결→401) + **write-free**(audit 0). 기존엔 `test_viewer_can_read_dashboard` happy 만.
+- `test_enforce_session_get_ip_not_allowed_is_403_and_write_free` — GET 경로 IP allowlist 거부(403) — `require_role` 와 별개인 `enforce_session` 의 IP deny 분기(무 audit).
+- `test_no_principal_post_does_not_amplify_audit` — **anti-flooding 불변식**: 미인증 POST 는 401 이되 DENIED audit 0(`_audit_denied` 의도적 설계). 기존 `test_no_principal_is_401` 은 401 만.
+- `test_allowlist_set_without_source_header_is_failclosed_403` — source 미상(XFF 없음→client host 가 IP 아님) + allowlist → `source_ip`/`ip_allowed` fail-closed 403 + DENIED audit.
+- `test_async_resolve_admin_principal_seam_supported` — `resolve_principal` 의 `inspect.isawaitable` 분기(async principal seam). 기존엔 sync lambda 만.
 
-라우트(`TestClient`, POST·HTMX fragment):
-- `test_route_activate_returns_fragment_and_persists` — 활성화 라우트(기존엔 pause 만, activate 미검증 — TARGET_ACTIVATE 별 액션코드).
-- `test_route_test_crawl_enqueues_baemin` — test crawl(BAEMIN) enqueue 200.
-- `test_route_test_crawl_coupang_platform_branch` — platform=COUPANG **분기 커버**.
-- `test_route_auth_check_triggers` — 인증 확인(AUTH_CHECK) 트리거 라우트.
-- `test_route_dry_run_returns_preview_without_send` — dry-run 미발송(FR-3) 기본 seam.
-- `test_route_assign_agent_happy_path` — Agent 배정 라우트 happy(`agent_for` 반영).
-- `test_route_assign_agent_missing_fields_is_400` — target_id/agent_id 누락 → 400.
-- `test_route_retry_failed_job_to_pending` — retry happy(FAILED→PENDING) — 기존엔 SUCCEEDED→400 만.
-- `test_route_dispose_discard_happy_path` — HELD dispose(DISCARD)→DISCARDED happy — 기존엔 NUKE→400 만.
-- `test_route_resume_invalid_to_status_is_400` — 잘못된 복구 to_status → 400 envelope.
+### `tests/server/test_audit_log_schema.py` (+2) — AC1 audit 매핑
 
-### `tests/server/test_admin_action_audit.py` (+3)
+- `test_audit_values_maps_seven_fields_with_uuid_actor` — PG repo 순수 함수 `_audit_values` 의 actor/target UUID 파싱 + `source`/`reason`/`result` 7필드 passthrough(PG-gated 파일만 간접 사용해 CI skip 시 가려짐).
+- `test_audit_values_preserves_unauthenticated_actor_sentinel` — 미인증 sentinel(UUID 아님) → `actor_id` 컬럼 NULL + `diff_redacted.actor` 보존(미인증도 추적).
 
-- `test_assign_agent_records_audit_with_agent_id` — AGENT_ASSIGN audit(actor/target/시각 + agent_id 보존).
-- `test_test_crawl_and_auth_check_each_record_an_audit_row` — record형 액션도 audit row(TEST_CRAWL·AUTH_CHECK 순서).
-- `test_dispose_held_records_audit_with_disposition` — HELD_DISPATCH_DISCARD audit + disposition 보존.
+### `tests/server/test_agent_token_revoke.py` (+4) — AC3 token revoke/rotate
 
-## 설계 관찰(결함 아님)
+- `test_route_secret_admin_can_rotate_agent_token` — `POST /admin/agents/{id}/token/rotate` 라우트(200 + rotate 시각 + AGENT_TOKEN_ROTATE audit). 기존 라우트 커버리지 0(revoke 만).
+- `test_route_operator_cannot_rotate_agent_token` — rotate 도 SECRET_ADMIN↑ 게이트 — OPERATOR 403 + DENIED audit + rotate 미반영.
+- `test_route_channel_token_rotate_accepts_ref` — `POST /admin/channels/{id}/token/rotate` happy(유효 `*_ref`→200 + audit ref 보존). 기존엔 평문 거부(400)만.
+- `test_pg_is_revoked_failclosed_on_non_uuid_agent_id` — `PostgresAgentTokenRepository.is_revoked` 의 non-UUID fail-closed(→True) 분기(DB 접근 전 반환 → 무-DB always-run 추출).
 
-- **HELD Dispatch 영속(열린 질문 #1)**: PG `get_held_dispatch→None`(보수적 미노출)이라 PG 경로의 dispose happy-path 는 의도적으로 미검증 — 순수 게이트 의미(DISCARD/RESUME/비-HELD 거부·복구 자동발송 0)는 always-run 으로 잠금. Epic 3/5 reconcile 표시 유지.
-- **라우트 실 `now()`**: 라우트는 주입 불가한 실시간 `now()` 라 시각 기반 단언 없이 액션 성공/거부/HTML 만 검증(memory/admin-routes-wallclock-severity 선례).
-- **redaction 키 규칙**: `agent_id`·`disposition`·`*_status` 는 secret 어간 아님 → 보존, `chat_id`/token/otp 류는 통째 마스킹 — audit `diff_redacted` 단언이 이 규칙에 정합.
+## 설계 관찰(결함 아님 — 코드 리뷰 메모)
 
-## 커버리지(액션 표면 기준)
+- **non-sending 소비처 부재**: `recovery.effective_send_enabled` + `Settings.sending_enabled` + `app.state.sending_enabled` 는 순수 helper/flag 로 테스트되지만 **dispatch 경로 소비처가 아직 없다**(settings/recovery/main 외 참조 0). 실제 전송 차단 통합은 Epic 5 reconcile 로 이연 → "실제 send 차단" end-to-end 단언은 만들지 않음(소비처 부재 시 가짜 green 위험). memory/story-5-8-audit-on-deny-anti-flooding 기록.
+- **라우트 실 `now()`**: 라우트는 주입 불가한 실시간 `now()` 라 시각 단언 없이 인가 성공/거부/HTML 만 검증(memory/admin-routes-wallclock-severity).
+- **HELD Dispatch 영속(열린 질문 #1)**: PG `get_held_dispatch→None` 보수적 미노출 — 순수 게이트 의미는 always-run 으로 잠금(5.7 선례 유지).
 
-- AC1 액션 service: 8/8 always-run(이전 6 → 보강 후 8 — assign·auth-check 추가)
-- AC1/AC2 라우트: 11/11 엔드포인트(이전 5 → 보강 후 11)
-- AC3 audit: 전이형 4 + record형 4 = 위험 액션 전수 기록 커버
+## 커버리지(5.8 AC별)
+
+- **AC1 audit 완성**: 7필드 스키마·서비스 채움·DENIED·redaction(기존) + `_audit_values` 순수 매핑(actor UUID/sentinel·passthrough) 보강.
+- **AC2 접근 제어**: 4역할 rank·IP·MFA·라우트 게이트·audit-on-deny(기존) + enforce_session deny(401/403 write-free)·anti-flooding·source 미상·async seam 보강.
+- **AC3 token·복구성**: revoke/rotate service·외부 ref 회전·revoke→401·non-sending(기존) + rotate 라우트·채널 rotate happy·PG is_revoked fail-closed 보강.
 
 ## lock 무회귀
 
-14표·0004 head·enum count-lock(11/4/3/7)·9-dep 전부 유지 — 신규 컬럼/테이블/마이그레이션/enum/deps 0.
+14표 lock·head 0005·9-dep·enum count-lock(`AdminRole`4·`AuditResult`3·기존 11/4/3/7)·단방향 import(`security/` `rider_agent` 0) 전부 유지 — 신규 컬럼/테이블/마이그레이션/enum/deps 0.
+
+## 검증
+
+- 3개 보강 파일: `pytest tests/server/test_admin_security.py test_audit_log_schema.py test_agent_token_revoke.py` → **45 passed**
+- 전체 스위트: **1815 passed / 41 skipped** ✅ · 회귀 0
 
 ## Next Steps
 
-- **PG-gated 6건**은 실 PostgreSQL(`TEST_DATABASE_URL`) 환경에서만 실행 — CI 에 PG 서비스가 붙으면 영속·tenant 격리·audit INSERT 가 추가 검증된다(현 WSL/venv skip).
-- 정본 테스트 카운트는 review 단계에서 재측정해 Dev Agent Record(현재 41 신규)와 일치시킨다.
+- non-sending 게이트의 실제 dispatch 소비처가 Epic 5 reconcile 에서 배선되면 "복구 환경 실전송 0" end-to-end 테스트 추가.
+- **PG-gated 5건**(audit 7필드 영속·`token_revoked_at` UPDATE·0005 round-trip·cross-tenant 누출 0)은 실 PostgreSQL(`TEST_DATABASE_URL`) CI 잡에서만 실행 — 현 WSL/venv skip.
+- 정본 테스트 카운트(1815)는 review 단계에서 재측정해 Dev Agent Record 와 일치시킨다.

@@ -23,6 +23,7 @@ from .platform_account import PlatformAccount
 from .secret_ref import SecretRef
 from .snapshot import Snapshot
 from .states import (
+    AuditResult,
     BaeminAuthState,
     BrowserProfileState,
     CustomerLifecycleState,
@@ -62,6 +63,8 @@ __all__ = [
     "DeliveryStatus",
     # Story 3.6 — error_code 운영 카테고리(7종, delivery_logs/jobs.error_code 어휘)
     "FailureCategory",
+    # Story 5.8 — audit 결과 어휘(audit_logs.result; SUCCESS/FAILURE/DENIED)
+    "AuditResult",
     # 지원 enum
     "Platform",
     "Messenger",

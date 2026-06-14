@@ -31,6 +31,12 @@ class Agent(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     last_heartbeat_at: Mapped[datetime | None] = ts(nullable=True)
     capacity_json: Mapped[dict] = mapped_column(json_variant(), nullable=False, default=dict)
+    # ── 5.8 server-side token revoke/rotate(additive, 0005 마이그레이션, AC3) ──────────
+    # token 자체는 Agent-local DPAPI(서버 비저장)다. server 는 revoke/rotate **시각** 만 두어
+    # ``resolve_agent_id`` 가 revoked agent 의 bearer 를 거부(→None→401)하게 한다. ``token``
+    # 단독 컬럼명 금지(forbidden-column 정확매치 — ``token_revoked_at``/``token_rotated_at`` 안전).
+    token_revoked_at: Mapped[datetime | None] = ts(nullable=True)
+    token_rotated_at: Mapped[datetime | None] = ts(nullable=True)
 
 
 class BrowserProfile(Base):

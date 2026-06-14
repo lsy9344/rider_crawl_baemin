@@ -31,29 +31,35 @@ from rider_server.queue.states import (
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
 )
+from rider_server.security import AdminRole, require_role
 from rider_server.services.admin_action_service import (
     UNAUTHENTICATED_ACTOR,
     AdminActionNotFound,
 )
 from rider_server.services.subscription_gate import HeldDisposition, SubscriptionStatus
 
-from .routes import require_admin_session
-
 router = APIRouter(prefix="/admin", tags=["admin-actions"])
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
+# ── 역할 게이트(5.8) — 운영 액션=OPERATOR↑, secret/token=SECRET_ADMIN↑(Task 4) ──────
+# 게이트는 security 레이어에서 강제한다(fail-closed + audit-on-deny). 라우트는 직접 ORM write
+# 0·service 위임만(test_admin_actions_guard). 통과 principal 은 request.state 에 저장된다.
+require_operator = require_role(AdminRole.OPERATOR)
+require_secret_admin = require_role(AdminRole.SECRET_ADMIN)
 
-# ── actor 해석 seam(5.8 이 MFA/4역할/실 사용자로 교체) ──────────────────────────────
+
+# ── actor/source 해석 seam(5.8: principal 에서 도출) ─────────────────────────────────
 
 def _default_resolve_admin_actor(request: Request) -> str:
-    """기본 actor seam(5.7 최소) — 운영자 식별 인프라 부재라 sentinel 만 반환한다(AC3).
-
-    5.8 이 ``require_admin_session`` 을 실 세션/MFA/역할로 교체하면서 실제 actor 식별자(UUID)를
-    제공한다. 5.7 은 seam 이 주는 값만 audit 에 기록한다 — 미해결이면 명시적 sentinel.
+    """기본 actor seam(5.8) — 역할 게이트가 ``request.state.admin_principal`` 에 둔 principal 의
+    실 actor 식별자(UUID)를 audit 에 기록한다. principal 미해결이면 명시적 sentinel(미인증 추적).
     """
 
+    principal = getattr(request.state, "admin_principal", None)
+    if principal is not None:
+        return principal.actor_id
     return UNAUTHENTICATED_ACTOR
 
 
@@ -62,10 +68,22 @@ def _resolve_actor(request: Request) -> str:
     return seam(request)
 
 
+def _resolve_source(request: Request) -> str | None:
+    """audit ``source`` — principal 출처(역할/IP 라벨). 미해결이면 None(seam 거부 경로)."""
+
+    principal = getattr(request.state, "admin_principal", None)
+    return principal.source if principal is not None else None
+
+
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────────
 
 def _service(request: Request):
     return request.app.state.admin_action_service
+
+
+def _token_service(request: Request):
+    """server-side token revoke/rotate service(``AgentTokenService``) — SECRET_ADMIN 게이트 뒤."""
+    return request.app.state.agent_token_service
 
 
 def _now() -> datetime:
@@ -121,7 +139,7 @@ def _raise_for(exc: Exception) -> None:
 
 @router.post("/targets/{target_id}/activate", response_class=HTMLResponse)
 async def activate_target(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     reason = (await _form(request)).get("reason", "")
     try:
@@ -130,6 +148,7 @@ async def activate_target(
             active=True,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             reason=reason,
             at=_now(),
         )
@@ -140,7 +159,7 @@ async def activate_target(
 
 @router.post("/targets/{target_id}/pause", response_class=HTMLResponse)
 async def pause_target(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     reason = (await _form(request)).get("reason", "")
     try:
@@ -149,6 +168,7 @@ async def pause_target(
             active=False,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             reason=reason,
             at=_now(),
         )
@@ -161,7 +181,7 @@ async def pause_target(
 
 @router.post("/targets/{target_id}/test-crawl", response_class=HTMLResponse)
 async def test_crawl(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     platform = (await _form(request)).get("platform", "BAEMIN").strip().upper()
     job_type = JOB_TYPE_CRAWL_COUPANG if platform == "COUPANG" else JOB_TYPE_CRAWL_BAEMIN
@@ -171,6 +191,7 @@ async def test_crawl(
             job_type=job_type,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
@@ -180,13 +201,14 @@ async def test_crawl(
 
 @router.post("/targets/{target_id}/auth-check", response_class=HTMLResponse)
 async def auth_check(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     try:
         job_id = await _service(request).auth_check(
             target_id=target_id,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
@@ -196,7 +218,7 @@ async def auth_check(
 
 @router.post("/targets/{target_id}/dry-run", response_class=HTMLResponse)
 async def dry_run(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     """dry-run render — 실발송 없이 렌더 결과만(FR-3). 렌더 소스는 ``admin_render_preview`` seam.
 
@@ -215,6 +237,7 @@ async def dry_run(
             target_id=target_id,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
@@ -224,7 +247,7 @@ async def dry_run(
 
 @router.post("/targets/{target_id}/test-send", response_class=HTMLResponse)
 async def test_send(
-    request: Request, target_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     """test send — 운영자 지정 **단일 테스트 채널** 로만(실 고객 fan-out 0, dedup 우회 0).
 
@@ -248,6 +271,7 @@ async def test_send(
             channel_id=channel_id,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
@@ -259,7 +283,7 @@ async def test_send(
 
 @router.post("/jobs/{job_id}/retry", response_class=HTMLResponse)
 async def retry_job(
-    request: Request, job_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, job_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     reason = (await _form(request)).get("reason", "")
     try:
@@ -267,6 +291,7 @@ async def retry_job(
             job_id,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             reason=reason,
             at=_now(),
         )
@@ -279,7 +304,7 @@ async def retry_job(
 
 @router.post("/agents/assign", response_class=HTMLResponse)
 async def assign_agent(
-    request: Request, _auth: None = Depends(require_admin_session)
+    request: Request, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
     target_id = form.get("target_id", "").strip()
@@ -292,6 +317,7 @@ async def assign_agent(
             agent_id=agent_id,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             reason=form.get("reason", ""),
             at=_now(),
         )
@@ -304,7 +330,7 @@ async def assign_agent(
 
 @router.post("/subscriptions/{subscription_id}/suspend", response_class=HTMLResponse)
 async def suspend_subscription(
-    request: Request, subscription_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, subscription_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     reason = (await _form(request)).get("reason", "")
     try:
@@ -313,6 +339,7 @@ async def suspend_subscription(
             reason=reason,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
@@ -322,7 +349,7 @@ async def suspend_subscription(
 
 @router.post("/subscriptions/{subscription_id}/resume", response_class=HTMLResponse)
 async def resume_subscription(
-    request: Request, subscription_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, subscription_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
     reason = form.get("reason", "")
@@ -339,6 +366,7 @@ async def resume_subscription(
             reason=reason,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             at=_now(),
             **kwargs,
         )
@@ -356,7 +384,7 @@ async def resume_subscription(
 
 @router.post("/dispatch/{dispatch_id}/dispose", response_class=HTMLResponse)
 async def dispose_held_dispatch(
-    request: Request, dispatch_id: str, _auth: None = Depends(require_admin_session)
+    request: Request, dispatch_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
     disposition_raw = form.get("disposition", "").strip().upper()
@@ -372,9 +400,78 @@ async def dispose_held_dispatch(
             disposition,
             tenant_id=_tenant_id(request),
             actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
             reason=form.get("reason", ""),
             at=_now(),
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
     return _fragment(request, f"HELD Dispatch 처리됨 (상태: {new_status})")
+
+
+# ── token revoke/rotate(AC3) — SECRET_ADMIN↑ 게이트 ──────────────────────────────
+
+@router.post("/agents/{agent_id}/token/revoke", response_class=HTMLResponse)
+async def revoke_agent_token(
+    request: Request, agent_id: str, _principal=Depends(require_secret_admin)
+) -> HTMLResponse:
+    """``POST /admin/agents/{id}/token/revoke`` — Agent token server-side revoke(이후 401).
+
+    revoke 가 반영되면 같은 bearer 의 claim/heartbeat/complete 가 401 이 된다(resolver→None).
+    write+audit 는 ``AgentTokenService`` 가 동일 트랜잭션으로 수행한다(라우트 직접 write 0).
+    """
+
+    reason = (await _form(request)).get("reason", "")
+    await _token_service(request).revoke(
+        agent_id,
+        at=_now(),
+        actor_id=_resolve_actor(request),
+        source=_resolve_source(request),
+        reason=reason,
+    )
+    return _fragment(request, f"Agent token revoke됨 (agent {agent_id})")
+
+
+@router.post("/agents/{agent_id}/token/rotate", response_class=HTMLResponse)
+async def rotate_agent_token(
+    request: Request, agent_id: str, _principal=Depends(require_secret_admin)
+) -> HTMLResponse:
+    """``POST /admin/agents/{id}/token/rotate`` — 기존 token 무효화 + 재발급 경로 개방(audit)."""
+
+    reason = (await _form(request)).get("reason", "")
+    await _token_service(request).rotate(
+        agent_id,
+        at=_now(),
+        actor_id=_resolve_actor(request),
+        source=_resolve_source(request),
+        reason=reason,
+    )
+    return _fragment(request, f"Agent token rotate됨 (agent {agent_id})")
+
+
+@router.post("/channels/{channel_id}/token/rotate", response_class=HTMLResponse)
+async def rotate_channel_token(
+    request: Request, channel_id: str, _principal=Depends(require_secret_admin)
+) -> HTMLResponse:
+    """``POST /admin/channels/{id}/token/rotate`` — 외부 service token ``*_ref`` 회전(평문 DB 0).
+
+    ``new_secret_ref`` 는 ``*_ref`` 핸들이어야 한다 — 평문 secret 이면 fail-closed 400(평문을
+    응답/로그/audit 에 싣지 않는다). 실제 Secrets Manager 호출은 배포 인프라(runbook 절차).
+    """
+
+    form = await _form(request)
+    new_secret_ref = form.get("new_secret_ref", "").strip()
+    if not new_secret_ref:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "new_secret_ref(핸들)가 필요합니다")
+    try:
+        await _token_service(request).rotate_external_token(
+            channel_id=channel_id,
+            new_secret_ref=new_secret_ref,
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=form.get("reason", ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "평문 secret 금지 — *_ref 핸들만") from exc
+    return _fragment(request, f"채널 token ref 회전됨 (channel {channel_id})")

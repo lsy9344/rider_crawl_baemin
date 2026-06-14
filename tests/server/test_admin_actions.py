@@ -44,6 +44,7 @@ from rider_server.services.admin_action_service import (
     JobRef,
     TenantScopeViolation,
 )
+from rider_server.security import AdminPrincipal, AdminRole
 from rider_server.services.dispatch_fanout_service import DispatchJob
 from rider_server.services.subscription_gate import DispatchJobStatus, HeldDisposition
 from rider_server.settings import Settings
@@ -54,6 +55,10 @@ _TENANT = "tn-1"
 _OTHER = "tn-2"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
+# Story 5.8: 액션 라우트는 OPERATOR↑ 게이트(fail-closed). 5.7 라우트 테스트는 MFA 검증된
+# OPERATOR principal 을 주입해 통과시킨다(의도된 보안 강화 — story 4.5).
+_OPERATOR = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True,
+                           source="ADMIN_UI/operator")
 
 
 def _run(coro):
@@ -361,7 +366,9 @@ def test_missing_target_is_not_found() -> None:
 
 def _app_with(repo: InMemoryAdminActionRepository, queue=None):
     svc = AdminActionService(repo, queue or InMemoryQueueBackend())
-    return create_app(_FAKE_SETTINGS, admin_action_service=svc)
+    app = create_app(_FAKE_SETTINGS, admin_action_service=svc)
+    app.state.resolve_admin_principal = lambda request: _OPERATOR  # 통과 principal 주입(5.8)
+    return app
 
 
 def test_route_pause_returns_fragment_and_persists() -> None:
@@ -420,18 +427,45 @@ def test_route_cross_tenant_is_404() -> None:
 
 
 def test_route_requires_admin_session() -> None:
+    """Story 5.8: principal 미해결(seam None) → 401(fail-closed). 액션 라우트는 OPERATOR↑ 게이트."""
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
-    app = _app_with(repo)
-
-    def _reject(request):
-        raise HTTPException(HTTPStatus.UNAUTHORIZED, "admin only")
-
-    app.state.require_admin_session = _reject
+    app = create_app(_FAKE_SETTINGS, admin_action_service=AdminActionService(repo, InMemoryQueueBackend()))
+    app.state.resolve_admin_principal = lambda request: None  # 미인증 → fail-closed
     client = TestClient(app)
 
     resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
     assert resp.status_code == HTTPStatus.UNAUTHORIZED
+
+
+def test_route_viewer_role_cannot_act() -> None:
+    """Story 5.8: VIEWER principal 이 운영 액션(OPERATOR↑) 시도 → 403 + DENIED audit."""
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    app = create_app(_FAKE_SETTINGS, admin_action_service=AdminActionService(repo, InMemoryQueueBackend()))
+    viewer = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.VIEWER, mfa_verified=True, source="ADMIN_UI/viewer")
+    app.state.resolve_admin_principal = lambda request: viewer
+    client = TestClient(app)
+
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    # 거부 시도가 result=DENIED 로 audit(보안 audit — 시도 자체를 남긴다).
+    assert repo.audits[-1].result == "DENIED"
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE  # 전이 0
+
+
+def test_route_mfa_unverified_privileged_denied() -> None:
+    """Story 5.8: MFA 미검증 principal 의 privileged 액션 → 403(게이트레일 #4)."""
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    app = create_app(_FAKE_SETTINGS, admin_action_service=AdminActionService(repo, InMemoryQueueBackend()))
+    no_mfa = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=False, source="x")
+    app.state.resolve_admin_principal = lambda request: no_mfa
+    client = TestClient(app)
+
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert repo.audits[-1].result == "DENIED"
 
 
 def test_readonly_dashboard_get_still_ok() -> None:
@@ -458,7 +492,7 @@ def test_route_test_send_single_channel_when_seam_wired() -> None:
     sends: list[str] = []
     reserved: set[str] = set()
 
-    async def _seam(service, *, target_id, channel_id, tenant_id, actor_id, at):
+    async def _seam(service, *, target_id, channel_id, tenant_id, actor_id, at, source=None):
         def reserve(key: str) -> bool:
             if key in reserved:
                 return False
@@ -475,6 +509,7 @@ def test_route_test_send_single_channel_when_seam_wired() -> None:
             tenant_id=tenant_id,
             actor_id=actor_id,
             at=at,
+            source=source,
         )
 
     app.state.admin_test_send = _seam

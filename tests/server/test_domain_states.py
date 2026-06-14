@@ -10,6 +10,7 @@ import json
 from enum import Enum
 
 from rider_server.domain import (
+    AuditResult,
     BaeminAuthState,
     BrowserProfileState,
     CustomerLifecycleState,
@@ -39,6 +40,7 @@ def test_all_enums_are_str_enum_with_name_equals_uppercase_value() -> None:
         MessengerChannelState,
         BrowserProfileState,
         FailureCategory,  # Story 3.6 — error_code 운영 카테고리
+        AuditResult,  # Story 5.8 — audit 결과 어휘
     ]
     for enum_cls in enums:
         assert issubclass(enum_cls, str), f"{enum_cls.__name__} must be (str, Enum)"
@@ -129,6 +131,14 @@ def test_failure_category_has_exact_7_members_matching_nfr15() -> None:
     assert len(list(FailureCategory)) == 7
 
 
+def test_audit_result_has_exact_3_members() -> None:
+    # Story 5.8 / AC1: audit_logs.result 어휘 — 성공/실패/거부 3종(신규 enum 자체 count-lock).
+    # 거부(DENIED)도 1급 결과(보안 audit 핵심 — 거부 시도까지 남긴다).
+    assert [m.name for m in AuditResult] == ["SUCCESS", "FAILURE", "DENIED"]
+    assert [m.value for m in AuditResult] == ["SUCCESS", "FAILURE", "DENIED"]
+    assert len(list(AuditResult)) == 3
+
+
 def test_failure_category_auth_required_is_distinct_typed_member() -> None:
     # AUTH_REQUIRED는 CustomerLifecycleState·BaeminAuthState·FailureCategory 3타입 동명 멤버 —
     # 값은 같고 타입이 다르다(전송-결과 분류 vs 고객/계정 lifecycle). 필드 타입으로 구별.
@@ -206,6 +216,7 @@ def test_every_enum_member_json_serializes_to_its_uppercase_name() -> None:
         MessengerChannelState,
         BrowserProfileState,
         FailureCategory,  # Story 3.6 — error_code 운영 카테고리
+        AuditResult,  # Story 5.8 — audit 결과 어휘
     ]
     for enum_cls in enums:
         for member in enum_cls:

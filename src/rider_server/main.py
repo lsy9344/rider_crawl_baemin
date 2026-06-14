@@ -33,11 +33,18 @@ from .db.base import create_engine, create_session_factory
 from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
+from .security.access import _default_resolve_admin_principal
 from .services.admin_action_repository_postgres import PostgresAdminActionRepository
 from .services.admin_action_service import (
     AdminActionRepository,
     AdminActionService,
     InMemoryAdminActionRepository,
+)
+from .services.agent_token_repository_postgres import PostgresAgentTokenRepository
+from .services.agent_token_service import (
+    AgentTokenRepository,
+    AgentTokenService,
+    InMemoryAgentTokenRepository,
 )
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
@@ -82,6 +89,20 @@ def _default_admin_action_repository(settings: Settings) -> AdminActionRepositor
         engine = create_engine(settings.database_url)
         return PostgresAdminActionRepository(create_session_factory(engine))
     return InMemoryAdminActionRepository()
+
+
+def _default_agent_token_repository(settings: Settings) -> AgentTokenRepository:
+    """Agent token revoke/rotate repository 기본값(``_default_admin_action_repository`` 와 동형).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL(``agents.token_revoked_at`` UPDATE + audit INSERT 동일
+    트랜잭션), 없으면 in-memory(dev/무-DB + always-run fake). 테스트는
+    ``create_app(agent_token_service=...)`` 로 in-memory fake 를 직접 주입한다.
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresAgentTokenRepository(create_session_factory(engine))
+    return InMemoryAgentTokenRepository()
 
 
 def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
@@ -144,14 +165,19 @@ def create_app(
     channel_repository: ChannelRepository | None = None,
     dashboard_repository: DashboardRepository | None = None,
     admin_action_service: AdminActionService | None = None,
+    agent_token_service: AgentTokenService | None = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
 
     테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository``·
-    ``dashboard_repository``·``admin_action_service`` 를 주입할 수 있다(미지정 시 env 로딩 /
-    settings 기반 기본값). webhook secret 해석은 ``app.state.resolve_telegram_secret`` seam,
-    admin 세션은 ``app.state.require_admin_session`` seam, admin actor 는
-    ``app.state.resolve_admin_actor`` seam 으로 주입한다(5.8 이 MFA/4역할/세션으로 교체).
+    ``dashboard_repository``·``admin_action_service``·``agent_token_service`` 를 주입할 수 있다
+    (미지정 시 env 로딩 / settings 기반 기본값). webhook secret 해석은
+    ``app.state.resolve_telegram_secret`` seam. **Story 5.8 보안 seam**: principal 해석은
+    ``app.state.resolve_admin_principal``(기본 fail-closed deny), IP allowlist 는
+    ``app.state.admin_ip_allowlist``, MFA 강제는 ``app.state.admin_mfa_required``, 복구
+    non-sending 은 ``app.state.sending_enabled``, server-side token revoke/rotate 는
+    ``app.state.agent_token_service`` 로 주입·설정한다(``require_admin_session``/
+    ``resolve_admin_actor`` 는 principal 위에서 동작).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
@@ -178,6 +204,15 @@ def create_app(
         app.state.queue_backend,
     )
     app.state.resolve_admin_actor = _default_resolve_admin_actor
+    # Story 5.8: Admin 접근 보안 — principal 해석 seam(기본 fail-closed deny) + IP allowlist + MFA
+    # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.
+    app.state.resolve_admin_principal = _default_resolve_admin_principal
+    app.state.admin_ip_allowlist = app.state.settings.admin_ip_allowlist
+    app.state.admin_mfa_required = app.state.settings.admin_mfa_required
+    app.state.sending_enabled = app.state.settings.sending_enabled
+    app.state.agent_token_service = agent_token_service or AgentTokenService(
+        _default_agent_token_repository(app.state.settings)
+    )
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
     @app.get("/health")
