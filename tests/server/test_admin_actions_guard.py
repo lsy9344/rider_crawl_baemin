@@ -16,6 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ACTIONS_ROUTE = REPO_ROOT / "src" / "rider_server" / "admin" / "actions_routes.py"
 ACTION_SERVICE = REPO_ROOT / "src" / "rider_server" / "services" / "admin_action_service.py"
 ACTION_PG_REPO = REPO_ROOT / "src" / "rider_server" / "services" / "admin_action_repository_postgres.py"
+# Story 5.11: 엔티티 CRUD 라우트/service/PG repo(읽기 전용 화이트리스트에 넣지 않고 별도 가드).
+CRUD_ROUTE = REPO_ROOT / "src" / "rider_server" / "admin" / "crud_routes.py"
+ENTITY_SERVICE = REPO_ROOT / "src" / "rider_server" / "services" / "admin_entity_service.py"
+ENTITY_PG_REPO = REPO_ROOT / "src" / "rider_server" / "services" / "admin_entity_repository_postgres.py"
 
 # 라우트가 직접 호출하면 안 되는 저수준 write/전이 primitive(반드시 service 경유).
 _FORBIDDEN_ROUTE_CALLS = {
@@ -100,3 +104,35 @@ def test_action_service_is_the_write_owner() -> None:
     assert "SubscriptionGate" in source
     assert "assert_transition" in source
     assert "IdempotentDeliveryService" in source
+
+
+# ── Story 5.11: CRUD 라우트도 직접 write/전이 0·service 위임만 ──────────────────
+
+def test_crud_route_makes_no_direct_write_or_transition_calls() -> None:
+    hits = _forbidden_calls_in(_parse(CRUD_ROUTE), _FORBIDDEN_ROUTE_CALLS)
+    assert hits == [], f"CRUD 라우트가 직접 write/전이 호출: {hits}"
+
+
+def test_crud_route_delegates_to_entity_service() -> None:
+    """가드가 vacuous 하지 않도록 — CRUD 라우트가 실제로 entity service 에 위임함을 확인."""
+    source = CRUD_ROUTE.read_text(encoding="utf-8")
+    assert "admin_entity_service" in source, "CRUD 라우트는 admin_entity_service 에 위임해야 한다"
+
+
+def test_crud_route_does_not_import_sqlalchemy_or_rider_agent() -> None:
+    roots = _abs_import_roots(_parse(CRUD_ROUTE))
+    assert "sqlalchemy" not in roots, "CRUD 라우트는 ORM 을 직접 import 하지 않는다(service 경유)"
+    assert "rider_agent" not in roots, "단방향 import 위반(rider_agent)"
+
+
+def test_entity_modules_never_import_rider_agent() -> None:
+    for path in (ENTITY_SERVICE, ENTITY_PG_REPO):
+        assert "rider_agent" not in _abs_import_roots(_parse(path)), path.name
+
+
+def test_entity_service_is_the_write_owner() -> None:
+    """positive: 엔티티 service 는 audit/secret/채널 상태머신을 compose 한다(정책 재구현 아님)."""
+    source = ENTITY_SERVICE.read_text(encoding="utf-8")
+    assert "build_diff_redacted" in source
+    assert "looks_like_plaintext_secret" in source
+    assert "assert_channel_transition" in source

@@ -35,6 +35,11 @@
   </section>
 
   <section>
+    <h2>엔티티 관리 (생성 · 편집 · 비활성화)</h2>
+    {% include "_entity_admin.html" %}
+  </section>
+
+  <section>
     <h2>대상 상태 · 심각도</h2>
     <div id="targets"
          hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}"

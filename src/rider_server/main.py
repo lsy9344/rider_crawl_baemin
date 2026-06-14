@@ -23,7 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
 
-from .admin import admin_actions_router, admin_router
+from .admin import admin_actions_router, admin_crud_router, admin_router
 from .admin.actions_routes import _default_resolve_admin_actor
 from .admin.dashboard_repository_postgres import PostgresDashboardRepository
 from .admin.dashboard_service import DashboardRepository, InMemoryDashboardRepository
@@ -52,6 +52,12 @@ from .services.agent_token_service import (
     AgentTokenRepository,
     AgentTokenService,
     InMemoryAgentTokenRepository,
+)
+from .services.admin_entity_repository_postgres import PostgresAdminEntityRepository
+from .services.admin_entity_service import (
+    AdminEntityRepository,
+    AdminEntityService,
+    InMemoryAdminEntityRepository,
 )
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
@@ -96,6 +102,20 @@ def _default_admin_action_repository(settings: Settings) -> AdminActionRepositor
         engine = create_engine(settings.database_url)
         return PostgresAdminActionRepository(create_session_factory(engine))
     return InMemoryAdminActionRepository()
+
+
+def _default_admin_entity_repository(settings: Settings) -> AdminEntityRepository:
+    """Admin 엔티티 CRUD write+audit repository 기본값(``_default_admin_action_repository`` 와 동형).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL(신규 INSERT/UPDATE + audit INSERT 동일 트랜잭션), 없으면
+    in-memory(dev/무-DB + always-run 테스트 fake). 테스트는 ``create_app(admin_entity_service=...)``
+    로 in-memory fake 를 직접 주입한다. 엔티티 write 는 5.11 service 소유다(라우트 직접 write 0).
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresAdminEntityRepository(create_session_factory(engine))
+    return InMemoryAdminEntityRepository()
 
 
 def _default_agent_token_repository(settings: Settings) -> AgentTokenRepository:
@@ -187,6 +207,7 @@ def create_app(
     dashboard_repository: DashboardRepository | None = None,
     metrics_repository: MetricsRepository | None = None,
     admin_action_service: AdminActionService | None = None,
+    admin_entity_service: AdminEntityService | None = None,
     agent_token_service: AgentTokenService | None = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
@@ -230,6 +251,10 @@ def create_app(
         app.state.queue_backend,
     )
     app.state.resolve_admin_actor = _default_resolve_admin_actor
+    # Story 5.11: 엔티티 CRUD service(생성/편집/비활성화 write+audit 동일 트랜잭션) — 테스트 주입 가능.
+    app.state.admin_entity_service = admin_entity_service or AdminEntityService(
+        _default_admin_entity_repository(app.state.settings)
+    )
     # Story 5.8: Admin 접근 보안 — principal 해석 seam(기본 fail-closed deny) + IP allowlist + MFA
     # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.
     app.state.resolve_admin_principal = _default_resolve_admin_principal
@@ -331,6 +356,8 @@ def create_app(
     app.include_router(admin_router)
     # --- Admin 수동 운영 액션 (HTML POST, /admin) — 쓰기 라우트(Story 5.7) -------
     app.include_router(admin_actions_router)
+    # --- Admin 엔티티 CRUD (HTML GET/POST, /admin) — 생성/편집/비활성화(Story 5.11) -----
+    app.include_router(admin_crud_router)
 
     return app
 

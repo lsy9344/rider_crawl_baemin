@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14 (story 5.10 review AI: review → done — CRITICAL 0/HIGH 0, MEDIUM 1+LOW 2 auto-fixed, test count 1912→1915)
+last_updated: 2026-06-14 (story 5.11 review (AI): review → done — CRITICAL 0, HIGH 1 auto-fixed)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
@@ -111,5 +111,5 @@ development_status:
   5-8-audit-log와-admin-접근-보안: done
   5-9-7개-모니터링-지표-알림과-운영-runbook: done
   5-10-100-fake-target-부하-smoke와-negative-safety-test: done
-  5-11-admin-엔티티-생성-편집-crud-ui: backlog
+  5-11-admin-엔티티-생성-편집-crud-ui: done
   epic-5-retrospective: optional
