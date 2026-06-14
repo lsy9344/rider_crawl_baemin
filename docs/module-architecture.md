@@ -59,10 +59,15 @@ then add settings/env selection without changing `app.run_once`.
 
 `rider_server` is a new top-level package holding the platform-neutral domain
 and service layer introduced in Epic 2 and grown in Epic 3 (the `run_once` split
-and the collect/render/dispatch pipeline). It is pure and dependency-free (no
-FastAPI, SQLAlchemy, or async); it may import `rider_crawl`, but `rider_crawl`
-never depends on it. Throughout Epic 3 `src/rider_crawl/` was changed by zero
-lines — every new behaviour is additive inside `rider_server`.
+and the collect/render/dispatch pipeline). **This Epic 2–3 domain/service layer
+is pure and dependency-free** (no FastAPI, SQLAlchemy, or async) — identifiers and
+timestamps are caller-injected, so there are no internal `datetime.now()`/`uuid4()`
+calls. It may import `rider_crawl`, but `rider_crawl` never depends on it.
+Throughout Epic 3 `src/rider_crawl/` was changed by zero lines — every new
+behaviour is additive inside `rider_server`. (Epic 5 later wrapped this pure core
+in an async FastAPI/SQLAlchemy runtime — see *Cloud Server Runtime (Epic 5)* below.
+The `domain`/`services` modules stay pure; the async runtime lives in sibling
+modules and never pushes async/IO into them.)
 
 - `rider_server.domain` defines 11 frozen-dataclass models — Epic 2 added
   `Tenant`, `Subscription`, `PlatformAccount`, `MonitoringTarget`,
@@ -121,9 +126,13 @@ lines — every new behaviour is additive inside `rider_server`.
   guards against old/new dual active send (`DualSendError`), and on rollback
   disables the new rule while preserving the dedup logs.
 
-DB/ORM/Alembic, Pydantic schemas, and runtime wiring for this layer remain out of
-Epic 2–3 scope (Epic 5); through Epic 3 `rider_server` is defined and tested but
-not yet wired into a running process (the UI still calls `run_once`).
+Through Epic 3 this layer was defined and tested but not yet wired into a running
+process (the UI still calls `run_once`); DB/ORM/Alembic and runtime wiring were
+deferred to Epic 5. **Epic 5 has since delivered that runtime** (FastAPI app,
+14-table async SQLAlchemy ORM + Alembic, queue/scheduler/Admin/security) — see
+*Cloud Server Runtime (Epic 5)* below. The desktop UI still calls `run_once`; the
+server is a separate process that reuses this domain/service layer by zero-line
+import.
 
 ## Local Agent Boundary (Epic 4)
 
@@ -192,10 +201,83 @@ The runtime is composed of additive primitives, each delivered by one story:
   reads through `MailboxLockRegistry`, and uses `dataclasses.replace` to give each
   mailbox a distinct token-file path so customers never share a token.
 
-Server-side job creation/queue/lease enforcement, the Admin UI, the
-`workers/crawl_worker.py` collection executor, and real OS/browser bindings for the
-auth probes are all Epic 5 — through Epic 4 the Agent is verified against server
-stubs/mocks and injected seams, not a live server.
+Server-side job creation/queue/lease enforcement and the Admin UI were Epic 5 and
+**are now delivered** (see *Cloud Server Runtime (Epic 5)* below). Two pieces the
+Agent depends on are still **not** built: the `workers/crawl_worker.py` collection
+executor and real OS/browser bindings for the auth probes (`default_login_probe`
+etc., `is_reauth`). Through Epic 4–5 the Agent is verified against server
+stubs/mocks and injected seams; an end-to-end live Agent run awaits those bindings
+and the central dispatch loop (operations cutover).
+
+## Cloud Server Runtime (Epic 5)
+
+Epic 5 added the async Cloud runtime on top of the Epic 2–3 domain/service layer,
+**without changing a single line of `rider_crawl` or `rider_agent`** (verified by
+empty `git diff -w` over both). It is a **server-only** epic: all new code is
+additive inside `src/rider_server/` (FastAPI, SQLAlchemy 2.x async, Alembic,
+PostgreSQL, Jinja2+HTMX Admin). The pure domain/service modules above are reused
+by zero-line import.
+
+- **Async is the boundary's law here, mirrored by a guard.** Unlike `rider_agent`
+  (sync, stdlib-only), `rider_server` is async. `tests/server/test_server_async_boundary.py`
+  (Story 5.1) `rglob`s `src/rider_server/**/*.py` and forbids blocking sync
+  (`time.sleep`, `subprocess`, direct sync I/O) inside async bodies — synchronous
+  reuse such as `CentralTelegramSender`'s `urllib` send must go through
+  `run_in_executor`. This is the async analogue of Epic 4's 4.1 AST guard: written
+  once, inherited by every later server module.
+- **No new framework leaks into the dependency lock.** `pyproject.toml` keeps its
+  9 pinned core dependencies; FastAPI/SQLAlchemy/asyncpg/jinja2 live in
+  `[project.optional-dependencies].server`/`.dev`.
+- `main.py` is the FastAPI app factory (`/health`, `/version`, `/metrics`, a
+  global error envelope `{"error":{"code":"<UPPER_SNAKE>","message_redacted":"…"}}`).
+  `settings.py` is a stdlib `os.environ` frozen-dataclass `Settings.from_env`
+  (no `pydantic-settings`); `__main__.py` is the uvicorn entry. Operational
+  endpoints are root-level; resource endpoints use the `/v1/` prefix.
+- `db/` (Story 5.2): a 14-table PostgreSQL schema via async SQLAlchemy ORM with a
+  `naming_convention` MetaData, driven by Alembic (`migrations/versions/0001…0005`,
+  a linear chain). `SecretRef` is modeled but is **not** a table; credentials are
+  `*_ref` columns only; `uq_delivery_logs_dedup_key` enforces dedup at the DB.
+  The table count is locked at exactly 14 — new behaviour is additive columns or
+  plain-string constants, never new tables.
+- `queue/` (Story 5.3): a `QueueBackend` abstraction with an in-memory
+  (`threading.Lock`) and a PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED`)
+  implementation, plus `/v1/jobs/claim|complete|events`. Lease ownership prevents
+  double-success (a stale owner gets 409/410). Job types/statuses are plain-string
+  constants (no count-locked enum).
+- `scheduler/` (Story 5.4): a callable async `run_tick` (not an HTTP route) that
+  composes existing policy — deterministic sha256 jitter, a 30%-with-min-samples
+  circuit breaker, the reused `SubscriptionGate`, capacity throttling, and an
+  idempotent conditional-UPDATE enqueue. Reimplements no policy.
+- `api/telegram_webhook.py` + `services/channel_registration.py` (Story 5.5):
+  a secret-header webhook + `/register <code>`, a `MessengerChannelState`
+  lifecycle (`PENDING → VERIFIED → ACTIVE → INACTIVE`), and an operate-only-when-
+  `ACTIVE` gate — no `getUpdates` polling (an import-edge guard forbids it).
+- `admin/` (Stories 5.6/5.7/5.11): Jinja2+HTMX, physically split into **read**
+  (`routes.py`/`dashboard_*` — severity ×2 warning/×4 critical, fail-closed signals
+  shown first; protected by a read-only AST guard), **act** (`actions_routes.py` —
+  manual operations, subscription transitions; retry never bypasses idempotency,
+  test-send goes to one test channel only), and **create** (`crud_routes.py` —
+  entity CRUD with soft-delete, tenant-scope filtering, `*_ref`-only secrets).
+- `security/` (Story 5.8): `AdminRole` (4) + MFA + IP allowlist, **fail-closed by
+  default** (no principal → 401, unmet MFA/role/IP → 403), and audit-on-deny for
+  authenticated principals only. `audit_logs` gains `source`/`reason`/`result`
+  (`AuditResult`, 3) and Agent tokens gain server-side revoke/rotate; a
+  backup/restore runbook starts recovery in non-sending mode.
+- `metrics/` (Story 5.9): a 7-fact `MetricsSnapshot`, a pure `evaluate_alerts`
+  (4 minimal alerts), and an unauthenticated `/metrics/operational` fleet scrape
+  that carries aggregate numbers only (no operational identifiers). Thresholds are
+  identity-locked to the scheduler/severity originals so they cannot drift.
+
+**Important — control plane, not yet an autonomous runtime.** Epic 5 delivers
+observability, control, security and recovery, but the collect → render → dispatch
+loop does **not** run by itself yet. `workers/crawl_worker.py` and the central
+dispatch loop (`migration/cutover.py`) are not coded; the only live send chokepoint
+is the operator-driven `AdminActionService.test_send`, gated by
+`effective_send_enabled` with `sending_enabled` defaulting **OFF**
+(`RIDER_SENDING_ENABLED`). When the central loop is added it must compose the same
+kill-switch gate (and gate `channel_registration.verify_channel`'s real test send).
+100-target scheduling smoke and a negative-safety traceability matrix (Story 5.10)
+prove scale and fail-closed behaviour without that loop existing.
 
 ## Compatibility Notes
 
