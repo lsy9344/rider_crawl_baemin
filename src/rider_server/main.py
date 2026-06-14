@@ -30,6 +30,13 @@ from .admin.dashboard_service import DashboardRepository, InMemoryDashboardRepos
 from .admin.routes import _default_require_admin_session
 from .api import default_resolve_agent_id, jobs_router, telegram_webhook_router
 from .db.base import create_engine, create_session_factory
+from .metrics.policy import evaluate_alerts
+from .metrics.repository_postgres import PostgresMetricsRepository
+from .metrics.service import (
+    InMemoryMetricsRepository,
+    MetricsRepository,
+    MetricsService,
+)
 from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
@@ -119,6 +126,20 @@ def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
     return InMemoryDashboardRepository()
 
 
+def _default_metrics_repository(settings: Settings) -> MetricsRepository:
+    """읽기 전용 운영 지표 repository 기본값(``_default_dashboard_repository`` 와 동형 선택).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL 파생 집계 구현, 없으면 in-memory(dev/무-DB 안전). 테스트는
+    ``create_app(metrics_repository=...)`` 로 in-memory fake 를 직접 주입한다. 지표 레이어는 읽기
+    전용이라 이 repository 에 write 메서드가 없다(상태를 바꾸지 않음).
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresMetricsRepository(create_session_factory(engine))
+    return InMemoryMetricsRepository()
+
+
 def _default_resolve_telegram_secret(settings: Settings):
     """webhook secret 해석 seam 기본값(평문 store 미배선이라 fail-closed → None).
 
@@ -164,6 +185,7 @@ def create_app(
     queue_backend: QueueBackend | None = None,
     channel_repository: ChannelRepository | None = None,
     dashboard_repository: DashboardRepository | None = None,
+    metrics_repository: MetricsRepository | None = None,
     admin_action_service: AdminActionService | None = None,
     agent_token_service: AgentTokenService | None = None,
 ) -> FastAPI:
@@ -198,6 +220,10 @@ def create_app(
         dashboard_repository or _default_dashboard_repository(app.state.settings)
     )
     app.state.require_admin_session = _default_require_admin_session
+    # Story 5.9: 읽기 전용 운영 지표 repository(7지표 비식별 fleet 집계) — 테스트 주입 가능 seam.
+    app.state.metrics_repository = (
+        metrics_repository or _default_metrics_repository(app.state.settings)
+    )
     # Story 5.7: 수동 운영 액션 service(상태 전이/액션 write+audit) + admin actor seam(5.8 교체).
     app.state.admin_action_service = admin_action_service or AdminActionService(
         _default_admin_action_repository(app.state.settings),
@@ -239,6 +265,26 @@ def create_app(
             "app_version": s.app_version,
             "uptime_seconds": round(uptime, 3),
             "server_time": _iso_utc_now(),
+        }
+
+    @app.get("/metrics/operational")
+    async def metrics_operational(request: Request) -> dict:
+        """운영 7지표 비식별 fleet 집계 + 발화 알림(Story 5.9, AC1·AC2).
+
+        DB 의존이라 dependency-free 인 ``/metrics``·``/health`` 와 **별도 엔드포인트**로 둔다
+        (DB 장애가 liveness 를 깨지 않게 분리). payload 는 집계 수치(count/rate/gauge)만 —
+        tenant_id·고객명·센터/상점명·target 식별 텍스트를 노출하지 않는다(unauthenticated
+        scrape 안전). 시각은 실 ``now`` 사용(주입 아님 — 5.6/5.7 라우트 선례); 시간 의존 단정은
+        순수 policy/service 레이어가 잠근다.
+        """
+        repo: MetricsRepository = request.app.state.metrics_repository
+        now = datetime.now(timezone.utc)
+        snapshot = await MetricsService().snapshot(repo, now=now)
+        alerts = evaluate_alerts(snapshot, now=now)
+        return {
+            "server_time": _iso_utc_now(),
+            "metrics": snapshot.to_payload(),
+            "alerts": [{"code": a.code, "severity": a.severity} for a in alerts],
         }
 
     # --- 전역 에러 envelope (AC2) ------------------------------------------
