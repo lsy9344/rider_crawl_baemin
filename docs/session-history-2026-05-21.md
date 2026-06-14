@@ -441,3 +441,86 @@ PYTHONDONTWRITEBYTECODE=1 uv run --python 3.10 --extra dev pytest -q
 예비값: 앱 전용 브라우저 프로필
 ```
 
+## 12. 2026-06-14 쿠팡 `수행중인원` 누락/오인 수정 기록
+
+### 12.1 증상
+
+- 카카오톡에 전송되는 쿠팡이츠 실적 메시지에서 `수행중인원` 줄이 크롤링2, 크롤링5에는 표시되지만 크롤링3, 크롤링4에는 표시되지 않았다.
+- 최초 확인 시 크롤링2/5는 `PerformanceSnapshot.current_screen`이 채워졌고, 크롤링3/4는 `current_screen=None`이었다.
+- 이후 사용자가 의미를 재확인했다. 기존 코드가 쓰던 `이름 / 연락처 총 N명`은 메시지의 `수행중인원`으로 부적절하며, 실제로는 `상태 온라인 N명`이 맞다.
+
+### 12.2 원인 분석
+
+- 카카오톡 전송 문제는 아니었다. 메시지 생성부 `src/rider_crawl/message.py::_render_performance_message()`는 쿠팡 `PerformanceSnapshot.current_screen`이 있을 때만 `수행중인원` 줄을 붙인다.
+- 쿠팡 보조 페이지 `rider-performance` 파싱 실패가 직접 원인이었다. `src/rider_crawl/platforms/coupang/crawler.py::crawl_performance_snapshot()`는 이 보조 조회 실패를 best-effort로 삼켜 `current_screen=None`으로 둔다.
+- 크롤링3/4의 기존 열린 `rider-performance` 탭은 현재 피크 요약 화면이 아니라 과거/기록형 화면에 머물러 있었다.
+- 해당 기록형 화면은 `라이더 현황`, `이름 / 연락처 총 N명`은 보였지만, 현재 파서가 요구하던 `참여 가능`, `대기`, `온라인 N명`, 시간대 포함 헤딩이 일부 빠져 `MissingPerformanceDataError`가 발생했다.
+- 라이브 확인 결과, 같은 로그인 세션에서 임시 새 `rider-performance` 탭을 열면 현재 화면으로 로드되며 `상태 온라인 N명`을 확인할 수 있었다.
+- 직접 API `fetch()`는 인증 헤더 문제로 401이 났지만, 페이지 로드 중 받은 네트워크 응답에는 `daily-edp-performance.data.onlineCount`가 존재했다. 다만 이번 조치는 DOM/화면 파싱 경로를 우선 사용했다.
+
+### 12.3 조치 사항
+
+- `src/rider_crawl/platforms/coupang/parser.py`
+  - 쿠팡 `active_riders` 값을 기존 `총 N명` 기준에서 `온라인 N명` 기준으로 변경했다.
+  - 요약형 화면에서는 `_required_number_after("온라인", ...)` 값을 `online_riders`와 `active_riders`에 동일하게 사용한다.
+  - 기록형 테이블 화면 fallback을 추가해 `상태 온라인 N명` 형태에서도 현재 화면 스냅샷을 만들 수 있게 했다.
+  - 화면 텍스트 앞에 섞이는 `라이더 기록 - vendor-portal`, `Hi there! Please`, `enable Javascript` 안내 문구는 센터명 후보에서 제외한다.
+- `src/rider_crawl/platforms/coupang/crawler.py`
+  - 기존 열린 `rider-performance` 탭 파싱이 `MissingPerformanceDataError`로 실패하면, 같은 로그인 CDP 컨텍스트에서 임시 새 `rider-performance` 탭을 열어 현재 화면을 다시 읽는다.
+  - 이 임시 탭은 읽은 뒤 닫으며, 사용자가 보고 있던 기존 탭은 건드리지 않는다.
+  - `fetch_page_html(..., force_new_tab=True)`와 CDP 내부 `allow_existing=True` 경로를 추가했다.
+  - 기존에 진행 중이던 `peak-dashboard` 임시 탭 보강과 대상 탭 탐색 실패 진단 로그도 유지했다.
+- `src/rider_crawl/message.py`
+  - 주석을 `활성 라이더 테이블의 총계`가 아니라 `온라인 수행중 인원` 기준으로 정정했다.
+- 테스트
+  - `tests/test_coupang_parser.py`
+    - `총 N명`이 아니라 `온라인 N명`을 `active_riders`로 쓰는 회귀 테스트를 추가/수정했다.
+    - 기록형 화면에서 `온라인 N명`을 추출하는 fallback 테스트를 추가했다.
+    - JavaScript 안내 문구가 센터명으로 오인되지 않는 테스트를 추가했다.
+  - `tests/test_coupang_crawler.py`
+    - 기존 탭이 stale/기록형일 때 임시 새 탭으로 현재 화면을 다시 읽는 테스트를 추가했다.
+    - `force_new_tab` 인자 전달 경로를 반영했다.
+
+### 12.4 검증 결과
+
+전송 없이 현재 코드 경로로 라이브 크롤링2~5를 확인했다.
+
+```text
+크롤링2
+current_screen=True
+online_riders=2
+active_riders=2
+메시지: 수행중인원: 2명
+
+크롤링3
+current_screen=True
+online_riders=24
+active_riders=24
+메시지: 수행중인원: 24명
+
+크롤링4
+current_screen=True
+online_riders=9
+active_riders=9
+메시지: 수행중인원: 9명
+
+크롤링5
+current_screen=True
+online_riders=22
+active_riders=22
+메시지: 수행중인원: 22명
+```
+
+전체 테스트 결과:
+
+```text
+python -X utf8 -m pytest -q
+445 passed in 2.87s
+```
+
+### 12.5 운영 메모
+
+- 이번 수정은 실행 중인 GUI 앱 프로세스에는 자동 반영되지 않는다. `python -m rider_crawl` 앱을 재시작한 뒤 각 탭을 다시 시작해야 한다.
+- 카카오톡 전송 경로 자체는 수정하지 않았다. 메시지 생성 전에 쿠팡 `current_screen.active_riders`가 온라인 인원으로 채워지도록 바꾼 작업이다.
+- 현재 확인된 소수점 포맷 이슈가 별도로 있다. 예: 크롤링4 `처리 48.199999999999996건`. 이번 작업 범위에는 포함하지 않았다.
+

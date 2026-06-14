@@ -69,7 +69,7 @@ def test_parse_coupang_current_screen_reads_center_and_shift_from_heading_not_ha
     assert snapshot.online_riders == 5
 
 
-def test_parse_coupang_current_screen_uses_active_rider_table_total_for_active_riders():
+def test_parse_coupang_current_screen_uses_online_count_for_active_riders():
     text = "\n".join(
         [
             "제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중 라이더 현황",
@@ -100,7 +100,7 @@ def test_parse_coupang_current_screen_uses_active_rider_table_total_for_active_r
     snapshot = parse_current_screen_text(text)
 
     assert snapshot.online_riders == 0
-    assert snapshot.active_riders == 4
+    assert snapshot.active_riders == 0
 
 
 def test_parse_coupang_current_screen_accepts_scrapling_split_available_pair():
@@ -141,7 +141,91 @@ def test_parse_coupang_current_screen_accepts_scrapling_split_available_pair():
 
     assert snapshot.available_current == 0
     assert snapshot.available_total == 15
-    assert snapshot.active_riders == 4
+    assert snapshot.active_riders == 0
+
+
+def test_parse_coupang_current_screen_falls_back_to_record_table_online_count():
+    text = "\n".join(
+        [
+            "해운대이로움 남구중앙",
+            "6.13",
+            "6:00",
+            "~",
+            "6.14",
+            "5:59",
+            "해운대이로움 남구중앙",
+            "6월 13일(토)",
+            "라이더 현황",
+            "신규 라이더 등록",
+            "10:51 업데이트",
+            "이름 / 연락처",
+            "총 60명",
+            "상태",
+            "온라인 18명",
+            "거절/무시",
+            "161.4건",
+            "취소",
+            "28건",
+            "완료",
+            "1772건",
+            "순서 미준수",
+            "0건",
+            "점심피크",
+            "416.4건",
+            "저녁피크",
+            "458건",
+            "논피크",
+            "897.6건",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.center_name == "해운대이로움 남구중앙"
+    assert snapshot.online_riders == 18
+    assert snapshot.active_riders == 18
+
+
+def test_parse_coupang_current_screen_record_table_skips_javascript_banner_for_center():
+    text = "\n".join(
+        [
+            "라이더 기록 - vendor-portal",
+            "Hi there! Please",
+            "enable Javascript",
+            "해운대이로움 남구중앙",
+            "6.13",
+            "6:00",
+            "~",
+            "6.14",
+            "5:59",
+            "해운대이로움 남구중앙",
+            "6월 13일(토)",
+            "라이더 현황",
+            "10:51 업데이트",
+            "이름 / 연락처",
+            "총 60명",
+            "상태",
+            "온라인 18명",
+            "거절/무시",
+            "161.4건",
+            "취소",
+            "28건",
+            "완료",
+            "1772건",
+            "순서 미준수",
+            "0건",
+            "점심피크",
+            "416.4건",
+            "저녁피크",
+            "458건",
+            "논피크",
+            "897.6건",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.center_name == "해운대이로움 남구중앙"
 
 
 @pytest.mark.parametrize(

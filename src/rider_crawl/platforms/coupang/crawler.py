@@ -37,9 +37,9 @@ def crawl_performance_snapshot(
         current_screen = parse_current_screen_html(current_screen_html)
         _validate_coupang_center(config, current_screen)
     elif fetch_peak_dashboard_html is None:
-        # rider-performance(현재 화면)는 '수행중인원'(활성 라이더 총계)을 채우는 '보조'
+        # rider-performance(현재 화면)는 '수행중인원'(온라인 인원)을 채우는 '보조'
         # 페이지다. CDP 운영 Chrome엔 보통 peak-dashboard 탭만 떠 있으므로, 이 조회는
-        # 필요하면 같은 세션에 임시 탭을 열어 직접 읽는다(_open_rider_performance_in_new_tab).
+        # 필요하면 같은 세션에 임시 탭을 열어 직접 읽는다(_open_target_in_new_tab).
         # 다만 보조 페이지의 '어떤' 실패도 권위 페이지(peak-dashboard) 크롤링을 막지 않게
         # best-effort로 둔다: 탭 부재/로그인 만료(BrowserActionRequiredError)·파싱 실패
         # (MissingPerformanceDataError)·센터 불일치/준비 지연/CDP 불가(RuntimeError)면
@@ -48,7 +48,18 @@ def crawl_performance_snapshot(
         # 멈추지 않는다(예상 못 한 버그는 삼키지 않도록 Type/AttributeError 등은 그대로 전파).
         try:
             current_screen_html = fetch_page_html(config, target_url=_rider_performance_url(config))
-            current_screen = parse_current_screen_html(current_screen_html)
+            try:
+                current_screen = parse_current_screen_html(current_screen_html)
+            except MissingPerformanceDataError:
+                # 기존 rider-performance 탭이 과거 기록 화면에 머물러 있으면 온라인 인원
+                # 헤더가 없을 수 있다. 같은 로그인 세션의 임시 새 탭에서 현재 화면을 다시
+                # 읽어 보조 인원을 채운다.
+                current_screen_html = fetch_page_html(
+                    config,
+                    target_url=_rider_performance_url(config),
+                    force_new_tab=True,
+                )
+                current_screen = parse_current_screen_html(current_screen_html)
             _validate_coupang_center(config, current_screen)
         except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
             current_screen = None
@@ -371,11 +382,11 @@ def _select_coupang_center(page: Any, config: AppConfig, *, timeout_errors: tupl
     return True
 
 
-def fetch_page_html(config: AppConfig, *, target_url: str | None = None) -> str:
+def fetch_page_html(config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False) -> str:
     if config.browser_mode == "cdp":
         if target_url is None:
-            return fetch_page_html_via_cdp(config)
-        return fetch_page_html_via_cdp(config, target_url=target_url)
+            return fetch_page_html_via_cdp(config, force_new_tab=force_new_tab)
+        return fetch_page_html_via_cdp(config, target_url=target_url, force_new_tab=force_new_tab)
     if config.browser_mode == "persistent":
         if target_url is None:
             return fetch_page_html_via_persistent_context(config)
@@ -383,7 +394,9 @@ def fetch_page_html(config: AppConfig, *, target_url: str | None = None) -> str:
     raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
 
 
-def fetch_page_html_via_cdp(config: AppConfig, *, target_url: str | None = None) -> str:
+def fetch_page_html_via_cdp(
+    config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False
+) -> str:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -408,6 +421,7 @@ def fetch_page_html_via_cdp(config: AppConfig, *, target_url: str | None = None)
             config,
             target_url=target_url or config.coupang_eats_url,
             load_timeout_errors=(PlaywrightTimeoutError,),
+            force_new_tab=force_new_tab,
         )
 
 
@@ -485,9 +499,21 @@ def _fetch_target_page_content(
     target_url: str | None = None,
     load_timeout_errors: tuple[type[BaseException], ...] = (),
     recover_session: Callable[[Any, AppConfig], bool] | None = None,
+    force_new_tab: bool = False,
 ) -> str:
     target_url = target_url or config.coupang_eats_url
     pages = _browser_pages(browser)
+    if force_new_tab:
+        opened = _open_target_in_new_tab(
+            browser,
+            pages,
+            config,
+            target_url=target_url,
+            load_timeout_errors=load_timeout_errors,
+            allow_existing=True,
+        )
+        if opened is not None:
+            return opened
     page = _select_page_by_url(pages, target_url)
     if page is None:
         # 대상 탭을 못 찾았다. 로그인 만료로 대상 탭의 URL이 login/xauth로 바뀐 경우가
@@ -502,11 +528,12 @@ def _fetch_target_page_content(
             load_timeout_errors=load_timeout_errors,
         )
         if page is None:
-            # rider-performance(보조 '수행중인원' 페이지)는 운영 Chrome에 탭이 안 열려 있을
-            # 수 있다. peak-dashboard만 로그인돼 떠 있고 rider-performance 탭이 없는 경우엔
-            # 같은 로그인 세션에 임시 탭을 새로 열어 직접 이동해 읽고 닫는다(사용자가 보는
-            # 기존 탭은 건드리지 않는다). 그래야 모든 쿠팡이츠 탭에서 '수행중인원'을 채운다.
-            opened = _open_rider_performance_in_new_tab(
+            # 로그인은 됐는데 대상 탭만 안 열려 있을 수 있다 — 예: 운영 Chrome이
+            # rider-performance에 머물러 peak-dashboard 탭이 없거나, 그 반대. 이때는 같은
+            # 로그인 세션에 임시 탭을 새로 열어 대상(peak-dashboard/rider-performance)을 직접
+            # 읽고 닫는다(사용자가 보는 기존 탭은 건드리지 않는다). 로그인된 쿠팡 컨텍스트가
+            # 없으면(진짜 만료) None을 돌려받아 아래 조치필요 흐름을 그대로 탄다.
+            opened = _open_target_in_new_tab(
                 browser,
                 pages,
                 config,
@@ -515,6 +542,9 @@ def _fetch_target_page_content(
             )
             if opened is not None:
                 return opened
+            # 끝내 못 찾았다. 무엇을 찾다가(대상), 그 순간 어떤 탭들이 열려 있었는지를
+            # 남겨 '탭 없음 vs 다른 페이지에 머묾 vs 중복 vs 로그아웃'을 사후 추적한다.
+            _log_page_selection_failure(browser, pages, config, target_url=target_url)
             _raise_coupang_page_action_required(pages, target_url)
     try:
         page.wait_for_load_state("networkidle", timeout=10_000)
@@ -577,35 +607,44 @@ def _recover_login_page_to_target(
     return None
 
 
-def _open_rider_performance_in_new_tab(
+def _open_target_in_new_tab(
     browser: Any,
     pages: list[Any],
     config: AppConfig,
     *,
     target_url: str,
     load_timeout_errors: tuple[type[BaseException], ...],
+    allow_existing: bool = False,
 ) -> str | None:
-    """Open a temp tab in the logged-in Coupang context to read rider-performance.
+    """Open a temp tab in the logged-in Coupang context to read the target page.
 
-    운영 Chrome(CDP)에는 보통 로그인 직후 열린 peak-dashboard 탭만 있고 rider-performance
-    탭은 없다. 그래서 기존 '열린 탭 읽기' 방식으론 '수행중인원'(활성 라이더 총계)을 못
-    채운다. 여기서는 같은 로그인 세션(컨텍스트)에 임시 탭을 새로 열어 rider-performance로
-    직접 이동해 읽고 닫는다(사용자가 보는 기존 탭은 건드리지 않는다).
+    운영 Chrome(CDP)에는 로그인된 쿠팡 탭이 한 종류만 떠 있을 수 있다 — 예: rider-performance
+    탭만 있고 peak-dashboard 탭이 없거나(운영 Chrome이 다른 페이지에 머문 경우), 그 반대.
+    그러면 기존 '열린 탭 읽기'로는 없는 쪽 페이지를 못 읽어 크롤이 멈춘다. 여기서는 같은
+    로그인 세션(컨텍스트)에 임시 탭을 새로 열어 대상 URL로 직접 이동해 읽고 닫는다(사용자가
+    보는 기존 탭은 건드리지 않는다). 주 페이지(peak-dashboard)·보조 페이지(rider-performance)
+    둘 다 이렇게 보강한다.
 
     다음 경우에는 새 탭을 열지 않고 ``None``을 돌려 호출부의 기존 흐름(조치 필요/중복/
-    복구 오류)을 타게 한다 — peak-dashboard 등 rider-performance가 아닌 대상, 로그인
-    필요 페이지가 떠 있는 상태(복구가 우선), 대상 탭이 이미 한 개 이상 열려 있는 경우
-    (중복이면 중복 오류로 안내), 로그인된 쿠팡 컨텍스트가 없는 경우. 임시 탭에서 로그인
-    화면이 감지되면 ``BrowserActionRequiredError``가 올라가며, 보조 조회는 상위에서
-    best-effort로 삼켜 '수행중인원'만 생략하고 peak-dashboard 조회가 만료를 처리한다.
+    복구 오류)을 타게 한다 — rider-performance/peak-dashboard가 아닌 대상, 로그인 필요
+    페이지가 떠 있는 상태(복구가 우선), 대상 탭이 이미 한 개 이상 열려 있는 경우(중복이면
+    중복 오류로 안내), 로그인된 쿠팡 컨텍스트가 없는 경우. **로그인된 컨텍스트가 있을 때만**
+    열기 때문에, 세션이 진짜 만료된 경우(로그인 탭만 있고 partner.coupangeats.com 페이지가
+    없음)엔 임시 탭을 열지 않고 기존 복구/조치필요 흐름이 그대로 동작한다. 임시 탭에서
+    로그인 화면이 감지되면 ``BrowserActionRequiredError``가 올라간다(주 페이지면 탭 중지,
+    보조면 상위에서 best-effort로 삼킴).
     """
 
-    if not _path_is(target_url, "/page/rider-performance"):
+    if not (
+        _path_is(target_url, "/page/rider-performance")
+        or _path_is(target_url, "/page/peak-dashboard")
+    ):
         return None
     if _login_required_page(pages) is not None:
         return None
-    # 대상 탭이 '아예 없을' 때만 연다. 한 개라도(또는 중복으로) 있으면 새 탭을 열지 않는다.
-    if any(_url_matches(str(page.url), target_url) for page in pages):
+    # 기본 경로에서는 대상 탭이 '아예 없을' 때만 연다. stale 화면 복구처럼 명시적으로
+    # fresh read가 필요할 때만 기존 대상 탭이 있어도 임시 탭을 연다.
+    if not allow_existing and any(_url_matches(str(page.url), target_url) for page in pages):
         return None
     context = _coupang_logged_in_context(browser)
     if context is None:
@@ -735,6 +774,50 @@ def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:
             file.write(line)
     except Exception:
         # 로깅 실패는 복구 결과에 영향 주지 않는다.
+        pass
+
+
+def _url_host_path(url: str) -> str:
+    # 진단 로그엔 host+path만 남긴다(쿼리의 인증 토큰/state/execution 등은 적지 않는다).
+    parsed = urlsplit(str(url or ""))
+    host = parsed.hostname or ""
+    path = _normalize_path(parsed.path) if parsed.path else ""
+    return f"{host}{path}" if (host or path) else (str(url or "") or "?")
+
+
+def _log_page_selection_failure(
+    browser: Any, pages: Iterable[Any], config: AppConfig, *, target_url: str
+) -> None:
+    """대상 탭을 못 찾아 조치필요 오류를 내기 직전, 추적용 진단을 한 줄 남긴다.
+
+    어떤 대상(peak-dashboard/rider-performance)을 찾다가 그 순간 어떤 탭들이 열려 있었는지
+    (host+path만; 쿼리의 토큰/인증 파라미터는 적지 않음), exact/path 매칭 수, 로그인 필요
+    페이지·로그인된 쿠팡 컨텍스트 유무를 ``<log_dir>/run_errors.log``에 남긴다. 이걸로
+    '왜 못 찾았는지'(탭 없음 vs 다른 페이지에 머묾 vs 중복 vs 로그아웃)를 사후 추적한다.
+    로깅 실패는 크롤 흐름에 영향 주지 않도록 모든 예외를 삼킨다.
+    """
+
+    try:
+        pages_list = list(pages)
+        open_paths = [_url_host_path(str(getattr(p, "url", ""))) for p in pages_list]
+        exact = sum(1 for p in pages_list if _url_matches_exact(str(getattr(p, "url", "")), target_url))
+        path = sum(1 for p in pages_list if _url_matches(str(getattr(p, "url", "")), target_url))
+        login_page = _login_required_page(pages_list) is not None
+        logged_in_ctx = _coupang_logged_in_context(browser) is not None
+        log_dir = getattr(config, "log_dir", None) or Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = (
+            f"[{ts}] 쿠팡 대상 탭 탐색 실패 "
+            f"(cdp={getattr(config, 'cdp_url', '?')}, target={_url_host_path(target_url)}): "
+            f"open_tabs={open_paths}, exact_match={exact}, path_match={path}, "
+            f"login_page={login_page}, logged_in_context={logged_in_ctx}\n"
+            "----------------------------------------\n"
+        )
+        with (log_dir / "run_errors.log").open("a", encoding="utf-8") as file:
+            file.write(line)
+    except Exception:
+        # 진단 로깅 실패는 크롤 흐름에 영향 주지 않는다.
         pass
 
 

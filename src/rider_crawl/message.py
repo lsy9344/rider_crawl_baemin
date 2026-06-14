@@ -90,7 +90,7 @@ def _render_performance_message(
             f"거절률: {_format_count(dashboard.reject_rate)}%",
         ]
     )
-    # rider-performance 페이지도 함께 읽는 경우 활성 라이더 테이블의 총계를 붙인다.
+    # rider-performance 페이지도 함께 읽는 경우 온라인 수행중 인원을 붙인다.
     if snapshot.current_screen is not None:
         lines.append(f"수행중인원: {snapshot.current_screen.active_riders}명")
     return "\n".join(lines)
