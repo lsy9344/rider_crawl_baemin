@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>운영 대시보드 — rider_server</title>
+  <!-- HTMX: 별도 npm/빌드 없이 CDN 정적 자산만 로드(서버 렌더 부분 갱신). -->
+  <script src="https://unpkg.com/htmx.org@2"></script>
+  <style>
+    body { font-family: sans-serif; margin: 1.5rem; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    section { margin-bottom: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }
+    th { background: #f4f4f4; }
+    .sev-normal { color: #1b7f3b; }
+    .sev-warning { color: #b8860b; font-weight: 600; }
+    .sev-critical { color: #c0392b; font-weight: 700; }
+    .sev-stopped { color: #fff; background: #922; font-weight: 700; padding: 0 0.3rem; }
+    .muted { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>운영 대시보드{% if tenant_id %} <span class="muted">· tenant {{ tenant_id }}</span>{% endif %}</h1>
+  <p class="muted">읽기 전용 관측 화면 — 상태를 바꾸지 않습니다(수동 운영 액션은 별도). 30초마다 자동 갱신.</p>
+
+  <section>
+    <h2>대상 상태 · 심각도</h2>
+    <div id="targets"
+         hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML">
+      {% include "_targets.html" %}
+    </div>
+  </section>
+
+  <section>
+    <h2>Agent fleet</h2>
+    <div id="agents"
+         hx-get="/admin/agents"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML">
+      {% include "_agents.html" %}
+    </div>
+  </section>
+
+  <section>
+    <h2>채널 상태 (KakaoTalk queue lag · Telegram 전송 오류)</h2>
+    <div id="channels"
+         hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML">
+      {% include "_channels.html" %}
+    </div>
+  </section>
+
+  <section>
+    <h2>인증 필요 대상</h2>
+    <div id="auth-required"
+         hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML">
+      {% include "_auth_required.html" %}
+    </div>
+  </section>
+</body>
+</html>

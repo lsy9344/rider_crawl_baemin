@@ -1,0 +1,274 @@
+"""읽기 전용 대시보드 read-model 조립 + repository 포트 — Story 5.6 (AC1·AC4).
+
+5.3 ``QueueBackend``·5.4 ``SchedulerRepository`` 선례를 **동형**으로 계승한다: 정책↔DB 경계를
+:class:`DashboardRepository`(abc) 포트로 분리해 **always-run in-memory fake** 와 **PostgreSQL
+구현**(:mod:`rider_server.admin.dashboard_repository_postgres`) 양쪽이 같은 조립 로직을 통과한다.
+repository 는 **중립 facts**(원시 타입/datetime/문자열)만 돌려주고(``AsyncSession``/SQL/ORM Row
+누출 0), 순수 심각도 합성은 :mod:`rider_server.admin.severity` 가 한다 — DB I/O 만 async,
+집계/심각도 합성은 sync(순수).
+
+**읽기 전용 불변식(AC, architecture #Service-Boundaries):** 포트에 write 메서드가 없다 —
+``save``/``commit``/``enqueue``/상태 전이 없음. 대시보드는 상태를 바꾸지 않는다(상태 전이는 5.7).
+
+"마지막 성공/실패"는 신규 컬럼이 아니라 기존 테이블에서 **파생 집계**한다(14표 lock·migration
+drift 회피): 수집 성공=``snapshots`` (quality_state=OK), 전송 성공=``delivery_logs`` (status=SENT),
+실패 사유=``jobs``/``delivery_logs.error_code`` 최신, heartbeat=``agents.last_heartbeat_at``.
+"""
+
+from __future__ import annotations
+
+import abc
+from dataclasses import dataclass
+from datetime import datetime
+
+from . import severity
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 중립 facts(repository 출력) — ORM Row/SQL 누출 금지
+# ══════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class TargetHealthFacts:
+    """대상 한 건의 파생 집계 facts(심각도 미합성 — 순수 정책이 합성). 모두 중립 타입."""
+
+    target_id: str
+    tenant_id: str
+    name: str
+    center_name: str
+    platform: str
+    interval_minutes: int
+    last_success_at: datetime | None  # MAX(snapshots.collected_at WHERE quality_state='OK')
+    last_delivery_at: datetime | None  # MAX(delivery_logs.sent_at WHERE status='SENT')
+    last_failure_code: str | None  # 최신 non-null FailureCategory(jobs/delivery_logs.error_code)
+    account_auth_state: str | None  # platform_accounts.auth_state(BaeminAuthState 값)
+    lifecycle_state: str | None  # tenants.status(CustomerLifecycleState 값)
+    auth_session_pending: bool = False  # auth_sessions 인증대기 행 존재
+
+
+@dataclass(frozen=True)
+class AgentHealthFacts:
+    """Agent 한 건의 facts(online 미판정 — 순수 정책이 판정). agents 는 tenant 소유 아님(fleet)."""
+
+    agent_id: str
+    name: str
+    version: str
+    last_heartbeat_at: datetime | None
+    current_job_type: str | None  # 활성(CLAIMED/RUNNING) job 의 type
+    capabilities: tuple[str, ...]  # capacity_json 의 capability 목록
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# read-model 중립 DTO(서비스 출력 — 심각도/online 합성 포함)
+# ══════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class TargetRow:
+    """대상 read-model 행(심각도 합성 포함). 템플릿이 한글 라벨/CSS class 로 매핑한다."""
+
+    target_id: str
+    tenant_id: str
+    name: str
+    center_name: str
+    platform: str
+    interval_minutes: int
+    last_success_at: datetime | None
+    last_delivery_at: datetime | None
+    last_failure_code: str | None
+    severity: str
+
+
+@dataclass(frozen=True)
+class AgentRow:
+    """Agent read-model 행(online 판정 포함)."""
+
+    agent_id: str
+    name: str
+    version: str
+    last_heartbeat_at: datetime | None
+    online: bool
+    current_job_type: str | None
+    capabilities: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ChannelHealthRow:
+    """채널 운영 상태(KakaoTalk queue lag 와 Telegram 전송 오류를 **별도 필드**로 구분, AC1).
+
+    혼합 금지: ``kakao_queue_lag_seconds`` 는 대기 ``KAKAO_SEND`` job 지연(초),
+    ``telegram_error_count`` 는 최근 윈도 ``TELEGRAM_FAILURE`` 분류 카운트로 의미가 다르다.
+    """
+
+    kakao_queue_lag_seconds: int
+    telegram_error_count: int
+
+
+@dataclass(frozen=True)
+class AuthRequiredRow:
+    """인증 필요 대상 한 건(AC4 필터). ``reason`` 은 기계가독 코드(secret 아님)."""
+
+    tenant_id: str
+    target_id: str | None
+    profile_id: str | None
+    reason: str
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# repository 포트(읽기 전용) — in-memory fake / PostgreSQL 공용
+# ══════════════════════════════════════════════════════════════════════════
+
+class DashboardRepository(abc.ABC):
+    """대시보드 read-model 의 DB 접근 포트(backend 중립, **읽기 전용**).
+
+    customer-owned 질의(:meth:`target_health`/:meth:`channel_health`/:meth:`auth_required`)는
+    ``tenant_id`` 로 scope 된다(architecture #Data-Boundaries). :meth:`agent_health` 는 agents
+    가 tenant 소유가 아닌 fleet 전역 자원이라 tenant scope 가 없다(명시적 예외).
+
+    write 메서드는 **존재하지 않는다** — 대시보드가 상태를 바꿀 수 없음을 타입으로 보장한다.
+    """
+
+    @abc.abstractmethod
+    async def target_health(
+        self, *, tenant_id: str, now: datetime
+    ) -> list[TargetHealthFacts]:
+        """tenant 의 대상별 파생 집계 facts(AC1·AC2·AC3 입력)."""
+
+    @abc.abstractmethod
+    async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
+        """fleet 전역 Agent facts(heartbeat/버전/현재 job/capability, AC1)."""
+
+    @abc.abstractmethod
+    async def channel_health(
+        self, *, tenant_id: str, now: datetime
+    ) -> ChannelHealthRow:
+        """tenant 의 Kakao queue lag · Telegram 전송 오류(구분, AC1)."""
+
+    @abc.abstractmethod
+    async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
+        """tenant 의 인증 필요 고객/대상/프로필 목록(AC4)."""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# read-model 조립 서비스(순수 심각도 합성 + async repository I/O)
+# ══════════════════════════════════════════════════════════════════════════
+
+class DashboardService:
+    """repository facts 를 심각도 합성된 read-model 로 조립한다(상태 변경 0).
+
+    행 매핑(:meth:`target_row`/:meth:`agent_row`)은 sync 순수 함수다 — 시각 ``now`` 주입으로
+    결정적·always-run 테스트가 가능하다(PG 없이 의미 잠금).
+    """
+
+    @staticmethod
+    def target_row(facts: TargetHealthFacts, now: datetime) -> TargetRow:
+        freshness = severity.classify_freshness(
+            facts.last_success_at, facts.interval_minutes, now
+        )
+        signals = severity.failclosed_signals_from(
+            account_auth_state=facts.account_auth_state,
+            lifecycle_state=facts.lifecycle_state,
+            latest_failure_code=facts.last_failure_code,
+            auth_session_pending=facts.auth_session_pending,
+        )
+        overall = severity.overall_severity(
+            freshness, severity.classify_failclosed(signals)
+        )
+        return TargetRow(
+            target_id=facts.target_id,
+            tenant_id=facts.tenant_id,
+            name=facts.name,
+            center_name=facts.center_name,
+            platform=facts.platform,
+            interval_minutes=facts.interval_minutes,
+            last_success_at=facts.last_success_at,
+            last_delivery_at=facts.last_delivery_at,
+            last_failure_code=facts.last_failure_code,
+            severity=overall,
+        )
+
+    @staticmethod
+    def agent_row(facts: AgentHealthFacts, now: datetime) -> AgentRow:
+        return AgentRow(
+            agent_id=facts.agent_id,
+            name=facts.name,
+            version=facts.version,
+            last_heartbeat_at=facts.last_heartbeat_at,
+            online=severity.is_agent_online(facts.last_heartbeat_at, now),
+            current_job_type=facts.current_job_type,
+            capabilities=facts.capabilities,
+        )
+
+    async def target_rows(
+        self, repo: DashboardRepository, *, tenant_id: str, now: datetime
+    ) -> list[TargetRow]:
+        facts = await repo.target_health(tenant_id=tenant_id, now=now)
+        rows = [self.target_row(f, now) for f in facts]
+        # 위험도 높은 순으로 정렬해 운영자가 막힌 곳을 먼저 본다(fail-closed 우선 표시, AC3).
+        rows.sort(key=lambda r: severity.severity_rank(r.severity), reverse=True)
+        return rows
+
+    async def agent_rows(
+        self, repo: DashboardRepository, *, now: datetime
+    ) -> list[AgentRow]:
+        facts = await repo.agent_health(now=now)
+        return [self.agent_row(f, now) for f in facts]
+
+    async def channel_health(
+        self, repo: DashboardRepository, *, tenant_id: str, now: datetime
+    ) -> ChannelHealthRow:
+        return await repo.channel_health(tenant_id=tenant_id, now=now)
+
+    async def auth_required_rows(
+        self, repo: DashboardRepository, *, tenant_id: str
+    ) -> list[AuthRequiredRow]:
+        return await repo.auth_required(tenant_id=tenant_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# in-memory 구현(무-DB 기본값 + 테스트 fake — InMemoryQueueBackend 선례)
+# ══════════════════════════════════════════════════════════════════════════
+
+class InMemoryDashboardRepository(DashboardRepository):
+    """프로세스-내 읽기 전용 대시보드 repository(무-DB 기본값 + always-run 테스트 fake).
+
+    ``seed_*`` 헬퍼는 **테스트/데모용 주입**일 뿐 앱 런타임 경로(라우트/서비스)는 호출하지
+    않는다(읽기 전용 — read 메서드만 사용). tenant scope 는 dict 키로 격리한다.
+    """
+
+    def __init__(self) -> None:
+        self._targets: dict[str, list[TargetHealthFacts]] = {}
+        self._agents: list[AgentHealthFacts] = []
+        self._channels: dict[str, ChannelHealthRow] = {}
+        self._auth_required: dict[str, list[AuthRequiredRow]] = {}
+
+    # ── seed(테스트 전용 — 런타임 read 경로 아님) ──────────────────────────────
+    def seed_target(self, facts: TargetHealthFacts) -> None:
+        self._targets.setdefault(facts.tenant_id, []).append(facts)
+
+    def seed_agent(self, facts: AgentHealthFacts) -> None:
+        self._agents.append(facts)
+
+    def seed_channel_health(self, tenant_id: str, row: ChannelHealthRow) -> None:
+        self._channels[tenant_id] = row
+
+    def seed_auth_required(self, row: AuthRequiredRow) -> None:
+        self._auth_required.setdefault(row.tenant_id, []).append(row)
+
+    # ── read 포트(런타임 경로) ────────────────────────────────────────────────
+    async def target_health(
+        self, *, tenant_id: str, now: datetime
+    ) -> list[TargetHealthFacts]:
+        return list(self._targets.get(tenant_id, []))
+
+    async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
+        return list(self._agents)
+
+    async def channel_health(
+        self, *, tenant_id: str, now: datetime
+    ) -> ChannelHealthRow:
+        return self._channels.get(
+            tenant_id, ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=0)
+        )
+
+    async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
+        return list(self._auth_required.get(tenant_id, []))

@@ -23,6 +23,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
 
+from .admin import admin_router
+from .admin.dashboard_repository_postgres import PostgresDashboardRepository
+from .admin.dashboard_service import DashboardRepository, InMemoryDashboardRepository
+from .admin.routes import _default_require_admin_session
 from .api import default_resolve_agent_id, jobs_router, telegram_webhook_router
 from .db.base import create_engine, create_session_factory
 from .queue.backend import QueueBackend
@@ -57,6 +61,20 @@ def _default_channel_repository(settings: Settings) -> ChannelRepository:
         engine = create_engine(settings.database_url)
         return PostgresChannelRepository(create_session_factory(engine))
     return InMemoryChannelRepository()
+
+
+def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
+    """읽기 전용 대시보드 repository 기본값(``_default_queue_backend`` 와 동형 선택).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL 파생 집계 구현, 없으면 in-memory(dev/무-DB 안전). 테스트는
+    ``create_app(dashboard_repository=...)`` 로 in-memory fake 를 직접 주입한다. 대시보드는 읽기
+    전용이라 이 repository 에 write 메서드가 없다(상태 전이는 5.7 service 소유).
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresDashboardRepository(create_session_factory(engine))
+    return InMemoryDashboardRepository()
 
 
 def _default_resolve_telegram_secret(settings: Settings):
@@ -103,12 +121,14 @@ def create_app(
     *,
     queue_backend: QueueBackend | None = None,
     channel_repository: ChannelRepository | None = None,
+    dashboard_repository: DashboardRepository | None = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
 
-    테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository`` 를 주입할 수
-    있다(미지정 시 env 로딩 / settings 기반 기본값). webhook secret 해석은
-    ``app.state.resolve_telegram_secret`` seam 으로 주입한다(기본값은 fail-closed → None).
+    테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository``·
+    ``dashboard_repository`` 를 주입할 수 있다(미지정 시 env 로딩 / settings 기반 기본값).
+    webhook secret 해석은 ``app.state.resolve_telegram_secret`` seam 으로, admin 세션은
+    ``app.state.require_admin_session`` seam 으로 주입한다(5.8 이 MFA/4역할/세션으로 교체).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
@@ -124,6 +144,11 @@ def create_app(
     app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
         app.state.settings
     )
+    # Story 5.6: 읽기 전용 Admin 대시보드 repository + admin 세션 seam(5.8 이 MFA/4역할으로 교체).
+    app.state.dashboard_repository = (
+        dashboard_repository or _default_dashboard_repository(app.state.settings)
+    )
+    app.state.require_admin_session = _default_require_admin_session
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
     @app.get("/health")
@@ -191,6 +216,9 @@ def create_app(
     # --- 리소스 라우트 (/v1/) -----------------------------------------------
     app.include_router(jobs_router)
     app.include_router(telegram_webhook_router)
+
+    # --- Admin UI (HTML, /admin) — 읽기 전용 관측 대시보드(Story 5.6) ----------
+    app.include_router(admin_router)
 
     return app
 

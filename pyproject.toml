@@ -30,6 +30,9 @@ server = [
   "sqlalchemy[asyncio]>=2.0,<2.1",
   "alembic>=1.18,<1.19",
   "asyncpg>=0.29",
+  # Story 5.6: Admin UI 서버 렌더(Jinja2+HTMX). HTMX 자산은 CDN/정적이라 python 의존 아님.
+  # 현재 venv 엔 transitive 로 존재하나 재현 가능 빌드 위해 명시 선언(server extra 만 — main 금지).
+  "jinja2>=3.1,<4",
 ]
 
 [build-system]

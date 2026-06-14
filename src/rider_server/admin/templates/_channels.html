@@ -1,0 +1,19 @@
+{# 채널 상태 부분 fragment. KakaoTalk queue lag 와 Telegram 전송 오류를 별도로 표시(혼합 금지). #}
+<table>
+  <thead>
+    <tr>
+      <th>지표</th>
+      <th>값</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>KakaoTalk queue lag</td>
+      <td>{{ channels.kakao_queue_lag_seconds }}초</td>
+    </tr>
+    <tr>
+      <td>Telegram 전송 오류</td>
+      <td>{{ channels.telegram_error_count }}건</td>
+    </tr>
+  </tbody>
+</table>

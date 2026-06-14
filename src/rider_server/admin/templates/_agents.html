@@ -1,0 +1,27 @@
+{# Agent fleet 부분 fragment(HTMX swap 대상). online/offline·버전·현재 job·capability. #}
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>버전</th>
+      <th>상태</th>
+      <th>마지막 heartbeat</th>
+      <th>현재 job</th>
+      <th>처리 가능 job type</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td>{{ a.name }}</td>
+      <td>{{ a.version }}</td>
+      <td>{% if a.online %}<span class="sev-normal">online</span>{% else %}<span class="sev-critical">offline</span>{% endif %}</td>
+      <td>{% if a.last_heartbeat_at %}{{ a.last_heartbeat_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
+      <td>{% if a.current_job_type %}{{ a.current_job_type }}{% else %}<span class="muted">유휴</span>{% endif %}</td>
+      <td>{{ a.capabilities | join(", ") }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">등록된 Agent 가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

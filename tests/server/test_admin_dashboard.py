@@ -1,0 +1,436 @@
+"""Story 5.6 / AC1·AC2·AC3·AC4 — read-model 조립 + HTMX 라우트(항상 실행, DB 불필요).
+
+(1) in-memory fake repo + 주입 ``now`` 로 ``DashboardService`` 조립이 올바른 severity·online·
+    tenant scope·채널 구분을 만드는지 결정적으로 잠근다.
+(2) ``TestClient`` 로 ``/admin`` 풀 페이지(200·HTML·``hx-`` 속성)·부분 fragment(200·HTML) 반환과
+    ``require_admin_session`` seam(거부 시 401 envelope)을 확인한다.
+(3) 무회귀 lock: ``jinja2`` 는 server extra(additive)·``[project].dependencies`` 9개 유지.
+(4) secret 위생: read-model DTO 에 token/secret 류 필드 0(HTML 평문 누출 차단).
+
+fake 값만 — 실제 토큰/전화/이메일/chat_id 형태 없음. 평면 ``tests/server/`` 컨벤션.
+``pytest-asyncio`` 미도입 → ``asyncio.run`` 으로 async 서비스 구동(5.4 선례).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tomllib
+from dataclasses import fields
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from pathlib import Path
+
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from rider_server.admin import routes as admin_routes
+from rider_server.admin.dashboard_service import (
+    AgentHealthFacts,
+    AgentRow,
+    AuthRequiredRow,
+    ChannelHealthRow,
+    DashboardRepository,
+    DashboardService,
+    InMemoryDashboardRepository,
+    TargetHealthFacts,
+    TargetRow,
+)
+from rider_server.admin.severity import (
+    SEVERITY_CRITICAL,
+    SEVERITY_NORMAL,
+    SEVERITY_STOPPED,
+    SEVERITY_WARNING,
+)
+from rider_server.main import create_app
+from rider_server.settings import Settings
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+_FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
+_TENANT = "tn-1"
+_OTHER_TENANT = "tn-2"
+
+
+def _target(
+    *,
+    target_id: str,
+    tenant_id: str = _TENANT,
+    name: str = "가게",
+    interval_minutes: int = 10,
+    last_success_at: datetime | None = None,
+    last_failure_code: str | None = None,
+    account_auth_state: str | None = "ACTIVE",
+    lifecycle_state: str | None = "ACTIVE",
+) -> TargetHealthFacts:
+    return TargetHealthFacts(
+        target_id=target_id,
+        tenant_id=tenant_id,
+        name=name,
+        center_name="센터",
+        platform="BAEMIN",
+        interval_minutes=interval_minutes,
+        last_success_at=last_success_at,
+        last_delivery_at=None,
+        last_failure_code=last_failure_code,
+        account_auth_state=account_auth_state,
+        lifecycle_state=lifecycle_state,
+    )
+
+
+def _seeded_repo() -> InMemoryDashboardRepository:
+    repo = InMemoryDashboardRepository()
+    # 정상(방금 성공)·위험(오래됨)·중지(인증 필요).
+    repo.seed_target(_target(target_id="t-normal", last_success_at=_NOW - timedelta(minutes=5)))
+    repo.seed_target(_target(target_id="t-critical", last_success_at=_NOW - timedelta(minutes=41)))
+    repo.seed_target(
+        _target(
+            target_id="t-stopped",
+            last_success_at=_NOW - timedelta(minutes=1),
+            account_auth_state="AUTH_REQUIRED",
+            lifecycle_state="AUTH_REQUIRED",
+        )
+    )
+    # 다른 tenant 데이터(누출 0 검증용).
+    repo.seed_target(_target(target_id="t-other", tenant_id=_OTHER_TENANT, name="다른고객"))
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-online",
+            name="agent-online",
+            version="1.0.0",
+            last_heartbeat_at=_NOW - timedelta(seconds=30),
+            current_job_type="CRAWL_BAEMIN",
+            capabilities=("CRAWL_BAEMIN", "KAKAO_SEND"),
+        )
+    )
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-offline",
+            name="agent-offline",
+            version="0.9.0",
+            last_heartbeat_at=_NOW - timedelta(minutes=5),
+            current_job_type=None,
+            capabilities=(),
+        )
+    )
+    repo.seed_channel_health(_TENANT, ChannelHealthRow(kakao_queue_lag_seconds=42, telegram_error_count=3))
+    repo.seed_auth_required(
+        AuthRequiredRow(tenant_id=_TENANT, target_id="t-stopped", profile_id="p1", reason="ACCOUNT_AUTH_REQUIRED")
+    )
+    repo.seed_auth_required(
+        AuthRequiredRow(tenant_id=_OTHER_TENANT, target_id="t-other", profile_id=None, reason="ACCOUNT_AUTH_REQUIRED")
+    )
+    return repo
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# (1) 서비스 조립 — severity·online·tenant scope·채널 구분
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_target_rows_compose_correct_severity_and_sort_desc() -> None:
+    rows = asyncio.run(DashboardService().target_rows(_seeded_repo(), tenant_id=_TENANT, now=_NOW))
+    by_id = {r.target_id: r for r in rows}
+    assert by_id["t-normal"].severity == SEVERITY_NORMAL
+    assert by_id["t-critical"].severity == SEVERITY_CRITICAL
+    # 인증 필요 → 마지막 성공이 최근(1분 전)이어도 중지 우선(AC3).
+    assert by_id["t-stopped"].severity == SEVERITY_STOPPED
+    # 위험도 높은 순 정렬(중지 먼저).
+    assert [r.target_id for r in rows] == ["t-stopped", "t-critical", "t-normal"]
+
+
+def test_target_rows_are_tenant_scoped() -> None:
+    rows = asyncio.run(DashboardService().target_rows(_seeded_repo(), tenant_id=_TENANT, now=_NOW))
+    tenants = {r.tenant_id for r in rows}
+    assert tenants == {_TENANT}
+    assert "t-other" not in {r.target_id for r in rows}
+
+
+def test_agent_rows_online_offline() -> None:
+    rows = asyncio.run(DashboardService().agent_rows(_seeded_repo(), now=_NOW))
+    by_id = {r.agent_id: r for r in rows}
+    assert by_id["a-online"].online is True
+    assert by_id["a-online"].current_job_type == "CRAWL_BAEMIN"
+    assert by_id["a-offline"].online is False
+
+
+def test_channel_health_separates_kakao_lag_and_telegram_error() -> None:
+    health = asyncio.run(DashboardService().channel_health(_seeded_repo(), tenant_id=_TENANT, now=_NOW))
+    # 두 값이 별도 필드(혼합 금지).
+    assert health.kakao_queue_lag_seconds == 42
+    assert health.telegram_error_count == 3
+
+
+def test_auth_required_rows_are_tenant_scoped() -> None:
+    rows = asyncio.run(DashboardService().auth_required_rows(_seeded_repo(), tenant_id=_TENANT))
+    assert [r.target_id for r in rows] == ["t-stopped"]
+    assert all(r.tenant_id == _TENANT for r in rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# (2) HTMX 라우트 — TestClient
+# ══════════════════════════════════════════════════════════════════════════
+
+def _client(repo: DashboardRepository) -> TestClient:
+    app = create_app(_FAKE_SETTINGS, dashboard_repository=repo)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_dashboard_full_page_has_htmx_attributes() -> None:
+    r = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    body = r.text
+    assert "hx-get" in body and "hx-trigger" in body
+    assert "https://unpkg.com/htmx.org" in body  # CDN 정적 자산(npm/빌드 0)
+    # 심각도 한글 라벨 매핑(코드값→정상/주의/위험/중지).
+    assert "중지" in body
+
+
+def test_dashboard_fragments_return_html_partials() -> None:
+    c = _client(_seeded_repo())
+    for path in (f"/admin/targets?tenant={_TENANT}", "/admin/agents", f"/admin/channels?tenant={_TENANT}", f"/admin/auth-required?tenant={_TENANT}"):
+        r = c.get(path)
+        assert r.status_code == 200, path
+        assert "text/html" in r.headers["content-type"], path
+    # 채널 fragment 는 두 지표를 모두 노출(구분 표시).
+    channels = c.get(f"/admin/channels?tenant={_TENANT}").text
+    assert "KakaoTalk" in channels and "Telegram" in channels
+
+
+def test_auth_required_fragment_lists_only_tenant_rows() -> None:
+    c = _client(_seeded_repo())
+    body = c.get(f"/admin/auth-required?tenant={_TENANT}").text
+    assert "t-stopped" in body
+    assert "t-other" not in body  # cross-tenant 누출 0
+
+
+def test_require_admin_session_seam_can_deny() -> None:
+    app = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
+
+    def _deny(request) -> None:
+        raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="admin session required")
+
+    app.state.require_admin_session = _deny
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.get(f"/admin?tenant={_TENANT}")
+    assert r.status_code == 401
+    # 전역 핸들러 envelope 통과.
+    assert r.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_admin_routes_registered_under_admin_prefix_not_v1() -> None:
+    app = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert "/admin" in paths
+    assert {"/admin/targets", "/admin/agents", "/admin/channels", "/admin/auth-required"} <= paths
+    # /v1/ 운영 가드와 무관(admin 은 HTML).
+    assert "/v1/admin" not in paths
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# (3) 무회귀 lock — jinja2 server extra · 9-dep
+# ══════════════════════════════════════════════════════════════════════════
+
+def _pyproject() -> dict:
+    return tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def test_jinja2_declared_in_server_extra_not_main_deps() -> None:
+    data = _pyproject()
+    server = data["project"]["optional-dependencies"]["server"]
+    assert any(dep.replace(" ", "").startswith("jinja2") for dep in server), server
+    main_deps = {d.replace(" ", "") for d in data["project"]["dependencies"]}
+    assert not any(d.startswith("jinja2") for d in main_deps)
+
+
+def test_main_dependencies_still_exactly_nine() -> None:
+    # rider_agent stdlib-only 표면 보호 — [project].dependencies 9개 고정.
+    assert len(_pyproject()["project"]["dependencies"]) == 9
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# (4) secret 위생 — read-model DTO 에 token/secret 류 필드 0
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_readmodel_dtos_have_no_secret_shaped_fields() -> None:
+    forbidden = ("token", "secret", "password", "otp", "passwd", "_ref")
+    for dto in (TargetRow, AgentRow, ChannelHealthRow, AuthRequiredRow):
+        for field in fields(dto):
+            lowered = field.name.lower()
+            assert not any(bad in lowered for bad in forbidden), f"{dto.__name__}.{field.name}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QA 보강 (5) 서비스 — fail-closed 가 CRITICAL freshness 도 덮어씀(AC3 강화)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_target_row_failclosed_overrides_even_critical_freshness() -> None:
+    # 마지막 성공이 오래(41분 → CRITICAL)인데 인증까지 필요 → 시간 경과를 덮고 STOPPED 우선.
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-both",
+            last_success_at=_NOW - timedelta(minutes=41),
+            account_auth_state="AUTH_REQUIRED",
+        )
+    )
+    rows = asyncio.run(DashboardService().target_rows(repo, tenant_id=_TENANT, now=_NOW))
+    assert rows[0].severity == SEVERITY_STOPPED
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QA 보강 (6) 인증 seam — fragment 도 보호·async seam·403 매핑
+# ══════════════════════════════════════════════════════════════════════════
+
+def _denying_app(exc: HTTPException):
+    app = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
+
+    def _deny(request) -> None:
+        raise exc
+
+    app.state.require_admin_session = _deny
+    return app
+
+
+def test_all_fragments_also_require_admin_session() -> None:
+    # 풀 페이지뿐 아니라 HTMX fragment 도 같은 seam 으로 보호되어야 한다(우회 차단).
+    app = _denying_app(HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="x"))
+    c = TestClient(app, raise_server_exceptions=False)
+    for path in (
+        f"/admin/targets?tenant={_TENANT}",
+        "/admin/agents",
+        f"/admin/channels?tenant={_TENANT}",
+        f"/admin/auth-required?tenant={_TENANT}",
+    ):
+        assert c.get(path).status_code == 401, path
+
+
+def test_require_admin_session_supports_async_seam() -> None:
+    # seam 이 async 여도(awaitable 분기) 통과/거부 모두 동작.
+    app_allow = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
+
+    async def _async_allow(request) -> None:
+        return None
+
+    app_allow.state.require_admin_session = _async_allow
+    assert TestClient(app_allow).get(f"/admin?tenant={_TENANT}").status_code == 200
+
+    app_deny = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
+
+    async def _async_deny(request) -> None:
+        raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="async denied")
+
+    app_deny.state.require_admin_session = _async_deny
+    assert TestClient(app_deny, raise_server_exceptions=False).get(
+        f"/admin?tenant={_TENANT}"
+    ).status_code == 401
+
+
+def test_admin_seam_can_return_403_forbidden() -> None:
+    # 401(미인증)뿐 아니라 403(권한 부족)도 전역 envelope 로 매핑(5.8 4역할 대비 seam).
+    app = _denying_app(HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="role required"))
+    r = TestClient(app, raise_server_exceptions=False).get(f"/admin?tenant={_TENANT}")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QA 보강 (7) 템플릿 — 빈 상태 렌더·심각도 4단계 라벨/CSS·무-tenant 안전
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_empty_repo_renders_empty_state_messages() -> None:
+    # 데이터 없는 tenant — 각 fragment 의 {% else %} 분기가 안내문을 렌더(크래시 0).
+    c = _client(InMemoryDashboardRepository())
+    assert "표시할 대상이 없습니다." in c.get("/admin/targets?tenant=none").text
+    assert "등록된 Agent 가 없습니다." in c.get("/admin/agents").text
+    assert "인증 필요 대상이 없습니다." in c.get("/admin/auth-required?tenant=none").text
+    # 채널은 행 고정(seed 없으면 0/0 기본값).
+    channels = c.get("/admin/channels?tenant=none").text
+    assert "0초" in channels and "0건" in channels
+
+
+def test_severity_label_and_class_filters_map_all_four_levels() -> None:
+    # 코드값 → 한글 라벨/CSS class 매핑 전수 + 미지 코드 안전 기본값(라우트 필터 단위).
+    expected = {
+        SEVERITY_NORMAL: ("정상", "sev-normal"),
+        SEVERITY_WARNING: ("주의", "sev-warning"),
+        SEVERITY_CRITICAL: ("위험", "sev-critical"),
+        SEVERITY_STOPPED: ("중지", "sev-stopped"),
+    }
+    for code, (label, css) in expected.items():
+        assert admin_routes._severity_label(code) == label
+        assert admin_routes._severity_class(code) == css
+    assert admin_routes._severity_label("NOPE") == "NOPE"  # 미지값은 코드 그대로
+    assert admin_routes._severity_class("NOPE") == "sev-normal"  # 미지값은 정상 class
+
+
+def test_targets_partial_renders_label_and_class_for_each_severity() -> None:
+    # 템플릿이 필터를 통해 4단계를 모두 한글 라벨/CSS class 로 렌더(시각 무관 — 주입 행으로 결정적).
+    # 라우트는 실시간 now 를 쓰므로(시간 경과 심각도 비결정적) 템플릿 렌더만 직접 검증한다.
+    def _row(sev: str) -> TargetRow:
+        return TargetRow(
+            target_id=f"t-{sev}", tenant_id=_TENANT, name="가게", center_name="센터",
+            platform="BAEMIN", interval_minutes=10, last_success_at=None,
+            last_delivery_at=None, last_failure_code=None, severity=sev,
+        )
+
+    rows = [_row(s) for s in (SEVERITY_NORMAL, SEVERITY_WARNING, SEVERITY_CRITICAL, SEVERITY_STOPPED)]
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
+    for label in ("정상", "주의", "위험", "중지"):
+        assert label in html, label
+    for css in ("sev-normal", "sev-warning", "sev-critical", "sev-stopped"):
+        assert css in html, css
+
+
+def test_dashboard_full_page_without_tenant_param_renders() -> None:
+    # ?tenant 미지정(빈 tenant seam) 이어도 200 — 대상은 빈 안내문, agent fleet 은 전역 표시.
+    r = _client(_seeded_repo()).get("/admin")
+    assert r.status_code == 200
+    body = r.text
+    assert "표시할 대상이 없습니다." in body  # tenant="" 데이터 없음
+    assert "agent-online" in body  # fleet 은 tenant 무관 표시
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QA 보강 (8) 읽기 전용 런타임 — 라우트가 read 메서드만 호출·포트 표면 lock
+# ══════════════════════════════════════════════════════════════════════════
+
+class _RecordingRepo(InMemoryDashboardRepository):
+    """런타임에 호출된 메서드 이름을 기록(읽기 전용 행위 검증용)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def target_health(self, **kw):  # type: ignore[override]
+        self.calls.append("target_health")
+        return await super().target_health(**kw)
+
+    async def agent_health(self, **kw):  # type: ignore[override]
+        self.calls.append("agent_health")
+        return await super().agent_health(**kw)
+
+    async def channel_health(self, **kw):  # type: ignore[override]
+        self.calls.append("channel_health")
+        return await super().channel_health(**kw)
+
+    async def auth_required(self, **kw):  # type: ignore[override]
+        self.calls.append("auth_required")
+        return await super().auth_required(**kw)
+
+
+def test_full_page_invokes_only_read_methods() -> None:
+    repo = _RecordingRepo()
+    TestClient(create_app(_FAKE_SETTINGS, dashboard_repository=repo)).get(f"/admin?tenant={_TENANT}")
+    # 풀 페이지는 4개 read 포트만 호출(write/전이 호출 0 — 읽기 전용 런타임).
+    assert set(repo.calls) == {
+        "target_health",
+        "agent_health",
+        "channel_health",
+        "auth_required",
+    }
+
+
+def test_dashboard_repository_port_exposes_only_read_methods() -> None:
+    # 포트 표면에 write/전이 메서드가 아예 없음(타입으로 읽기 전용 보장 — AST 가드와 상보).
+    public = {n for n in vars(DashboardRepository).keys() if not n.startswith("_")}
+    assert public == {"target_health", "agent_health", "channel_health", "auth_required"}

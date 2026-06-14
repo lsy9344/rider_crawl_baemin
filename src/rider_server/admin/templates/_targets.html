@@ -1,0 +1,31 @@
+{# 대상 상태 부분 fragment(HTMX swap 대상). 심각도 코드값→한글 라벨/CSS class 매핑. #}
+<table>
+  <thead>
+    <tr>
+      <th>대상</th>
+      <th>센터/상점</th>
+      <th>플랫폼</th>
+      <th>주기(분)</th>
+      <th>마지막 수집 성공</th>
+      <th>마지막 전송 성공</th>
+      <th>마지막 실패 사유</th>
+      <th>심각도</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in targets %}
+    <tr>
+      <td>{{ t.name }}</td>
+      <td>{{ t.center_name }}</td>
+      <td>{{ t.platform }}</td>
+      <td>{{ t.interval_minutes }}</td>
+      <td>{% if t.last_success_at %}{{ t.last_success_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
+      <td>{% if t.last_delivery_at %}{{ t.last_delivery_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
+      <td>{% if t.last_failure_code %}{{ t.last_failure_code }}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td><span class="{{ t.severity | severity_class }}">{{ t.severity | severity_label }}</span></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">표시할 대상이 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
