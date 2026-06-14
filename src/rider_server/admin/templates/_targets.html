@@ -10,6 +10,7 @@
       <th>마지막 전송 성공</th>
       <th>마지막 실패 사유</th>
       <th>심각도</th>
+      <th>운영 액션</th>
     </tr>
   </thead>
   <tbody>
@@ -23,9 +24,22 @@
       <td>{% if t.last_delivery_at %}{{ t.last_delivery_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
       <td>{% if t.last_failure_code %}{{ t.last_failure_code }}{% else %}<span class="muted">-</span>{% endif %}</td>
       <td><span class="{{ t.severity | severity_class }}">{{ t.severity | severity_label }}</span></td>
+      {# Story 5.7: 별도 액션 라우터(POST)로 전송 — 읽기 전용 fragment 안에 두되 write 는 action service 가 수행. #}
+      <td class="row-actions">
+        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
+                hx-target="#action-result" hx-confirm="대상을 활성화하시겠습니까?">활성</button>
+        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/pause?tenant={{ t.tenant_id | urlencode }}"
+                hx-target="#action-result" hx-confirm="대상을 비활성화하시겠습니까?">비활성</button>
+        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
+                hx-vals='{"platform": "{{ t.platform }}"}' hx-target="#action-result">test crawl</button>
+        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/dry-run?tenant={{ t.tenant_id | urlencode }}"
+                hx-target="#action-result">dry-run</button>
+        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
+                hx-target="#action-result">인증 확인</button>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="muted">표시할 대상이 없습니다.</td></tr>
+    <tr><td colspan="9" class="muted">표시할 대상이 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>

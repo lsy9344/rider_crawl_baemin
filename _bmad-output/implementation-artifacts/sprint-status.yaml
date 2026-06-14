@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-06-13
-last_updated: 2026-06-14 (story 5.6 dev-story → review)
+last_updated: 2026-06-14 (story 5.7 review (AI) → done)
 project: rider_result_mornitoring
 # story 4.5 dev-story: ready-for-dev → in-progress → review (2026-06-13)
 # story 4.5 review (AI): review → done — CRITICAL 0, MEDIUM 2 auto-fixed (2026-06-13)
@@ -105,7 +105,7 @@ development_status:
   5-4-scheduler-interval-jitter-circuit-breaker와-구독-게이트: done
   5-5-telegram-webhook과-채널-등록-검증-활성화: done
   5-6-admin-운영-대시보드와-상태-심각도-표시: done
-  5-7-admin-수동-운영-액션과-고객-구독-상태-전이: backlog
+  5-7-admin-수동-운영-액션과-고객-구독-상태-전이: done
   5-8-audit-log와-admin-접근-보안: backlog
   5-9-7개-모니터링-지표-알림과-운영-runbook: backlog
   5-10-100-fake-target-부하-smoke와-negative-safety-test: backlog

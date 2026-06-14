@@ -23,7 +23,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
 
-from .admin import admin_router
+from .admin import admin_actions_router, admin_router
+from .admin.actions_routes import _default_resolve_admin_actor
 from .admin.dashboard_repository_postgres import PostgresDashboardRepository
 from .admin.dashboard_service import DashboardRepository, InMemoryDashboardRepository
 from .admin.routes import _default_require_admin_session
@@ -32,6 +33,12 @@ from .db.base import create_engine, create_session_factory
 from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
+from .services.admin_action_repository_postgres import PostgresAdminActionRepository
+from .services.admin_action_service import (
+    AdminActionRepository,
+    AdminActionService,
+    InMemoryAdminActionRepository,
+)
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
 from .settings import Settings
@@ -61,6 +68,20 @@ def _default_channel_repository(settings: Settings) -> ChannelRepository:
         engine = create_engine(settings.database_url)
         return PostgresChannelRepository(create_session_factory(engine))
     return InMemoryChannelRepository()
+
+
+def _default_admin_action_repository(settings: Settings) -> AdminActionRepository:
+    """Admin 액션 write+audit repository 기본값(``_default_dashboard_repository`` 와 동형 선택).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL(전이 UPDATE + audit INSERT 동일 트랜잭션), 없으면
+    in-memory(dev/무-DB + always-run 테스트 fake). 테스트는 ``create_app(admin_action_service=...)``
+    로 in-memory fake 를 직접 주입한다. 상태 전이/DB write 는 5.7 service 소유다.
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresAdminActionRepository(create_session_factory(engine))
+    return InMemoryAdminActionRepository()
 
 
 def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
@@ -122,13 +143,15 @@ def create_app(
     queue_backend: QueueBackend | None = None,
     channel_repository: ChannelRepository | None = None,
     dashboard_repository: DashboardRepository | None = None,
+    admin_action_service: AdminActionService | None = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
 
     테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository``·
-    ``dashboard_repository`` 를 주입할 수 있다(미지정 시 env 로딩 / settings 기반 기본값).
-    webhook secret 해석은 ``app.state.resolve_telegram_secret`` seam 으로, admin 세션은
-    ``app.state.require_admin_session`` seam 으로 주입한다(5.8 이 MFA/4역할/세션으로 교체).
+    ``dashboard_repository``·``admin_action_service`` 를 주입할 수 있다(미지정 시 env 로딩 /
+    settings 기반 기본값). webhook secret 해석은 ``app.state.resolve_telegram_secret`` seam,
+    admin 세션은 ``app.state.require_admin_session`` seam, admin actor 는
+    ``app.state.resolve_admin_actor`` seam 으로 주입한다(5.8 이 MFA/4역할/세션으로 교체).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
@@ -149,6 +172,12 @@ def create_app(
         dashboard_repository or _default_dashboard_repository(app.state.settings)
     )
     app.state.require_admin_session = _default_require_admin_session
+    # Story 5.7: 수동 운영 액션 service(상태 전이/액션 write+audit) + admin actor seam(5.8 교체).
+    app.state.admin_action_service = admin_action_service or AdminActionService(
+        _default_admin_action_repository(app.state.settings),
+        app.state.queue_backend,
+    )
+    app.state.resolve_admin_actor = _default_resolve_admin_actor
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
     @app.get("/health")
@@ -219,6 +248,8 @@ def create_app(
 
     # --- Admin UI (HTML, /admin) — 읽기 전용 관측 대시보드(Story 5.6) ----------
     app.include_router(admin_router)
+    # --- Admin 수동 운영 액션 (HTML POST, /admin) — 쓰기 라우트(Story 5.7) -------
+    app.include_router(admin_actions_router)
 
     return app
 

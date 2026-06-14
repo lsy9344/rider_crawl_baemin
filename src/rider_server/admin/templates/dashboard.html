@@ -18,11 +18,21 @@
     .sev-critical { color: #c0392b; font-weight: 700; }
     .sev-stopped { color: #fff; background: #922; font-weight: 700; padding: 0 0.3rem; }
     .muted { color: #888; }
+    .actions fieldset { margin-bottom: 0.8rem; }
+    .actions legend { font-weight: 600; }
+    .row-actions button, .actions button { margin: 0 0.15rem 0.15rem 0; font-size: 0.8rem; }
+    .action-result.ok { color: #1b7f3b; }
+    .action-result.err { color: #c0392b; font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>운영 대시보드{% if tenant_id %} <span class="muted">· tenant {{ tenant_id }}</span>{% endif %}</h1>
-  <p class="muted">읽기 전용 관측 화면 — 상태를 바꾸지 않습니다(수동 운영 액션은 별도). 30초마다 자동 갱신.</p>
+  <p class="muted">관측 + 수동 운영 액션. 대상 표는 30초마다 자동 갱신되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor/시각이 audit 기록됩니다.</p>
+
+  <section>
+    <h2>수동 운영 액션</h2>
+    {% include "_actions.html" %}
+  </section>
 
   <section>
     <h2>대상 상태 · 심각도</h2>

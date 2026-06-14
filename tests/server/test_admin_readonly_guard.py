@@ -1,14 +1,18 @@
-"""Story 5.6 / AC (읽기 전용 불변식) — admin 모듈 read-only·단방향 import AST 가드.
+"""Story 5.6 / AC (읽기 전용 불변식) + Story 5.7 가드 scope 재정렬 — admin 모듈 AST 가드.
 
-대시보드는 상태를 바꾸지 않는다(상태 전이는 5.7). 이를 raw grep 이 아닌 **AST call-edge**로
+대시보드(읽기 전용)는 상태를 바꾸지 않는다. 5.7 이 **별도 액션 모듈**(``actions_routes.py``)로
+쓰기를 추가하므로, write-call 금지 스캔 scope 를 **읽기 전용 파일 화이트리스트**(``routes.py``/
+``dashboard_service.py``/``dashboard_repository_postgres.py``/``severity.py``/``__init__.py``)로
+좁힌다(열린 질문 #2 권장 경로). 액션 모듈의 "라우트 직접 ORM write 0·service 위임만" 가드는
+``test_admin_actions_guard.py`` 가 별도로 강제한다. 이를 raw grep 이 아닌 **AST call-edge**로
 강제한다(scope-boundary docstring 이 금지 심볼을 문자열로 명시 → raw 매칭 오탐, memory/
 negative-guard-tests-use-ast):
-  (1) admin 모듈은 DB write(``commit``/``add``/``flush``/``insert``/``update``/``delete`` …)·
+  (1) **읽기 전용 파일** 은 DB write(``commit``/``add``/``flush``/``insert``/``update``/``delete`` …)·
       queue/상태 전이 service(``enqueue``/``save``/``register``/``verify``/``activate``/
       ``deactivate``/``claim``/``complete`` …)를 **호출하지 않는다**(읽기 전용).
-  (2) 단방향 import: ``rider_agent`` import 0, third-party root 는 허용 집합(fastapi/sqlalchemy/
-      jinja2/starlette/pydantic/rider_crawl) ⊆.
-가드가 vacuous 하지 않음(실제 위반을 잡음)을 자기검증한다.
+  (2) 단방향 import(admin **전체**): ``rider_agent`` import 0, third-party root 는 허용 집합
+      (fastapi/sqlalchemy/jinja2/starlette/pydantic/rider_crawl) ⊆.
+가드가 vacuous 하지 않음(실제 위반을 잡음·화이트리스트가 액션 모듈을 제외함)을 자기검증한다.
 """
 
 from __future__ import annotations
@@ -19,6 +23,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADMIN_DIR = REPO_ROOT / "src" / "rider_server" / "admin"
+
+# 읽기 전용 파일 화이트리스트(5.7 재정렬) — write-call 금지 스캔 대상. 액션 모듈
+# (actions_routes.py)은 의도적으로 제외(쓰기 라우트 — 별도 가드가 service 위임을 강제).
+_READONLY_FILES = {
+    "__init__.py",
+    "routes.py",
+    "dashboard_service.py",
+    "dashboard_repository_postgres.py",
+    "severity.py",
+}
 
 # DB write / 상태 전이 / queue mutation 함수·메서드 이름(읽기 전용 admin 에서 금지).
 _FORBIDDEN_CALLS = {
@@ -65,6 +79,11 @@ def _py_files(pkg_dir: Path) -> list[Path]:
     return sorted(p for p in pkg_dir.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+def _readonly_py_files() -> list[Path]:
+    """write-call 금지 스캔 대상 = 읽기 전용 화이트리스트에 존재하는 파일만."""
+    return sorted(p for p in _py_files(ADMIN_DIR) if p.name in _READONLY_FILES)
+
+
 def _parse(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
@@ -106,10 +125,23 @@ def _abs_import_roots(tree: ast.Module) -> set[str]:
 
 def test_admin_modules_make_no_write_or_transition_calls() -> None:
     offenders: list[str] = []
-    for path in _py_files(ADMIN_DIR):
+    for path in _readonly_py_files():
         for name in _forbidden_calls_in(_parse(path)):
             offenders.append(f"{path.name} -> {name}()")
     assert offenders == [], offenders
+
+
+def test_readonly_whitelist_is_complete_and_excludes_action_module() -> None:
+    """화이트리스트가 실제 읽기 전용 파일을 모두 덮고(스캔이 비지 않음), 액션 모듈은 제외한다.
+
+    (1) 스캔 대상이 실제로 존재해야 한다(빈 스캔 = vacuous pass 방지).
+    (2) 5.7 액션 모듈(actions_routes.py)은 존재하지만 화이트리스트에 없다(쓰기 허용 — 별도 가드).
+    """
+    scanned = {p.name for p in _readonly_py_files()}
+    assert scanned, "읽기 전용 스캔 대상이 비어 있으면 안 된다"
+    action_module = ADMIN_DIR / "actions_routes.py"
+    assert action_module.exists(), "5.7 액션 모듈이 있어야 한다"
+    assert "actions_routes.py" not in scanned, "액션 모듈은 read-only 스캔에서 제외돼야 한다"
 
 
 def test_readonly_guard_is_not_vacuous() -> None:

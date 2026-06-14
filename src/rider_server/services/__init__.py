@@ -79,6 +79,18 @@ from .subscription_gate import (
     SubscriptionGate,
     SubscriptionStateChange,
 )
+from .admin_action_service import (
+    AdminActionNotFound,
+    AdminActionRepository,
+    AdminActionService,
+    AuditEntry,
+    HeldDispatchRef,
+    InMemoryAdminActionRepository,
+    JobRef,
+    TenantScopeViolation,
+    UNAUTHENTICATED_ACTOR,
+    build_diff_redacted,
+)
 
 __all__ = [
     "SubscriptionGate",
@@ -120,4 +132,15 @@ __all__ = [
     "KakaoRoomCollisionError",
     "find_kakao_room_collisions",
     "assert_unique_kakao_rooms",
+    # Story 5.7 — Admin 수동 운영 액션 + 구독/Dispatch 상태 전이(write+audit 경계)
+    "AdminActionService",
+    "AdminActionRepository",
+    "InMemoryAdminActionRepository",
+    "AdminActionNotFound",
+    "TenantScopeViolation",
+    "AuditEntry",
+    "JobRef",
+    "HeldDispatchRef",
+    "UNAUTHENTICATED_ACTOR",
+    "build_diff_redacted",
 ]

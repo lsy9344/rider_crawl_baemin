@@ -9,6 +9,7 @@ JSON Agent API(``api/``)와 분리된 **HTML Admin UI** 레이어다(architectur
 
 from __future__ import annotations
 
+from .actions_routes import router as admin_actions_router
 from .routes import router as admin_router
 
-__all__ = ["admin_router"]
+__all__ = ["admin_router", "admin_actions_router"]
