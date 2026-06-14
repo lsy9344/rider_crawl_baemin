@@ -1,8 +1,10 @@
-# rider_server Cloud 백엔드 — Story 5.1 최소 compose.
+# rider_server Cloud 백엔드 — Story 5.1 최소 compose (+ 5.5 Telegram webhook env).
 #
-# 5.1 범위는 backend-api 서비스만 실행·검증한다. scheduler / telegram-dispatcher /
-# admin-ui 는 architecture 트리에 있으나 각 후속 스토리 범위라 placeholder 주석으로만 둔다.
-# env 분리는 deploy/env/ 로 둔다(추후 ECS/Fargate 이전 대비).
+# Story 5.5 결정(ADD-12): Telegram webhook(`POST /v1/telegram/webhook`)은 별도 dispatcher
+# 프로세스가 아니라 backend-api FastAPI 앱의 인바운드 라우트로 서빙한다(send-only 중앙 정책 —
+# getUpdates polling 경합 회피, AC가 outbound 디스패치 배선을 요구하지 않으므로 최소 범위). 따라서
+# 기존 `telegram-dispatcher` placeholder 는 별도 서비스가 아니라 backend-api 의 webhook env 분리로
+# 채운다. webhook secret/public URL 은 평문 금지 — `*_ref` 핸들·플레이스홀더만 deploy/env/ 에 둔다.
 services:
   backend-api:
     build:
@@ -13,9 +15,10 @@ services:
       - "8000:8000"
     env_file:
       - ./env/backend-api.env
+      # Story 5.5 — Telegram webhook secret/public URL 분리 env(평문 secret 없음, *_ref 만).
+      - ./env/telegram-webhook.env
     restart: unless-stopped
 
-  # 후속 스토리 placeholder (5.1 범위 아님):
-  # scheduler:            # Story 5.4 — 스케줄러
-  # telegram-dispatcher:  # Story 5.5 — Telegram webhook/dispatcher
+  # 후속 스토리 placeholder (범위 아님):
+  # scheduler:            # Story 5.4 — 스케줄러(별도 프로세스)
   # admin-ui:             # Story 5.6 — Admin UI

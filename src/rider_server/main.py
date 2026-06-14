@@ -23,11 +23,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
 
-from .api import default_resolve_agent_id, jobs_router
+from .api import default_resolve_agent_id, jobs_router, telegram_webhook_router
 from .db.base import create_engine, create_session_factory
 from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
+from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
+from .services.channel_repository_postgres import PostgresChannelRepository
 from .settings import Settings
 
 
@@ -42,6 +44,33 @@ def _default_queue_backend(settings: Settings) -> QueueBackend:
         engine = create_engine(settings.database_url)
         return PostgresQueueBackend(create_session_factory(engine))
     return InMemoryQueueBackend()
+
+
+def _default_channel_repository(settings: Settings) -> ChannelRepository:
+    """채널 등록/검증/활성 영속 repository 기본값(``_default_queue_backend`` 와 동형 선택).
+
+    ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 in-memory(dev/무-DB 안전). 테스트는
+    ``create_app(channel_repository=...)`` 로 in-memory fake 를 직접 주입한다.
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresChannelRepository(create_session_factory(engine))
+    return InMemoryChannelRepository()
+
+
+def _default_resolve_telegram_secret(settings: Settings):
+    """webhook secret 해석 seam 기본값(평문 store 미배선이라 fail-closed → None).
+
+    ``telegram_webhook_secret_ref`` 는 ``*_ref`` 핸들이라 평문 secret 해석에는 secret store 가
+    필요하다(5.8+ 배선). 기본값은 평문을 복원할 수 없어 ``None`` 을 반환해 webhook 을 fail-closed
+    로 거부한다. 운영/테스트는 ``app.state.resolve_telegram_secret`` 을 실제 해석기로 교체한다.
+    """
+
+    def resolve() -> str | None:
+        return None
+
+    return resolve
 
 
 def _iso_utc_now() -> str:
@@ -73,11 +102,13 @@ def create_app(
     settings: Settings | None = None,
     *,
     queue_backend: QueueBackend | None = None,
+    channel_repository: ChannelRepository | None = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
 
-    테스트는 fake ``settings`` 와 ``queue_backend``(in-memory/PG)를 주입할 수 있다(미지정 시
-    env 로딩 / settings 기반 기본 backend).
+    테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository`` 를 주입할 수
+    있다(미지정 시 env 로딩 / settings 기반 기본값). webhook secret 해석은
+    ``app.state.resolve_telegram_secret`` seam 으로 주입한다(기본값은 fail-closed → None).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
@@ -86,6 +117,13 @@ def create_app(
     # Agent API queue backend(주입 가능 seam) + bearer→agent_id 해석 seam(5.8 이 교체).
     app.state.queue_backend = queue_backend or _default_queue_backend(app.state.settings)
     app.state.resolve_agent_id = default_resolve_agent_id
+    # Story 5.5: 채널 등록/검증/활성 repository + webhook secret 해석 seam(테스트 주입 가능).
+    app.state.channel_repository = channel_repository or _default_channel_repository(
+        app.state.settings
+    )
+    app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
+        app.state.settings
+    )
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
     @app.get("/health")
@@ -152,6 +190,7 @@ def create_app(
 
     # --- 리소스 라우트 (/v1/) -----------------------------------------------
     app.include_router(jobs_router)
+    app.include_router(telegram_webhook_router)
 
     return app
 

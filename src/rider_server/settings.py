@@ -35,6 +35,12 @@ class Settings:
     # 평문 비밀을 설정 객체에 싣지 않는다(미설정 시 None). 기존 4-필드 positional
     # 생성과 호환되도록 default 를 가진 마지막 필드로 둔다.
     database_url: str | None = None
+    # Story 5.5: Telegram webhook secret / bot token 의 **참조 핸들**(``*_ref``)만 싣는다.
+    # 평문 secret 은 절대 설정 객체에 두지 않는다(NFR-5·8 / ``database_url`` 추가 패턴 계승).
+    # 실제 평문 해석은 ``create_app`` 의 ``resolve_telegram_secret``/``resolve_telegram_token``
+    # 주입 seam 책임이고, 기존 positional 생성 호환을 위해 default 를 가진 마지막 필드로 둔다.
+    telegram_webhook_secret_ref: str | None = None
+    telegram_bot_token_ref: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -47,4 +53,7 @@ class Settings:
             build_sha=env.get("BUILD_SHA") or None,
             build_time=env.get("BUILD_TIME") or None,
             database_url=env.get("DATABASE_URL") or None,
+            # ``*_ref`` 핸들(평문 secret 아님) — 미설정/빈 문자열은 None 으로 정규화한다.
+            telegram_webhook_secret_ref=env.get("TELEGRAM_WEBHOOK_SECRET_REF") or None,
+            telegram_bot_token_ref=env.get("TELEGRAM_BOT_TOKEN_REF") or None,
         )

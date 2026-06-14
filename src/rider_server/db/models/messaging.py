@@ -27,6 +27,10 @@ class MessengerChannel(Base):
     thread_id: Mapped[str | None] = mapped_column(String, nullable=True)  # 라우팅 식별자(secret 아님)
     kakao_room_name: Mapped[str | None] = mapped_column(String, nullable=True)
     state: Mapped[str] = mapped_column(String, nullable=False)  # MessengerChannelState 값
+    # Story 5.5: 운영자가 PENDING 채널 사전 생성 시 부여하는 1회용 등록 코드(라우팅/운영용 —
+    # secret 아님). 고객 ``/register <code>`` → webhook 이 telegram_chat_id/thread_id 를 채운다.
+    # 0004 가 additive 로 추가(nullable). 활성 (chat_id, thread_id) 부분 유니크도 0004 가 건다.
+    registration_code: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class DeliveryRule(Base):

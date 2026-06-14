@@ -2,7 +2,7 @@
 
 작성: 2026-06-14 · 워크플로: `bmad-qa-generate-e2e-tests` · 역할: QA 자동화(테스트 생성 전용, 코드/스토리 검증 아님) · 프레임워크: pytest (`.venv/Scripts/python.exe -m pytest`, `pythonpath=["src"]`) · 모드: 발견 갭 자동 적용
 
-> QA 런마다 `test-summary.md` 1개를 정본(latest)으로 둔다. 직전 5.4 요약은 본 파일을 덮어쓰며 갱신됐고 5.4 내용은 story 5.4 Completion Notes 에 보존. 5.5 스냅샷은 `test-summary-5-5.md`.
+> 본 파일은 5.5 스냅샷이며, 동일 내용이 `test-summary.md`(QA 런 정본)에도 반영됐다. 제품 코드 무변경 — 테스트만 추가.
 
 ## 결과 요약
 
@@ -13,7 +13,7 @@
 | Story 5.5 always-run | 39 | **59** | **+20** |
 | Story 5.5 PG-gated(skip) | 3 | 3 | 0 |
 
-전체 회귀: `1635 passed, 24 skipped` — 신규 갭 테스트 20개, **회귀 0**. 이 수치가 review 정본(dev-exit 39 는 QA 추가로 stale — memory/stale-test-count-a2). 제품 코드 무변경 — 테스트만 추가.
+전체 회귀: `1635 passed, 24 skipped` — 신규 갭 테스트 20개, **회귀 0**. 이 수치가 review 정본(dev-exit 39 는 QA 추가로 stale — memory/stale-test-count-a2).
 
 ## 발견·채운 갭
 
