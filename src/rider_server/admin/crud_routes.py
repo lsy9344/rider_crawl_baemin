@@ -34,6 +34,7 @@ from rider_server.services.admin_action_service import (
     AdminActionNotFound,
 )
 from rider_server.services.admin_entity_service import is_center_name_risky  # noqa: F401  (재노출/문서용)
+from rider_server.services.admin_entity_service import AdminEntityDuplicateError
 
 router = APIRouter(prefix="/admin", tags=["admin-crud"])
 
@@ -105,10 +106,22 @@ def _int_or(form: dict, key: str, default: int = 0) -> int:
         return default
 
 
-def _fragment(request: Request, message: str, *, ok: bool = True) -> HTMLResponse:
-    return templates.TemplateResponse(
+ENTITY_OPTIONS_CHANGED = "admin-entity-changed"
+
+
+def _fragment(
+    request: Request,
+    message: str,
+    *,
+    ok: bool = True,
+    trigger: str | None = None,
+) -> HTMLResponse:
+    response = templates.TemplateResponse(
         request, "_action_result.html", {"message": message, "ok": ok}
     )
+    if trigger:
+        response.headers["HX-Trigger"] = trigger
+    return response
 
 
 def _entities(request: Request, title: str, rows: list[dict]) -> HTMLResponse:
@@ -117,11 +130,30 @@ def _entities(request: Request, title: str, rows: list[dict]) -> HTMLResponse:
     )
 
 
+def _options(
+    request: Request, options: list[dict], *, placeholder: str | None = None
+) -> HTMLResponse:
+    """드롭다운 <option> fragment(HTMX 로 <select> 안에 swap) — raw-id 직접 입력 제거용."""
+    return templates.TemplateResponse(
+        request, "_options.html", {"options": options, "placeholder": placeholder}
+    )
+
+
+def _channel_label(channel) -> str:
+    """메신저 채널 드롭다운 라벨 — messenger + 라우팅 식별자(비밀 아님). id 노출 최소."""
+    routing = getattr(channel, "telegram_chat_id", None) or getattr(
+        channel, "kakao_room_name", None
+    )
+    return f"{channel.messenger.value} · {routing}" if routing else channel.messenger.value
+
+
 def _raise_for(exc: Exception) -> None:
     """service 예외 → HTTP 상태(전역 핸들러가 envelope 로 변환). NotFound/scope→404, ValueError→400."""
 
     if isinstance(exc, AdminActionNotFound):
         raise HTTPException(HTTPStatus.NOT_FOUND, "대상을 찾을 수 없습니다") from exc
+    if isinstance(exc, AdminEntityDuplicateError):
+        raise HTTPException(HTTPStatus.CONFLICT, str(exc)) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "허용되지 않은 입력입니다") from exc
     raise exc
@@ -220,6 +252,54 @@ async def list_delivery_rules(
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# GET — 드롭다운 <option> fragment(연결 선택용 — raw-id 직접 입력 제거, AC: 비개발 운영자)
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/customers/options", response_class=HTMLResponse)
+async def customer_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_tenants()
+    return _options(
+        request, [{"id": t.id, "label": t.name} for t in rows], placeholder="고객 선택…"
+    )
+
+
+@router.get("/platform-accounts/options", response_class=HTMLResponse)
+async def platform_account_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_platform_accounts(_tenant_id(request))
+    return _options(
+        request,
+        [{"id": a.id, "label": f"{a.platform.value} · {a.label}"} for a in rows],
+        placeholder="계정 선택…",
+    )
+
+
+@router.get("/monitoring-targets/options", response_class=HTMLResponse)
+async def monitoring_target_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_monitoring_targets(_tenant_id(request))
+    return _options(
+        request, [{"id": t.id, "label": t.name} for t in rows], placeholder="업체 선택…"
+    )
+
+
+@router.get("/messenger-channels/options", response_class=HTMLResponse)
+async def messenger_channel_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_messenger_channels(_tenant_id(request))
+    return _options(
+        request,
+        [{"id": c.id, "label": _channel_label(c)} for c in rows],
+        placeholder="채널 선택…",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 고객 Tenant — create/update
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -239,7 +319,11 @@ async def create_customer(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"고객 생성됨 (id {tenant.id})")
+    response = _fragment(
+        request, f"고객 생성됨 (id {tenant.id})", trigger=ENTITY_OPTIONS_CHANGED
+    )
+    response.headers["HX-Redirect"] = f"/admin?tenant={tenant.id}"
+    return response
 
 
 @router.post("/customers/{tenant_id}", response_class=HTMLResponse)
@@ -258,7 +342,9 @@ async def update_customer(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"고객 편집됨 ({tenant.name})")
+    return _fragment(
+        request, f"고객 편집됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -290,12 +376,18 @@ async def create_platform_account(
             password_ref=form.get("password_ref", ""),
             at=_now(),
             actor_id=_resolve_actor(request),
+            verification_email_address_ref=form.get("verification_email_address_ref", ""),
+            verification_email_app_password_ref=form.get("verification_email_app_password_ref", ""),
+            verification_email_subject_keyword=form.get("verification_email_subject_keyword", ""),
+            verification_email_sender_keyword=form.get("verification_email_sender_keyword", ""),
             source=_resolve_source(request),
             reason=form.get("reason", ""),
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"플랫폼 계정 생성됨 (id {account.id})")
+    return _fragment(
+        request, f"플랫폼 계정 생성됨 (id {account.id})", trigger=ENTITY_OPTIONS_CHANGED
+    )
 
 
 @router.post("/platform-accounts/{account_id}", response_class=HTMLResponse)
@@ -312,12 +404,18 @@ async def update_platform_account(
             password_ref=form.get("password_ref"),
             at=_now(),
             actor_id=_resolve_actor(request),
+            verification_email_address_ref=form.get("verification_email_address_ref"),
+            verification_email_app_password_ref=form.get("verification_email_app_password_ref"),
+            verification_email_subject_keyword=form.get("verification_email_subject_keyword"),
+            verification_email_sender_keyword=form.get("verification_email_sender_keyword"),
             source=_resolve_source(request),
             reason=form.get("reason", ""),
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"플랫폼 계정 편집됨 (id {account.id})")
+    return _fragment(
+        request, f"플랫폼 계정 편집됨 (id {account.id})", trigger=ENTITY_OPTIONS_CHANGED
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -354,7 +452,10 @@ async def create_monitoring_target(
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
     return _fragment(
-        request, _target_message("모니터링 대상 생성됨", result), ok=not result.center_name_risky
+        request,
+        _target_message("모니터링 대상 생성됨", result),
+        ok=not result.center_name_risky,
+        trigger=ENTITY_OPTIONS_CHANGED,
     )
 
 
@@ -382,7 +483,10 @@ async def update_monitoring_target(
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
     return _fragment(
-        request, _target_message("모니터링 대상 편집됨", result), ok=not result.center_name_risky
+        request,
+        _target_message("모니터링 대상 편집됨", result),
+        ok=not result.center_name_risky,
+        trigger=ENTITY_OPTIONS_CHANGED,
     )
 
 
@@ -402,7 +506,11 @@ async def deactivate_monitoring_target(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"모니터링 대상 비활성화됨 (상태: {target.status.value})")
+    return _fragment(
+        request,
+        f"모니터링 대상 비활성화됨 (상태: {target.status.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -440,7 +548,11 @@ async def create_messenger_channel(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"메시지 채널 생성됨 (id {channel.id}, 상태 {channel.state.value})")
+    return _fragment(
+        request,
+        f"메시지 채널 생성됨 (id {channel.id}, 상태 {channel.state.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
 
 
 @router.post("/messenger-channels/{channel_id}", response_class=HTMLResponse)
@@ -462,7 +574,11 @@ async def update_messenger_channel(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"메시지 채널 라우팅 편집됨 (id {channel.id})")
+    return _fragment(
+        request,
+        f"메시지 채널 라우팅 편집됨 (id {channel.id})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
 
 
 @router.post("/messenger-channels/{channel_id}/deactivate", response_class=HTMLResponse)
@@ -481,7 +597,11 @@ async def deactivate_messenger_channel(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"메시지 채널 비활성화됨 (상태: {channel.state.value})")
+    return _fragment(
+        request,
+        f"메시지 채널 비활성화됨 (상태: {channel.state.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════

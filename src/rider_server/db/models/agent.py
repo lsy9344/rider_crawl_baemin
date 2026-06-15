@@ -1,4 +1,4 @@
-"""agents·browser_profiles·jobs ORM 모델 — Story 5.2 (AC1·AC2) + 5.3 jobs lease 컬럼(AC2).
+"""agents·browser_profiles·jobs ORM 모델 — Story 5.2 (AC1·AC2) + additive runtime columns.
 
 ``agents``/``jobs`` 는 domain dataclass 가 없어 data-api-contract Required fields 에서 직접
 정의한다(추측 컬럼 추가 금지 — 운영 컬럼은 후속 스토리가 additive 마이그레이션으로).
@@ -7,13 +7,14 @@
 claim 로직(``queue/postgres_queue.py``)을 채운다. 계약 Required 8필드(id/type/target_id/
 agent_id/status/run_after/attempts/error_code)는 그대로 유지 — 새 컬럼은 superset 이라 5.2
 schema 가드 무회귀. ``browser_profiles.profile_path_ref`` 는 ref 컬럼(raw 경로 평문 금지).
-``capacity_json`` 은 JSON(Postgres JSONB).
+``capacity_json`` 은 JSON(Postgres JSONB). Agent registration columns store only hashes and
+timestamps; plaintext registration codes and bearer tokens never enter the DB.
 """
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Index, Integer, String
+from sqlalchemy import Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base, json_variant
@@ -37,6 +38,26 @@ class Agent(Base):
     # 단독 컬럼명 금지(forbidden-column 정확매치 — ``token_revoked_at``/``token_rotated_at`` 안전).
     token_revoked_at: Mapped[datetime | None] = ts(nullable=True)
     token_rotated_at: Mapped[datetime | None] = ts(nullable=True)
+    # ── Agent register/heartbeat contract(additive, 0006 migration) ─────────────
+    registration_code_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    registration_code_used_at: Mapped[datetime | None] = ts(nullable=True)
+    token_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    token_issued_at: Mapped[datetime | None] = ts(nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_agents_registration_code_hash",
+            "registration_code_hash",
+            unique=True,
+            postgresql_where=text("registration_code_hash IS NOT NULL"),
+        ),
+        Index(
+            "uq_agents_token_hash",
+            "token_hash",
+            unique=True,
+            postgresql_where=text("token_hash IS NOT NULL"),
+        ),
+    )
 
 
 class BrowserProfile(Base):
@@ -61,6 +82,7 @@ class Job(Base):
     run_after: Mapped[datetime | None] = ts(nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)  # FailureCategory 값
+    payload_json: Mapped[dict | None] = mapped_column(json_variant(), nullable=True)
     # ── 5.3 lease 컬럼(additive, 0002 마이그레이션) ─────────────────────────────
     lease_expires_at: Mapped[datetime | None] = ts(nullable=True)  # claim 시 부여, 만료 시 stale 회수
     claimed_at: Mapped[datetime | None] = ts(nullable=True)

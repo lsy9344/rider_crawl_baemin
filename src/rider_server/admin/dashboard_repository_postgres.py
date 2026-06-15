@@ -81,6 +81,8 @@ class PostgresDashboardRepository(DashboardRepository):
     async def target_health(
         self, *, tenant_id: str, now: datetime
     ) -> list[TargetHealthFacts]:
+        if not tenant_id.strip():
+            return []
         # 대상 + 소유 계정(auth_state) + tenant lifecycle 을 tenant scope 로 조인(INACTIVE 제외).
         base_stmt = (
             select(
@@ -241,6 +243,8 @@ class PostgresDashboardRepository(DashboardRepository):
     async def channel_health(
         self, *, tenant_id: str, now: datetime
     ) -> ChannelHealthRow:
+        if not tenant_id.strip():
+            return ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=0)
         kakao_stmt = (
             select(func.min(Job.run_after))
             .join(MonitoringTarget, Job.target_id == MonitoringTarget.id)
@@ -274,6 +278,8 @@ class PostgresDashboardRepository(DashboardRepository):
         )
 
     async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
+        if not tenant_id.strip():
+            return []
         # 계정 인증 필요(AUTH_REQUIRED) 대상/프로필을 tenant scope 로 조인(AC4).
         account_stmt = (
             select(

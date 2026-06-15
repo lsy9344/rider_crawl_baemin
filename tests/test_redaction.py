@@ -153,11 +153,11 @@ def test_ac2_operational_ids_masked_when_opted_in():
 
 def test_ac3_redacted_error_event_masks_message_and_error():
     event = redacted_error_event(
-        "GMAIL_FETCH_FAILED",
+        "EMAIL_FETCH_FAILED",
         f"otp={FAKE_OTP} 발송 실패 token {FAKE_TOKEN}",
         RuntimeError(f"{FAKE_EMAIL} 인증 실패 인증번호 {FAKE_OTP}"),
     )
-    assert event["code"] == "GMAIL_FETCH_FAILED"  # code 는 보존
+    assert event["code"] == "EMAIL_FETCH_FAILED"  # code 는 보존
     assert FAKE_OTP not in event["message_redacted"]
     assert FAKE_TOKEN not in event["message_redacted"]
     assert FAKE_EMAIL not in event["error_message_redacted"]

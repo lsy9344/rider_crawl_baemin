@@ -221,7 +221,7 @@ def test_all_four_alerts_fire_in_canonical_order_without_duplicates() -> None:
 def test_alert_threshold_minimums_lock_ac1_ge_one() -> None:
     # AC1 "≥1" 임계: auth/gmail/telegram 최소 발화 카운트는 1(정본 임계 잠금).
     assert policy.AUTH_REQUIRED_ALERT_MIN == 1
-    assert policy.GMAIL_REAUTH_ALERT_MIN == 1
+    assert policy.EMAIL_AUTH_ALERT_MIN == 1
     assert policy.TELEGRAM_ERROR_ALERT_MIN == 1
 
 

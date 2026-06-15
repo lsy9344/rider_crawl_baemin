@@ -17,13 +17,14 @@ from rider_crawl.ui_settings import _SECRET_FIELDS
 # ── AC4: secret 저장 위치 3분류 매핑 ──
 
 
-def test_classification_maps_five_secret_kinds_to_three_buckets():
-    # 텔레그램 봇 토큰=중앙, 쿠팡 password·login-id=Agent-local, Gmail token=Agent-local,
-    # OTP=비저장.
+def test_classification_maps_secret_kinds_to_three_buckets():
+    # 텔레그램 봇 토큰=중앙, 쿠팡 password·login-id=Agent-local,
+    # 인증 이메일 주소/앱 비밀번호=Agent-local, OTP=비저장.
     assert classify_secret_storage("telegram_bot_token") == SECRET_STORAGE_CENTRAL
     assert classify_secret_storage("coupang_login_password") == SECRET_STORAGE_AGENT_LOCAL
     assert classify_secret_storage("coupang_login_id") == SECRET_STORAGE_AGENT_LOCAL
-    assert classify_secret_storage("gmail_oauth_token") == SECRET_STORAGE_AGENT_LOCAL
+    assert classify_secret_storage("verification_email_address") == SECRET_STORAGE_AGENT_LOCAL
+    assert classify_secret_storage("verification_email_app_password") == SECRET_STORAGE_AGENT_LOCAL
     assert classify_secret_storage("otp") == SECRET_STORAGE_NOT_STORED
 
 
@@ -129,4 +130,5 @@ def test_otp_is_not_stored_and_excluded_from_store_handled_fields():
         "telegram_bot_token",
         "coupang_login_password",
         "coupang_login_id",
+        "verification_email_app_password",
     }

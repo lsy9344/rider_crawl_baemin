@@ -10,7 +10,7 @@ Postgres 에선 JSONB. telegram_chat_id/thread_id 는 라우팅 식별자라 sec
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, String, UniqueConstraint
+from sqlalchemy import Boolean, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base, json_variant
@@ -19,6 +19,27 @@ from ._columns import fk, ts, uuid_pk
 
 class MessengerChannel(Base):
     __tablename__ = "messenger_channels"
+    __table_args__ = (
+        Index(
+            "uq_messenger_channels_active_telegram_topic",
+            "telegram_chat_id",
+            "thread_id",
+            unique=True,
+            postgresql_where=text("state = 'ACTIVE' AND thread_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_messenger_channels_active_telegram_general",
+            "telegram_chat_id",
+            unique=True,
+            postgresql_where=text("state = 'ACTIVE' AND thread_id IS NULL"),
+        ),
+        Index(
+            "uq_messenger_channels_registration_code",
+            "registration_code",
+            unique=True,
+            postgresql_where=text("registration_code IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = fk("tenants.id")

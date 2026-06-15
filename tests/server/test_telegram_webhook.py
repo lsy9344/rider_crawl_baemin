@@ -315,6 +315,29 @@ def test_webhook_default_secret_seam_is_fail_closed():
     assert r.status_code == 401
 
 
+def test_webhook_default_secret_resolver_reads_env_ref(monkeypatch):
+    monkeypatch.setenv("RIDER_TELEGRAM_WEBHOOK_SECRET", _FAKE_SECRET)
+    repo = InMemoryChannelRepository()
+    repo.seed(_pending_channel(), registration_code=_REG_CODE)
+    settings = Settings(
+        app_env="test",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        telegram_webhook_secret_ref="env:RIDER_TELEGRAM_WEBHOOK_SECRET",
+    )
+    app = create_app(settings, channel_repository=repo)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post(
+        "/v1/telegram/webhook",
+        json=_update(f"/register {_REG_CODE}"),
+        headers={WEBHOOK_SECRET_HEADER: _FAKE_SECRET},
+    )
+
+    assert r.status_code == 200
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (3) reuse/boundary 가드 — webhook 은 send-only(getUpdates/poller import 0)
 # ══════════════════════════════════════════════════════════════════════════

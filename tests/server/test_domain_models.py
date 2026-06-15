@@ -101,6 +101,10 @@ def test_model_field_sets_match_contract() -> None:
         "label",
         "username_ref",
         "password_ref",
+        "verification_email_address_ref",
+        "verification_email_app_password_ref",
+        "verification_email_subject_keyword",
+        "verification_email_sender_keyword",
         "auth_state",
     }
     assert _fields(MonitoringTarget) == {
@@ -158,6 +162,10 @@ def test_default_typed_state_fields() -> None:
         password_ref=_FAKE_PASSWORD_REF,
     )
     assert account.auth_state is BaeminAuthState.UNKNOWN
+    assert account.verification_email_address_ref.ref == ""
+    assert account.verification_email_app_password_ref.ref == ""
+    assert account.verification_email_subject_keyword == "인증번호"
+    assert account.verification_email_sender_keyword == "coupang"
     assert make_target().status is MonitoringTargetStatus.ACTIVE
     assert make_channel().state is MessengerChannelState.PENDING
     tenant = Tenant(id="tnt-1", name="고객", status=CustomerLifecycleState.LEAD,
@@ -202,6 +210,8 @@ def test_platform_account_uses_secret_refs_not_plaintext() -> None:
     )
     assert isinstance(account.username_ref, SecretRef)
     assert isinstance(account.password_ref, SecretRef)
+    assert isinstance(account.verification_email_address_ref, SecretRef)
+    assert isinstance(account.verification_email_app_password_ref, SecretRef)
     # SecretRef는 참조 핸들만 — 평문 필드(value/secret/password/token …)를 갖지 않는다.
     plaintext_keys = {"value", "secret", "password", "token", "plaintext", "raw"}
     assert _fields(SecretRef) & plaintext_keys == set()

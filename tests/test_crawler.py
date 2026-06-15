@@ -458,6 +458,17 @@ def test_collect_baemin_achievement_report_text_preserves_frame_line_breaks(tmp_
                 "433/330 (100%)",
                 "374/319 (100%)",
                 "88.18%",
+                "오늘 배달현황",
+                "협력사아이디",
+                "아침점심",
+                "오후논피",
+                "저녁피크",
+                "심야논피",
+                "표준서울마포B - DP2605181318",
+                "471/341 (100%)",
+                "295/242 (100%)",
+                "494/396 (100%)",
+                "489/341 (100%)",
             ]
         )
     )
@@ -467,6 +478,50 @@ def test_collect_baemin_achievement_report_text_preserves_frame_line_breaks(tmp_
 
     assert "\n26-06-10\n" in text
     assert frame.scrolled is True
+
+
+def test_collect_baemin_achievement_report_text_waits_for_today_delivery_table(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_id="DP2605181318",
+    )
+    weekly_only = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-14",
+            "일",
+            "0/363 (0%)",
+            "0/242 (0%)",
+            "0/385 (0%)",
+            "0/330 (0%)",
+            "0.00%",
+        ]
+    )
+    weekly_plus_today = "\n".join(
+        [
+            weekly_only,
+            "오늘 배달현황",
+            "협력사아이디",
+            "아침점심",
+            "오후논피",
+            "저녁피크",
+            "심야논피",
+            "표준서울마포B - DP2605181318",
+            "471/341 (100%)",
+            "295/242 (100%)",
+            "494/396 (100%)",
+            "489/341 (100%)",
+        ]
+    )
+    frame = _FakeProgressiveTextFrame([weekly_only, weekly_plus_today])
+    page = _FakeAsyncReportPage([frame])
+
+    text = asyncio.run(crawler._collect_baemin_achievement_report_text(page, config))
+
+    assert "471/341 (100%)" in text
+    assert page.wait_calls == 1
 
 
 def _consume_coroutine_then(value):
@@ -756,11 +811,29 @@ class _FakeAsyncTextLocator:
         return self.text
 
 
+class _FakeProgressiveTextFrame:
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = texts
+        self._index = 0
+        self.scrolled = False
+
+    async def evaluate(self, _script: str):
+        self.scrolled = True
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        text = self._texts[min(self._index, len(self._texts) - 1)]
+        self._index += 1
+        return _FakeAsyncTextLocator(text)
+
+
 class _FakeAsyncReportPage:
     def __init__(self, frames: list[_FakeAsyncTextFrame]) -> None:
         self.frames = frames
+        self.wait_calls = 0
 
     async def wait_for_timeout(self, _timeout: int):
+        self.wait_calls += 1
         return None
 
 

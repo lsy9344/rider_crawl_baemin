@@ -12,9 +12,8 @@ from .config import (
     DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
     DEFAULT_BAEMIN_CENTER_ID,
     DEFAULT_BAEMIN_CENTER_NAME,
-    DEFAULT_GMAIL_2FA_QUERY,
-    DEFAULT_GMAIL_CREDENTIALS_PATH,
-    DEFAULT_GMAIL_TOKEN_PATH,
+    DEFAULT_EMAIL_2FA_SENDER_KEYWORD,
+    DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD,
     AppConfig,
     coupang_center_name_risk,
 )
@@ -26,6 +25,7 @@ _SECRET_FIELDS: tuple[str, ...] = (
     "telegram_bot_token",
     "coupang_login_password",
     "coupang_login_id",
+    "verification_email_app_password",
 )
 
 
@@ -57,9 +57,10 @@ class UiSettings:
     coupang_auto_email_2fa_enabled: bool = False
     coupang_login_id: str = ""
     coupang_login_password: str = ""
-    gmail_2fa_query: str = DEFAULT_GMAIL_2FA_QUERY
-    gmail_credentials_path: str = DEFAULT_GMAIL_CREDENTIALS_PATH
-    gmail_token_path: str = DEFAULT_GMAIL_TOKEN_PATH
+    verification_email_address: str = ""
+    verification_email_app_password: str = ""
+    verification_email_subject_keyword: str = DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+    verification_email_sender_keyword: str = DEFAULT_EMAIL_2FA_SENDER_KEYWORD
     # 운영 추적용 안정 식별자(P1-01). 탭 번호가 아니라 ID로 고객/대상을 추적한다. 로드
     # 마이그레이션이 활성 탭에만 불투명 ID(uuid4)를 발급·영속화하고(load_all), 기존 탭명은
     # legacy_alias로 표시/보조 식별만 한다(주 식별자는 monitoring_target_id). state_subdir
@@ -76,6 +77,7 @@ class UiSettings:
     telegram_bot_token_ref: str = ""
     coupang_login_password_ref: str = ""
     coupang_login_id_ref: str = ""
+    verification_email_app_password_ref: str = ""
 
     @classmethod
     def defaults(cls) -> "UiSettings":
@@ -169,13 +171,18 @@ class UiSettings:
             state_subdir=state_subdir,
             # 쿠팡 자동 이메일 2FA 복구 설정은 UI에서 입력받아 탭별로 저장한 값을 쓴다
             # (.env 사용 안 함). poll/코드 자릿수 등 자주 안 바뀌는 값은 AppConfig 기본값을
-            # 그대로 둔다. 빈 경로/검색식은 기본값으로 보정해 잘못된 빈 값으로 덮이지 않게 한다.
+            # 그대로 둔다. 빈 키워드는 기본값으로 보정해 잘못된 빈 값으로 덮이지 않게 한다.
             coupang_auto_email_2fa_enabled=self.coupang_auto_email_2fa_enabled,
             coupang_login_id=self.coupang_login_id,
             coupang_login_password=self.coupang_login_password,
-            gmail_2fa_query=self.gmail_2fa_query or DEFAULT_GMAIL_2FA_QUERY,
-            gmail_credentials_path=Path(self.gmail_credentials_path or DEFAULT_GMAIL_CREDENTIALS_PATH),
-            gmail_token_path=Path(self.gmail_token_path or DEFAULT_GMAIL_TOKEN_PATH),
+            verification_email_address=self.verification_email_address.strip(),
+            verification_email_app_password=self.verification_email_app_password,
+            verification_email_subject_keyword=(
+                self.verification_email_subject_keyword or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+            ),
+            verification_email_sender_keyword=(
+                self.verification_email_sender_keyword or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+            ),
         )
 
 

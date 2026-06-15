@@ -9,7 +9,7 @@ from .models import CurrentScreenSnapshot, PeakPeriodSnapshot, PerformanceSnapsh
 # 별도 표를 사용한다. 키는 메시지 라벨, 값은 "시작~끝" 문자열.
 WEEKDAY_PEAK_TIMES = {
     "morning": "06:00~10:54",
-    "lunch_peak": "10:54~12:59",
+    "lunch_peak": "10:55~12:59",
     "lunch_non_peak": "13:00~16:54",
     "dinner_peak": "16:55~19:59",
     "dinner_non_peak": "20:00~03:59",
@@ -17,7 +17,7 @@ WEEKDAY_PEAK_TIMES = {
 
 WEEKEND_PEAK_TIMES = {
     "morning": "06:00~10:54",
-    "lunch_peak": "10:54~01:59",
+    "lunch_peak": "10:55~01:59",
     "lunch_non_peak": "02:00~04:54",
     "dinner_peak": "04:55~07:59",
     "dinner_non_peak": "20:00~03:59",
@@ -87,14 +87,12 @@ def _render_performance_message(
             f"저녁 논피크 : {_format_period(dashboard.dinner_non_peak, times['dinner_non_peak'])}",
             "",
             f"배정 {_format_count(dashboard.assigned_count)}건 / 처리 {_format_count(dashboard.processed_count)}건",
-            f"🚨거절률: {_format_count(dashboard.reject_rate)}%🚨",
+            f"거절률: {_format_count(dashboard.reject_rate)}%",
         ]
     )
-    # '수행중인인원'은 rider-performance 페이지(``current_screen``)에서만 얻는다. 쿠팡 탭은
-    # peak-dashboard 한 페이지만 크롤링하므로 보통 ``current_screen``이 없고, 이때는 줄을
-    # 생략한다. rider-performance도 함께 읽는 경우에만 이 줄을 덧붙인다.
+    # 수행중 인원은 rider-performance의 온라인 인원이다. 해당 보조 화면을 못 읽으면 생략한다.
     if snapshot.current_screen is not None:
-        lines.append(f"🌇수행중인인원 : {snapshot.current_screen.active_riders}명")
+        lines.append(f"수행중인원: {snapshot.current_screen.active_riders}명")
     return "\n".join(lines)
 
 

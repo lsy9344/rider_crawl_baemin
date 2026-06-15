@@ -42,6 +42,7 @@ class ClaimedJobRecord:
     type: str
     target_id: str | None
     lease_expires_at: datetime
+    payload_json: dict[str, Any] | None = None
     attempts: int = 0
     status: str = JOB_STATUS_CLAIMED
 
@@ -74,6 +75,7 @@ class QueueBackend(abc.ABC):
         *,
         job_type: str,
         target_id: str | None = None,
+        payload_json: dict[str, Any] | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -94,6 +96,21 @@ class QueueBackend(abc.ABC):
         claim 시 한 트랜잭션에서 ``CLAIMED`` + ``agent_id`` + ``lease_expires_at``(=now+lease)
         + ``claimed_at`` 를 부여한다. 동시 claim 에서 같은 job 은 **정확히 하나만** 성공한다
         (PG=``FOR UPDATE SKIP LOCKED``, in-memory=lock). 빈 큐면 ``[]``.
+        """
+
+    @abc.abstractmethod
+    async def in_flight_job(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        now: datetime,
+    ) -> ClaimedJobRecord | None:
+        """이 Agent 가 아직 소유 중인 진행 job 을 조회한다.
+
+        ``agent_id`` 소유 + 미만료 + 진행 중(CLAIMED/RUNNING)이면 중립 record 를 돌려주고,
+        미존재/재할당/만료/종료 상태면 ``None`` 을 돌려준다. 완료 전 snapshot 검증처럼 job 의
+        target 계약을 확인해야 하지만 상태를 아직 바꾸면 안 되는 경로에서 쓴다.
         """
 
     @abc.abstractmethod

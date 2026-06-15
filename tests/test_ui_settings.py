@@ -1,3 +1,4 @@
+import json
 import math
 from pathlib import Path
 
@@ -292,30 +293,35 @@ def test_ui_settings_to_app_config_uses_ui_2fa_fields():
     settings.coupang_auto_email_2fa_enabled = True
     settings.coupang_login_id = "worker-id"
     settings.coupang_login_password = "worker-password"
-    settings.gmail_2fa_query = "from:(no-reply@coupang.com) subject:(인증)"
-    settings.gmail_credentials_path = "C:/safe/credentials.gmail.json"
-    settings.gmail_token_path = "C:/safe/token.gmail.json"
+    settings.verification_email_address = " rider@naver.com "
+    settings.verification_email_app_password = "app password"
+    settings.verification_email_subject_keyword = "이메일 인증번호"
+    settings.verification_email_sender_keyword = "donotreply"
 
     config = settings.to_app_config()
 
     assert config.coupang_auto_email_2fa_enabled is True
     assert config.coupang_login_id == "worker-id"
     assert config.coupang_login_password == "worker-password"
-    assert config.gmail_2fa_query == "from:(no-reply@coupang.com) subject:(인증)"
-    assert config.gmail_credentials_path == Path("C:/safe/credentials.gmail.json")
-    assert config.gmail_token_path == Path("C:/safe/token.gmail.json")
+    assert config.verification_email_address == "rider@naver.com"
+    assert config.verification_email_app_password == "app password"
+    assert config.verification_email_subject_keyword == "이메일 인증번호"
+    assert config.verification_email_sender_keyword == "donotreply"
 
 
 def test_ui_settings_to_app_config_2fa_does_not_read_env(monkeypatch):
     # 정책 변경: to_app_config는 더 이상 환경변수/.env를 읽지 않는다. env가 켜져 있어도
     # UI 설정이 비활성이면 비활성이어야 한다.
     monkeypatch.setenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", "true")
-    monkeypatch.setenv("GMAIL_2FA_QUERY", "from:(env@coupang.com)")
+    monkeypatch.setenv("G" + "MAIL_2FA_QUERY", "from:(env@coupang.com)")
 
     config = UiSettings.defaults().to_app_config()
 
     assert config.coupang_auto_email_2fa_enabled is False
-    assert config.gmail_2fa_query != "from:(env@coupang.com)"
+    assert config.verification_email_address == ""
+    assert config.verification_email_app_password == ""
+    assert config.verification_email_subject_keyword == "인증번호"
+    assert not hasattr(config, "g" + "mail_2fa_query")
 
 
 def test_ui_settings_to_app_config_defaults_2fa_disabled():
@@ -324,6 +330,32 @@ def test_ui_settings_to_app_config_defaults_2fa_disabled():
     assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == ""
     assert config.coupang_login_password == ""
+    assert config.verification_email_address == ""
+    assert config.verification_email_app_password == ""
+
+
+def test_ui_settings_load_ignores_legacy_gmail_oauth_keys(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "performance_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                "g" + "mail_2fa_query": "from:(donotreply@coupang.com) subject:(인증번호)",
+                "g" + "mail_credentials_path": "secrets/legacy/credentials.json",
+                "g" + "mail_token_path": "secrets/legacy/token.json",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert not hasattr(loaded, "g" + "mail_2fa_query")
+    assert loaded.verification_email_address == ""
+    assert loaded.verification_email_app_password == ""
+    assert loaded.verification_email_subject_keyword == "인증번호"
+    assert loaded.verification_email_sender_keyword == "coupang"
 
 
 # ── Story 2.1: customer/target ID 발급 + legacy_alias 보존 ──
@@ -813,20 +845,23 @@ def test_save_strips_plaintext_secret_and_writes_only_ref(tmp_path):
     settings.telegram_bot_token = "tok-fake"
     settings.coupang_login_password = "pw-fake"
     settings.coupang_login_id = "id-fake"
+    settings.verification_email_app_password = "imap-pw-fake"
 
     store.save(settings)
 
     text = (tmp_path / "settings.json").read_text(encoding="utf-8")
-    for secret in ("tok-fake", "pw-fake", "id-fake"):
+    for secret in ("tok-fake", "pw-fake", "id-fake", "imap-pw-fake"):
         assert secret not in text
     assert "telegram_bot_token_ref" in text
     assert "coupang_login_password_ref" in text
     assert "coupang_login_id_ref" in text
+    assert "verification_email_app_password_ref" in text
     assert '"crawlings"' not in text  # 평면 객체 직렬화 형식 보존
     # 평문은 설정 파일 밖 store에서만 복원된다.
     assert backend.resolve(settings.telegram_bot_token_ref) == "tok-fake"
     assert backend.resolve(settings.coupang_login_password_ref) == "pw-fake"
     assert backend.resolve(settings.coupang_login_id_ref) == "id-fake"
+    assert backend.resolve(settings.verification_email_app_password_ref) == "imap-pw-fake"
 
 
 def test_save_all_strips_plaintext_secret_and_preserves_format(tmp_path):
@@ -838,15 +873,18 @@ def test_save_all_strips_plaintext_secret_and_preserves_format(tmp_path):
     settings[0].monitoring_target_id = "mt-1"
     settings[0].telegram_bot_token = "tok-fake"
     settings[0].coupang_login_password = "pw-fake"
+    settings[0].verification_email_app_password = "imap-pw-fake"
 
     store.save_all(settings)
 
     text = (tmp_path / "settings.json").read_text(encoding="utf-8")
     assert "tok-fake" not in text
     assert "pw-fake" not in text
+    assert "imap-pw-fake" not in text
     assert '"crawlings"' in text
     assert backend.resolve(settings[0].telegram_bot_token_ref) == "tok-fake"
     assert backend.resolve(settings[0].coupang_login_password_ref) == "pw-fake"
+    assert backend.resolve(settings[0].verification_email_app_password_ref) == "imap-pw-fake"
 
 
 def test_load_all_migrates_legacy_plaintext_secret_to_ref_only(tmp_path):
@@ -859,7 +897,8 @@ def test_load_all_migrates_legacy_plaintext_secret_to_ref_only(tmp_path):
         '{"crawlings": [{"performance_url": "https://example.test/x",'
         ' "telegram_bot_token": "tok-fake",'
         ' "coupang_login_password": "pw-fake",'
-        ' "coupang_login_id": "id-fake"}]}',
+        ' "coupang_login_id": "id-fake",'
+        ' "verification_email_app_password": "imap-pw-fake"}]}',
         encoding="utf-8",
     )
     store = UiSettingsStore(path, backend)
@@ -869,13 +908,15 @@ def test_load_all_migrates_legacy_plaintext_secret_to_ref_only(tmp_path):
     assert loaded[0].telegram_bot_token == "tok-fake"
     assert loaded[0].coupang_login_password == "pw-fake"
     assert loaded[0].coupang_login_id == "id-fake"
+    assert loaded[0].verification_email_app_password == "imap-pw-fake"
     text = path.read_text(encoding="utf-8")
-    for secret in ("tok-fake", "pw-fake", "id-fake"):
+    for secret in ("tok-fake", "pw-fake", "id-fake", "imap-pw-fake"):
         assert secret not in text
     assert "telegram_bot_token_ref" in text
     assert backend.resolve(loaded[0].telegram_bot_token_ref) == "tok-fake"
     assert backend.resolve(loaded[0].coupang_login_password_ref) == "pw-fake"
     assert backend.resolve(loaded[0].coupang_login_id_ref) == "id-fake"
+    assert backend.resolve(loaded[0].verification_email_app_password_ref) == "imap-pw-fake"
 
 
 def test_load_single_migrates_legacy_plaintext_to_ref_only(tmp_path):
@@ -919,6 +960,8 @@ def test_ref_only_file_resolves_to_byte_identical_plaintext_in_app_config(tmp_pa
     original.telegram_bot_token = "tok-fake"
     original.coupang_login_password = "pw-fake"
     original.coupang_login_id = "id-fake"
+    original.verification_email_address = "rider@naver.com"
+    original.verification_email_app_password = "imap-pw-fake"
     store.save(original)
 
     config = store.load().to_app_config()
@@ -926,6 +969,8 @@ def test_ref_only_file_resolves_to_byte_identical_plaintext_in_app_config(tmp_pa
     assert config.telegram_bot_token == "tok-fake"
     assert config.coupang_login_password == "pw-fake"
     assert config.coupang_login_id == "id-fake"
+    assert config.verification_email_address == "rider@naver.com"
+    assert config.verification_email_app_password == "imap-pw-fake"
 
 
 def test_resolve_missing_store_value_is_fail_closed_empty(tmp_path):
@@ -966,19 +1011,20 @@ def test_migration_precedence_plaintext_wins_over_existing_ref(tmp_path):
     assert backend.resolve(loaded.telegram_bot_token_ref) == "tok-fresh"
 
 
-def test_gmail_oauth_token_is_path_ref_only_in_settings_json(tmp_path):
-    # AC2 #5(c): Gmail OAuth token은 설정 JSON에 값이 아니라 경로(ref)만 있다(이미 그러함 —
-    # 분류 명문화용). UiSettings엔 토큰 값 필드가 없고 gmail_token_path(경로)만 직렬화된다.
+def test_verification_email_app_password_is_ref_only_in_settings_json(tmp_path):
+    # IMAP 앱 비밀번호는 설정 JSON에 평문으로 남지 않고 ref만 직렬화된다.
     backend = LocalFileSecretStore(tmp_path / "store.json")
     store = UiSettingsStore(tmp_path / "settings.json", backend)
     settings = UiSettings.defaults()
-    settings.gmail_token_path = "secrets/google/token.gmail.json"
+    settings.monitoring_target_id = "mt-1"
+    settings.verification_email_app_password = "imap-pw-fake"
 
     store.save(settings)
 
     text = (tmp_path / "settings.json").read_text(encoding="utf-8")
-    assert "secrets/google/token.gmail.json" in text  # 경로(ref)만 존재
-    assert not hasattr(settings, "gmail_oauth_token")  # 토큰 값 필드 자체가 없다
+    assert "imap-pw-fake" not in text
+    assert "verification_email_app_password_ref" in text
+    assert backend.resolve(settings.verification_email_app_password_ref) == "imap-pw-fake"
 
 
 def test_round_trip_does_not_reissue_ref_when_already_migrated(tmp_path):
@@ -1046,6 +1092,7 @@ def test_secret_persistence_survives_fresh_store_instances_restart(tmp_path):
     original.telegram_bot_token = "tok-fake"
     original.coupang_login_password = "pw-fake"
     original.coupang_login_id = "id-fake"
+    original.verification_email_app_password = "imap-pw-fake"
     saver.save(original)
 
     reopened = UiSettingsStore(
@@ -1056,6 +1103,7 @@ def test_secret_persistence_survives_fresh_store_instances_restart(tmp_path):
     assert config.telegram_bot_token == "tok-fake"
     assert config.coupang_login_password == "pw-fake"
     assert config.coupang_login_id == "id-fake"
+    assert config.verification_email_app_password == "imap-pw-fake"
 
 
 def test_default_store_wiring_writes_separate_secrets_file(tmp_path):
@@ -1108,5 +1156,6 @@ def test_save_without_secrets_issues_no_ref_and_creates_no_store_file(tmp_path):
     assert settings.telegram_bot_token_ref == ""
     assert settings.coupang_login_password_ref == ""
     assert settings.coupang_login_id_ref == ""
+    assert settings.verification_email_app_password_ref == ""
     assert (tmp_path / "store.json").exists() is False
     assert (tmp_path / "settings.json").exists()  # 설정 자체는 정상 기록

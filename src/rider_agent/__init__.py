@@ -1,6 +1,6 @@
 """rider_agent — Windows Local Agent 패키지 (Epic 4).
 
-기존 ``rider_crawl`` 의 검증된 도메인(crawler/parser/renderer/Gmail 2FA/Kakao sender)을
+기존 ``rider_crawl`` 의 검증된 도메인(crawler/parser/renderer/email IMAP 2FA/Kakao sender)을
 **단방향 import 로 재사용**하는 신규 Windows Local Agent 런타임이다. 새 프레임워크를
 하나도 도입하지 않으며, 자기(own) 코드는 **동기(sync) 런타임**으로 동작한다 — Cloud 의
 FastAPI/SQLAlchemy async 경계와 섞지 않는다.
@@ -21,7 +21,7 @@ FastAPI/SQLAlchemy async 경계와 섞지 않는다.
 - BrowserProfileManager(프로필/CDP 격리·대상 검증) → Story 4.5
 - KakaoSenderWorker(FIFO 직렬 queue) → Story 4.6
 - interactive session 실행 조건 / 재부팅 autostart → Story 4.7
-- 배민 사람 개입형 재인증 → Story 4.8 / 쿠팡 Gmail 2FA 메일함 분리·lock → Story 4.9
+- 배민 사람 개입형 재인증 → Story 4.8 / 쿠팡 이메일 IMAP 2FA 메일함 분리·lock → Story 4.9
 - 서버 측 job 생성·queue·Admin → Epic 5
 
 ``__init__`` 은 의도적으로 가볍게 유지한다 — 재사용 seam(``reuse``)을 eager import 하지

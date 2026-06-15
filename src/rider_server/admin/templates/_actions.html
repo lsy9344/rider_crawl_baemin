@@ -7,7 +7,7 @@
     <legend>구독 (subscription) · 위험</legend>
     <label>subscription_id <input type="text" id="act-sub-id"></label>
     <label>사유 <input type="text" id="act-sub-reason"></label>
-    <button type="button"
+    <button type="button" class="danger"
             onclick="admPost('/admin/subscriptions/', 'act-sub-id', '/suspend', {reason: val('act-sub-reason')}, '구독을 중지하시겠습니까?')">중지</button>
     <button type="button"
             onclick="admPost('/admin/subscriptions/', 'act-sub-id', '/resume', {reason: val('act-sub-reason')}, '구독을 복구하시겠습니까? (HELD 는 자동 발송 안 됨)')">복구</button>
@@ -16,7 +16,7 @@
   <fieldset>
     <legend>보류 Dispatch (HELD) · 위험</legend>
     <label>dispatch_id <input type="text" id="act-dispatch-id"></label>
-    <button type="button"
+    <button type="button" class="danger"
             onclick="admPost('/admin/dispatch/', 'act-dispatch-id', '/dispose', {disposition: 'DISCARD'}, '보류 Dispatch 를 폐기하시겠습니까?')">폐기(DISCARD)</button>
     <button type="button"
             onclick="admPost('/admin/dispatch/', 'act-dispatch-id', '/dispose', {disposition: 'RESUME'}, '보류 Dispatch 를 재개(발송 후보)하시겠습니까?')">재개(RESUME)</button>
@@ -29,11 +29,11 @@
             onclick="admPost('/admin/jobs/', 'act-job-id', '/retry', {}, 'job 을 재시도하시겠습니까?')">retry</button>
     <label>target_id <input type="text" id="act-assign-target"></label>
     <label>agent_id <input type="text" id="act-assign-agent"></label>
-    <button type="button"
+    <button type="button" class="create"
             onclick="admAssign()">Agent 배정</button>
   </fieldset>
 
-  <div id="action-result" class="muted">액션 결과가 여기에 표시됩니다.</div>
+  <div class="muted">구독/Dispatch/job 액션 결과는 화면 하단 토스트에 표시됩니다.</div>
 </div>
 
 <script>

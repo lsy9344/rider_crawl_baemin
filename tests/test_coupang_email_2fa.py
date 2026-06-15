@@ -1,7 +1,5 @@
-import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -10,7 +8,7 @@ from rider_crawl.auth.coupang_email_2fa import (
     Coupang2faError,
     recover_coupang_session_with_email_2fa,
 )
-from rider_crawl.auth.gmail import Gmail2faError
+from rider_crawl.auth.imap_2fa import Imap2faError
 from rider_crawl.config import AppConfig
 
 
@@ -50,7 +48,6 @@ class _FakePage:
         input_selectors: tuple[str, ...] = (),
     ):
         self.html = html
-        # 클릭 가능한 텍스트(부분 일치)와 채울 수 있는 input selector를 화이트리스트로 둔다.
         self._clickable = clickable
         self._role_clickable = role_clickable
         self._role_click_updates = role_click_updates or {}
@@ -147,24 +144,29 @@ def test_recover_clicks_email_method_send_and_fills_code(tmp_path):
         clickable=("이메일", "인증번호 발송", "확인"),
         input_selectors=("input[name='code']",),
     )
-
     captured = {}
 
     def _fetch(**kwargs):
         captured.update(kwargs)
         return "246802"
 
-    result = recover_coupang_session_with_email_2fa(
-        page, _config(tmp_path), fetch_code=_fetch, now=_NOW
+    config = replace(
+        _config(tmp_path),
+        verification_email_address="rider@naver.com",
+        verification_email_app_password="app-pass",
     )
+
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
 
     assert result is True
     assert "이메일" in page.clicked_texts
     assert "인증번호 발송" in page.clicked_texts
     assert "확인" in page.clicked_texts
     assert page.filled == [("input[name='code']", "246802")]
-    # 발송 클릭 직전 시각에서 안전 여유를 뺀 시각을 requested_after로 넘긴다. 클릭과
-    # 동시에 도착한 메일이 컷오프에서 잘리지 않도록 now()보다 약간 과거여야 한다.
+    assert captured["email_address"] == "rider@naver.com"
+    assert captured["app_password"] == "app-pass"
+    assert captured["subject_keyword"] == "인증번호"
+    assert captured["sender_keyword"] == "coupang"
     assert captured["requested_after"] < _NOW()
     assert captured["requested_after"] >= _NOW() - timedelta(minutes=2)
     assert captured["code_digits"] == 6
@@ -236,13 +238,12 @@ def test_recover_prefers_tab_and_button_roles_over_broad_text_matches(tmp_path):
     assert page.filled == [("input[placeholder*='코드']", "135790")]
 
 
-def test_recover_logs_in_with_saved_credentials_before_email_2fa(tmp_path):
-    credentials_path = tmp_path / "coupang.credentials.json"
-    credentials_path.write_text(
-        json.dumps({"username": "worker-id", "password": "worker-password"}),
-        encoding="utf-8",
+def test_recover_logs_in_with_ui_credentials_before_email_2fa(tmp_path):
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
     )
-    config = replace(_config(tmp_path), coupang_credentials_path=credentials_path)
     page = _FakePage(
         html="<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>",
         role_clickable=(
@@ -284,12 +285,11 @@ def test_recover_logs_in_with_saved_credentials_before_email_2fa(tmp_path):
 
 
 def test_recover_detects_primary_login_by_password_input_when_body_label_is_short(tmp_path):
-    credentials_path = tmp_path / "coupang.credentials.json"
-    credentials_path.write_text(
-        json.dumps({"username": "worker-id", "password": "worker-password"}),
-        encoding="utf-8",
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
     )
-    config = replace(_config(tmp_path), coupang_credentials_path=credentials_path)
     page = _FakePage(
         html="<html>Vendor Portal 아이디 비밀번호 로그인</html>",
         role_clickable=(
@@ -327,8 +327,23 @@ def test_recover_detects_primary_login_by_password_input_when_body_label_is_shor
     ]
 
 
+def test_recover_uses_resend_button_when_code_already_sent(tmp_path):
+    page = _FakePage(
+        html="<html>2단계 인증 로그인 이메일로 인증 인증 재요청<input placeholder='인증코드'></html>",
+        clickable=("이메일로 인증", "인증 재요청", "인증 완료"),
+        input_selectors=("input[placeholder*='코드']",),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch("778899"), now=_NOW
+    )
+
+    assert result is True
+    assert "인증 재요청" in page.clicked_texts
+    assert page.filled == [("input[placeholder*='코드']", "778899")]
+
+
 def test_recover_returns_false_when_send_button_missing(tmp_path):
-    # 이메일 인증 화면이 아니어서 발송 버튼이 없으면 자동 복구를 포기한다.
     page = _FakePage(html="<html>알 수 없는 화면</html>", clickable=())
 
     result = recover_coupang_session_with_email_2fa(
@@ -338,7 +353,7 @@ def test_recover_returns_false_when_send_button_missing(tmp_path):
     assert result is False
 
 
-def test_recover_raises_when_gmail_fetch_fails(tmp_path):
+def test_recover_raises_when_imap_fetch_fails(tmp_path):
     page = _FakePage(
         html="<html>이메일 인증</html>",
         clickable=("이메일", "인증번호 발송"),
@@ -346,7 +361,7 @@ def test_recover_raises_when_gmail_fetch_fails(tmp_path):
     )
 
     def _fetch(**_kwargs):
-        raise Gmail2faError("인증 메일 미도착")
+        raise Imap2faError("인증 메일 미도착")
 
     with pytest.raises(Coupang2faError):
         recover_coupang_session_with_email_2fa(
@@ -354,8 +369,63 @@ def test_recover_raises_when_gmail_fetch_fails(tmp_path):
         )
 
 
+def test_recover_proceeds_when_screen_domain_matches_tab_address(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 abc@naver.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@naver.com")
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
+
+    assert result is True
+    assert called["hit"] is True
+    assert page.filled == [("input[name='code']", "246802")]
+
+
+def test_recover_stops_when_screen_domain_differs_from_tab_address(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 abc@naver.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@gmail.com")
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(page, config, fetch_code=_fetch, now=_NOW)
+
+    assert result is False
+    assert called["hit"] is False
+    assert page.filled == []
+
+
+def test_recover_skips_cross_check_when_screen_domain_masked(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 ri***@na***.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@naver.com")
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("111222"), now=_NOW
+    )
+
+    assert result is True
+    assert page.filled == [("input[name='code']", "111222")]
+
+
 def test_recover_raises_when_code_input_missing(tmp_path):
-    # 발송까지는 됐지만 코드 입력칸 selector를 못 찾으면 복구 불가 오류를 올린다.
     page = _FakePage(
         html="<html>이메일 인증</html>",
         clickable=("이메일", "인증번호 발송"),
@@ -381,3 +451,59 @@ def test_recover_does_not_leak_code_in_errors(tmp_path):
         )
     except Coupang2faError as exc:
         assert "999888" not in str(exc)
+
+
+class _FakeMatch:
+    def __init__(self, visible: bool, log: list[str], label: str):
+        self._visible = visible
+        self._log = log
+        self._label = label
+
+    def click(self, **_kwargs):
+        if not self._visible:
+            raise RuntimeError("element is not visible")
+        self._log.append(self._label)
+
+
+class _FakeFilterLocator:
+    def __init__(self, matches: list[_FakeMatch], *, visible_only: bool = False):
+        self._matches = matches
+        self._visible_only = visible_only
+
+    def filter(self, *, visible: bool):
+        if not visible:
+            return self
+        return _FakeFilterLocator([m for m in self._matches if m._visible], visible_only=True)
+
+    @property
+    def first(self):
+        return self._matches[0]
+
+
+def test_click_first_visible_skips_hidden_duplicate_button():
+    log: list[str] = []
+    locator = _FakeFilterLocator(
+        [
+            _FakeMatch(visible=False, log=log, label="hidden-phone"),
+            _FakeMatch(visible=True, log=log, label="visible-email"),
+        ]
+    )
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is True
+    assert log == ["visible-email"]
+
+
+def test_click_first_visible_falls_back_when_filter_unsupported():
+    page = _FakePage(html="", clickable=("인증코드 전송",))
+    locator = page.get_by_text("인증코드 전송", exact=False)
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is True
+    assert page.clicked_texts == ["인증코드 전송"]
+
+
+def test_click_first_visible_returns_false_when_no_visible_match():
+    log: list[str] = []
+    locator = _FakeFilterLocator([_FakeMatch(visible=False, log=log, label="hidden")])
+
+    assert coupang_email_2fa._click_first_visible(locator, timeout=1000) is False
+    assert log == []

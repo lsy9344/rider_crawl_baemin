@@ -99,13 +99,35 @@ def _capacity(n=100, in_flight=0, caps=(JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_CO
     )
 
 
-def _target(tid, *, platform="BAEMIN", tenant=None, interval=_INTERVAL_MIN, next_run=None):
+def _target(
+    tid,
+    *,
+    platform="BAEMIN",
+    tenant=None,
+    interval=_INTERVAL_MIN,
+    next_run=None,
+    username_ref="",
+    password_ref="",
+    verification_email_address_ref="",
+    verification_email_app_password_ref="",
+    verification_email_subject_keyword="인증번호",
+    verification_email_sender_keyword="coupang",
+):
     return DueTarget(
         target_id=tid,
         tenant_id=tenant or f"tenant-{tid}",
         platform=platform,
         interval_minutes=interval,
         next_run_at=next_run,
+        platform_account_id=f"acct-{tid}",
+        primary_url=f"https://example.invalid/{tid}",
+        expected_display_name=f"센터-{tid}",
+        username_ref=username_ref,
+        password_ref=password_ref,
+        verification_email_address_ref=verification_email_address_ref,
+        verification_email_app_password_ref=verification_email_app_password_ref,
+        verification_email_subject_keyword=verification_email_subject_keyword,
+        verification_email_sender_keyword=verification_email_sender_keyword,
     )
 
 
@@ -144,6 +166,65 @@ def test_enqueued_jobs_use_platform_specific_canonical_job_type() -> None:
     # 실제 backend 에 PENDING job 으로 들어갔는지 확인.
     for o in result.outcomes:
         assert backend.job_status(o.job_id) == "PENDING"
+
+
+def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
+    target = _target("t-payload", platform="BAEMIN")
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    assert job.payload_json == {
+        "target_id": "t-payload",
+        "tenant_id": "tenant-t-payload",
+        "platform": "baemin",
+        "platform_account_id": "acct-t-payload",
+        "primary_url": "https://example.invalid/t-payload",
+        "expected_display_name": "센터-t-payload",
+        "browser_profile_ref": "profile:t-payload",
+        "timeout_seconds": 60,
+        "parser_version": "baemin-v1",
+        "job_type": JOB_TYPE_CRAWL_BAEMIN,
+    }
+
+
+def test_scheduler_enqueues_coupang_secret_refs_needed_for_email_2fa() -> None:
+    target = _target(
+        "t-coupang",
+        platform="COUPANG",
+        username_ref="vault://coupang/login-id",
+        password_ref="vault://coupang/login-password",
+        verification_email_address_ref="vault://mail/address",
+        verification_email_app_password_ref="vault://mail/app-password",
+        verification_email_subject_keyword="보안코드",
+        verification_email_sender_keyword="wing",
+    )
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    assert job.payload_json["job_type"] == JOB_TYPE_CRAWL_COUPANG
+    assert job.payload_json["username_ref"] == "vault://coupang/login-id"
+    assert job.payload_json["password_ref"] == "vault://coupang/login-password"
+    assert job.payload_json["verification_email_address_ref"] == "vault://mail/address"
+    assert job.payload_json["verification_email_app_password_ref"] == "vault://mail/app-password"
+    assert job.payload_json["verification_email_subject_keyword"] == "보안코드"
+    assert job.payload_json["verification_email_sender_keyword"] == "wing"
+    assert job.payload_json["coupang_auto_email_2fa_enabled"] is True
 
 
 # ── AC2: 중지/비활성 고객 제외 ────────────────────────────────────────────────

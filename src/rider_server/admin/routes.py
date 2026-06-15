@@ -19,6 +19,7 @@ tenant 선택은 5.6 단계에선 ``?tenant=<id>`` 쿼리 seam 으로 둔다 —
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,10 +29,15 @@ from fastapi.templating import Jinja2Templates
 
 from ..security.access import enforce_session
 from .dashboard_service import DashboardRepository, DashboardService
+from . import severity as severity_policy
 from .severity import (
+    SEVERITY_AUTH_REQUIRED,
     SEVERITY_CRITICAL,
+    SEVERITY_KAKAO_MISDELIVERY_RISK,
     SEVERITY_NORMAL,
+    SEVERITY_OPERATOR_STOPPED,
     SEVERITY_STOPPED,
+    SEVERITY_TARGET_VALIDATION_FAILURE,
     SEVERITY_WARNING,
 )
 
@@ -48,12 +54,20 @@ _SEVERITY_LABELS: dict[str, str] = {
     SEVERITY_WARNING: "주의",
     SEVERITY_CRITICAL: "위험",
     SEVERITY_STOPPED: "중지",
+    SEVERITY_AUTH_REQUIRED: "인증 필요",
+    SEVERITY_TARGET_VALIDATION_FAILURE: "대상 검증 실패",
+    SEVERITY_KAKAO_MISDELIVERY_RISK: "카카오 오발송 위험",
+    SEVERITY_OPERATOR_STOPPED: "운영자 중지",
 }
 _SEVERITY_CLASSES: dict[str, str] = {
     SEVERITY_NORMAL: "sev-normal",
     SEVERITY_WARNING: "sev-warning",
     SEVERITY_CRITICAL: "sev-critical",
     SEVERITY_STOPPED: "sev-stopped",
+    SEVERITY_AUTH_REQUIRED: "sev-stopped",
+    SEVERITY_TARGET_VALIDATION_FAILURE: "sev-stopped",
+    SEVERITY_KAKAO_MISDELIVERY_RISK: "sev-stopped",
+    SEVERITY_OPERATOR_STOPPED: "sev-stopped",
 }
 
 
@@ -67,6 +81,78 @@ def _severity_class(code: str) -> str:
 
 templates.env.filters["severity_label"] = _severity_label
 templates.env.filters["severity_class"] = _severity_class
+
+
+# ── 표현 전용 Jinja 필터(재설계) — 기계 코드/절대시각을 사람이 읽는 문장/상대시간으로 ──────
+# 모두 순수 표시 변환이다(상태 변경 0, DB 0). FailureCategory/플랫폼 값은 plain-string 으로만
+# 비교한다(domain enum import 불필요 — 어휘는 코드값 그대로). 읽기 전용 가드 무관(write 호출 0).
+_REASON_TEXT: dict[str, str] = {
+    "AUTH_REQUIRED": "로그인 만료 · 인증 확인 필요",
+    "TARGET_VALIDATION_FAILURE": "센터/상점명 불일치 — 오발송 위험",
+    "CRAWL_FAILURE": "수집 실패 — 확인 필요",
+    "RENDER_FAILURE": "메시지 생성 실패",
+    "TELEGRAM_FAILURE": "텔레그램 전송 오류",
+    "KAKAO_FAILURE": "카카오톡 전송 오류",
+    "DUPLICATE_BLOCKED": "중복으로 전송 보류",
+}
+_PLATFORM_LABELS: dict[str, str] = {"BAEMIN": "배민", "COUPANG": "쿠팡"}
+_PLATFORM_CLASSES: dict[str, str] = {"BAEMIN": "plat-baemin", "COUPANG": "plat-coupang"}
+
+
+def _reason_text(code: str | None) -> str:
+    """실패 코드 → 사람이 읽는 사유 문장. 미지 코드는 코드값을 괄호로 보조."""
+    if not code:
+        return ""
+    return _REASON_TEXT.get(code, f"오류 — 확인 필요 ({code})")
+
+
+def _platform_label(code: str | None) -> str:
+    return _PLATFORM_LABELS.get((code or "").upper(), code or "")
+
+
+def _platform_class(code: str | None) -> str:
+    return _PLATFORM_CLASSES.get((code or "").upper(), "")
+
+
+def _relative_time(value: datetime | None) -> str:
+    """datetime → '3분 전' 상대시간(읽기 전용 표시라 실 now 기준 — jobs.py 선례)."""
+    if value is None:
+        return ""
+    try:
+        ts = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        delta = (datetime.now(timezone.utc) - ts).total_seconds()
+    except (TypeError, AttributeError):
+        return str(value)
+    if delta < 60:
+        return "방금"
+    if delta < 3600:
+        return f"{int(delta // 60)}분 전"
+    if delta < 86400:
+        return f"{int(delta // 3600)}시간 전"
+    return f"{int(delta // 86400)}일 전"
+
+
+def _freshness_class(value: datetime | None) -> str:
+    """상대시간 신선도 색 class — 없음/주의(15분 초과)/위험(1시간 초과)."""
+    if value is None:
+        return "fresh-none"
+    try:
+        ts = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        delta = (datetime.now(timezone.utc) - ts).total_seconds()
+    except (TypeError, AttributeError):
+        return ""
+    if delta > 3600:
+        return "fresh-dead"
+    if delta > 900:
+        return "fresh-stale"
+    return ""
+
+
+templates.env.filters["reason_text"] = _reason_text
+templates.env.filters["platform_label"] = _platform_label
+templates.env.filters["platform_class"] = _platform_class
+templates.env.filters["relative_time"] = _relative_time
+templates.env.filters["freshness_class"] = _freshness_class
 
 
 # ── 인증 seam(5.8 이 MFA/4역할/세션으로 교체) ───────────────────────────────────────
@@ -114,6 +200,50 @@ def _tenant_id(request: Request) -> str:
     return request.query_params.get("tenant", "").strip()
 
 
+async def _dashboard_tenant_id(request: Request) -> str:
+    tenant_id = _tenant_id(request)
+    if tenant_id:
+        return tenant_id
+    service = getattr(request.app.state, "admin_entity_service", None)
+    if service is None:
+        return ""
+    try:
+        tenants = await service.list_tenants()
+    except Exception:
+        return ""
+    return tenants[0].id if len(tenants) == 1 else ""
+
+
+async def _target_rows_for_display(
+    repo: DashboardRepository, *, tenant_id: str, now: datetime
+):
+    facts_rows = await repo.target_health(tenant_id=tenant_id, now=now)
+    rows = []
+    for facts in facts_rows:
+        row = _service.target_row(facts, now)
+        rows.append(replace(row, severity=_display_severity(row.severity, facts)))
+    rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
+    return rows
+
+
+def _display_severity(code: str, facts) -> str:
+    if code != SEVERITY_STOPPED:
+        return code
+    signals = severity_policy.failclosed_signals_from(
+        account_auth_state=facts.account_auth_state,
+        lifecycle_state=facts.lifecycle_state,
+        latest_failure_code=facts.last_failure_code,
+        auth_session_pending=facts.auth_session_pending,
+    )
+    if signals.auth_required:
+        return SEVERITY_AUTH_REQUIRED
+    if signals.target_validation_failed:
+        return SEVERITY_TARGET_VALIDATION_FAILURE
+    if signals.kakao_misdelivery_risk:
+        return SEVERITY_KAKAO_MISDELIVERY_RISK
+    return SEVERITY_OPERATOR_STOPPED
+
+
 # ── 라우트 ───────────────────────────────────────────────────────────────────────
 
 @router.get("", response_class=HTMLResponse)
@@ -124,10 +254,25 @@ async def dashboard(
 ) -> HTMLResponse:
     """``GET /admin`` — 대시보드 풀 페이지(4개 섹션 + HTMX polling 부착)."""
 
+    return await _dashboard_response(request, initial_target_id="")
+
+
+@router.get("/t/{target_id}", response_class=HTMLResponse)
+async def target_deeplink(
+    target_id: str,
+    request: Request,
+    _auth: None = Depends(require_admin_session),
+) -> HTMLResponse:
+    """``GET /admin/t/{target_id}`` — 특정 업체 drawer 를 여는 딥링크 진입점."""
+
+    return await _dashboard_response(request, initial_target_id=target_id)
+
+
+async def _dashboard_response(request: Request, *, initial_target_id: str) -> HTMLResponse:
     now = _now()
     repo = _repo(request)
-    tenant_id = _tenant_id(request)
-    targets = await _service.target_rows(repo, tenant_id=tenant_id, now=now)
+    tenant_id = await _dashboard_tenant_id(request)
+    targets = await _target_rows_for_display(repo, tenant_id=tenant_id, now=now)
     agents = await _service.agent_rows(repo, now=now)
     channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
     auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id)
@@ -140,6 +285,8 @@ async def dashboard(
             "agents": agents,
             "channels": channels,
             "auth_required": auth_required,
+            "initial_target_id": initial_target_id,
+            "show_debug_actions": False,
         },
     )
 
@@ -151,7 +298,7 @@ async def targets_fragment(
 ) -> HTMLResponse:
     """``GET /admin/targets`` — HTMX 부분 fragment(대상 상태 표)."""
 
-    rows = await _service.target_rows(_repo(request), tenant_id=_tenant_id(request), now=_now())
+    rows = await _target_rows_for_display(_repo(request), tenant_id=_tenant_id(request), now=_now())
     return templates.TemplateResponse(request, "_targets.html", {"targets": rows})
 
 

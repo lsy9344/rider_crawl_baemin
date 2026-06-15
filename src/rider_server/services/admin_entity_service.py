@@ -79,6 +79,26 @@ TARGET_TYPE_TENANT = "tenant"
 TARGET_TYPE_PLATFORM_ACCOUNT = "platform_account"
 TARGET_TYPE_DELIVERY_RULE = "delivery_rule"
 
+DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD = "인증번호"
+DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD = "coupang"
+_SECRET_REF_PREFIXES = (
+    "local:",
+    "agent:",
+    "secretref-",
+    "arn:",
+    "projects/",
+)
+
+
+class AdminEntityDuplicateError(ValueError):
+    """운영자가 고칠 수 있는 중복 입력/unique violation."""
+
+    def __init__(self, field: str, message: str = "중복된 값입니다") -> None:
+        if "중복" not in message:
+            message = f"중복: {message}"
+        super().__init__(message)
+        self.field = field
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 순수 helper(always-run — DB/async 의존 0)
@@ -110,9 +130,25 @@ def _secret_ref_or_reject(value: str, *, field: str) -> SecretRef:
     handle = (value or "").strip()
     if not handle:
         raise ValueError(f"{field} 핸들(*_ref)이 필요합니다(fail-closed)")
-    if looks_like_plaintext_secret(handle):
+    if looks_like_plaintext_secret(handle) or not _looks_like_secret_ref(handle):
         raise ValueError(f"평문 secret 금지 — {field} 는 *_ref 핸들만 허용(fail-closed)")
     return SecretRef(ref=handle, storage_class=SecretStorageClass.CENTRAL)
+
+
+def _looks_like_secret_ref(handle: str) -> bool:
+    return "://" in handle or handle.startswith(_SECRET_REF_PREFIXES)
+
+
+def _optional_secret_ref_or_empty(value: str | None, *, field: str) -> SecretRef:
+    handle = (value or "").strip()
+    if not handle:
+        return SecretRef(ref="", storage_class=SecretStorageClass.CENTRAL)
+    return _secret_ref_or_reject(handle, field=field)
+
+
+def _keyword_or_default(value: str | None, default: str) -> str:
+    normalized = (value or "").strip()
+    return normalized or default
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -401,6 +437,10 @@ class AdminEntityService:
         password_ref: str,
         at: datetime,
         actor_id: str | None,
+        verification_email_address_ref: str = "",
+        verification_email_app_password_ref: str = "",
+        verification_email_subject_keyword: str = DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD,
+        verification_email_sender_keyword: str = DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD,
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
@@ -409,6 +449,22 @@ class AdminEntityService:
         await self._scoped_tenant(tenant_id)  # 부모 tenant 존재/scope 확인
         username = _secret_ref_or_reject(username_ref, field="username_ref")
         password = _secret_ref_or_reject(password_ref, field="password_ref")
+        email_address = _optional_secret_ref_or_empty(
+            verification_email_address_ref,
+            field="verification_email_address_ref",
+        )
+        email_app_password = _optional_secret_ref_or_empty(
+            verification_email_app_password_ref,
+            field="verification_email_app_password_ref",
+        )
+        email_subject_keyword = _keyword_or_default(
+            verification_email_subject_keyword,
+            DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD,
+        )
+        email_sender_keyword = _keyword_or_default(
+            verification_email_sender_keyword,
+            DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD,
+        )
         account = PlatformAccount(
             id=entity_id,
             tenant_id=tenant_id,
@@ -416,6 +472,10 @@ class AdminEntityService:
             label=label,
             username_ref=username,
             password_ref=password,
+            verification_email_address_ref=email_address,
+            verification_email_app_password_ref=email_app_password,
+            verification_email_subject_keyword=email_subject_keyword,
+            verification_email_sender_keyword=email_sender_keyword,
             auth_state=BaeminAuthState.UNKNOWN,
         )
         audit = self._audit(
@@ -431,6 +491,10 @@ class AdminEntityService:
                 # *_ref 핸들은 secret 아님(redact 보존) — 평문 자격증명은 애초에 들어오지 않는다.
                 "username_ref": username.ref,
                 "password_ref": password.ref,
+                "verification_email_address_ref": email_address.ref,
+                "verification_email_app_password_ref": email_app_password.ref,
+                "verification_email_subject_keyword": email_subject_keyword,
+                "verification_email_sender_keyword": email_sender_keyword,
                 "reason": reason,
             },
             source=source,
@@ -444,11 +508,15 @@ class AdminEntityService:
         account_id: str,
         *,
         tenant_id: str,
+        at: datetime,
+        actor_id: str | None,
         label: str | None = None,
         username_ref: str | None = None,
         password_ref: str | None = None,
-        at: datetime,
-        actor_id: str | None,
+        verification_email_address_ref: str | None = None,
+        verification_email_app_password_ref: str | None = None,
+        verification_email_subject_keyword: str | None = None,
+        verification_email_sender_keyword: str | None = None,
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
@@ -466,11 +534,49 @@ class AdminEntityService:
             if password_ref is not None and password_ref.strip()
             else existing.password_ref
         )
+        new_email_address = (
+            _secret_ref_or_reject(
+                verification_email_address_ref,
+                field="verification_email_address_ref",
+            )
+            if verification_email_address_ref is not None
+            and verification_email_address_ref.strip()
+            else existing.verification_email_address_ref
+        )
+        new_email_app_password = (
+            _secret_ref_or_reject(
+                verification_email_app_password_ref,
+                field="verification_email_app_password_ref",
+            )
+            if verification_email_app_password_ref is not None
+            and verification_email_app_password_ref.strip()
+            else existing.verification_email_app_password_ref
+        )
+        new_email_subject_keyword = (
+            _keyword_or_default(
+                verification_email_subject_keyword,
+                existing.verification_email_subject_keyword,
+            )
+            if verification_email_subject_keyword is not None
+            else existing.verification_email_subject_keyword
+        )
+        new_email_sender_keyword = (
+            _keyword_or_default(
+                verification_email_sender_keyword,
+                existing.verification_email_sender_keyword,
+            )
+            if verification_email_sender_keyword is not None
+            else existing.verification_email_sender_keyword
+        )
         updated = replace(
             existing,
             label=new_label,
             username_ref=new_username,
             password_ref=new_password,
+            verification_email_address_ref=new_email_address,
+            verification_email_app_password_ref=new_email_app_password,
+            verification_email_subject_keyword=new_email_subject_keyword,
+            verification_email_sender_keyword=new_email_sender_keyword,
         )
         audit = self._audit(
             actor_id=actor_id,
@@ -482,6 +588,10 @@ class AdminEntityService:
                 "from_label": existing.label,
                 "to_label": updated.label,
                 "username_ref": updated.username_ref.ref,  # 핸들만(secret 아님)
+                "verification_email_address_ref": updated.verification_email_address_ref.ref,
+                "verification_email_app_password_ref": updated.verification_email_app_password_ref.ref,
+                "verification_email_subject_keyword": updated.verification_email_subject_keyword,
+                "verification_email_sender_keyword": updated.verification_email_sender_keyword,
                 "reason": reason,
             },
             source=source,

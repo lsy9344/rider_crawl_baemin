@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from rider_server.admin import routes as admin_routes
+from rider_server.admin.dashboard_repository_postgres import PostgresDashboardRepository
 from rider_server.admin.dashboard_service import (
     AgentHealthFacts,
     AgentRow,
@@ -36,13 +37,21 @@ from rider_server.admin.dashboard_service import (
     TargetRow,
 )
 from rider_server.admin.severity import (
+    SEVERITY_AUTH_REQUIRED,
     SEVERITY_CRITICAL,
     SEVERITY_NORMAL,
+    SEVERITY_OPERATOR_STOPPED,
     SEVERITY_STOPPED,
+    SEVERITY_TARGET_VALIDATION_FAILURE,
     SEVERITY_WARNING,
 )
+from rider_server.domain import CustomerLifecycleState, Tenant
 from rider_server.main import create_app
 from rider_server.security import AdminPrincipal, AdminRole
+from rider_server.services.admin_entity_service import (
+    AdminEntityService,
+    InMemoryAdminEntityRepository,
+)
 from rider_server.settings import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -191,9 +200,18 @@ def test_dashboard_full_page_has_htmx_attributes() -> None:
     assert "text/html" in r.headers["content-type"]
     body = r.text
     assert "hx-get" in body and "hx-trigger" in body
-    assert "https://unpkg.com/htmx.org" in body  # CDN 정적 자산(npm/빌드 0)
+    assert "/admin/static/htmx.min.js" in body
+    assert "https://unpkg.com/htmx.org@2" not in body
     # 심각도 한글 라벨 매핑(코드값→정상/주의/위험/중지).
-    assert "중지" in body
+    assert "인증 필요" in body
+
+
+def test_admin_htmx_static_asset_is_local() -> None:
+    r = _client(_seeded_repo()).get("/admin/static/htmx.min.js")
+
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+    assert b"htmx" in r.content[:2000]
 
 
 def test_dashboard_fragments_return_html_partials() -> None:
@@ -212,6 +230,27 @@ def test_auth_required_fragment_lists_only_tenant_rows() -> None:
     body = c.get(f"/admin/auth-required?tenant={_TENANT}").text
     assert "t-stopped" in body
     assert "t-other" not in body  # cross-tenant 누출 0
+    assert ">t-stopped<" not in body
+    assert ">p1<" not in body
+    assert "상세 열기" in body
+
+
+def test_auth_required_target_button_uses_data_attribute_not_inline_js_literal() -> None:
+    # target_id 를 JS 문자열 안에 직접 끼우면 따옴표가 섞인 id 에서 깨질 수 있다.
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="bad'id",
+                profile_id=None,
+                reason="ACCOUNT_AUTH_REQUIRED",
+            )
+        ]
+    )
+
+    assert "openAuthRequiredTarget(this.dataset.target)" in html
+    assert 'data-target="bad&#39;id"' in html
+    assert "openAuthRequiredTarget('" not in html
 
 
 def test_require_admin_session_seam_can_deny() -> None:
@@ -253,9 +292,9 @@ def test_jinja2_declared_in_server_extra_not_main_deps() -> None:
     assert not any(d.startswith("jinja2") for d in main_deps)
 
 
-def test_main_dependencies_still_exactly_nine() -> None:
-    # rider_agent stdlib-only 표면 보호 — [project].dependencies 9개 고정.
-    assert len(_pyproject()["project"]["dependencies"]) == 9
+def test_main_dependencies_still_exactly_seven() -> None:
+    # rider_agent stdlib-only 표면 보호 — Gmail OAuth 제거 + IMAPClient 추가 후 main deps 7개 고정.
+    assert len(_pyproject()["project"]["dependencies"]) == 7
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -374,6 +413,18 @@ def test_severity_label_and_class_filters_map_all_four_levels() -> None:
     assert admin_routes._severity_class("NOPE") == "sev-normal"  # 미지값은 정상 class
 
 
+def test_failclosed_display_labels_distinguish_operator_visible_causes() -> None:
+    expected = {
+        SEVERITY_AUTH_REQUIRED: ("인증 필요", "sev-stopped"),
+        SEVERITY_TARGET_VALIDATION_FAILURE: ("대상 검증 실패", "sev-stopped"),
+        SEVERITY_OPERATOR_STOPPED: ("운영자 중지", "sev-stopped"),
+    }
+
+    for code, (label, css) in expected.items():
+        assert admin_routes._severity_label(code) == label
+        assert admin_routes._severity_class(code) == css
+
+
 def test_targets_partial_renders_label_and_class_for_each_severity() -> None:
     # 템플릿이 필터를 통해 4단계를 모두 한글 라벨/CSS class 로 렌더(시각 무관 — 주입 행으로 결정적).
     # 라우트는 실시간 now 를 쓰므로(시간 경과 심각도 비결정적) 템플릿 렌더만 직접 검증한다.
@@ -384,12 +435,108 @@ def test_targets_partial_renders_label_and_class_for_each_severity() -> None:
             last_delivery_at=None, last_failure_code=None, severity=sev,
         )
 
-    rows = [_row(s) for s in (SEVERITY_NORMAL, SEVERITY_WARNING, SEVERITY_CRITICAL, SEVERITY_STOPPED)]
+    rows = [
+        _row(s)
+        for s in (
+            SEVERITY_NORMAL,
+            SEVERITY_WARNING,
+            SEVERITY_CRITICAL,
+            SEVERITY_STOPPED,
+            SEVERITY_AUTH_REQUIRED,
+            SEVERITY_TARGET_VALIDATION_FAILURE,
+        )
+    ]
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
-    for label in ("정상", "주의", "위험", "중지"):
+    for label in ("정상", "주의", "위험", "중지", "인증 필요", "대상 검증 실패"):
         assert label in html, label
     for css in ("sev-normal", "sev-warning", "sev-critical", "sev-stopped"):
         assert css in html, css
+
+
+def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
+    row = TargetRow(
+        target_id="t-auth",
+        tenant_id=_TENANT,
+        name="가게",
+        center_name="센터",
+        platform="BAEMIN",
+        interval_minutes=10,
+        last_success_at=None,
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        severity=SEVERITY_STOPPED,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert 'role="button"' not in html
+    assert 'data-primary-action="auth-check"' in html
+    assert 'aria-label="가게 상세 열기"' in html
+    assert 'id="target-result-t-auth"' in html
+    assert 'hx-target="#target-result-t-auth"' in html
+
+
+def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'id="drawer" role="dialog"' in body
+    assert 'hidden inert aria-hidden="true"' in body
+    assert 'id="drawer-result"' in body
+    assert 'id="drawer-actions"' in body
+    assert 'renderDrawerActions' in body
+    assert 'syncOpenDrawerFromRows' in body
+    assert 'trapDrawerFocus' in body
+
+
+def test_targets_refresh_on_entity_change_event() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'id="targets" hx-get="/admin/targets?tenant=tn-1"' in body
+    assert 'hx-trigger="admin-entity-changed from:body, every 30s"' in body
+
+
+def test_target_deeplink_route_seeds_initial_drawer_target() -> None:
+    body = _client(_seeded_repo()).get(f"/admin/t/t-stopped?tenant={_TENANT}").text
+
+    assert 'data-initial-target="t-stopped"' in body
+    assert "/admin/t/" in body
+    assert "history.pushState" in body
+    assert "keepUrl: true" in body
+    assert "openInitialTarget" in body
+
+
+def test_missing_target_deeplink_exposes_workbench_notice() -> None:
+    body = _client(_seeded_repo()).get(f"/admin/t/no-such-target?tenant={_TENANT}").text
+
+    assert 'data-initial-target="no-such-target"' in body
+    assert 'id="target-notice"' in body
+    assert "showTargetNotice" in body
+    assert "업체를 찾지 못했습니다." in body
+
+
+def test_drawer_activate_confirmation_uses_activate_wording() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'drawerConfirm("활성화")' in body
+    assert 'drawerConfirm("비활성화")' in body
+    assert 'drawerPost("/activate", {}, true)' not in body
+
+
+def test_dashboard_drawer_contains_center_name_edit_flow() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'id="d-center-edit"' in body
+    assert 'id="d-center-input"' in body
+    assert 'drawerUpdateCenterName' in body
+    assert "/admin/monitoring-targets/" in body
+
+
+def test_dashboard_hides_raw_id_debug_action_panel_by_default() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert "subscription_id" not in body
+    assert "dispatch_id" not in body
+    assert "act-job-id" not in body
 
 
 def test_dashboard_full_page_without_tenant_param_renders() -> None:
@@ -399,6 +546,52 @@ def test_dashboard_full_page_without_tenant_param_renders() -> None:
     body = r.text
     assert "표시할 대상이 없습니다." in body  # tenant="" 데이터 없음
     assert "agent-online" in body  # fleet 은 tenant 무관 표시
+
+
+def test_dashboard_without_tenant_uses_single_known_tenant() -> None:
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    app = _allow_viewer(
+        create_app(
+            _FAKE_SETTINGS,
+            dashboard_repository=_seeded_repo(),
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+    r = TestClient(app, raise_server_exceptions=False).get("/admin")
+
+    assert r.status_code == 200
+    assert "tenant · tn-1" in r.text
+    assert 'hx-get="/admin/targets?tenant=tn-1"' in r.text
+
+
+class _FailingSessionFactory:
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        raise AssertionError("empty tenant should not query Postgres")
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_postgres_dashboard_repository_empty_tenant_is_empty_without_uuid_query() -> None:
+    repo = PostgresDashboardRepository(_FailingSessionFactory())  # type: ignore[arg-type]
+
+    assert asyncio.run(repo.target_health(tenant_id="", now=_NOW)) == []
+    assert asyncio.run(repo.channel_health(tenant_id="", now=_NOW)) == ChannelHealthRow(
+        kakao_queue_lag_seconds=0,
+        telegram_error_count=0,
+    )
+    assert asyncio.run(repo.auth_required(tenant_id="")) == []
 
 
 # ══════════════════════════════════════════════════════════════════════════

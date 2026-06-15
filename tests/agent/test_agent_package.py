@@ -1,6 +1,6 @@
 """Story 4.1 — rider_agent 패키지 토대 + rider_crawl 재사용 seam 검증.
 
-외부 호출 없음(실제 브라우저/네트워크/Kakao/Gmail 미호출). 부정 가드(단방향 import·
+외부 호출 없음(실제 브라우저/네트워크/Kakao/email 미호출). 부정 가드(단방향 import·
 sync 런타임·새 프레임워크 0)는 raw grep 이 아니라 **AST import-edge** 로 검사한다 —
 scope 경계 docstring 이 금지 심볼(rider_agent/rider_server/async)을 문자열로 명시하므로
 raw 소스 매칭은 docstring 언급을 import 로 오탐한다(memory/negative-guard-tests-use-ast).
@@ -138,7 +138,7 @@ def test_python_dash_m_rider_agent_exits_zero_subprocess():
 
 def test_reuse_seam_reexports_same_objects():
     import rider_crawl.auth.coupang_email_2fa as cp2fa
-    import rider_crawl.auth.gmail as gmail
+    import rider_crawl.auth.imap_2fa as imap_2fa
     import rider_crawl.message as message
     import rider_crawl.messengers as messengers
     import rider_crawl.platforms as platforms
@@ -167,8 +167,8 @@ def test_reuse_seam_reexports_same_objects():
     assert reuse.coupang_center_name_risk is config.coupang_center_name_risk
     # 렌더
     assert reuse.render_current_screen_message is message.render_current_screen_message
-    # Gmail 2FA
-    assert reuse.fetch_latest_verification_code is gmail.fetch_latest_verification_code
+    # Email/IMAP 2FA
+    assert reuse.fetch_latest_verification_code is imap_2fa.fetch_latest_verification_code
     assert (
         reuse.recover_coupang_session_with_email_2fa
         is cp2fa.recover_coupang_session_with_email_2fa
@@ -221,8 +221,8 @@ def test_pyproject_dependencies_unchanged_pins():
     normalized = {d.replace(" ", "") for d in deps}
     assert "playwright==1.60.0" in normalized
     assert "crawl4ai==0.8.7" in normalized
-    # 새 의존 0 — deps 항목 수가 늘지 않았다(현 9개 그대로).
-    assert len(deps) == 9, deps
+    # Google OAuth 의존 제거 후 main deps는 IMAPClient 포함 7개다.
+    assert len(deps) == 7, deps
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -271,7 +271,7 @@ def test_main_does_not_import_tkinter_or_legacy_ui():
 
 
 # AC1·import-safety(핵심 설계 결정) — reuse seam 을 eager import 해도 crawl4ai/
-# playwright/Windows GUI(pyautogui·pywinauto·pyperclip)/google 클라이언트를 끌지
+# playwright/Windows GUI(pyautogui·pywinauto·pyperclip)/mail 클라이언트를 끌지
 # 않아야 `python -m rider_agent` 가 무-GUI·무-브라우저로 뜬다. rider_crawl 의 lazy
 # 경계(함수 내부 import)에 의존하므로, 깨끗한 서브프로세스의 sys.modules 로 확인한다.
 def test_reuse_seam_is_import_safe_no_heavy_deps():

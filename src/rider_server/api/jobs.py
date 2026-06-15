@@ -19,23 +19,27 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from http import HTTPStatus
+from inspect import isawaitable
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from rider_crawl.redaction import redact
+from rider_crawl.redaction import redact, redact_mapping
 
 from ..queue.backend import (
+    COMPLETE_ACCEPTED,
     COMPLETE_LEASE_LOST,
     COMPLETE_NOT_FOUND,
     QueueBackend,
 )
 from ..queue.states import (
     InvalidJobTransition,
+    JOB_STATUS_SUCCEEDED,
     UnknownAgentStatus,
     map_agent_status,
 )
+from ..services.job_result_ingest_service import JobResultIngestError
 
 # claim 시 부여하는 lease 기간(초). Agent heartbeat(30~60초)보다 길어 연장 여유를 둔다.
 # heartbeat 라우트 배선·설정화는 후속 — 5.3 은 단일 서버 상수로 둔다.
@@ -58,7 +62,7 @@ def default_resolve_agent_id(token: str) -> str | None:
     return "agent" if token else None
 
 
-def resolve_agent(request: Request) -> str:
+async def resolve_agent(request: Request) -> str:
     """``Authorization: Bearer <token>`` → agent_id. 누락/무효 token 은 401."""
 
     auth = request.headers.get("Authorization", "")
@@ -68,9 +72,11 @@ def resolve_agent(request: Request) -> str:
         raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="missing bearer token")
     resolver: Callable[[str], str | None] = request.app.state.resolve_agent_id
     agent_id = resolver(token)
+    if isawaitable(agent_id):
+        agent_id = await agent_id
     if not agent_id:
         raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="invalid agent token")
-    return agent_id
+    return str(agent_id)
 
 
 # ── 요청/응답 스키마(Pydantic v2, snake_case) ─────────────────────────────────────
@@ -118,6 +124,10 @@ def _backend(request: Request) -> QueueBackend:
     return request.app.state.queue_backend
 
 
+def _job_result_ingest_service(request: Request) -> Any:
+    return getattr(request.app.state, "job_result_ingest_service", None)
+
+
 # ── 라우트 ───────────────────────────────────────────────────────────────────────
 
 
@@ -128,6 +138,9 @@ async def claim_jobs(
     agent_id: str = Depends(resolve_agent),
 ) -> dict:
     """``POST /v1/jobs/claim`` — capability 매칭 PENDING job 을 claim(빈 큐면 ``{"jobs":[]}``)."""
+
+    if agent_id != body.agent_id:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="agent token mismatch")
 
     now = datetime.now(timezone.utc)
     records = await _backend(request).claim(
@@ -144,6 +157,7 @@ async def claim_jobs(
                 "type": r.type,
                 "target_id": r.target_id,
                 "lease_expires_at": _iso_utc(r.lease_expires_at),
+                "payload": r.payload_json or {},
             }
             for r in records
         ]
@@ -162,6 +176,9 @@ async def complete_job(
     재할당/만료면 409(Agent 가 lease_lost 흡수), 미존재면 404, 알 수 없는 status 는 422.
     """
 
+    if agent_id != body.agent_id:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="agent token mismatch")
+
     try:
         target_status = map_agent_status(body.status)
     except UnknownAgentStatus as exc:
@@ -170,12 +187,84 @@ async def complete_job(
         ) from exc
 
     now = datetime.now(timezone.utc)
+    backend = _backend(request)
+    ingest_service = _job_result_ingest_service(request)
+    stored_result_json = (
+        redact_mapping(body.result_json) if body.result_json is not None else None
+    )
+    prepared_ingest = None
+    if ingest_service is not None and target_status == JOB_STATUS_SUCCEEDED:
+        expected_target_id = None
+        if body.result_json and body.result_json.get("result_type") == "snapshot":
+            in_flight_job = await backend.in_flight_job(
+                job_id=job_id,
+                agent_id=body.agent_id,
+                now=now,
+            )
+            if in_flight_job is None:
+                try:
+                    outcome = await backend.complete(
+                        job_id=job_id,
+                        agent_id=body.agent_id,
+                        status=target_status,
+                        result_json=stored_result_json,
+                        error_code=body.error_code,
+                        now=now,
+                    )
+                except InvalidJobTransition as exc:
+                    raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
+                if outcome.result == COMPLETE_NOT_FOUND:
+                    raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="job not found")
+                raise HTTPException(
+                    status_code=HTTPStatus.CONFLICT,
+                    detail="job lease lost or reassigned",
+                )
+            expected_target_id = in_flight_job.target_id
+        try:
+            prepared_ingest = ingest_service.prepare_complete(
+                job_id=job_id,
+                agent_id=body.agent_id,
+                status=target_status,
+                result_json=body.result_json,
+                completed_at=now,
+                expected_target_id=expected_target_id,
+            )
+        except JobResultIngestError as exc:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
+    atomic_complete = getattr(ingest_service, "complete_snapshot_job", None)
+    if prepared_ingest is not None and atomic_complete is not None:
+        try:
+            outcome = atomic_complete(
+                prepared_ingest,
+                agent_id=body.agent_id,
+                status=target_status,
+                result_json=stored_result_json,
+                error_code=body.error_code,
+                now=now,
+            )
+            if isawaitable(outcome):
+                outcome = await outcome
+        except InvalidJobTransition as exc:
+            raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
+
+        if outcome.result == COMPLETE_NOT_FOUND:
+            raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="job not found")
+        if outcome.result == COMPLETE_LEASE_LOST:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT, detail="job lease lost or reassigned"
+            )
+        if outcome.result != COMPLETE_ACCEPTED:
+            raise HTTPException(status_code=HTTPStatus.CONFLICT, detail="job not accepted")
+        return {"job_id": outcome.job_id, "status": outcome.final_status}
+
     try:
-        outcome = await _backend(request).complete(
+        outcome = await backend.complete(
             job_id=job_id,
             agent_id=body.agent_id,
             status=target_status,
-            result_json=body.result_json,
+            result_json=stored_result_json,
             error_code=body.error_code,
             now=now,
         )
@@ -190,6 +279,23 @@ async def complete_job(
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT, detail="job lease lost or reassigned"
         )
+    if prepared_ingest is not None:
+        try:
+            committed = ingest_service.commit(prepared_ingest)
+            if isawaitable(committed):
+                await committed
+        except Exception:  # noqa: BLE001 - compensate queue state, then preserve 500.
+            restore = getattr(backend, "restore_claimed_after_snapshot_failure", None)
+            if restore is not None:
+                restored = restore(
+                    job_id=job_id,
+                    agent_id=body.agent_id,
+                    lease_seconds=DEFAULT_LEASE_SECONDS,
+                    now=now,
+                )
+                if isawaitable(restored):
+                    await restored
+            raise
     return {"job_id": outcome.job_id, "status": outcome.final_status}
 
 

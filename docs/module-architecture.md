@@ -145,7 +145,7 @@ server (Epic 5) outbound-only.
 
 - **Dependency direction is strictly one-way.** `rider_agent` imports `rider_crawl`
   only — through a single re-export chokepoint, `reuse.py` (crawler / parser /
-  renderer / Gmail 2FA / KakaoTalk sender). It must **never import `rider_server`**;
+  renderer / email IMAP 2FA / KakaoTalk sender). It must **never import `rider_server`**;
   where it needs a server-side enum value (e.g. `BaeminAuthState`,
   `FailureCategory`) it mirrors the value as a plain-string constant rather than
   importing it. The dependency edges `rider_crawl → rider_agent` and
@@ -191,23 +191,23 @@ The runtime is composed of additive primitives, each delivered by one story:
   folder `.cmd` (default, no admin rights) or Task Scheduler (`/sc ONLOGON /it`,
   alternative). KakaoTalk work is gated to an interactive Windows session
   (Session 0 service mode is refused, fail-closed).
-- `auth/baemin_auth.py` (Story 4.8) vs `auth/coupang_gmail_2fa.py` (Story 4.9) sit
-  in the same subpackage with **opposite policies**. Baemin is human-in-the-loop:
+- `auth/baemin_auth.py` (Story 4.8) vs the legacy-named
+  `auth/coupang_gmail_2fa.py` / current IMAP email 2FA path (Story 4.9) sit in the
+  same subpackage with **opposite policies**. Baemin is human-in-the-loop:
   it detects `AUTH_REQUIRED` (without ever mapping a parser error such as
   `MissingPerformanceDataError` to auth) and never acquires, inputs, or bypasses an
-  OTP — an AST import-edge guard forbids Gmail/`pyautogui` imports in that module.
-  Coupang Gmail 2FA *does* auto-recover: it stores an OAuth token per
-  `mailbox_id` (opaque ref, server keeps the ref only), serializes same-mailbox
-  reads through `MailboxLockRegistry`, and uses `dataclasses.replace` to give each
-  mailbox a distinct token-file path so customers never share a token.
+  OTP — an AST import-edge guard forbids email-2FA/`pyautogui` imports in that
+  module. Coupang email 2FA *does* auto-recover: it resolves account and mailbox
+  refs into Agent-local config, reads Gmail/Naver through IMAP with address + app
+  password, serializes same-mailbox reads through `MailboxLockRegistry`, and does
+  not use Google OAuth token files.
 
 Server-side job creation/queue/lease enforcement and the Admin UI were Epic 5 and
 **are now delivered** (see *Cloud Server Runtime (Epic 5)* below). Two pieces the
-Agent depends on are still **not** built: the `workers/crawl_worker.py` collection
-executor and real OS/browser bindings for the auth probes (`default_login_probe`
-etc., `is_reauth`). Through Epic 4–5 the Agent is verified against server
-stubs/mocks and injected seams; an end-to-end live Agent run awaits those bindings
-and the central dispatch loop (operations cutover).
+Agent depends on have since been delivered or wired through injected seams,
+including `workers/crawl_worker.py`. A full live Agent run still depends on the
+real operator browser/session state and the central dispatch loop (operations
+cutover).
 
 ## Cloud Server Runtime (Epic 5)
 

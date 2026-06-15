@@ -106,6 +106,14 @@ class _AchievementRow:
         )
 
 
+@dataclass(frozen=True)
+class _TodayDeliveryStatus:
+    lunch_peak: _AchievementPeriod
+    afternoon_non_peak: _AchievementPeriod
+    dinner_peak: _AchievementPeriod
+    dinner_non_peak: _AchievementPeriod
+
+
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -194,6 +202,15 @@ def parse_achievement_report_text(
     current_time = now or datetime.now()
     row = _select_achievement_row(rows, today=current_time.date())
     reject_rate = max(0, min(100, round(100 - row.acceptance_rate, 2)))
+    today = _parse_today_delivery_status(text, center_id=center_id)
+    lunch_peak = _combine_today_and_weekly(row.lunch_peak, today.lunch_peak if today else None)
+    afternoon_non_peak = _combine_today_and_weekly(
+        row.afternoon_non_peak, today.afternoon_non_peak if today else None
+    )
+    dinner_peak = _combine_today_and_weekly(row.dinner_peak, today.dinner_peak if today else None)
+    dinner_non_peak = _combine_today_and_weekly(
+        row.dinner_non_peak, today.dinner_non_peak if today else None
+    )
 
     return CurrentScreenSnapshot(
         center_name=center_name.strip() or row.center_label,
@@ -210,19 +227,19 @@ def parse_achievement_report_text(
         cancelled_count=0,
         completed_count=0,
         sequence_violation_count=0,
-        lunch_peak_count=row.lunch_peak.done,
-        lunch_peak_goal=row.lunch_peak.goal,
-        lunch_peak_rate=row.lunch_peak.rate,
-        afternoon_non_peak_count=row.afternoon_non_peak.done,
-        afternoon_non_peak_goal=row.afternoon_non_peak.goal,
-        afternoon_non_peak_rate=row.afternoon_non_peak.rate,
-        dinner_peak_count=row.dinner_peak.done,
-        dinner_peak_goal=row.dinner_peak.goal,
-        dinner_peak_rate=row.dinner_peak.rate,
-        dinner_non_peak_count=row.dinner_non_peak.done,
-        dinner_non_peak_goal=row.dinner_non_peak.goal,
-        dinner_non_peak_rate=row.dinner_non_peak.rate,
-        non_peak_count=row.afternoon_non_peak.done + row.dinner_non_peak.done,
+        lunch_peak_count=lunch_peak.done,
+        lunch_peak_goal=lunch_peak.goal,
+        lunch_peak_rate=lunch_peak.rate,
+        afternoon_non_peak_count=afternoon_non_peak.done,
+        afternoon_non_peak_goal=afternoon_non_peak.goal,
+        afternoon_non_peak_rate=afternoon_non_peak.rate,
+        dinner_peak_count=dinner_peak.done,
+        dinner_peak_goal=dinner_peak.goal,
+        dinner_peak_rate=dinner_peak.rate,
+        dinner_non_peak_count=dinner_non_peak.done,
+        dinner_non_peak_goal=dinner_non_peak.goal,
+        dinner_non_peak_rate=dinner_non_peak.rate,
+        non_peak_count=afternoon_non_peak.done + dinner_non_peak.done,
         active_riders=0,
         reject_rate=reject_rate,
     )
@@ -378,16 +395,15 @@ def _parse_achievement_rows(text: str, *, center_id: str) -> list[_AchievementRo
 
 def _select_achievement_row(rows: list[_AchievementRow], *, today: date) -> _AchievementRow:
     today_rows = [row for row in rows if row.row_date == today]
-    completed_today = [row for row in today_rows if row.has_delivery_count]
-    if completed_today:
-        return completed_today[-1]
+    if today_rows:
+        completed_today = [row for row in today_rows if row.has_delivery_count]
+        if completed_today:
+            return completed_today[-1]
+        return today_rows[-1]
 
     completed_rows = [row for row in rows if row.row_date <= today and row.has_delivery_count]
     if completed_rows:
         return max(completed_rows, key=lambda row: row.row_date)
-
-    if today_rows:
-        return today_rows[-1]
 
     past_rows = [row for row in rows if row.row_date <= today]
     if past_rows:
@@ -411,6 +427,52 @@ def _parse_achievement_period(raw: str) -> _AchievementPeriod:
     )
 
 
+_PERIOD_CELL_PATTERN = re.compile(
+    r"\d+(?:,\d{3})*\s*/\s*\d+(?:,\d{3})*\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)"
+)
+
+
+def _is_period_cell(raw: str) -> bool:
+    return bool(_PERIOD_CELL_PATTERN.fullmatch(raw.strip()))
+
+
+def _parse_today_delivery_status(text: str, *, center_id: str) -> _TodayDeliveryStatus | None:
+    expected_id = center_id.strip().upper()
+    if not expected_id:
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if expected_id not in line.upper():
+            continue
+        cells = lines[index + 1 : index + 5]
+        if len(cells) < 4 or not all(_is_period_cell(cell) for cell in cells):
+            continue
+        try:
+            return _TodayDeliveryStatus(
+                lunch_peak=_parse_achievement_period(cells[0]),
+                afternoon_non_peak=_parse_achievement_period(cells[1]),
+                dinner_peak=_parse_achievement_period(cells[2]),
+                dinner_non_peak=_parse_achievement_period(cells[3]),
+            )
+        except (MissingPerformanceDataError, ValueError):
+            continue
+    return None
+
+
+def has_today_delivery_status(text: str, *, center_id: str) -> bool:
+    return _parse_today_delivery_status(text, center_id=center_id) is not None
+
+
+def _combine_today_and_weekly(
+    weekly: _AchievementPeriod, today: _AchievementPeriod | None
+) -> _AchievementPeriod:
+    if today is None:
+        return weekly
+    goal = weekly.goal if weekly.goal else today.goal
+    return _AchievementPeriod(done=today.done, goal=goal, rate=today.rate)
+
+
 def _looks_like_achievement_date(raw: str) -> bool:
     return bool(re.fullmatch(r"\d{2}-\d{2}-\d{2}", raw.strip()))
 
@@ -419,7 +481,14 @@ def _scrapling_text(html: str) -> str:
     try:
         from scrapling.parser import Selector
     except ImportError:
-        return ""
+        try:
+            from scrapling.parser import Adaptor
+        except ImportError:
+            return ""
+
+        page = Adaptor(html)
+        text = page.get_all_text()
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
     page = Selector(html)
     chunks = page.css("body *::text").getall()

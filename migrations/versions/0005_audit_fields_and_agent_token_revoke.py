@@ -17,8 +17,8 @@
 ``upgrade``/``downgrade`` 는 정확히 round-trip 한다. ``token``/``secret``/``password`` 단독
 컬럼명 금지(forbidden-column 정확매치 — ``token_*_at`` 는 안전).
 
-Revision ID: 0005_audit_fields_and_agent_token_revoke
-Revises: 0004_messenger_channel_registration
+Revision ID: 0005_audit_agent_tokens
+Revises: 0004_channel_reg
 Create Date: 2026-06-14
 
 """
@@ -31,8 +31,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0005_audit_fields_and_agent_token_revoke"
-down_revision: str | None = "0004_messenger_channel_registration"
+revision: str = "0005_audit_agent_tokens"
+down_revision: str | None = "0004_channel_reg"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -147,6 +147,9 @@ def _run_agent_loop(
         store=store,
         identity_path=identity_path,
         base_url=args.server_url,
+        start_auth_worker=True,
+        start_crawl_worker=True,
+        start_kakao_sender=True,
     )
 
     if not getattr(summary, "started", False):

@@ -1,45 +1,90 @@
-{# 대상 상태 부분 fragment(HTMX swap 대상). 심각도 코드값→한글 라벨/CSS class 매핑. #}
-<table>
-  <thead>
-    <tr>
-      <th>대상</th>
-      <th>센터/상점</th>
-      <th>플랫폼</th>
-      <th>주기(분)</th>
-      <th>마지막 수집 성공</th>
-      <th>마지막 전송 성공</th>
-      <th>마지막 실패 사유</th>
-      <th>심각도</th>
-      <th>운영 액션</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for t in targets %}
-    <tr>
-      <td>{{ t.name }}</td>
-      <td>{{ t.center_name }}</td>
-      <td>{{ t.platform }}</td>
-      <td>{{ t.interval_minutes }}</td>
-      <td>{% if t.last_success_at %}{{ t.last_success_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
-      <td>{% if t.last_delivery_at %}{{ t.last_delivery_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
-      <td>{% if t.last_failure_code %}{{ t.last_failure_code }}{% else %}<span class="muted">-</span>{% endif %}</td>
-      <td><span class="{{ t.severity | severity_class }}">{{ t.severity | severity_label }}</span></td>
-      {# Story 5.7: 별도 액션 라우터(POST)로 전송 — 읽기 전용 fragment 안에 두되 write 는 action service 가 수행. #}
-      <td class="row-actions">
-        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
-                hx-target="#action-result" hx-confirm="대상을 활성화하시겠습니까?">활성</button>
-        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/pause?tenant={{ t.tenant_id | urlencode }}"
-                hx-target="#action-result" hx-confirm="대상을 비활성화하시겠습니까?">비활성</button>
-        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
-                hx-vals='{"platform": "{{ t.platform }}"}' hx-target="#action-result">test crawl</button>
-        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/dry-run?tenant={{ t.tenant_id | urlencode }}"
-                hx-target="#action-result">dry-run</button>
-        <button hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
-                hx-target="#action-result">인증 확인</button>
-      </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="9" class="muted">표시할 대상이 없습니다.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+{# 대상 상태 fragment(HTMX swap 대상) — 재설계 행 구조.
+   행 = 심각도 바 + 이름/센터 + 플랫폼 배지 + 심각도 배지 + 사유/상대시간 + 상황맞춤 액션.
+   심각도 class(severity_class) 는 행과 배지에 공유해 좌측 바·배지 색을 결정한다(고정폭 트랙으로 정렬 일치).
+   data-* 속성은 클릭 시 업체 상세 드로어를 서버 왕복 없이 채우는 데 쓴다. autoescape 유지. #}
+<div class="tlist" id="tlist">
+  {% for t in targets %}
+  {% if t.last_failure_code == 'AUTH_REQUIRED' %}
+    {% set primary_action = 'auth-check' %}
+    {% set primary_label = '인증 확인' %}
+    {% set primary_style = 'primary' %}
+  {% elif t.last_failure_code == 'TARGET_VALIDATION_FAILURE' %}
+    {% set primary_action = 'center-name' %}
+    {% set primary_label = '센터명 설정' %}
+    {% set primary_style = 'primary' %}
+  {% elif t.severity == 'STOPPED' %}
+    {% set primary_action = 'activate' %}
+    {% set primary_label = '활성화' %}
+    {% set primary_style = '' %}
+  {% elif t.severity in ('WARNING', 'CRITICAL') %}
+    {% set primary_action = 'test-crawl' %}
+    {% set primary_label = '지금 수집' %}
+    {% set primary_style = 'primary' if t.severity == 'CRITICAL' else '' %}
+  {% else %}
+    {% set primary_action = 'details' %}
+    {% set primary_label = '상세' %}
+    {% set primary_style = 'ghost' %}
+  {% endif %}
+  <div class="trow trow--{{ t.severity | lower }}"
+       onclick="if(!event.target.closest('button'))openTargetDrawer(this, this)"
+       data-name="{{ t.name }}"
+       data-center="{{ t.center_name }}"
+       data-platform="{{ t.platform }}"
+       data-platform-label="{{ t.platform | platform_label }}"
+       data-severity="{{ t.severity }}"
+       data-severity-label="{{ t.severity | severity_label }}"
+       data-severity-class="{{ t.severity | severity_class }}"
+       data-interval="{{ t.interval_minutes }}"
+       data-failcode="{{ t.last_failure_code or '' }}"
+       data-reason="{{ t.last_failure_code | reason_text }}"
+       data-success="{{ t.last_success_at | relative_time }}"
+       data-delivery="{{ t.last_delivery_at | relative_time }}"
+       data-target="{{ t.target_id }}"
+       data-tenant="{{ t.tenant_id }}"
+       data-primary-action="{{ primary_action }}"
+       data-primary-label="{{ primary_label }}"
+       data-primary-style="{{ primary_style }}">
+    <span class="sevbar" aria-hidden="true"></span>
+    <span class="t-name">
+      <span class="nm">{{ t.name }}</span>
+      <span class="ctr">{% if t.center_name %}센터: {{ t.center_name }}{% else %}<span class="risk">⚠ 센터 미설정</span>{% endif %}</span>
+    </span>
+    <span class="plat {{ t.platform | platform_class }}">{{ t.platform | platform_label }}</span>
+    <span class="sev-badge {{ t.severity | severity_class }}">{{ t.severity | severity_label }}</span>
+    <span class="t-reason">
+      <span class="rs">
+        {%- if t.last_failure_code %}{{ t.last_failure_code | reason_text }}
+        {%- elif t.severity == 'STOPPED' %}운영 중지
+        {%- elif t.severity == 'NORMAL' %}정상
+        {%- else %}관찰 중{% endif -%}
+      </span>
+      <span class="fresh {{ t.last_success_at | freshness_class }}">
+        {%- if t.last_success_at %}수집 {{ t.last_success_at | relative_time }}{% else %}수집 기록 없음{% endif -%}
+        {%- if t.last_delivery_at %} · 전송 {{ t.last_delivery_at | relative_time }}{% endif -%}
+      </span>
+    </span>
+    <span class="t-act row-actions">
+      {# 상황 맞춤 1차 액션 + 보조. event.stopPropagation 으로 행 클릭(드로어)과 분리. 위험 액션은 이름 박은 confirm. #}
+      {%- if t.last_failure_code == 'AUTH_REQUIRED' %}
+      <button type="button" class="btn primary" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
+              hx-target="#target-result-{{ t.target_id }}">인증 확인</button>
+      {%- elif t.last_failure_code == 'TARGET_VALIDATION_FAILURE' %}
+      <button type="button" class="btn primary" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this); focusCenterNameEdit()">센터명 설정</button>
+      {%- elif t.severity == 'STOPPED' %}
+      <button type="button" class="btn" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
+              hx-target="#target-result-{{ t.target_id }}" hx-confirm="대상 '{{ t.name }}'을(를) 활성화할까요?">활성화</button>
+      {%- elif t.severity in ('WARNING', 'CRITICAL') %}
+      <button type="button" class="btn{% if t.severity == 'CRITICAL' %} primary{% endif %}" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
+              hx-vals='{"platform": "{{ t.platform }}"}' hx-target="#target-result-{{ t.target_id }}">지금 수집</button>
+      {%- endif %}
+      <button type="button" class="btn ghost" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this)" aria-label="{{ t.name }} 상세 열기">상세</button>
+    </span>
+    <div class="row-result" id="target-result-{{ t.target_id }}" aria-live="polite" role="status"></div>
+  </div>
+  {% else %}
+  <div class="allgood">표시할 대상이 없습니다.</div>
+  {% endfor %}
+</div>

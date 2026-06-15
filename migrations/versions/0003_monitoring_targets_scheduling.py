@@ -8,7 +8,7 @@ due 스캔(``next_run_at <= now``) 성능을 위해 ``ix_monitoring_targets_next
 추가한다. downgrade 는 round-trip(드롭). 계약 Required 8필드는 불변 — 새 컬럼은 superset 이라
 5.2 schema 가드 무회귀.
 
-Revision ID: 0003_monitoring_targets_scheduling
+Revision ID: 0003_targets_sched
 Revises: 0002_jobs_lease_columns
 Create Date: 2026-06-14
 
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0003_monitoring_targets_scheduling"
+revision: str = "0003_targets_sched"
 down_revision: str | None = "0002_jobs_lease_columns"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

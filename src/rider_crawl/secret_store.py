@@ -28,7 +28,8 @@ SECRET_STORAGE_CLASSIFICATION: dict[str, str] = {
     "telegram_bot_token": SECRET_STORAGE_CENTRAL,
     "coupang_login_password": SECRET_STORAGE_AGENT_LOCAL,
     "coupang_login_id": SECRET_STORAGE_AGENT_LOCAL,
-    "gmail_oauth_token": SECRET_STORAGE_AGENT_LOCAL,
+    "verification_email_address": SECRET_STORAGE_AGENT_LOCAL,
+    "verification_email_app_password": SECRET_STORAGE_AGENT_LOCAL,
     "otp": SECRET_STORAGE_NOT_STORED,
 }
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
@@ -45,6 +46,7 @@ from rider_server.domain import (
 
 from .admin_action_repository_postgres import _audit_values, _target_to_domain
 from .admin_action_service import AuditEntry
+from .admin_entity_service import AdminEntityDuplicateError
 
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
@@ -71,6 +73,16 @@ def _account_to_domain(row: PlatformAccountRow) -> PlatformAccount:
         label=row.label,
         username_ref=SecretRef(ref=row.username_ref, storage_class=SecretStorageClass.CENTRAL),
         password_ref=SecretRef(ref=row.password_ref, storage_class=SecretStorageClass.CENTRAL),
+        verification_email_address_ref=SecretRef(
+            ref=row.verification_email_address_ref,
+            storage_class=SecretStorageClass.CENTRAL,
+        ),
+        verification_email_app_password_ref=SecretRef(
+            ref=row.verification_email_app_password_ref,
+            storage_class=SecretStorageClass.CENTRAL,
+        ),
+        verification_email_subject_keyword=row.verification_email_subject_keyword,
+        verification_email_sender_keyword=row.verification_email_sender_keyword,
         auth_state=BaeminAuthState(row.auth_state),
     )
 
@@ -142,18 +154,24 @@ class PostgresAdminEntityRepository:
         return [_tenant_to_domain(r) for r in rows]
 
     async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]:
+        if not tenant_id.strip():
+            return []
         stmt = select(PlatformAccountRow).where(PlatformAccountRow.tenant_id == tenant_id)
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
         return [_account_to_domain(r) for r in rows]
 
     async def list_monitoring_targets(self, tenant_id: str) -> list[MonitoringTarget]:
+        if not tenant_id.strip():
+            return []
         stmt = select(MonitoringTargetRow).where(MonitoringTargetRow.tenant_id == tenant_id)
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
         return [_target_to_domain(r) for r in rows]
 
     async def list_messenger_channels(self, tenant_id: str) -> list[MessengerChannel]:
+        if not tenant_id.strip():
+            return []
         stmt = select(MessengerChannelRow).where(MessengerChannelRow.tenant_id == tenant_id)
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
@@ -185,6 +203,10 @@ class PostgresAdminEntityRepository:
             "label": account.label,
             "username_ref": account.username_ref.ref,  # 핸들만(평문 0)
             "password_ref": account.password_ref.ref,
+            "verification_email_address_ref": account.verification_email_address_ref.ref,
+            "verification_email_app_password_ref": account.verification_email_app_password_ref.ref,
+            "verification_email_subject_keyword": account.verification_email_subject_keyword,
+            "verification_email_sender_keyword": account.verification_email_sender_keyword,
             "auth_state": account.auth_state.value,
         }
         await self._insert_with_audit(PlatformAccountRow, values, audit)
@@ -254,6 +276,10 @@ class PostgresAdminEntityRepository:
                 "label": account.label,
                 "username_ref": account.username_ref.ref,
                 "password_ref": account.password_ref.ref,
+                "verification_email_address_ref": account.verification_email_address_ref.ref,
+                "verification_email_app_password_ref": account.verification_email_app_password_ref.ref,
+                "verification_email_subject_keyword": account.verification_email_subject_keyword,
+                "verification_email_sender_keyword": account.verification_email_sender_keyword,
             },
             audit,
         )
@@ -304,17 +330,33 @@ class PostgresAdminEntityRepository:
 
     # ── 공통: INSERT/UPDATE + audit INSERT 를 한 세션·한 commit 으로 ─────────────
     async def _insert_with_audit(self, row_cls, values: dict, audit: AuditEntry) -> None:
-        async with self._session_factory() as session:
-            await session.execute(insert(row_cls).values(**values))
-            await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
-            await session.commit()
+        try:
+            async with self._session_factory() as session:
+                await session.execute(insert(row_cls).values(**values))
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise _duplicate_error(exc) from exc
 
     async def _update_with_audit(
         self, row_cls, entity_id: str, values: dict, audit: AuditEntry
     ) -> None:
-        async with self._session_factory() as session:
-            await session.execute(
-                update(row_cls).where(row_cls.id == entity_id).values(**values)
-            )
-            await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
-            await session.commit()
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(row_cls).where(row_cls.id == entity_id).values(**values)
+                )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise _duplicate_error(exc) from exc
+
+
+def _duplicate_error(exc: IntegrityError) -> AdminEntityDuplicateError:
+    text = str(getattr(exc, "orig", exc))
+    lowered = text.lower()
+    if "registration_code" in lowered:
+        return AdminEntityDuplicateError("registration_code", "중복된 채널 등록 코드입니다")
+    if "telegram" in lowered or "chat" in lowered or "messenger_channels" in lowered:
+        return AdminEntityDuplicateError("messenger_channel", "중복된 메시지 채널입니다")
+    return AdminEntityDuplicateError("unique", "중복된 값입니다")

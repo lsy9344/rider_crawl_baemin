@@ -45,10 +45,12 @@ class Settings:
     #   * sending_enabled: 복구/신규 환경 실전송 게이트(기본 OFF — fail-closed, NFR-9·25).
     #   * admin_ip_allowlist: Admin 접근 허용 source IP/CIDR(빈 tuple = 추가 제한 없음, opt-in).
     #   * admin_mfa_required: privileged 액션의 MFA 강제 토글(기본 True — 게이트레일 #4).
+    #   * admin_allowed_origins: Admin POST Origin/Referer same-origin 보강용 추가 허용 Origin.
     # 기존 positional 생성 호환을 위해 default 를 가진 마지막 필드들로 둔다.
     sending_enabled: bool = False
     admin_ip_allowlist: tuple[str, ...] = ()
     admin_mfa_required: bool = True
+    admin_allowed_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -68,6 +70,7 @@ class Settings:
             sending_enabled=_env_bool(env.get("RIDER_SENDING_ENABLED"), default=False),
             admin_ip_allowlist=_env_tuple(env.get("RIDER_ADMIN_IP_ALLOWLIST")),
             admin_mfa_required=_env_bool(env.get("RIDER_ADMIN_MFA_REQUIRED"), default=True),
+            admin_allowed_origins=_env_tuple(env.get("RIDER_ADMIN_ALLOWED_ORIGINS")),
         )
 
 

@@ -49,6 +49,15 @@ class DueTarget:
     platform: str
     interval_minutes: int
     next_run_at: datetime | None
+    platform_account_id: str = ""
+    primary_url: str = ""
+    expected_display_name: str = ""
+    username_ref: str = ""
+    password_ref: str = ""
+    verification_email_address_ref: str = ""
+    verification_email_app_password_ref: str = ""
+    verification_email_subject_keyword: str = "인증번호"
+    verification_email_sender_keyword: str = "coupang"
 
 
 @dataclass(frozen=True)
@@ -254,6 +263,7 @@ class SchedulerService:
             job_id = await queue_backend.enqueue(
                 job_type=job_type,
                 target_id=target.target_id,
+                payload_json=_crawl_job_payload(target, job_type),
                 run_after=now,
                 now=now,
             )
@@ -267,3 +277,37 @@ class SchedulerService:
             )
 
         return TickResult(tuple(outcomes), enqueued_count)
+
+
+def _crawl_job_payload(target: DueTarget, job_type: str) -> dict[str, object]:
+    platform = str(target.platform or "").strip().casefold()
+    payload: dict[str, object] = {
+        "target_id": target.target_id,
+        "tenant_id": target.tenant_id,
+        "platform": platform,
+        "platform_account_id": target.platform_account_id,
+        "primary_url": target.primary_url,
+        "expected_display_name": target.expected_display_name,
+        "browser_profile_ref": f"profile:{target.target_id}",
+        "timeout_seconds": 60,
+        "parser_version": f"{platform}-v1",
+        "job_type": job_type,
+    }
+    if platform == "coupang":
+        payload.update(
+            {
+                "username_ref": target.username_ref,
+                "password_ref": target.password_ref,
+                "verification_email_address_ref": target.verification_email_address_ref,
+                "verification_email_app_password_ref": target.verification_email_app_password_ref,
+                "verification_email_subject_keyword": target.verification_email_subject_keyword,
+                "verification_email_sender_keyword": target.verification_email_sender_keyword,
+                "coupang_auto_email_2fa_enabled": bool(
+                    target.username_ref
+                    and target.password_ref
+                    and target.verification_email_address_ref
+                    and target.verification_email_app_password_ref
+                ),
+            }
+        )
+    return payload

@@ -51,9 +51,9 @@ QUEUE_LAG_ALERT_SECONDS: int = 120
 #: 두고 실 알람(CloudWatch) 임계는 deploy/운영 설정에서 튜닝한다(api_error_rate.md 기록).
 TELEGRAM_ERROR_ALERT_MIN: int = 1
 
-#: 인증 필요 알림 임계(≥1 이면 alert). auth_required / gmail_reauth 공통.
+#: 인증 필요 알림 임계(≥1 이면 alert). auth_required / email auth 공통.
 AUTH_REQUIRED_ALERT_MIN: int = 1
-GMAIL_REAUTH_ALERT_MIN: int = 1
+EMAIL_AUTH_ALERT_MIN: int = 1
 
 # ══════════════════════════════════════════════════════════════════════════
 # 알림 코드(plain-string 상수 — 새 Enum 금지, AC2 최소 4종)
@@ -195,7 +195,7 @@ def evaluate_alerts(
 
     if (
         snapshot.auth_required_count >= AUTH_REQUIRED_ALERT_MIN
-        or snapshot.gmail_reauth_required_count >= GMAIL_REAUTH_ALERT_MIN
+        or snapshot.gmail_reauth_required_count >= EMAIL_AUTH_ALERT_MIN
     ):
         alerts.append(Alert(ALERT_AUTH_REQUIRED, severity.SEVERITY_WARNING))
 

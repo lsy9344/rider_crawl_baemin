@@ -1,6 +1,6 @@
 """platform_accounts·monitoring_targets·auth_sessions ORM 모델 — Story 5.2 (AC1·AC2).
 
-secret 평문 금지(NFR-8): ``username_ref``/``password_ref`` 만 둔다 — 평문
+secret 평문 금지(NFR-8): ``username_ref``/``password_ref`` 와 쿠팡 인증 메일 ref만 둔다 — 평문
 ``password``/``username``/``token`` 컬럼 0. ``monitoring_targets.center_name`` 은 domain
 공개 경계 필드라 보존한다(FR-20 기대 센터/상점명 검증 정본). ``auth_sessions`` 는 domain
 dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하며, **계약 필드명
@@ -26,6 +26,10 @@ class PlatformAccount(Base):
     label: Mapped[str] = mapped_column(String, nullable=False)
     username_ref: Mapped[str] = mapped_column(String, nullable=False)  # SecretRef 핸들(평문 아님)
     password_ref: Mapped[str] = mapped_column(String, nullable=False)  # SecretRef 핸들(평문 아님)
+    verification_email_address_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    verification_email_app_password_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    verification_email_subject_keyword: Mapped[str] = mapped_column(String, nullable=False, default="인증번호")
+    verification_email_sender_keyword: Mapped[str] = mapped_column(String, nullable=False, default="coupang")
     auth_state: Mapped[str] = mapped_column(String, nullable=False)  # BaeminAuthState 값
 
 

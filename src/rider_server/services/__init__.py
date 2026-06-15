@@ -47,6 +47,12 @@ from .dispatch_fanout_service import (
 from .dispatch_service import DispatchResult, DispatchService
 from .idempotency import IdempotentDeliveryService
 from .message_render_service import MessageRenderService
+from .job_result_ingest_service import (
+    JobResultIngestError,
+    JobResultIngestService,
+    SnapshotIngestRecord,
+)
+from .snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .snapshot_normalizer import MissingSnapshotDataError, SnapshotNormalizer
 from .telegram_central_dispatch import (
     CentralTelegramSender,
@@ -100,6 +106,10 @@ __all__ = [
     "SubscriptionStateChange",
     "CrawlService",
     "MessageRenderService",
+    "JobResultIngestService",
+    "JobResultIngestError",
+    "SnapshotIngestRecord",
+    "PostgresSnapshotIngestRepository",
     "DispatchService",
     "DispatchResult",
     "DispatchFanoutService",

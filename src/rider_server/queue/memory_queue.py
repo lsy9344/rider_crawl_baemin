@@ -30,6 +30,7 @@ from .states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
     assert_transition,
 )
 
@@ -44,6 +45,7 @@ class _Job:
     status: str
     attempts: int = 0
     run_after: datetime | None = None
+    payload_json: dict[str, Any] | None = None
     agent_id: str | None = None
     lease_expires_at: datetime | None = None
     claimed_at: datetime | None = None
@@ -65,6 +67,7 @@ class InMemoryQueueBackend(QueueBackend):
         *,
         job_type: str,
         target_id: str | None = None,
+        payload_json: dict[str, Any] | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -74,6 +77,7 @@ class InMemoryQueueBackend(QueueBackend):
                 job_id=job_id,
                 type=job_type,
                 target_id=target_id,
+                payload_json=dict(payload_json) if payload_json is not None else None,
                 status=JOB_STATUS_PENDING,
                 run_after=run_after,
             )
@@ -115,6 +119,7 @@ class InMemoryQueueBackend(QueueBackend):
                         type=job.type,
                         target_id=job.target_id,
                         lease_expires_at=lease_until,
+                        payload_json=dict(job.payload_json) if job.payload_json is not None else None,
                         attempts=job.attempts,
                         status=job.status,
                     )
@@ -148,6 +153,32 @@ class InMemoryQueueBackend(QueueBackend):
             job.error_code = error_code
             job.lease_expires_at = None
             return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=status)
+
+    async def in_flight_job(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        now: datetime,
+    ) -> ClaimedJobRecord | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job.agent_id != agent_id
+                or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                or _lease_expired(job.lease_expires_at, now)
+            ):
+                return None
+            return ClaimedJobRecord(
+                job_id=job.job_id,
+                type=job.type,
+                target_id=job.target_id,
+                lease_expires_at=job.lease_expires_at,
+                payload_json=dict(job.payload_json) if job.payload_json is not None else None,
+                attempts=job.attempts,
+                status=job.status,
+            )
 
     async def extend_lease(
         self,
@@ -184,6 +215,28 @@ class InMemoryQueueBackend(QueueBackend):
                     job.claimed_at = None
                     recovered += 1
         return recovered
+
+    async def restore_claimed_after_snapshot_failure(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        lease_seconds: float,
+        now: datetime,
+    ) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job.agent_id != agent_id
+                or job.status != JOB_STATUS_SUCCEEDED
+            ):
+                return False
+            job.status = JOB_STATUS_CLAIMED
+            job.result_json = None
+            job.error_code = None
+            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            return True
 
     async def emit_event(
         self,

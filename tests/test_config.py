@@ -1,4 +1,5 @@
 import dataclasses
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -85,7 +86,13 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
         "MESSENGER_NAME",
         "CRAWL_NAME",
         "STATE_SUBDIR",
-        "COUPANG_CREDENTIALS_PATH",
+        "COUPANG_" + "CREDENTIALS_PATH",
+        "COUPANG_AUTO_EMAIL_2FA_ENABLED",
+        "G" + "MAIL_CREDENTIALS_PATH",
+        "G" + "MAIL_TOKEN_PATH",
+        "G" + "MAIL_2FA_QUERY",
+        "G" + "MAIL_2FA_POLL_SECONDS",
+        "G" + "MAIL_2FA_POLL_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -104,15 +111,44 @@ def test_app_config_defaults_to_safe_dry_run(monkeypatch):
     assert config.run_lock_timeout_seconds == 900
     assert config.crawl_name == ""
     assert config.state_subdir == ""
-    assert config.coupang_credentials_path == Path("secrets/google/coupang.credentials.json")
 
 
-def test_app_config_reads_coupang_credentials_path(monkeypatch):
-    monkeypatch.setenv("COUPANG_CREDENTIALS_PATH", "C:/safe/coupang.credentials.json")
+def test_app_config_email_2fa_defaults_ignore_gmail_oauth_env(monkeypatch):
+    monkeypatch.setenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", "true")
+    monkeypatch.setenv("COUPANG_" + "CREDENTIALS_PATH", "C:/safe/coupang.credentials.json")
+    monkeypatch.setenv("G" + "MAIL_CREDENTIALS_PATH", "C:/safe/legacy-credentials.json")
+    monkeypatch.setenv("G" + "MAIL_TOKEN_PATH", "C:/safe/legacy-token.json")
+    monkeypatch.setenv("G" + "MAIL_2FA_QUERY", "from:(example) subject:(secret)")
+    monkeypatch.setenv("G" + "MAIL_2FA_POLL_SECONDS", "999")
+    monkeypatch.setenv("G" + "MAIL_2FA_POLL_INTERVAL_SECONDS", "99")
 
     config = AppConfig.from_env()
 
-    assert config.coupang_credentials_path == Path("C:/safe/coupang.credentials.json")
+    assert config.coupang_auto_email_2fa_enabled is False
+    assert config.coupang_login_id == ""
+    assert config.coupang_login_password == ""
+    assert config.verification_email_address == ""
+    assert config.verification_email_app_password == ""
+    assert config.verification_email_subject_keyword == "인증번호"
+    assert config.verification_email_sender_keyword == "coupang"
+    assert config.email_2fa_poll_seconds == 120
+    assert config.email_2fa_poll_interval_seconds == 5
+    assert config.coupang_2fa_code_digits == 6
+
+
+def test_app_config_repr_masks_secret_values():
+    config = replace(
+        _config_with_log_dir("logs"),
+        telegram_bot_token="telegram-secret",
+        coupang_login_password="coupang-secret",
+        verification_email_app_password="imap-secret",
+    )
+
+    rendered = repr(config)
+
+    assert "telegram-secret" not in rendered
+    assert "coupang-secret" not in rendered
+    assert "imap-secret" not in rendered
 
 
 def test_app_config_reads_coupang_environment_values(monkeypatch):

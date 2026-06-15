@@ -137,6 +137,76 @@ def test_operator_passes_action_gate() -> None:
     assert repo.audits[-1].result == "SUCCESS"
 
 
+def test_admin_post_same_origin_header_is_allowed() -> None:
+    app, repo = _app(_principal(AdminRole.OPERATOR))
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
+
+
+def test_admin_post_cross_origin_header_is_denied_and_audited() -> None:
+    app, repo = _app(_principal(AdminRole.OPERATOR))
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={"Origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
+    assert repo.audits[-1].result == "DENIED"
+    assert "ORIGIN_NOT_ALLOWED" in (repo.audits[-1].reason or "")
+
+
+def test_admin_post_configured_origin_allows_https_proxy_origin() -> None:
+    # TLS 종료 proxy 뒤에서는 앱이 내부 http base_url 을 보고, 브라우저 Origin 은 https 일 수 있다.
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    settings = Settings(
+        app_env="test",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        admin_allowed_origins=("https://admin.example",),
+    )
+    app = create_app(
+        settings,
+        admin_action_service=AdminActionService(repo, InMemoryQueueBackend()),
+    )
+    app.state.resolve_admin_principal = lambda request: _principal(AdminRole.OPERATOR)
+
+    resp = TestClient(app, base_url="http://admin.example").post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={"Origin": "https://admin.example"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
+
+
+def test_admin_post_cross_site_referer_is_denied_when_origin_missing() -> None:
+    app, repo = _app(_principal(AdminRole.OPERATOR))
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={"Referer": "https://evil.example/admin"},
+    )
+
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
+
+
+def test_admin_post_without_origin_or_referer_remains_allowed() -> None:
+    # 일부 내부 프록시/테스트 클라이언트는 둘 다 보내지 않는다. 미전송은 호환을 위해 허용한다.
+    app, repo = _app(_principal(AdminRole.OPERATOR))
+    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
+
+
 def test_secret_admin_satisfies_operator_gate() -> None:
     # rank 단조 — SECRET_ADMIN(2) 은 OPERATOR(1) 게이트 통과.
     app, repo = _app(_principal(AdminRole.SECRET_ADMIN))

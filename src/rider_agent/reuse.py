@@ -9,7 +9,7 @@ re-export** 한다(동일 객체 identity — 테스트가 ``is`` 로 잠근다)
 이 모듈은 **순수 동기**다: ``async def``/``await`` 가 없고 직접 ``import asyncio`` 하지
 않는다(re-export 와 docstring 뿐). re-export 는 **import 만** 하고 함수를 실행
 (crawl/send/fetch)하지 않으므로, ``rider_crawl`` 이 갖춘 lazy 경계
-(pyautogui/pywinauto/crawl4ai/google 등은 함수 내부에서 import)를 깨지 않는다 — 따라서
+(pyautogui/pywinauto/crawl4ai 등은 함수 내부에서 import)를 깨지 않는다 — 따라서
 이 seam 을 eager import 해도 import-safe 하다.
 
 주의: ``rider_crawl.crawler`` 는 동기 표면을 제공하되 내부에서 ``asyncio.run(...)`` 으로
@@ -43,9 +43,9 @@ from rider_crawl.config import coupang_center_name_risk
 # 렌더 — 현재 화면/실적 스냅샷 → 메시지 문자열.
 from rider_crawl.message import render_current_screen_message
 
-# Gmail 2FA — 쿠팡 이메일 인증번호 조회 + 세션 복구(4.9 가 이 seam 으로 import).
+# Email/IMAP 2FA — 쿠팡 이메일 인증번호 조회 + 세션 복구(4.9 가 이 seam 으로 import).
 from rider_crawl.auth.coupang_email_2fa import recover_coupang_session_with_email_2fa
-from rider_crawl.auth.gmail import fetch_latest_verification_code
+from rider_crawl.auth.imap_2fa import fetch_latest_verification_code
 
 # Kakao sender — 직접 전송 함수 + 예외, 또는 messenger 추상화(4.6 worker 가 래핑).
 from rider_crawl.messengers import KakaoMessenger, dispatch_text_message
@@ -73,7 +73,7 @@ __all__ = [
     "coupang_center_name_risk",
     # 렌더
     "render_current_screen_message",
-    # Gmail 2FA
+    # Email/IMAP 2FA
     "fetch_latest_verification_code",
     "recover_coupang_session_with_email_2fa",
     # Kakao sender

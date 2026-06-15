@@ -79,7 +79,16 @@ class PostgresSchedulerRepository(SchedulerRepository):
             select(
                 MonitoringTarget.id,
                 MonitoringTarget.tenant_id,
+                MonitoringTarget.platform_account_id,
+                MonitoringTarget.url,
+                MonitoringTarget.center_name,
                 PlatformAccount.platform,
+                PlatformAccount.username_ref,
+                PlatformAccount.password_ref,
+                PlatformAccount.verification_email_address_ref,
+                PlatformAccount.verification_email_app_password_ref,
+                PlatformAccount.verification_email_subject_keyword,
+                PlatformAccount.verification_email_sender_keyword,
                 MonitoringTarget.interval_minutes,
                 MonitoringTarget.next_run_at,
             )
@@ -102,6 +111,15 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 platform=row.platform,
                 interval_minutes=row.interval_minutes,
                 next_run_at=row.next_run_at,
+                platform_account_id=str(row.platform_account_id),
+                primary_url=row.url,
+                expected_display_name=row.center_name,
+                username_ref=row.username_ref,
+                password_ref=row.password_ref,
+                verification_email_address_ref=row.verification_email_address_ref,
+                verification_email_app_password_ref=row.verification_email_app_password_ref,
+                verification_email_subject_keyword=row.verification_email_subject_keyword,
+                verification_email_sender_keyword=row.verification_email_sender_keyword,
             )
             for row in rows
         ]

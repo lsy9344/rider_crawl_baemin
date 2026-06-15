@@ -72,9 +72,12 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
         normalized,
     )
     update_match = re.search(r"(?P<time>\d{1,2}:\d{2})\s*업데이트", normalized)
-    available_match = re.search(r"(?P<current>\d+)\s*/\s*(?P<total>\d+)\s*명", normalized)
+    available_match = re.search(r"(?P<current>\d+)\s*/\s*(?P<total>\d+)(?:\s*명)?", normalized)
 
     if not heading_match or not update_match or not available_match:
+        record_snapshot = _parse_record_table_current_screen_text(normalized)
+        if record_snapshot is not None:
+            return record_snapshot
         raise MissingPerformanceDataError("required performance summary text was not found")
 
     online_riders = int(parse_count(_required_number_after("온라인", normalized)))
@@ -99,6 +102,63 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
         non_peak_count=parse_count(_required_number_after("논피크", normalized)),
         active_riders=online_riders,
     )
+
+
+def _parse_record_table_current_screen_text(text: str) -> CurrentScreenSnapshot | None:
+    if "라이더 현황" not in text or "이름 / 연락처" not in text:
+        return None
+
+    update_match = re.search(r"(?P<time>\d{1,2}:\d{2})\s*업데이트", text)
+    if not update_match:
+        return None
+
+    try:
+        online_riders = int(parse_count(_required_number_after("온라인", text)))
+        rejected_ignored_count = parse_count(_required_number_after("거절/무시", text))
+        cancelled_count = parse_count(_required_number_after("취소", text))
+        completed_count = parse_count(_required_number_after("완료", text))
+        sequence_violation_count = parse_count(_required_number_after("순서 미준수", text))
+        lunch_peak_count = parse_count(_required_number_after("점심피크", text))
+        dinner_peak_count = parse_count(_required_number_after("저녁피크", text))
+        non_peak_count = parse_count(_required_number_after("논피크", text))
+    except (MissingPerformanceDataError, ValueError):
+        return None
+
+    return CurrentScreenSnapshot(
+        center_name=_record_table_center_name(text),
+        date_label=_extract_date_label(text),
+        shift_label="",
+        shift_time_range="",
+        shift_status="",
+        updated_at=update_match.group("time"),
+        available_current=0,
+        available_total=0,
+        waiting_count=0,
+        online_riders=online_riders,
+        rejected_ignored_count=rejected_ignored_count,
+        cancelled_count=cancelled_count,
+        completed_count=completed_count,
+        sequence_violation_count=sequence_violation_count,
+        lunch_peak_count=lunch_peak_count,
+        dinner_peak_count=dinner_peak_count,
+        non_peak_count=non_peak_count,
+        active_riders=online_riders,
+    )
+
+
+def _record_table_center_name(text: str) -> str:
+    for line in text.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        if value in {"라이더 기록 - vendor-portal", "Hi there! Please", "enable Javascript"}:
+            continue
+        if re.fullmatch(r"\d{1,2}\.\d{1,2}", value) or re.fullmatch(r"\d{1,2}:\d{2}", value):
+            continue
+        if value in {"~", "(오늘)"}:
+            continue
+        return value
+    return ""
 
 
 def parse_count(raw: str) -> float | int:
@@ -131,7 +191,14 @@ def _scrapling_text(html: str) -> str:
     try:
         from scrapling.parser import Selector
     except ImportError:
-        return ""
+        try:
+            from scrapling.parser import Adaptor
+        except ImportError:
+            return ""
+
+        page = Adaptor(html)
+        text = page.get_all_text()
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
     page = Selector(html)
     chunks = page.css("body *::text").getall()

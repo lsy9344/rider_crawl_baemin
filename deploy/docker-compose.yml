@@ -6,6 +6,36 @@
 # 기존 `telegram-dispatcher` placeholder 는 별도 서비스가 아니라 backend-api 의 webhook env 분리로
 # 채운다. webhook secret/public URL 은 평문 금지 — `*_ref` 핸들·플레이스홀더만 deploy/env/ 에 둔다.
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${RIDER_POSTGRES_DB:-rider}
+      POSTGRES_USER: ${RIDER_POSTGRES_USER:-rider}
+      POSTGRES_PASSWORD: ${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    image: rider-server:dev
+    command: python -m rider_server.db.migrate upgrade head
+    env_file:
+      - ./env/backend-api.env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${RIDER_POSTGRES_USER:-rider}:${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}@db:5432/${RIDER_POSTGRES_DB:-rider}"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   backend-api:
     build:
       context: ..
@@ -17,8 +47,36 @@ services:
       - ./env/backend-api.env
       # Story 5.5 — Telegram webhook secret/public URL 분리 env(평문 secret 없음, *_ref 만).
       - ./env/telegram-webhook.env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${RIDER_POSTGRES_USER:-rider}:${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}@db:5432/${RIDER_POSTGRES_DB:-rider}"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    image: rider-server:dev
+    command: python -m rider_server.scheduler
+    env_file:
+      - ./env/backend-api.env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${RIDER_POSTGRES_USER:-rider}:${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}@db:5432/${RIDER_POSTGRES_DB:-rider}"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      backend-api:
+        condition: service_started
+
   # 후속 스토리 placeholder (범위 아님):
-  # scheduler:            # Story 5.4 — 스케줄러(별도 프로세스)
   # admin-ui:             # Story 5.6 — Admin UI
+
+volumes:
+  postgres-data:

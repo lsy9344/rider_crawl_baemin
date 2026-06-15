@@ -738,8 +738,35 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert rc == 0
     assert "stopped" in out
     assert captured["base_url"] == "https://srv.test"
+    assert captured["start_auth_worker"] is True
+    assert captured["start_crawl_worker"] is True
+    assert captured["start_kakao_sender"] is True
     # token 평문 미출력.
     assert FAKE_TOKEN not in out
+
+
+def test_run_agent_builds_default_crawl_profile_manager(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+    stop = threading.Event()
+    stop.set()
+
+    summary = run_agent(
+        transport=FakeTransport(claim_script=[{"jobs": []}]),
+        store=store,
+        identity_path=identity_path,
+        sleep=lambda _s: None,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        start_crawl_worker=True,
+        start_kakao_sender=False,
+    )
+
+    assert summary.crawl_worker is not None
+    assert summary.crawl_worker._profile_manager is not None
+    assert summary.reporter._browser_profiles_provider is not None
 
 
 def test_run_agent_loop_cli_not_started_returns_1_without_leak(capsys):

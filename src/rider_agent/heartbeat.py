@@ -83,7 +83,7 @@ MIN_HEARTBEAT_INTERVAL_SECONDS = 30
 MAX_HEARTBEAT_INTERVAL_SECONDS = 60
 
 # provider 미주입 시 안전 기본값(후속 스토리 소유 소스의 placeholder).
-DEFAULT_KAKAO_STATUS = "disabled"
+DEFAULT_KAKAO_STATUS: dict[str, Any] = {"state": "disabled", "queue_depth": 0}
 
 # heartbeat 전송 transport 의 operation 라벨(HttpTransport(op_label=...) 로 운영 로그 구분).
 HEARTBEAT_OP_LABEL = "agent heartbeat"
@@ -96,6 +96,14 @@ def _resolve(provider: Any) -> Any:
     """
 
     return provider() if callable(provider) else provider
+
+
+def _normalize_kakao_status(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        return {"state": value}
+    return {"state": str(value)}
 
 
 def default_metrics() -> dict[str, Any]:
@@ -124,7 +132,7 @@ def build_heartbeat_payload(
 
     5필드(``metrics``/``capabilities``/``active_jobs``/``kakao_status``/``browser_profiles``)
     + ``agent_id`` + ``agent_version``(버전 drift 입력). 각 provider 는 값 또는 callable 이며,
-    미주입 시 안전 기본값(빈 리스트/``"disabled"``/stdlib metrics/6종 capabilities)을 쓴다.
+    미주입 시 안전 기본값(빈 리스트/disabled 상태 dict/stdlib metrics/6종 capabilities)을 쓴다.
     [Source: data-api-contract.md(67-69), architecture-contract.md(120-129)]
     """
 
@@ -152,7 +160,7 @@ def build_heartbeat_payload(
         "metrics": metrics,
         "capabilities": list(caps),
         "active_jobs": list(active_jobs),
-        "kakao_status": kakao_status,
+        "kakao_status": _normalize_kakao_status(kakao_status),
         "browser_profiles": list(browser_profiles),
     }
 

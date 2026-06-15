@@ -44,6 +44,8 @@ from rider_server.domain import (
 )
 from rider_server.queue.backend import QueueBackend
 from rider_server.queue.states import (
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
     JOB_STATUS_PENDING,
     JOB_TYPES,
     assert_transition,
@@ -223,6 +225,30 @@ def build_diff_redacted(payload: dict) -> dict:
     """
 
     return redact_mapping(payload, mask_operational_ids=True)
+
+
+def _test_crawl_payload(target: MonitoringTarget, job_type: str) -> dict[str, object]:
+    platform = _platform_for_crawl_job(job_type)
+    return {
+        "target_id": target.id,
+        "tenant_id": target.tenant_id,
+        "platform": platform,
+        "platform_account_id": target.platform_account_id,
+        "primary_url": target.url,
+        "expected_display_name": target.center_name,
+        "browser_profile_ref": f"profile:{target.id}",
+        "timeout_seconds": 60,
+        "parser_version": f"{platform}-v1",
+        "job_type": job_type,
+    }
+
+
+def _platform_for_crawl_job(job_type: str) -> str:
+    if job_type == JOB_TYPE_CRAWL_BAEMIN:
+        return "baemin"
+    if job_type == JOB_TYPE_CRAWL_COUPANG:
+        return "coupang"
+    raise ValueError(f"unknown crawl job type: {job_type}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -468,10 +494,15 @@ class AdminActionService:
         미정의 type 은 거부(fail-closed). audit 는 enqueue 직후 기록한다.
         """
 
-        await self._scoped_target(target_id, tenant_id=tenant_id)
+        target = await self._scoped_target(target_id, tenant_id=tenant_id)
         if job_type not in JOB_TYPES:
             raise ValueError(f"unknown job type: {job_type}")
-        job_id = await self._queue.enqueue(job_type=job_type, target_id=target_id, now=at)
+        job_id = await self._queue.enqueue(
+            job_type=job_type,
+            target_id=target_id,
+            payload_json=_test_crawl_payload(target, job_type),
+            now=at,
+        )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_TEST_CRAWL,

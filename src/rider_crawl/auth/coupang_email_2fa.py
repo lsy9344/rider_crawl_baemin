@@ -1,38 +1,18 @@
-"""쿠팡이츠 이메일 2차 인증 자동 복구.
-
-로그인 만료 화면에서 이메일 인증 방식을 고르고, 인증번호 발송 버튼을 누른 뒤
-Gmail에서 받은 코드를 입력칸에 넣어 제출한다. 자동 복구가 가능한 화면이면 ``True``,
-CAPTCHA·아이디/비밀번호 입력 등 1차 구현 범위 밖이면 ``False``를 반환한다.
-
-selector는 운영 PC에서 실제 쿠팡 인증 화면 기준으로 보정한다. 그래서 화면 조작을
-얇은 헬퍼로 분리하고, 후보 selector를 여러 개 두어 화면 변화에 견디게 했다.
-
-보안: 인증번호와 토큰 값은 예외 메시지/로그에 넣지 않는다.
-"""
+"""쿠팡이츠 이메일 2차 인증 자동 복구."""
 
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from rider_crawl.auth.gmail import Gmail2faError, fetch_latest_verification_code
+from rider_crawl.auth.imap_2fa import IMAP_HOST_BY_DOMAIN, Imap2faError, domain_of
 from rider_crawl.config import AppConfig
 
-# 발송 클릭 직전 시각에서 빼 둘 안전 여유(초). 로컬/Gmail 서버 시계 오차와, 클릭과
-# 동시에 도착하는 메일을 ``requested_after`` 컷오프에서 잃지 않도록 둔다.
 _REQUESTED_AFTER_SAFETY_SECONDS = 30
-
-# 인증 화면 조작(클릭·입력) 1회당 타임아웃(ms). 맞는 요소는 보통 즉시 존재하므로,
-# 후보 selector/텍스트마다 페이지 전체 타임아웃(수십 초)을 기다리면 그 사이 인증번호가
-# 만료된다. 짧게 잡아 틀린 후보는 빨리 넘기고, 코드 입력칸을 지체 없이 채운다.
 _INTERACTION_TIMEOUT_MS = 2_000
 
-# 이메일 인증 방식을 고르는 버튼/링크 후보 텍스트. 화면 문구가 바뀔 수 있어 여러 개를 둔다.
 _EMAIL_METHOD_TEXTS = ("이메일로 인증", "이메일 인증", "이메일", "email")
-
-# 인증번호 발송(요청) 버튼 후보 텍스트. 실측 화면의 실제 버튼("인증코드 전송")을 맨 앞에
-# 둬, 틀린 후보를 하나씩 타임아웃만큼 기다리는 낭비를 줄인다.
 _SEND_CODE_TEXTS = (
     "인증코드 전송",
     "인증번호 발송",
@@ -40,11 +20,14 @@ _SEND_CODE_TEXTS = (
     "인증번호 전송",
     "인증코드 발송",
     "코드 받기",
+    "인증 재요청",
+    "인증코드 재전송",
+    "인증번호 재전송",
+    "인증 재전송",
     "send code",
     "send",
+    "resend",
 )
-
-# 인증번호 입력칸 후보 selector(placeholder/이름/일반 텍스트 입력).
 _CODE_INPUT_SELECTORS = (
     "input[name='code']",
     "input[name='verificationCode']",
@@ -53,14 +36,9 @@ _CODE_INPUT_SELECTORS = (
     "input[type='tel']",
     "input[type='number']",
 )
-
-# 코드 입력 후 제출(확인) 버튼 후보 텍스트.
 _SUBMIT_TEXTS = ("인증 완료", "확인", "인증", "제출", "로그인", "submit", "verify")
-
-# 자동 복구 범위 밖 신호. 이 텍스트가 보이면 운영자 조치가 필요하므로 False를 돌려준다.
 _CAPTCHA_SIGNALS = ("captcha", "보안문자", "자동입력 방지", "로봇이 아닙니다", "recaptcha")
 _PASSWORD_SIGNALS = ("비밀번호 입력",)
-
 _USERNAME_INPUT_SELECTORS = (
     "input[placeholder*='아이디']",
     "input[name='username']",
@@ -71,6 +49,8 @@ _PASSWORD_INPUT_SELECTORS = (
     "input[name='password']",
 )
 _LOGIN_BUTTON_TEXTS = ("로그인", "login")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%*+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+_SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
 
 
 def recover_coupang_session_with_email_2fa(
@@ -80,17 +60,10 @@ def recover_coupang_session_with_email_2fa(
     fetch_code: Callable[..., str] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> bool:
-    """Attempt to recover an expired Coupang session via email 2FA.
-
-    성공하면 ``True``, 자동 복구할 수 없는 화면(CAPTCHA, 아이디/비밀번호 입력 등)이면
-    ``False``를 돌려준다. Gmail/입력 단계의 복구 불가 오류는 ``Coupang2faError``로
-    올려, 호출부가 기존 ``BrowserActionRequiredError`` 흐름으로 중단하게 한다.
-    """
+    """Attempt to recover an expired Coupang session via email 2FA."""
 
     page_text = _safe_page_text(page)
-
     if _contains_any(page_text, _CAPTCHA_SIGNALS):
-        # CAPTCHA는 자동으로 풀지 않는다(문서 제외 범위). 운영자 처리로 넘긴다.
         return False
 
     if _is_password_login_screen(page_text, page):
@@ -98,34 +71,26 @@ def recover_coupang_session_with_email_2fa(
             return False
         _wait_after_action(page, config)
 
-    # 이메일 인증 방식 선택. 이미 코드 입력 단계면 이 클릭은 없어도 된다.
     _click_first_by_text(page, _EMAIL_METHOD_TEXTS, config, roles=("tab", "button"))
-    # 인증번호 발송 버튼이 없으면(= 이메일 인증 화면이 아니면) 자동 복구 대상이 아니다.
-    # 로그인 제출 뒤에도 비밀번호 화면에 머물러 있으면 계정 정보 오류나 CAPTCHA 가능성이
-    # 있으므로 운영자 조치가 필요한 상태로 본다.
     refreshed_text = _safe_page_text(page)
     if _is_password_login_screen(refreshed_text, page):
         return False
 
-    # 인증번호 발송 시각은 "발송 클릭 직전"을 기준으로, 거기서 약간의 안전 여유를 뺀
-    # 시각으로 잡는다. 발송 클릭 직후에 시각을 찍으면, 클릭과 동시에 도착한 메일의 Gmail
-    # internalDate가 그 시각보다 살짝 앞서 버려질 수 있다(로컬 시계와 Gmail 서버 시계
-    # 오차 포함). 이 시각 이전 메일은 Gmail 조회에서 버린다.
     requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
-
     if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
-        # 발송 버튼을 못 찾으면 이메일 인증 화면이 아니라고 보고 자동 복구를 포기한다.
+        return False
+
+    if not _account_matches_screen(page, config.verification_email_address):
         return False
 
     code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
-
     _fill_code_input(page, code, config)
     _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",))
     return True
 
 
 class Coupang2faError(RuntimeError):
-    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/토큰을 넣지 않는다."""
+    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/앱 비밀번호를 넣지 않는다."""
 
 
 def _fetch_code(
@@ -134,36 +99,49 @@ def _fetch_code(
     requested_after: datetime,
     fetch_code: Callable[..., str] | None,
 ) -> str:
-    fetcher = fetch_code or _default_fetch_code
+    fetcher = fetch_code or _imap_fetch
     try:
         code = fetcher(
-            credentials_path=config.gmail_credentials_path,
-            token_path=config.gmail_token_path,
-            query=config.gmail_2fa_query,
+            email_address=config.verification_email_address,
+            app_password=config.verification_email_app_password,
+            subject_keyword=config.verification_email_subject_keyword,
+            sender_keyword=config.verification_email_sender_keyword,
             requested_after=requested_after,
-            poll_seconds=config.gmail_2fa_poll_seconds,
-            poll_interval_seconds=config.gmail_2fa_poll_interval_seconds,
+            poll_seconds=config.email_2fa_poll_seconds,
+            poll_interval_seconds=config.email_2fa_poll_interval_seconds,
             code_digits=config.coupang_2fa_code_digits,
         )
-    except Gmail2faError as exc:
-        # Gmail 조회 실패는 자동 복구 불가. 코드 값은 애초에 메시지에 없다.
+    except Imap2faError as exc:
         raise Coupang2faError(str(exc)) from exc
 
     if not code:
-        raise Coupang2faError("Gmail에서 인증번호를 받지 못했습니다.")
+        raise Coupang2faError("이메일에서 인증번호를 받지 못했습니다.")
     return code
 
 
-def _default_fetch_code(**kwargs: Any) -> str:
+def _imap_fetch(**kwargs: Any) -> str:
+    from rider_crawl.auth.imap_2fa import fetch_latest_verification_code
+
     return fetch_latest_verification_code(**kwargs)
 
 
-# --- 화면 조작 헬퍼 ----------------------------------------------------------
+def _onscreen_domains(page: Any) -> set[str]:
+    text = _safe_page_text(page)
+    return {
+        domain
+        for match in _EMAIL_RE.finditer(text)
+        if (domain := match.group(1).casefold()) in _SUPPORTED_SCREEN_DOMAINS
+    }
+
+
+def _account_matches_screen(page: Any, account_address: str) -> bool:
+    screen = _onscreen_domains(page)
+    if not screen:
+        return True
+    return domain_of(account_address) in screen
 
 
 def _interaction_timeout(config: AppConfig) -> int:
-    # 인증 화면 조작은 짧게 시도하고 빨리 넘긴다(코드 만료 방지). 페이지 타임아웃이
-    # 더 작게 설정된 환경에서는 그 값을 따른다.
     return min(config.page_timeout_seconds, _INTERACTION_TIMEOUT_MS)
 
 
@@ -194,29 +172,17 @@ def _submit_primary_login(page: Any, config: AppConfig) -> bool:
         return False
     if not _fill_first_input(page, _PASSWORD_INPUT_SELECTORS, password, config):
         return False
-    return _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+    _press_enter_first(page, _PASSWORD_INPUT_SELECTORS, config)
+    _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+    return True
 
 
 def _load_coupang_credentials(config: AppConfig) -> tuple[str, str] | None:
-    # UI에 입력한 자격증명이 있으면 그것을 먼저 쓴다. 둘 중 하나라도 비면 기존
-    # JSON 파일(``coupang_credentials_path``)로 폴백한다(하위호환).
     ui_username = str(getattr(config, "coupang_login_id", "") or "").strip()
     ui_password = str(getattr(config, "coupang_login_password", "") or "")
     if ui_username and ui_password:
         return ui_username, ui_password
-
-    try:
-        raw = json.loads(config.coupang_credentials_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    username = str(raw.get("username") or "").strip()
-    password = str(raw.get("password") or "")
-    if not username or not password:
-        return None
-    return username, password
+    return None
 
 
 def _fill_first_input(
@@ -228,8 +194,36 @@ def _fill_first_input(
     timeout = _interaction_timeout(config)
     for selector in selectors:
         try:
-            page.locator(selector).first.fill(value, timeout=timeout)
+            _enter_text(page.locator(selector).first, value, timeout)
             return True
+        except Exception:
+            continue
+    return False
+
+
+def _enter_text(locator: Any, value: str, timeout: int) -> None:
+    try:
+        locator.click(timeout=timeout)
+        try:
+            locator.press("Control+a", timeout=timeout)
+            locator.press("Delete", timeout=timeout)
+        except Exception:
+            pass
+        locator.press_sequentially(value, timeout=timeout, delay=30)
+        return
+    except (AttributeError, TypeError):
+        pass
+    locator.fill(value, timeout=timeout)
+
+
+def _press_enter_first(page: Any, selectors: tuple[str, ...], config: AppConfig) -> bool:
+    timeout = _interaction_timeout(config)
+    for selector in selectors:
+        try:
+            page.locator(selector).first.press("Enter", timeout=timeout)
+            return True
+        except (AttributeError, TypeError):
+            return False
         except Exception:
             continue
     return False
@@ -262,8 +256,6 @@ def _has_visible_input(page: Any, selectors: tuple[str, ...]) -> bool:
 
 
 def _wait_after_action(page: Any, config: AppConfig) -> None:
-    # networkidle은 보통 빨리 끝나지만, 안 끝나도 인증 화면 조작을 오래 막지 않도록
-    # 상한을 짧게 둔다(idle이면 그 전에 반환된다).
     try:
         page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 3_000))
     except Exception:
@@ -281,46 +273,53 @@ def _click_first_by_text(
     *,
     roles: tuple[str, ...] = ("tab", "button"),
 ) -> bool:
-    """Click the first visible element whose text matches one of ``texts``.
-
-    어떤 후보든 한 번 클릭에 성공하면 ``True``. 화면에 없거나 모두 실패하면 ``False``.
-    """
-
     timeout = _interaction_timeout(config)
     for text in texts:
         for role in roles:
             try:
-                page.get_by_role(role, name=text, exact=False).click(timeout=timeout)
-                return True
+                locator = page.get_by_role(role, name=text, exact=False)
             except TypeError:
                 try:
-                    page.get_by_role(role, name=text).click(timeout=timeout)
-                    return True
+                    locator = page.get_by_role(role, name=text)
                 except Exception:
                     continue
             except Exception:
                 continue
+            if _click_first_visible(locator, timeout):
+                return True
         try:
-            locator = page.get_by_text(text, exact=False).first
+            locator = page.get_by_text(text, exact=False)
         except TypeError:
-            # fake page 등 exact 인자를 안 받는 구현 호환.
             locator = page.get_by_text(text)
-        try:
-            locator.click(timeout=timeout)
-            return True
         except Exception:
             continue
+        if _click_first_visible(locator, timeout):
+            return True
     return False
 
 
+def _click_first_visible(locator: Any, timeout: int) -> bool:
+    try:
+        visible = locator.filter(visible=True)
+    except (AttributeError, TypeError):
+        try:
+            locator.first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    try:
+        visible.first.click(timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def _fill_code_input(page: Any, code: str, config: AppConfig) -> None:
-    # selector마다 페이지 전체 타임아웃(수십 초)을 기다리면, 첫 selector가 안 맞을 때
-    # 그 시간 동안 입력이 지연돼 인증번호가 만료된다. 짧은 타임아웃으로 빠르게 넘긴다.
     timeout = _interaction_timeout(config)
     for selector in _CODE_INPUT_SELECTORS:
         try:
-            locator = page.locator(selector).first
-            locator.fill(code, timeout=timeout)
+            _enter_text(page.locator(selector).first, code, timeout)
             return
         except Exception:
             continue

@@ -21,6 +21,7 @@ def test_from_env_uses_defaults_when_empty():
     assert s.app_version == "0.1.0"
     assert s.build_sha is None
     assert s.build_time is None
+    assert s.admin_allowed_origins == ()
 
 
 def test_from_env_reads_all_values():
@@ -50,6 +51,21 @@ def test_partial_build_meta_preserved_independently():
     s = Settings.from_env({"BUILD_SHA": "onlysha", "BUILD_TIME": ""})
     assert s.build_sha == "onlysha"
     assert s.build_time is None
+
+
+def test_admin_allowed_origins_parsed_from_env_tuple():
+    s = Settings.from_env(
+        {
+            "RIDER_ADMIN_ALLOWED_ORIGINS": (
+                " https://admin.example ,https://ops.example:8443, "
+            )
+        }
+    )
+
+    assert s.admin_allowed_origins == (
+        "https://admin.example",
+        "https://ops.example:8443",
+    )
 
 
 def test_settings_is_frozen_immutable():

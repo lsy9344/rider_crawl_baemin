@@ -42,6 +42,8 @@ _OFFLINE_PG_URL = "postgresql://alembic:offline@localhost/offline"
 # 0004 SQL 을 **연결 없이** 렌더해 부분 유니크 인덱스 + 컬럼/round-trip 을 CI 에서도 잠근다.
 
 _INDEX_NAME = "uq_messenger_channels_active_telegram_topic"
+_GENERAL_INDEX_NAME = "uq_messenger_channels_active_telegram_general"
+_REGISTRATION_CODE_INDEX_NAME = "uq_messenger_channels_registration_code"
 
 
 def _alembic_cfg():
@@ -76,10 +78,16 @@ def test_0004_offline_upgrade_renders_partial_unique_on_active_only():
     assert "WHERE state = 'ACTIVE'" in sql  # 전역 유니크 아님(PENDING/INACTIVE 중복 허용)
 
 
+def test_offline_upgrade_renders_null_thread_and_registration_unique_guards():
+    sql = _render_offline("head")
+    assert f"CREATE UNIQUE INDEX {_GENERAL_INDEX_NAME}" in sql
+    assert "thread_id IS NULL" in sql
+    assert f"CREATE UNIQUE INDEX {_REGISTRATION_CODE_INDEX_NAME}" in sql
+    assert "registration_code IS NOT NULL" in sql
+
+
 def test_0004_offline_downgrade_round_trip_drops_index_and_column():
-    sql = _render_offline(
-        "0004_messenger_channel_registration:0003_monitoring_targets_scheduling"
-    )
+    sql = _render_offline("0004_channel_reg:0003_targets_sched")
     assert f"DROP INDEX {_INDEX_NAME}" in sql
     assert "DROP COLUMN registration_code" in sql
 
@@ -141,7 +149,13 @@ def pg_env():
         teardown()
 
 
-def _channel_row(*, chat_id: str, thread_id: str | None, state: str):
+def _channel_row(
+    *,
+    chat_id: str | None = _FAKE_CHAT,
+    thread_id: str | None = None,
+    state: str,
+    registration_code: str | None = None,
+):
     from rider_server.db.models.messaging import MessengerChannel
 
     return MessengerChannel(
@@ -151,6 +165,7 @@ def _channel_row(*, chat_id: str, thread_id: str | None, state: str):
         telegram_chat_id=chat_id,
         thread_id=thread_id,
         state=state,
+        registration_code=registration_code,
     )
 
 
@@ -168,6 +183,56 @@ def test_active_duplicate_chat_thread_blocked_by_partial_unique(pg_env):
         with pytest.raises(IntegrityError):
             async with factory() as s:
                 s.add(_channel_row(chat_id=_FAKE_CHAT, thread_id="7", state="ACTIVE"))
+                await s.commit()
+
+    asyncio.run(_run())
+
+
+@_pg_gate
+def test_active_duplicate_general_chat_blocked_when_thread_id_null(pg_env):
+    from sqlalchemy.exc import IntegrityError
+
+    _cfg, factory = pg_env
+
+    async def _run():
+        async with factory() as s:
+            s.add(_channel_row(chat_id=_FAKE_CHAT, thread_id=None, state="ACTIVE"))
+            await s.commit()
+        with pytest.raises(IntegrityError):
+            async with factory() as s:
+                s.add(_channel_row(chat_id=_FAKE_CHAT, thread_id=None, state="ACTIVE"))
+                await s.commit()
+
+    asyncio.run(_run())
+
+
+@_pg_gate
+def test_registration_code_duplicate_blocked(pg_env):
+    from sqlalchemy.exc import IntegrityError
+
+    _cfg, factory = pg_env
+
+    async def _run():
+        async with factory() as s:
+            s.add(
+                _channel_row(
+                    chat_id=None,
+                    thread_id=None,
+                    state="PENDING",
+                    registration_code="join-fake-1",
+                )
+            )
+            await s.commit()
+        with pytest.raises(IntegrityError):
+            async with factory() as s:
+                s.add(
+                    _channel_row(
+                        chat_id=None,
+                        thread_id=None,
+                        state="PENDING",
+                        registration_code="join-fake-1",
+                    )
+                )
                 await s.commit()
 
     asyncio.run(_run())
@@ -213,6 +278,6 @@ def test_upgrade_downgrade_round_trip(pg_env):
     assert has_col and has_idx  # 0004 upgrade 적용됨
 
     # 0003 으로 downgrade → 0004 가 추가한 컬럼·인덱스가 정확히 제거(round-trip).
-    command.downgrade(cfg, "0003_monitoring_targets_scheduling")
+    command.downgrade(cfg, "0003_targets_sched")
     has_col2, has_idx2 = asyncio.run(_has_column_and_index())
     assert not has_col2 and not has_idx2

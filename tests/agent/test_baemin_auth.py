@@ -355,7 +355,7 @@ def test_baemin_auth_does_not_import_otp_or_gui_automation_symbols():
         "pyautogui",
         "pywinauto",
         "pyperclip",
-        "rider_crawl.auth.gmail",
+        "rider_crawl.auth.imap_2fa",
         "rider_crawl.auth.coupang_email_2fa",
     }
     forbidden_names = {
@@ -524,6 +524,44 @@ def test_run_agent_routes_auth_job_through_real_loop(tmp_path):
 
     assert summary.started is True
     assert len(probe_calls) == 1  # auth job 이 AUTH_CHECK 실행자로 라우팅됨
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    body = completes[0][1]
+    assert body["status"] == JOB_STATUS_SUCCESS
+    assert body["result_json"] == {"target_id": FAKE_TARGET, "auth_state": AUTH_STATE_ACTIVE}
+
+
+def test_run_agent_composes_auth_worker_for_auth_job_by_default_option(tmp_path):
+    store = _FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    job_dict = {
+        "job_id": "job-fake-auth-default-1",
+        "type": CAPABILITY_AUTH_CHECK,
+        "target_id": FAKE_TARGET,
+        "lease_expires_at": FUTURE_LEASE,
+        "payload": {},
+    }
+    transport = _FakeTransport(claim_script=[{"jobs": [job_dict]}])
+    stop = threading.Event()
+    sleep = _StoppingSleep(stop, stop_after=1)
+    probe_calls = []
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        start_auth_worker=True,
+        auth_login_probe=lambda j: (probe_calls.append(j) or AUTH_STATE_ACTIVE),
+    )
+
+    assert summary.started is True
+    assert len(probe_calls) == 1
     completes = transport.calls_for("/complete")
     assert len(completes) == 1
     body = completes[0][1]

@@ -12,23 +12,33 @@ redaction 은 재구현하지 않고 :func:`rider_crawl.redaction.redacted_error
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from http import HTTPStatus
+from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rider_crawl.redaction import redacted_error_event
+
+_ADMIN_STATIC_DIR = Path(__file__).parent / "admin" / "static"
 
 from .admin import admin_actions_router, admin_crud_router, admin_router
 from .admin.actions_routes import _default_resolve_admin_actor
 from .admin.dashboard_repository_postgres import PostgresDashboardRepository
 from .admin.dashboard_service import DashboardRepository, InMemoryDashboardRepository
 from .admin.routes import _default_require_admin_session
-from .api import default_resolve_agent_id, jobs_router, telegram_webhook_router
+from .api import (
+    agents_router,
+    jobs_router,
+    telegram_webhook_router,
+)
 from .db.base import create_engine, create_session_factory
 from .metrics.policy import evaluate_alerts
 from .metrics.repository_postgres import PostgresMetricsRepository
@@ -53,6 +63,8 @@ from .services.agent_token_service import (
     AgentTokenService,
     InMemoryAgentTokenRepository,
 )
+from .services.agent_registry import AgentRegistry, InMemoryAgentRegistry
+from .services.agent_registry_postgres import PostgresAgentRegistry
 from .services.admin_entity_repository_postgres import PostgresAdminEntityRepository
 from .services.admin_entity_service import (
     AdminEntityRepository,
@@ -61,6 +73,8 @@ from .services.admin_entity_service import (
 )
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
+from .services.job_result_ingest_service import JobResultIngestService
+from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .settings import Settings
 
 
@@ -132,6 +146,28 @@ def _default_agent_token_repository(settings: Settings) -> AgentTokenRepository:
     return InMemoryAgentTokenRepository()
 
 
+def _default_agent_registry(settings: Settings) -> AgentRegistry:
+    """Agent register/heartbeat registry 기본값(``DATABASE_URL`` 있으면 PostgreSQL)."""
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresAgentRegistry(create_session_factory(engine))
+    return InMemoryAgentRegistry()
+
+
+def _default_job_result_ingest_service(settings: Settings) -> JobResultIngestService | None:
+    """Agent complete snapshot ingest 기본값.
+
+    ``DATABASE_URL`` 이 있으면 complete 성공 결과를 실제 ``snapshots`` 테이블에 저장한다.
+    DB가 없는 개발/테스트 기본값은 no-op(None)으로 둔다.
+    """
+
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return PostgresSnapshotIngestRepository(create_session_factory(engine))
+    return None
+
+
 def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
     """읽기 전용 대시보드 repository 기본값(``_default_queue_backend`` 와 동형 선택).
 
@@ -160,16 +196,27 @@ def _default_metrics_repository(settings: Settings) -> MetricsRepository:
     return InMemoryMetricsRepository()
 
 
-def _default_resolve_telegram_secret(settings: Settings):
-    """webhook secret 해석 seam 기본값(평문 store 미배선이라 fail-closed → None).
+def _resolve_env_secret_ref(ref: str | None) -> str | None:
+    """Resolve ``env:NAME`` secret refs without storing plaintext in settings."""
 
-    ``telegram_webhook_secret_ref`` 는 ``*_ref`` 핸들이라 평문 secret 해석에는 secret store 가
-    필요하다(5.8+ 배선). 기본값은 평문을 복원할 수 없어 ``None`` 을 반환해 webhook 을 fail-closed
-    로 거부한다. 운영/테스트는 ``app.state.resolve_telegram_secret`` 을 실제 해석기로 교체한다.
+    if not ref:
+        return None
+    prefix, _, name = ref.partition(":")
+    if prefix != "env" or not name:
+        return None
+    return os.environ.get(name) or None
+
+
+def _default_resolve_telegram_secret(settings: Settings):
+    """webhook secret 해석 seam 기본값(``env:NAME`` ref만 지원, 그 외 fail-closed).
+
+    ``telegram_webhook_secret_ref`` 는 ``*_ref`` 핸들이라 설정 객체에는 평문을 싣지 않는다.
+    운영 기본값은 ``env:RIDER_SECRET_NAME`` 형태만 해석하고, 다른 backend ref는 fail-closed로
+    둔다. Vault/KMS 등은 ``app.state.resolve_telegram_secret`` 주입 seam으로 교체한다.
     """
 
     def resolve() -> str | None:
-        return None
+        return _resolve_env_secret_ref(settings.telegram_webhook_secret_ref)
 
     return resolve
 
@@ -182,6 +229,13 @@ def _iso_utc_now() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _require_database_for_production(settings: Settings) -> None:
+    """운영 환경에서 DB 없는 in-memory fallback 을 막는다."""
+
+    if settings.app_env.strip().lower() == "production" and not settings.database_url:
+        raise RuntimeError("DATABASE_URL is required when APP_ENV=production")
 
 
 def _error_response(
@@ -209,26 +263,29 @@ def create_app(
     admin_action_service: AdminActionService | None = None,
     admin_entity_service: AdminEntityService | None = None,
     agent_token_service: AgentTokenService | None = None,
+    agent_registry: AgentRegistry | None = None,
+    job_result_ingest_service: Any = None,
 ) -> FastAPI:
     """FastAPI 앱 팩토리.
 
     테스트는 fake ``settings``·``queue_backend``(in-memory/PG)·``channel_repository``·
-    ``dashboard_repository``·``admin_action_service``·``agent_token_service`` 를 주입할 수 있다
+    ``dashboard_repository``·``admin_action_service``·``agent_token_service``·``agent_registry`` 를 주입할 수 있다
     (미지정 시 env 로딩 / settings 기반 기본값). webhook secret 해석은
     ``app.state.resolve_telegram_secret`` seam. **Story 5.8 보안 seam**: principal 해석은
     ``app.state.resolve_admin_principal``(기본 fail-closed deny), IP allowlist 는
-    ``app.state.admin_ip_allowlist``, MFA 강제는 ``app.state.admin_mfa_required``, 복구
+    ``app.state.admin_ip_allowlist``, Admin POST 추가 허용 Origin 은
+    ``app.state.admin_allowed_origins``, MFA 강제는 ``app.state.admin_mfa_required``, 복구
     non-sending 은 ``app.state.sending_enabled``, server-side token revoke/rotate 는
     ``app.state.agent_token_service`` 로 주입·설정한다(``require_admin_session``/
     ``resolve_admin_actor`` 는 principal 위에서 동작).
     """
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
+    _require_database_for_production(app.state.settings)
     # 프로세스 기동 시점(단조 시계) — /metrics uptime 계산 기준.
     app.state.start_monotonic = time.monotonic()
     # Agent API queue backend(주입 가능 seam) + bearer→agent_id 해석 seam(5.8 이 교체).
     app.state.queue_backend = queue_backend or _default_queue_backend(app.state.settings)
-    app.state.resolve_agent_id = default_resolve_agent_id
     # Story 5.5: 채널 등록/검증/활성 repository + webhook secret 해석 seam(테스트 주입 가능).
     app.state.channel_repository = channel_repository or _default_channel_repository(
         app.state.settings
@@ -259,10 +316,18 @@ def create_app(
     # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.
     app.state.resolve_admin_principal = _default_resolve_admin_principal
     app.state.admin_ip_allowlist = app.state.settings.admin_ip_allowlist
+    app.state.admin_allowed_origins = app.state.settings.admin_allowed_origins
     app.state.admin_mfa_required = app.state.settings.admin_mfa_required
     app.state.sending_enabled = app.state.settings.sending_enabled
     app.state.agent_token_service = agent_token_service or AgentTokenService(
         _default_agent_token_repository(app.state.settings)
+    )
+    app.state.agent_registry = agent_registry or _default_agent_registry(app.state.settings)
+    app.state.resolve_agent_id = app.state.agent_registry.resolve_agent_id
+    app.state.job_result_ingest_service = (
+        job_result_ingest_service
+        if job_result_ingest_service is not None
+        else _default_job_result_ingest_service(app.state.settings)
     )
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------
@@ -270,6 +335,11 @@ def create_app(
     async def health() -> dict:
         """의존성 없는 liveness probe(DB readiness 분리는 5.2+)."""
         return {"status": "ok"}
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        """브라우저 기본 favicon 요청을 조용히 처리한다."""
+        return Response(status_code=HTTPStatus.NO_CONTENT)
 
     @app.get("/version")
     async def version(request: Request) -> dict:
@@ -349,9 +419,16 @@ def create_app(
         )
 
     # --- 리소스 라우트 (/v1/) -----------------------------------------------
+    app.include_router(agents_router)
     app.include_router(jobs_router)
     app.include_router(telegram_webhook_router)
 
+    # --- Admin UI static assets ---------------------------------------------
+    app.mount(
+        "/admin/static",
+        StaticFiles(directory=str(_ADMIN_STATIC_DIR)),
+        name="admin-static",
+    )
     # --- Admin UI (HTML, /admin) — 읽기 전용 관측 대시보드(Story 5.6) ----------
     app.include_router(admin_router)
     # --- Admin 수동 운영 액션 (HTML POST, /admin) — 쓰기 라우트(Story 5.7) -------

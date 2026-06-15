@@ -39,6 +39,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from rider_crawl.redaction import redact, redacted_error_event
@@ -750,6 +751,8 @@ class AgentRunSummary:
     heartbeat_thread: threading.Thread | None = None
     #: 활성 노드에서 기동된 4.6 KakaoSenderWorker(미배선/비활성이면 ``None``).
     kakao_worker: Any = None
+    #: 활성 노드에서 구성된 CRAWL_BAEMIN/CRAWL_COUPANG worker(미배선이면 ``None``).
+    crawl_worker: Any = None
 
 
 def run_agent(
@@ -771,6 +774,17 @@ def run_agent(
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
     kakao_status_provider: Any = None,
+    start_auth_worker: bool = False,
+    auth_login_probe: Callable[[ClaimedJob], str] | None = None,
+    auth_open_auth_browser: Callable[[ClaimedJob], Any] | None = None,
+    auth_detect_completion: Callable[[ClaimedJob], bool] | None = None,
+    auth_max_wait_seconds: float | None = None,
+    auth_poll_interval_seconds: float | None = None,
+    auth_max_attempts: int | None = None,
+    start_crawl_worker: bool = False,
+    crawl_profile_manager: Any = None,
+    crawl_snapshot: Callable[..., Any] | None = None,
+    crawl_auth_probe: Callable[[ClaimedJob, Any], str] | None = None,
     start_kakao_sender: bool = False,
     kakao_send: Callable[..., Any] | None = None,
     kakao_build_config: Callable[..., Any] | None = None,
@@ -783,7 +797,9 @@ def run_agent(
     sleep/now/execute_job/stop_event)을 노출해 테스트가 결정적으로 검증한다.
 
     identity 없음/token revoke 면 명확히 surfacing 하고 **루프에 진입하지 않는다**(재등록 필요).
-    ``start_kakao_sender`` 가 True 이고 ``capabilities`` 에 ``KAKAO_SEND`` 가 있으면
+    ``start_crawl_worker`` 가 True 이고 ``capabilities`` 에 ``CRAWL_BAEMIN`` 또는
+    ``CRAWL_COUPANG`` 이 있으면 crawl worker 를 구성해 해당 job type 을 실제 crawler seam 으로
+    라우팅한다. ``start_kakao_sender`` 가 True 이고 ``capabilities`` 에 ``KAKAO_SEND`` 가 있으면
     :func:`~rider_agent.workers.kakao_sender.start_kakao_sender_worker_if_enabled` 로 FIFO 단일-
     세션 직렬 워커를 띄우고, ``KAKAO_SEND`` job 을 그 워커로 라우팅하며(그 외 type 은 기존
     ``execute_job`` 유지) ``kakao_status`` 소스를 배선한다(미배선/비활성이면 4.3 기본
@@ -812,11 +828,73 @@ def run_agent(
             on_status(validation.status)
         return AgentRunSummary(started=False, token_status=validation.status)
 
+    # 활성 노드면 auth 실행자를 합성해 AUTH_CHECK/OPEN_AUTH_BROWSER 를 실제 처리한다.
+    effective_execute_job = execute_job
+    if start_auth_worker and (
+        "AUTH_CHECK" in capabilities or "OPEN_AUTH_BROWSER" in capabilities
+    ):
+        from rider_agent.auth.baemin_auth import build_auth_execute_job
+
+        auth_kwargs: dict[str, Any] = {
+            "fallback": effective_execute_job,
+            "now": now,
+            "sleep": sleep,
+            "log": log,
+        }
+        if auth_login_probe is not None:
+            auth_kwargs["login_probe"] = auth_login_probe
+        if auth_open_auth_browser is not None:
+            auth_kwargs["open_auth_browser"] = auth_open_auth_browser
+        if auth_detect_completion is not None:
+            auth_kwargs["detect_completion"] = auth_detect_completion
+        if auth_max_wait_seconds is not None:
+            auth_kwargs["max_wait_seconds"] = auth_max_wait_seconds
+        if auth_poll_interval_seconds is not None:
+            auth_kwargs["poll_interval_seconds"] = auth_poll_interval_seconds
+        if auth_max_attempts is not None:
+            auth_kwargs["max_attempts"] = auth_max_attempts
+        effective_execute_job = build_auth_execute_job(**auth_kwargs)
+
+    # 활성 노드면 crawl worker 를 구성하고 CRAWL_* 라우팅 + browser_profiles 소스를 배선한다.
+    crawl_worker = None
+    effective_browser_profiles = browser_profiles_provider
+    if start_crawl_worker and (
+        "CRAWL_BAEMIN" in capabilities or "CRAWL_COUPANG" in capabilities
+    ):
+        if crawl_profile_manager is None and crawl_snapshot is None:
+            from rider_agent.browser_profile import BrowserProfileManager
+
+            crawl_profile_manager = BrowserProfileManager(
+                profiles_root=Path("runtime") / "agent-browser-profiles",
+                agent_id=identity.agent_id,
+                log=log,
+            )
+        from rider_agent.workers.crawl_worker import (
+            CrawlWorker,
+            build_execute_job as build_crawl_execute_job,
+        )
+
+        crawl_worker = CrawlWorker(
+            profile_manager=crawl_profile_manager,
+            crawl_snapshot=crawl_snapshot,
+            auth_probe=crawl_auth_probe,
+            secret_resolver=getattr(store, "resolve", None),
+            log=log,
+        )
+        effective_execute_job = build_crawl_execute_job(
+            crawl_worker=crawl_worker, fallback=effective_execute_job
+        )
+        if (
+            effective_browser_profiles is None
+            and crawl_profile_manager is not None
+            and hasattr(crawl_profile_manager, "browser_profiles")
+        ):
+            effective_browser_profiles = crawl_profile_manager.browser_profiles
+
     # 활성 노드면 4.6 KakaoSenderWorker 를 띄우고 KAKAO_SEND 라우팅 + kakao_status 소스를
     # 배선한다(4.4 가 남긴 startup seam 의 실제 배선). 워커 모듈은 reuse seam(rider_crawl)을
     # 끌어오므로 활성일 때만 lazy import 해 import-safety/무회귀를 유지한다.
     kakao_worker = None
-    effective_execute_job = execute_job
     effective_kakao_status = kakao_status_provider
     if start_kakao_sender:
         # 4.7 interactive-session 게이트 — Kakao 노드가 비대화형(Session 0 service-only)이면
@@ -853,7 +931,7 @@ def run_agent(
             )
             if kakao_worker is not None:
                 effective_execute_job = build_execute_job(
-                    kakao_worker=kakao_worker, fallback=execute_job
+                    kakao_worker=kakao_worker, fallback=effective_execute_job
                 )
                 if effective_kakao_status is None:
                     effective_kakao_status = kakao_worker.kakao_status
@@ -873,7 +951,7 @@ def run_agent(
         stop_event=stop_event,
         on_status=on_status,
         log=log,
-        browser_profiles_provider=browser_profiles_provider,
+        browser_profiles_provider=effective_browser_profiles,
         kakao_status_provider=effective_kakao_status,
     )
 
@@ -895,4 +973,5 @@ def run_agent(
         reporter=reporter,
         heartbeat_thread=hb_thread,
         kakao_worker=kakao_worker,
+        crawl_worker=crawl_worker,
     )

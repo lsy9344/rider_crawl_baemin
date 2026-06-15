@@ -81,6 +81,12 @@ def test_metrics_minimal_extensible_shape():
     datetime.strptime(body["server_time"], "%Y-%m-%dT%H:%M:%SZ")
 
 
+def test_favicon_request_is_quiet_no_content():
+    r = _client().get("/favicon.ico")
+    assert r.status_code == 204
+    assert r.content == b""
+
+
 # ── AC2 — 운영 엔드포인트는 root-level(/v1/ 금지) ─────────────────────────
 
 def test_operational_endpoints_are_root_level_not_v1():

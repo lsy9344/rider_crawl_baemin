@@ -198,7 +198,7 @@ def test_0005_round_trip_adds_and_drops_columns(pg) -> None:
         assert {"token_revoked_at", "token_rotated_at"} <= agent_cols
 
         # downgrade 0004: 신규 컬럼 제거(테이블은 유지 — 14표 불변).
-        command.downgrade(cfg, "0004_messenger_channel_registration")
+        command.downgrade(cfg, "0004_channel_reg")
         audit_cols_4 = asyncio.run(_cols("audit_logs"))
         agent_cols_4 = asyncio.run(_cols("agents"))
         assert {"source", "reason", "result"}.isdisjoint(audit_cols_4)

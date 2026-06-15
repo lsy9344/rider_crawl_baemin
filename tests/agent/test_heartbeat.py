@@ -143,7 +143,7 @@ def test_build_payload_has_seven_keys_and_version():
     # 기본 provider → 안전 빈/idle 값(실제 소스는 후속 스토리가 주입).
     assert payload["active_jobs"] == []
     assert payload["browser_profiles"] == []
-    assert payload["kakao_status"] == "disabled"
+    assert payload["kakao_status"] == {"state": "disabled", "queue_depth": 0}
     assert isinstance(payload["metrics"], dict)
     # token 본문 미포함(인증은 헤더).
     assert "agent_token" not in payload
@@ -163,7 +163,7 @@ def test_build_payload_reflects_injected_providers():
     assert payload["capabilities"] == ["CRAWL_BAEMIN"]
     assert payload["metrics"] == {"cpu": 0.1}
     assert payload["active_jobs"] == ["job-1"]
-    assert payload["kakao_status"] == "idle"
+    assert payload["kakao_status"] == {"state": "idle"}
     assert payload["browser_profiles"] == [{"profile_id": "p1", "cdp_port": 9222}]
 
 

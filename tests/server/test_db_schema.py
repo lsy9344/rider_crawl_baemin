@@ -56,7 +56,10 @@ REQUIRED_FIELDS = {
     "tenants": {"id", "name", "status", "created_at"},
     "subscriptions": {"tenant_id", "plan", "status", "current_period_end", "quotas"},
     "platform_accounts": {
-        "id", "tenant_id", "platform", "label", "username_ref", "password_ref", "auth_state",
+        "id", "tenant_id", "platform", "label", "username_ref", "password_ref",
+        "verification_email_address_ref", "verification_email_app_password_ref",
+        "verification_email_subject_keyword", "verification_email_sender_keyword",
+        "auth_state",
     },
     "monitoring_targets": {
         "id", "tenant_id", "platform_account_id", "name", "external_id", "url",
@@ -155,7 +158,12 @@ def test_no_plaintext_secret_columns():
 
 def test_secret_ref_columns_present():
     pa = set(Base.metadata.tables["platform_accounts"].columns.keys())
-    assert {"username_ref", "password_ref"} <= pa
+    assert {
+        "username_ref",
+        "password_ref",
+        "verification_email_address_ref",
+        "verification_email_app_password_ref",
+    } <= pa
     bp = set(Base.metadata.tables["browser_profiles"].columns.keys())
     assert "profile_path_ref" in bp
 
@@ -216,6 +224,22 @@ def test_offline_upgrade_uses_postgres_dialect_types():
     # 실제 Postgres dialect 로 렌더됐음을 잠근다(JSONB·UUID 의미가 Postgres 정본).
     assert "JSONB" in sql
     assert "uq_delivery_logs_dedup_key" in sql
+
+
+def test_offline_upgrade_emits_dbx_unique_guards():
+    sql = _offline_sql("upgrade")
+    expected = {
+        "uq_messenger_channels_active_telegram_general",
+        "uq_messenger_channels_registration_code",
+        "uq_agents_registration_code_hash",
+        "uq_agents_token_hash",
+    }
+    for name in expected:
+        assert f"CREATE UNIQUE INDEX {name}" in sql
+    assert "thread_id IS NULL" in sql
+    assert "registration_code IS NOT NULL" in sql
+    assert "registration_code_hash IS NOT NULL" in sql
+    assert "token_hash IS NOT NULL" in sql
 
 
 def test_offline_downgrade_drops_all_14_tables_round_trip():
@@ -346,6 +370,8 @@ EXPECTED_JSON_COLUMNS = {
     ("subscriptions", "quotas"),
     ("snapshots", "normalized_json"),
     ("agents", "capacity_json"),
+    ("jobs", "payload_json"),
+    ("jobs", "result_json"),
     ("audit_logs", "diff_redacted"),
 }
 
@@ -409,18 +435,34 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # Story 5.8 이 additive 0005 를 추가 → 단일 head 가 0005 로 이동, 0001→…→0004→0005 선형 체인.
-    assert heads[0] == "0005_audit_fields_and_agent_token_revoke"
+    # DBX unique guards moved the single head to 0009.
+    assert heads[0] == "0009_dbx_unique_guards"
     assert (
-        script.get_revision("0005_audit_fields_and_agent_token_revoke").down_revision
-        == "0004_messenger_channel_registration"
+        script.get_revision("0009_dbx_unique_guards").down_revision
+        == "0008_acct_email_2fa_refs"
     )
     assert (
-        script.get_revision("0004_messenger_channel_registration").down_revision
-        == "0003_monitoring_targets_scheduling"
+        script.get_revision("0008_acct_email_2fa_refs").down_revision
+        == "0007_jobs_payload_json"
     )
     assert (
-        script.get_revision("0003_monitoring_targets_scheduling").down_revision
+        script.get_revision("0007_jobs_payload_json").down_revision
+        == "0006_agent_registration_contract"
+    )
+    assert (
+        script.get_revision("0006_agent_registration_contract").down_revision
+        == "0005_audit_agent_tokens"
+    )
+    assert (
+        script.get_revision("0005_audit_agent_tokens").down_revision
+        == "0004_channel_reg"
+    )
+    assert (
+        script.get_revision("0004_channel_reg").down_revision
+        == "0003_targets_sched"
+    )
+    assert (
+        script.get_revision("0003_targets_sched").down_revision
         == "0002_jobs_lease_columns"
     )
     assert (

@@ -22,6 +22,7 @@ import ipaddress
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from http import HTTPStatus
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
@@ -39,6 +40,8 @@ from .principal import (
 
 
 # ── 순수 정책: source IP 도출 + allowlist 판정(stdlib ipaddress, 신규 deps 0) ───────
+
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 def source_ip(request: Request) -> str:
     """요청의 source IP 를 도출한다 — ``X-Forwarded-For`` 선두 토큰 우선(reverse-proxy), 없으면
@@ -79,6 +82,46 @@ def ip_allowed(ip: str, allowlist: Sequence[str]) -> bool:
         except ValueError:
             continue  # 잘못된 allowlist 항목은 무시(나머지로 판정)
     return False
+
+
+def _normalize_origin(value: str) -> str | None:
+    """URL/Origin 문자열을 ``scheme://host[:port]`` 형태로 정규화한다. 파싱 실패는 None."""
+
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if port is None or (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _admin_allowed_origins(request: Request) -> set[str]:
+    origins = {_normalize_origin(str(request.base_url))}
+    for origin in getattr(request.app.state, "admin_allowed_origins", ()) or ():
+        origins.add(_normalize_origin(str(origin)))
+    return {origin for origin in origins if origin}
+
+
+def admin_origin_allowed(request: Request) -> bool:
+    """Admin 쓰기 요청의 Origin/Referer same-origin 가드.
+
+    브라우저가 ``Origin`` 을 보내면 그것을 우선 검증하고, 없지만 ``Referer`` 가 있으면 Referer 를
+    검증한다. 둘 다 없으면 내부 프록시/테스트 호환을 위해 허용한다.
+    """
+
+    if request.method.upper() not in _UNSAFE_METHODS:
+        return True
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return True
+    normalized = _normalize_origin(source)
+    return normalized is not None and normalized in _admin_allowed_origins(request)
 
 
 # ── app.state seam 접근자 + 기본값(fail-closed) ─────────────────────────────────
@@ -196,6 +239,9 @@ def require_role(min_role: AdminRole):
         if not ip_allowed(source_ip(request), _allowlist(request)):
             await _audit_denied(request, principal, "IP_NOT_ALLOWED", min_role)
             raise HTTPException(HTTPStatus.FORBIDDEN, "source not allowed")
+        if is_privileged(min_role) and not admin_origin_allowed(request):
+            await _audit_denied(request, principal, "ORIGIN_NOT_ALLOWED", min_role)
+            raise HTTPException(HTTPStatus.FORBIDDEN, "admin origin not allowed")
         if is_privileged(min_role) and _mfa_required(request) and not principal.mfa_verified:
             await _audit_denied(request, principal, "MFA_REQUIRED", min_role)
             raise HTTPException(HTTPStatus.FORBIDDEN, "MFA verification required")

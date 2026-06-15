@@ -6,596 +6,611 @@
   <meta name="color-scheme" content="dark light">
   <title>운영 대시보드 — rider_server</title>
   <!-- HTMX: 별도 npm/빌드 없이 CDN 정적 자산만 로드(서버 렌더 부분 갱신). -->
-  <script src="https://unpkg.com/htmx.org@2"></script>
-  <!-- Darkmatter 테마 폰트(tweakcn darkmatter.json): Geist Mono(sans) / JetBrains Mono(mono).
-       CDN 정적 자산만(npm/빌드 0). 한글은 시스템 고딕으로 폴백(글꼴 스택 후순위). -->
+  <script src="/admin/static/htmx.min.js"></script>
+  <!-- Darkmatter 테마 폰트(tweakcn darkmatter.json): Geist Mono(sans) / JetBrains Mono(mono). 한글은 시스템 고딕 폴백. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <!-- 첫 페인트 전에 저장된 테마를 적용해 깜빡임(FOUC) 방지. darkmatter 는 다크 우선이라 기본 다크. -->
+  <!-- 첫 페인트 전에 저장된 테마 적용(FOUC 방지). darkmatter 는 다크 우선. -->
   <script>
     (function () {
       try {
         var t = localStorage.getItem("adm-theme");
         var root = document.documentElement;
-        if (t === "light") root.classList.remove("dark");
-        else root.classList.add("dark");
+        if (t === "light") root.classList.remove("dark"); else root.classList.add("dark");
       } catch (e) {}
     })();
   </script>
   <style>
-    /* ════════════════════════════════════════════════════════════════════════
-       Darkmatter 디자인 토큰(tweakcn darkmatter.json — oklch 원값 그대로)
-       다크 우선 · 모노 타이포 · 둥근 모서리(0.75rem) · 부드러운 그림자(5%).
-       ════════════════════════════════════════════════════════════════════════ */
+    /* ════ Darkmatter 디자인 토큰(tweakcn darkmatter.json — oklch 원값) ════ */
     :root {
-      --background: oklch(1.0000 0 0);
-      --foreground: oklch(0.2101 0.0318 264.6645);
-      --card: oklch(1.0000 0 0);
-      --card-foreground: oklch(0.2101 0.0318 264.6645);
+      --background: oklch(1.0000 0 0); --foreground: oklch(0.2101 0.0318 264.6645);
+      --card: oklch(1.0000 0 0); --card-foreground: oklch(0.2101 0.0318 264.6645);
       --popover: oklch(1.0000 0 0);
-      --primary: oklch(0.6716 0.1368 48.5130);          /* 골든-오렌지 */
-      --primary-foreground: oklch(1.0000 0 0);
-      --secondary: oklch(0.5360 0.0398 196.0280);        /* 틸 */
-      --secondary-foreground: oklch(1.0000 0 0);
-      --muted: oklch(0.9670 0.0029 264.5419);
-      --muted-foreground: oklch(0.5510 0.0234 264.3637);
-      --accent: oklch(0.9491 0 0);
-      --accent-foreground: oklch(0.2101 0.0318 264.6645);
-      --border: oklch(0.9276 0.0058 264.5313);
-      --input: oklch(0.9276 0.0058 264.5313);
-      --ring: oklch(0.6716 0.1368 48.5130);
-      --sidebar: oklch(0.9670 0.0029 264.5419);
-
-      /* 의미색(상태) — 다크/라이트별로 대비를 직접 보정(접근성 우선). 라이트는 텍스트가
-         밝은 틴트 위에 오므로 명도 L 을 낮춰 가독성을 확보한다. */
-      --ok:      oklch(0.5200 0.1300 155);               /* 정상(그린) */
-      --warn:    oklch(0.5300 0.1250 70);                /* 주의(앰버) */
-      --crit:    oklch(0.5400 0.2200 27);                /* 위험(레드) */
-      --info:    oklch(0.5200 0.1700 255);               /* 정보(블루) */
-      --violet:  oklch(0.5200 0.2000 295);               /* 보조 강조(바이올렛) */
-      --neutral: oklch(0.4500 0.0150 265);               /* 중지(뉴트럴) */
-
+      --primary: oklch(0.6716 0.1368 48.5130); --primary-foreground: oklch(1.0000 0 0);
+      --secondary: oklch(0.5360 0.0398 196.0280); --secondary-foreground: oklch(1.0000 0 0);
+      --muted: oklch(0.9670 0.0029 264.5419); --muted-foreground: oklch(0.5510 0.0234 264.3637);
+      --accent: oklch(0.9491 0 0); --accent-foreground: oklch(0.2101 0.0318 264.6645);
+      --border: oklch(0.9276 0.0058 264.5313); --input: oklch(0.9276 0.0058 264.5313);
+      --ring: oklch(0.6716 0.1368 48.5130); --sidebar: oklch(0.9670 0.0029 264.5419);
+      --ok: oklch(0.5200 0.1300 155); --warn: oklch(0.5300 0.1250 70);
+      --crit: oklch(0.5400 0.2200 27); --info: oklch(0.5200 0.1700 255);
+      --violet: oklch(0.5200 0.2000 295); --neutral: oklch(0.4500 0.0150 265);
       --font-sans: "Geist Mono", ui-monospace, SFMono-Regular, "Apple SD Gothic Neo", "Malgun Gothic", "Pretendard", sans-serif;
       --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, "Apple SD Gothic Neo", monospace;
-
-      --radius: 0.75rem;
-      --radius-sm: calc(var(--radius) - 0.35rem);
-      --radius-lg: calc(var(--radius) + 0.25rem);
-
-      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.04);
-      --shadow-sm: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 1px 2px -1px hsl(0 0% 0% / 0.05);
+      --radius: 0.75rem; --radius-sm: calc(var(--radius) - 0.35rem); --radius-lg: calc(var(--radius) + 0.25rem);
+      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.04); --shadow-sm: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 1px 2px -1px hsl(0 0% 0% / 0.05);
       --shadow-md: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 2px 6px -1px hsl(0 0% 0% / 0.06);
-      --shadow-lg: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 8px 20px -4px hsl(0 0% 0% / 0.10);
-      --tracking: 0rem;
+      --shadow-lg: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 8px 20px -4px hsl(0 0% 0% / 0.10); --tracking: 0rem;
     }
     html.dark {
-      --background: oklch(0.1797 0.0043 308.1928);       /* 매우 어두운 블루그레이 */
-      --foreground: oklch(0.8109 0 0);
-      --card: oklch(0.2150 0.0040 308);
-      --card-foreground: oklch(0.8109 0 0);
-      --popover: oklch(0.1822 0 0);
-      --primary: oklch(0.7214 0.1337 49.9802);           /* 밝은 골든 */
-      --primary-foreground: oklch(0.1797 0.0043 308.1928);
-      --secondary: oklch(0.5940 0.0443 196.0233);        /* 시안 */
-      --secondary-foreground: oklch(0.1797 0.0043 308.1928);
-      --muted: oklch(0.2520 0 0);
-      --muted-foreground: oklch(0.6750 0 0);
-      --accent: oklch(0.3211 0 0);
-      --accent-foreground: oklch(0.8109 0 0);
-      --border: oklch(0.2900 0 0);
-      --input: oklch(0.2520 0 0);
-      --ring: oklch(0.7214 0.1337 49.9802);
-      --sidebar: oklch(0.1822 0 0);
-
-      --ok:      oklch(0.8000 0.1500 160);
-      --warn:    oklch(0.8300 0.1400 80);
-      --crit:    oklch(0.7100 0.1900 25);
-      --info:    oklch(0.7300 0.1300 250);
-      --violet:  oklch(0.7600 0.1500 300);
-      --neutral: oklch(0.7000 0.0150 265);
-
-      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.30);
-      --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.40);
-      --shadow-md: 0 2px 8px -1px hsl(0 0% 0% / 0.45);
-      --shadow-lg: 0 12px 30px -6px hsl(0 0% 0% / 0.55);
+      --background: oklch(0.1797 0.0043 308.1928); --foreground: oklch(0.8109 0 0);
+      --card: oklch(0.2150 0.0040 308); --card-foreground: oklch(0.8109 0 0); --popover: oklch(0.1822 0 0);
+      --primary: oklch(0.7214 0.1337 49.9802); --primary-foreground: oklch(0.1797 0.0043 308.1928);
+      --secondary: oklch(0.5940 0.0443 196.0233); --secondary-foreground: oklch(0.1797 0.0043 308.1928);
+      --muted: oklch(0.2520 0 0); --muted-foreground: oklch(0.6750 0 0);
+      --accent: oklch(0.3211 0 0); --accent-foreground: oklch(0.8109 0 0);
+      --border: oklch(0.2900 0 0); --input: oklch(0.2520 0 0); --ring: oklch(0.7214 0.1337 49.9802); --sidebar: oklch(0.1822 0 0);
+      --ok: oklch(0.8000 0.1500 160); --warn: oklch(0.8300 0.1400 80); --crit: oklch(0.7100 0.1900 25);
+      --info: oklch(0.7300 0.1300 250); --violet: oklch(0.7600 0.1500 300); --neutral: oklch(0.7000 0.0150 265);
+      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.30); --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.40);
+      --shadow-md: 0 2px 8px -1px hsl(0 0% 0% / 0.45); --shadow-lg: 0 12px 30px -6px hsl(0 0% 0% / 0.55);
     }
-
-    /* ── 리셋 / 베이스 ───────────────────────────────────────────────────────── */
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      font-family: var(--font-sans);
-      letter-spacing: var(--tracking);
-      color: var(--foreground);
-      background-color: var(--background);
-      line-height: 1.55;
-      font-size: 14px;
-      -webkit-font-smoothing: antialiased;
-      text-rendering: optimizeLegibility;
-    }
-    /* 미세한 도트 텍스처로 깊이감(다크 우선 — 매우 은은하게). */
-    body::before {
-      content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    body { margin: 0; font-family: var(--font-sans); letter-spacing: var(--tracking); color: var(--foreground);
+      background-color: var(--background); line-height: 1.55; font-size: 14px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+    body.drawer-open { overflow: hidden; }
+    body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
       background-image: radial-gradient(color-mix(in srgb, var(--muted-foreground) 22%, transparent) 0.6px, transparent 0.6px);
-      background-size: 26px 26px; opacity: 0.5;
-    }
-    a { color: var(--primary); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+      background-size: 26px 26px; opacity: 0.5; }
+    a { color: var(--primary); text-decoration: none; } a:hover { text-decoration: underline; }
     h1, h2, h3 { margin: 0; letter-spacing: -0.01em; }
     ::selection { background: color-mix(in srgb, var(--primary) 30%, transparent); }
     ::-webkit-scrollbar { width: 11px; height: 11px; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 3px solid var(--background); }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+    .muted { color: var(--muted-foreground); }
 
-    /* ── 상단 고정 바(앱바 + 섹션 네비) ────────────────────────────────────────── */
-    .topbar {
-      position: sticky; top: 0; z-index: 50;
-      background: color-mix(in srgb, var(--background) 82%, transparent);
-      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
-    }
-    .appbar {
-      display: flex; flex-wrap: wrap; gap: 0.6rem 1rem;
-      align-items: center; justify-content: space-between;
-      max-width: 1240px; margin: 0 auto; padding: 0.7rem 1.25rem;
-    }
+    /* ── 상단 바 + 모드 탭 ───────────────────────────────────────────────── */
+    .topbar { position: sticky; top: 0; z-index: 50; background: color-mix(in srgb, var(--background) 82%, transparent);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .appbar { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between;
+      max-width: 1240px; margin: 0 auto; padding: 0.7rem 1.25rem; }
     .brand { display: flex; align-items: center; gap: 0.7rem; }
-    .brand-mark {
-      display: grid; place-items: center;
-      width: 2.2rem; height: 2.2rem; border-radius: var(--radius-sm);
+    .brand-mark { display: grid; place-items: center; width: 2.2rem; height: 2.2rem; border-radius: var(--radius-sm);
       background: linear-gradient(145deg, var(--primary), color-mix(in srgb, var(--primary) 65%, var(--violet)));
-      color: var(--primary-foreground);
-      font-weight: 700; font-size: 1.05rem; box-shadow: var(--shadow-sm);
-    }
+      color: var(--primary-foreground); font-weight: 700; font-size: 1.05rem; box-shadow: var(--shadow-sm); }
     .brand-title { font-size: 1.02rem; font-weight: 600; line-height: 1.15; }
     .brand-sub { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted-foreground); letter-spacing: 0.02em; }
     .appbar-right { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
-
-    .pill {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      font-weight: 500; font-size: 0.72rem; letter-spacing: 0.01em;
-      padding: 0.3rem 0.6rem; border-radius: 999px;
-      border: 1px solid var(--border); background: var(--card); color: var(--foreground);
-      white-space: nowrap;
-    }
+    .pill { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; font-size: 0.72rem; letter-spacing: 0.01em;
+      padding: 0.3rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); white-space: nowrap; }
     .pill-tenant { color: var(--secondary); border-color: color-mix(in srgb, var(--secondary) 35%, var(--border)); }
     .pill-live { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
     .pill-time { font-family: var(--font-mono); color: var(--muted-foreground); }
-    .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 0 currentColor; animation: pulse 2s ease-out infinite; }
-    @keyframes pulse {
-      0%   { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); }
-      70%  { box-shadow: 0 0 0 0.5rem transparent; }
-      100% { box-shadow: 0 0 0 0 transparent; }
-    }
-
-    .theme-toggle {
-      font-family: var(--font-sans); font-weight: 500; font-size: 0.74rem;
-      cursor: pointer; padding: 0.34rem 0.7rem; border-radius: 999px;
-      background: var(--card); color: var(--foreground); border: 1px solid var(--border);
-      transition: background 0.15s ease, border-color 0.15s ease;
-    }
+    .pill-stale { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+    .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; animation: pulse 2s ease-out infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); } 70% { box-shadow: 0 0 0 0.5rem transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .theme-toggle { font-family: var(--font-sans); font-weight: 500; font-size: 0.74rem; cursor: pointer; padding: 0.34rem 0.7rem;
+      border-radius: 999px; background: var(--card); color: var(--foreground); border: 1px solid var(--border); transition: background .15s, border-color .15s; }
     .theme-toggle:hover { background: var(--accent); border-color: var(--muted-foreground); }
-    .theme-toggle:active { transform: translateY(1px); }
+    .modetabs { display: flex; gap: 0.25rem; max-width: 1240px; margin: 0 auto; padding: 0 1.25rem; }
+    .modetab { font-family: var(--font-sans); font-weight: 600; font-size: 0.82rem; color: var(--muted-foreground); cursor: pointer;
+      padding: 0.55rem 0.95rem; border: none; background: transparent; border-bottom: 2px solid transparent; }
+    .modetab[aria-selected="true"] { color: var(--foreground); border-bottom-color: var(--primary); }
+    .modetab .cnt { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted-foreground); }
 
-    .subnav {
-      display: flex; flex-wrap: wrap; gap: 0.4rem;
-      max-width: 1240px; margin: 0 auto; padding: 0 1.25rem 0.7rem;
-    }
-    .subnav a {
-      font-weight: 500; font-size: 0.76rem; color: var(--muted-foreground);
-      padding: 0.34rem 0.7rem; border-radius: 999px;
-      background: transparent; border: 1px solid transparent;
-      transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
-    }
-    .subnav a:hover { color: var(--foreground); background: var(--accent); border-color: var(--border); text-decoration: none; }
-
-    /* ── 레이아웃 컨테이너 ──────────────────────────────────────────────────────── */
-    .container { max-width: 1240px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
-    .lead {
-      color: var(--muted-foreground); font-size: 0.86rem; line-height: 1.6;
-      margin: 0 0 1.6rem; padding-left: 0.9rem; border-left: 2px solid var(--border);
-    }
+    .container { max-width: 1240px; margin: 0 auto; padding: 1.3rem 1.25rem 4rem; }
+    .lead { color: var(--muted-foreground); font-size: 0.82rem; line-height: 1.6; margin: 0.4rem 0 1.1rem; padding-left: 0.9rem; border-left: 2px solid var(--border); }
     .lead b { color: var(--foreground); font-weight: 600; }
 
-    /* ── 시스템 상태 개요(요약 배너 + KPI) ─────────────────────────────────────── */
-    .overview { margin-bottom: 1.8rem; }
-    .status-banner {
-      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-      padding: 1rem 1.15rem; border-radius: var(--radius);
-      background: var(--card); border: 1px solid var(--border); box-shadow: var(--shadow-sm);
-      position: relative; overflow: hidden;
-    }
-    .status-banner::before {
-      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--neutral);
-    }
-    .status-banner.status-ok::before   { background: var(--ok); }
-    .status-banner.status-warn::before { background: var(--warn); }
-    .status-banner.status-crit::before { background: var(--crit); }
-    .status-orb {
-      width: 0.85rem; height: 0.85rem; border-radius: 50%; flex: none; margin-left: 0.2rem;
-      background: var(--neutral); box-shadow: 0 0 0 4px color-mix(in srgb, var(--neutral) 22%, transparent);
-    }
-    .status-ok   .status-orb { background: var(--ok);   box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
-    .status-warn .status-orb { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 22%, transparent); }
-    .status-crit .status-orb { background: var(--crit); box-shadow: 0 0 0 4px color-mix(in srgb, var(--crit) 22%, transparent); animation: orbpulse 1.6s ease-out infinite; }
-    @keyframes orbpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--crit) 50%, transparent); } 70%,100% { box-shadow: 0 0 0 0.7rem transparent; } }
-    .status-text { display: flex; flex-direction: column; gap: 0.15rem; }
-    .status-title { font-size: 1.02rem; font-weight: 600; }
-    .status-desc { font-family: var(--font-mono); font-size: 0.76rem; color: var(--muted-foreground); }
-    .status-meta {
-      margin-left: auto; display: inline-flex; align-items: center; gap: 0.45rem;
-      font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted-foreground); white-space: nowrap;
-    }
+    /* ── 요약: KPI 필터칩 + 미니 상태 ───────────────────────────────────── */
+    .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; margin-bottom: 0.4rem; }
+    .kpichip { display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: 600; font-size: 0.8rem;
+      padding: 0.5rem 0.85rem; border-radius: var(--radius-sm); background: var(--card); border: 1px solid var(--border);
+      box-shadow: var(--shadow-xs); transition: border-color .15s, transform .1s; color: var(--foreground); }
+    .kpichip:hover { transform: translateY(-1px); border-color: var(--muted-foreground); }
+    .kpichip[aria-pressed="true"] { border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 25%, transparent); }
+    .kpichip .n { font-family: var(--font-mono); font-size: 1.05rem; }
+    .kpichip .lbl { color: var(--muted-foreground); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em; }
+    .kpichip::before { content: ""; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--neutral); }
+    .kpichip.k-ok::before { background: var(--ok); } .kpichip.k-warn::before { background: var(--warn); }
+    .kpichip.k-crit::before { background: var(--crit); } .kpichip.k-stop::before { background: var(--neutral); }
+    .kpichip.k-all { font-family: var(--font-mono); } .kpichip.k-all::before { display: none; }
+    .ministatus { margin-left: auto; display: inline-flex; align-items: center; gap: 0.9rem; flex-wrap: wrap;
+      font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted-foreground); }
+    .ministatus b { color: var(--foreground); font-weight: 600; }
+    .ministatus .seg { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .ministatus .seg::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ok); }
+    .ministatus .seg.bad::before { background: var(--crit); }
 
-    .kpi-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 0.85rem; margin-top: 0.85rem;
-    }
-    .kpi {
-      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 0.95rem 1.05rem; box-shadow: var(--shadow-xs);
-      transition: border-color 0.15s ease, transform 0.15s ease;
-    }
-    .kpi:hover { border-color: var(--muted-foreground); transform: translateY(-1px); }
-    .kpi.kpi-alert { border-color: color-mix(in srgb, var(--crit) 50%, var(--border)); }
-    .kpi-label { font-size: 0.72rem; font-weight: 500; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.05em; }
-    .kpi-value { font-family: var(--font-mono); font-weight: 600; font-size: 1.9rem; line-height: 1.15; margin-top: 0.35rem; }
-    .kpi-unit { font-size: 0.95rem; color: var(--muted-foreground); font-weight: 500; margin-left: 0.15rem; }
-    .kpi-foot { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; margin-top: 0.6rem; }
-    .dotchip { display: inline-flex; align-items: center; gap: 0.32rem; font-family: var(--font-mono); font-size: 0.69rem; color: var(--muted-foreground); }
-    .dotchip::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--neutral); }
-    .dotchip.dot-ok::before   { background: var(--ok); }
-    .dotchip.dot-warn::before { background: var(--warn); }
-    .dotchip.dot-crit::before { background: var(--crit); }
-    .dotchip.dot-stop::before { background: var(--neutral); }
+    /* ── 워크벤치 ───────────────────────────────────────────────────────── */
+    .workbench { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; padding: 0.75rem 0.9rem;
+      border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--primary) 4%, var(--card)); }
+    .search { position: relative; flex: 1 1 240px; min-width: 170px; }
+    .search input { width: 100%; font-family: var(--font-sans); font-size: 0.85rem; padding: 0.5rem 0.7rem 0.5rem 2rem; color: var(--foreground);
+      background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    .search input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
+    .search::before { content: "🔍"; position: absolute; left: 0.6rem; top: 50%; transform: translateY(-50%); font-size: 0.8rem; opacity: 0.6; }
+    .fchip { font-family: var(--font-sans); font-weight: 500; font-size: 0.76rem; cursor: pointer; padding: 0.42rem 0.7rem; border-radius: 999px;
+      background: var(--card); color: var(--muted-foreground); border: 1px solid var(--border); white-space: nowrap; }
+    .fchip[aria-pressed="true"] { color: var(--foreground); background: var(--accent); border-color: var(--muted-foreground); }
+    .sortsel { font-family: var(--font-sans); font-size: 0.76rem; padding: 0.42rem 0.6rem; color: var(--foreground); background: var(--card);
+      border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+    .toolbar-spacer { flex: 1; }
+    .count { font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted-foreground); white-space: nowrap; }
 
-    /* ── 카드(섹션) ───────────────────────────────────────────────────────────── */
-    .card {
-      background: var(--card); color: var(--card-foreground);
-      border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm);
-      margin-bottom: 1.4rem; scroll-margin-top: 7.5rem; overflow: hidden;
-      --accent-hue: var(--primary);
-    }
-    .card-head {
-      display: flex; align-items: center; gap: 0.7rem;
-      padding: 0.85rem 1.05rem; border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--accent-hue) 5%, var(--card));
-    }
-    .card-head h2 { font-size: 0.92rem; font-weight: 600; letter-spacing: -0.005em; }
-    .card-num {
-      display: grid; place-items: center; width: 1.7rem; height: 1.7rem; flex: none;
-      font-family: var(--font-mono); font-weight: 600; font-size: 0.82rem; border-radius: var(--radius-sm);
-      background: color-mix(in srgb, var(--accent-hue) 16%, var(--card));
-      color: var(--accent-hue);
-      border: 1px solid color-mix(in srgb, var(--accent-hue) 35%, var(--border));
-    }
-    .card-tag {
-      margin-left: auto; font-family: var(--font-mono); font-weight: 500; font-size: 0.66rem;
-      padding: 0.22rem 0.5rem; border-radius: 999px;
-      background: var(--accent); color: var(--muted-foreground);
-      border: 1px solid var(--border); white-space: nowrap;
-    }
-    .card--red    { --accent-hue: var(--crit); }
-    .card--blue   { --accent-hue: var(--info); }
-    .card--magenta{ --accent-hue: var(--violet); }
-    .card--green  { --accent-hue: var(--ok); }
-    .card-body { padding: 1.1rem 1.05rem; }
+    /* ── 대상 행(리스트) — 데스크톱: 고정폭 트랙으로 행 간 정렬 일치 ──────── */
+    .tlist { display: flex; flex-direction: column; }
+    .trow { display: grid; align-items: center; column-gap: 1.15rem;
+      grid-template-columns: 0.3rem minmax(12rem, 1.5fr) 5rem 5rem minmax(13rem, 2fr) 11rem;
+      padding: 0.85rem 1.25rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+      cursor: pointer; transition: background .12s; }
+    .trow:hover { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .trow:last-child { border-bottom: 0; }
+    .trow:focus-visible { outline: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ring) 60%, transparent); }
+    .sevbar { width: 0.3rem; height: 2.3rem; border-radius: 999px; background: var(--neutral); }
+    .trow--critical .sevbar { background: var(--crit); }
+    .trow--warning .sevbar { background: var(--warn); }
+    .trow--normal .sevbar { background: var(--ok); }
+    .trow--stopped .sevbar { background: var(--neutral); }
+    .t-name { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; }
+    .t-name .nm { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-name .ctr { font-size: 0.72rem; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-name .risk { color: var(--crit); }
+    .plat { font-family: var(--font-mono); font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.5rem; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap; justify-self: start; }
+    .plat.plat-baemin { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, var(--border)); }
+    .plat.plat-coupang { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 35%, var(--border)); }
+    .sev-badge { display: inline-flex; align-items: center; gap: 0.36rem; font-weight: 600; font-size: 0.7rem; padding: 0.2rem 0.55rem;
+      border-radius: 999px; white-space: nowrap; justify-self: start; }
+    .sev-badge::before { content: ""; width: 0.46rem; height: 0.46rem; border-radius: 50%; background: currentColor; }
+    .sev-badge.sev-normal { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .sev-badge.sev-warning { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+    .sev-badge.sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
+    .sev-badge.sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
+    .t-reason { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; }
+    .t-reason .rs { font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-reason .fresh { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted-foreground); }
+    .t-reason .fresh.fresh-stale { color: var(--warn); } .t-reason .fresh.fresh-dead { color: var(--crit); }
+    .t-act { display: flex; gap: 0.3rem; justify-self: end; white-space: nowrap; }
+    .row-result { grid-column: 2 / -1; margin-top: 0.25rem; }
+    .row-result:empty { display: none; }
+    .btn { font-family: var(--font-sans); font-weight: 500; font-size: 0.74rem; cursor: pointer; padding: 0.34rem 0.6rem; color: var(--foreground);
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs); white-space: nowrap;
+      transition: background .13s, border-color .13s, transform .06s; }
+    .btn:hover { background: var(--accent); border-color: var(--muted-foreground); }
+    .btn:active { transform: translateY(1px); box-shadow: none; }
+    .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+    .btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+    .btn.primary:hover { background: color-mix(in srgb, var(--primary) 88%, black); border-color: var(--primary); }
+    .btn.danger { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); background: color-mix(in srgb, var(--crit) 8%, var(--card)); }
+    .btn.danger:hover { background: color-mix(in srgb, var(--crit) 18%, var(--card)); border-color: var(--crit); }
+    .btn.ghost { background: transparent; box-shadow: none; padding: 0.34rem 0.5rem; }
+    .allgood { padding: 1.2rem; text-align: center; color: var(--muted-foreground); font-size: 0.82rem; }
+    .filter-empty { display: none; padding: 1.1rem; text-align: center; color: var(--muted-foreground); font-size: 0.82rem; }
+    .target-notice { margin: 0.75rem 0.9rem 0; padding: 0.65rem 0.75rem; border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--warn) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+      color: var(--warn); font-size: 0.82rem; }
+    .target-notice[hidden] { display: none; }
 
-    /* ── 테이블 ───────────────────────────────────────────────────────────────── */
-    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
-    table { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
-    caption { text-align: left; padding: 0.6rem 0.8rem; font-weight: 500; font-size: 0.78rem; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
-    thead th {
-      position: sticky; top: 0;
-      background: color-mix(in srgb, var(--muted) 60%, var(--card));
-      color: var(--muted-foreground);
-      text-align: left; padding: 0.6rem 0.8rem; font-weight: 600;
-      font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
-      border-bottom: 1px solid var(--border);
-    }
-    tbody td { padding: 0.62rem 0.8rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); vertical-align: middle; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr { transition: background 0.12s ease; }
-    tbody tr:hover td { background: color-mix(in srgb, var(--accent) 55%, transparent); }
-    code {
-      font-family: var(--font-mono); font-size: 0.76rem;
-      background: var(--muted); color: var(--foreground);
-      padding: 0.08rem 0.36rem; border-radius: var(--radius-sm); border: 1px solid var(--border);
-    }
+    /* ── 보조: Agent / 채널 / 인증필요(접힘) ─────────────────────────────── */
+    details.aux { margin-top: 1.2rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-xs); overflow: hidden; }
+    details.aux > summary { cursor: pointer; list-style: none; padding: 0.8rem 1rem; font-weight: 600; font-size: 0.86rem; display: flex; align-items: center; gap: 0.5rem; }
+    details.aux > summary::-webkit-details-marker { display: none; }
+    details.aux > summary::before { content: "▸"; color: var(--muted-foreground); transition: transform .15s; }
+    details.aux[open] > summary::before { transform: rotate(90deg); }
+    details.aux > summary .tag { margin-left: auto; font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted-foreground); }
+    .aux-body { padding: 0 1rem 1rem; }
 
-    /* ── 상태/심각도 배지(soft 스타일 — sev-* 클래스 유지) ──────────────────────── */
-    .sev-normal, .sev-warning, .sev-critical, .sev-stopped {
-      display: inline-flex; align-items: center; gap: 0.36rem;
-      font-weight: 600; font-size: 0.7rem; letter-spacing: 0.01em;
-      padding: 0.2rem 0.55rem; border-radius: 999px; white-space: nowrap;
-    }
-    .sev-normal::before, .sev-warning::before, .sev-critical::before, .sev-stopped::before {
-      content: ""; width: 0.46rem; height: 0.46rem; border-radius: 50%; background: currentColor;
-    }
-    .sev-normal   { color: var(--ok);      background: color-mix(in srgb, var(--ok) 14%, transparent);      border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent); }
-    .sev-warning  { color: var(--warn);    background: color-mix(in srgb, var(--warn) 15%, transparent);    border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent); }
-    .sev-critical { color: var(--crit);    background: color-mix(in srgb, var(--crit) 15%, transparent);    border: 1px solid color-mix(in srgb, var(--crit) 34%, transparent); }
-    .sev-stopped  { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent);  border: 1px solid color-mix(in srgb, var(--neutral) 34%, transparent); }
-
-    .muted { color: var(--muted-foreground); }
-
-    /* ── 폼: fieldset / 입력 / 셀렉트 / 라벨 ───────────────────────────────────── */
-    fieldset {
-      border: 1px solid var(--border); border-radius: var(--radius);
-      background: color-mix(in srgb, var(--muted) 28%, var(--card));
-      padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem;
-    }
-    legend {
-      font-weight: 600; font-size: 0.78rem; letter-spacing: 0.01em;
-      padding: 0.1rem 0.5rem; color: var(--foreground);
-      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
-    }
-    .card-body label {
-      display: inline-flex; flex-direction: column; gap: 0.3rem;
-      margin: 0 0.7rem 0.75rem 0; vertical-align: bottom;
-      font-size: 0.72rem; font-weight: 500; color: var(--muted-foreground);
-    }
-    .card-body label.muted { color: var(--muted-foreground); }
-    .card-body input[type="text"],
-    .card-body input[type="number"],
-    .card-body select {
-      font-family: var(--font-mono); font-size: 0.82rem; font-weight: 400;
-      padding: 0.46rem 0.6rem; min-width: 11rem;
-      color: var(--foreground); background: var(--background);
-      border: 1px solid var(--input); border-radius: var(--radius-sm);
-      transition: border-color 0.15s ease, box-shadow 0.15s ease;
-    }
-    .card-body input::placeholder { color: var(--muted-foreground); opacity: 0.7; }
-    .card-body input:focus, .card-body select:focus {
-      outline: none; border-color: var(--ring);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent);
-    }
-    .card-body input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--primary); }
-    .edit-row {
-      display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 0.4rem;
-      margin-top: 0.4rem; padding-top: 0.7rem; border-top: 1px dashed var(--border);
-    }
-
-    /* ── 버튼 ─────────────────────────────────────────────────────────────────── */
-    .card-body button, .btn {
-      font-family: var(--font-sans); font-weight: 500; font-size: 0.78rem;
-      cursor: pointer; padding: 0.46rem 0.85rem; margin: 0 0.4rem 0.5rem 0;
-      color: var(--foreground); background: var(--card);
-      border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs);
-      transition: background 0.13s ease, border-color 0.13s ease, transform 0.06s ease, box-shadow 0.13s ease;
-      vertical-align: bottom;
-    }
-    .card-body button:hover, .btn:hover { background: var(--accent); border-color: var(--muted-foreground); }
-    .card-body button:active, .btn:active { transform: translateY(1px); box-shadow: none; }
-    .card-body button:focus-visible, .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
-    /* 시맨틱 변형: create=primary(생성/배정), danger=red(중지/폐기/비활성) */
-    .card-body button.create {
-      background: var(--primary); color: var(--primary-foreground);
-      border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
-    }
-    .card-body button.create:hover { background: color-mix(in srgb, var(--primary) 88%, black); border-color: var(--primary); }
-    .card-body button.danger {
-      color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card));
-      border-color: color-mix(in srgb, var(--crit) 38%, var(--border));
-    }
-    .card-body button.danger:hover { background: color-mix(in srgb, var(--crit) 18%, var(--card)); border-color: var(--crit); }
-
-    /* 표 안의 행별 운영 액션 — 촘촘한 고스트 버튼 */
-    .row-actions { white-space: nowrap; }
-    .row-actions button {
-      font-size: 0.7rem; padding: 0.28rem 0.55rem; margin: 0.12rem 0.25rem 0.12rem 0;
-    }
-
-    /* ── 액션 결과 토스트 ──────────────────────────────────────────────────────── */
-    .action-result {
-      font-weight: 500; font-size: 0.82rem; padding: 0.65rem 0.85rem; margin-bottom: 0.9rem;
-      border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card);
-      display: flex; align-items: center; gap: 0.5rem;
-    }
-    .action-result.muted { color: var(--muted-foreground); }
-    .action-result.ok  { color: var(--ok);   background: color-mix(in srgb, var(--ok) 10%, var(--card));   border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
-    .action-result.err { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
-    .action-result.ok::before  { content: "✓"; font-weight: 700; }
-    .action-result.err::before { content: "!"; font-weight: 700; }
-
-    /* ── 채널 지표 타일 ───────────────────────────────────────────────────────── */
+    /* ── 채널 지표 타일(기존 _channels.html 호환) / 표(기존 _agents,_auth 호환) ── */
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
     .metric { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 1rem 1.1rem; box-shadow: var(--shadow-xs); }
     .metric-label { font-size: 0.72rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); }
     .metric-value { font-family: var(--font-mono); font-weight: 600; font-size: 2rem; line-height: 1.1; margin-top: 0.35rem; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+    caption { text-align: left; padding: 0.6rem 0.8rem; font-weight: 500; font-size: 0.78rem; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
+    thead th { position: sticky; top: 0; background: color-mix(in srgb, var(--muted) 60%, var(--card)); color: var(--muted-foreground);
+      text-align: left; padding: 0.6rem 0.8rem; font-weight: 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; border-bottom: 1px solid var(--border); }
+    tbody td { padding: 0.62rem 0.8rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+    code { font-family: var(--font-mono); font-size: 0.76rem; background: var(--muted); color: var(--foreground); padding: 0.08rem 0.36rem; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+    .sev-normal, .sev-warning, .sev-critical, .sev-stopped { display: inline-flex; align-items: center; gap: 0.36rem; font-weight: 600; font-size: 0.7rem; padding: 0.2rem 0.55rem; border-radius: 999px; white-space: nowrap; }
+    .sev-normal::before, .sev-warning::before, .sev-critical::before, .sev-stopped::before { content: ""; width: 0.46rem; height: 0.46rem; border-radius: 50%; background: currentColor; }
+    .sev-normal { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .sev-warning { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+    .sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
+    .sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
 
-    .hint { font-size: 0.82rem; color: var(--muted-foreground); margin: 0 0 0.9rem; }
+    /* ── 관리 모드: 폼/폴드 ─────────────────────────────────────────────── */
+    fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 28%, var(--card)); padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem; }
+    legend { font-weight: 600; font-size: 0.78rem; padding: 0.1rem 0.5rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    #view-manage label { display: inline-flex; flex-direction: column; gap: 0.3rem; margin: 0 0.7rem 0.75rem 0; vertical-align: bottom; font-size: 0.72rem; font-weight: 500; color: var(--muted-foreground); }
+    #view-manage input[type="text"], #view-manage input[type="number"], #view-manage select { font-family: var(--font-mono); font-size: 0.82rem; padding: 0.46rem 0.6rem; min-width: 11rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    #view-manage input:focus, #view-manage select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
+    #view-manage input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--primary); }
+    #view-manage button { font-family: var(--font-sans); font-weight: 500; font-size: 0.78rem; cursor: pointer; padding: 0.46rem 0.85rem; margin: 0 0.4rem 0.5rem 0; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs); }
+    #view-manage button:hover { background: var(--accent); border-color: var(--muted-foreground); }
+    #view-manage button.create { background: var(--primary); color: var(--primary-foreground); border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+    #view-manage button.danger { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
+    .edit-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 0.4rem; margin-top: 0.4rem; padding-top: 0.7rem; border-top: 1px dashed var(--border); }
+    .action-result { font-weight: 500; font-size: 0.82rem; padding: 0.65rem 0.85rem; margin-bottom: 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); display: flex; align-items: center; gap: 0.5rem; }
+    .action-result.muted { color: var(--muted-foreground); }
+    .action-result.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--card)); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+    .action-result.err { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
+    .action-result.ok::before { content: "✓"; font-weight: 700; } .action-result.err::before { content: "!"; font-weight: 700; }
 
-    /* ── HTMX 갱신 중 표시(부분 swap 영역을 살짝 흐리게) ───────────────────────── */
+    /* ── 업체 상세 드로어 ───────────────────────────────────────────────── */
+    .scrim { position: fixed; inset: 0; background: hsl(0 0% 0% / 0.5); z-index: 80; display: none; }
+    .scrim.open { display: block; }
+    .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%); z-index: 81; background: var(--card);
+      border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column; }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 0.6rem; }
+    .drawer-head h2 { font-size: 1.05rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .drawer-close { margin-left: auto; cursor: pointer; background: transparent; border: none; color: var(--muted-foreground); font-size: 1.2rem; }
+    .drawer-body { padding: 1.1rem; overflow-y: auto; flex: 1; }
+    .why { display: block; padding: 0.7rem 0.85rem; border-radius: var(--radius-sm); font-size: 0.82rem; margin-bottom: 1rem; }
+    .why.sev-critical, .why.sev-stopped { background: color-mix(in srgb, var(--crit) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--crit) 30%, var(--border)); color: var(--crit); }
+    .why.sev-warning { background: color-mix(in srgb, var(--warn) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border)); color: var(--warn); }
+    .why.sev-normal { background: color-mix(in srgb, var(--ok) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--border)); color: var(--ok); }
+    .facts { display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 0.9rem; font-size: 0.82rem; margin-bottom: 1rem; }
+    .facts dt { color: var(--muted-foreground); } .facts dd { margin: 0; font-family: var(--font-mono); }
+    .deeplink { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted-foreground); margin-top: 0.6rem; word-break: break-all; }
+    .drawer-edit { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+    .drawer-edit[hidden] { display: none; }
+    .drawer-edit label { display: flex; flex-direction: column; gap: 0.25rem; flex: 1 1 12rem; font-size: 0.74rem; color: var(--muted-foreground); }
+    .drawer-edit input { width: 100%; font-family: var(--font-sans); font-size: 0.84rem; padding: 0.45rem 0.55rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    .drawer-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; padding: 1rem 1.1rem; border-top: 1px solid var(--border); }
+    #drawer-result { padding: 0 1.1rem 1rem; }
+    #drawer-result:empty { display: none; }
+
+    /* ── 액션 결과 전역 토스트(항상 보임) ───────────────────────────────── */
+    #action-result { position: fixed; left: 50%; bottom: 1.1rem; transform: translateX(-50%); z-index: 70; max-width: min(560px, 92vw); }
+    #action-result:empty { display: none; }
     .htmx-swapping { opacity: 0.55; transition: opacity 0.15s ease; }
 
-    @media (max-width: 640px) {
-      body { font-size: 13px; }
-      .brand-sub { display: none; }
-      .status-meta { margin-left: 0; }
-      .card-body { padding: 0.9rem 0.75rem; }
-      .card-body input[type="text"], .card-body input[type="number"], .card-body select { min-width: 8.5rem; }
+    @media (max-width: 720px) {
+      body { font-size: 13px; } .brand-sub { display: none; } .ministatus { margin-left: 0; width: 100%; }
+      .trow { grid-template-columns: 0.4rem 1fr auto; grid-template-areas: "bar name plat" "bar reason reason" "bar act act"; gap: 0.35rem 0.6rem; padding: 0.8rem 0.85rem; }
+      .sevbar { grid-area: bar; height: 100%; } .t-name { grid-area: name; } .plat { grid-area: plat; align-self: start; }
+      .trow > .sev-badge { display: none; } .t-reason { grid-area: reason; } .t-reason .rs { white-space: normal; }
+      .t-act { grid-area: act; justify-self: start; margin-top: 0.2rem; }
+      #view-manage input[type="text"], #view-manage input[type="number"], #view-manage select { min-width: 8.5rem; }
     }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-    }
+    @media (min-width: 721px) { #view-manage .trow { grid-template-columns: 0.4rem minmax(0, 1fr) 4.5rem 6rem; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
   </style>
 </head>
-<body>
+<body data-initial-target="{{ initial_target_id or '' }}">
+  {# ── 집계(서버 데이터로 Jinja 계산 — Python 무변경). 심각도 코드: NORMAL/WARNING/CRITICAL/STOPPED. ── #}
+  {% set tg_total = targets | list | length %}
+  {% set tg_normal = targets | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
+  {% set tg_warning = targets | selectattr('severity', 'equalto', 'WARNING') | list | length %}
+  {% set tg_critical = targets | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
+  {% set tg_stopped = targets | selectattr('severity', 'equalto', 'STOPPED') | list | length %}
+  {% set ag_total = agents | list | length %}
+  {% set ag_online = agents | selectattr('online') | list | length %}
+  {% set ag_offline = ag_total - ag_online %}
+  {% set auth_n = auth_required | list | length %}
+  {% set attention = tg_critical + tg_stopped + ag_offline + auth_n %}
+
   <header class="topbar">
     <div class="appbar">
       <div class="brand">
         <span class="brand-mark">R</span>
-        <div>
-          <div class="brand-title">운영 대시보드</div>
-          <div class="brand-sub">rider_server · ops console</div>
-        </div>
+        <div><div class="brand-title">운영 대시보드</div><div class="brand-sub">rider_server · ops console</div></div>
       </div>
       <div class="appbar-right">
         {% if tenant_id %}<span class="pill pill-tenant">tenant · {{ tenant_id }}</span>{% endif %}
-        <span class="pill pill-live"><span class="dot"></span> LIVE · 30s</span>
+        <span class="pill pill-live" id="live-pill"><span class="dot"></span> LIVE · 30s</span>
         <span class="pill pill-time" title="마지막 자동 갱신 시각">갱신 <span id="last-updated">—</span></span>
         <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">◐ 라이트</button>
       </div>
     </div>
-    <nav class="subnav" aria-label="섹션 이동">
-      <a href="#sec-actions">① 수동 액션</a>
-      <a href="#sec-entities">② 엔티티 관리</a>
-      <a href="#sec-targets">③ 대상 상태</a>
-      <a href="#sec-agents">④ Agent fleet</a>
-      <a href="#sec-channels">⑤ 채널 상태</a>
-      <a href="#sec-auth">⑥ 인증 필요</a>
+    <nav class="modetabs" role="tablist" aria-label="모드">
+      <button class="modetab" role="tab" aria-selected="true" onclick="switchMode('monitor', this)">모니터링 <span class="cnt">{{ tg_total }}</span></button>
+      <button class="modetab" role="tab" aria-selected="false" onclick="switchMode('manage', this)">관리</button>
     </nav>
   </header>
 
-  <main class="container">
-    {# ── 집계(서버 데이터로 Jinja 계산 — Python 무변경). 심각도 코드는 NORMAL/WARNING/CRITICAL/STOPPED. ── #}
-    {% set tg_total = targets | list | length %}
-    {% set tg_normal = targets | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
-    {% set tg_warning = targets | selectattr('severity', 'equalto', 'WARNING') | list | length %}
-    {% set tg_critical = targets | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
-    {% set tg_stopped = targets | selectattr('severity', 'equalto', 'STOPPED') | list | length %}
-    {% set ag_total = agents | list | length %}
-    {% set ag_online = agents | selectattr('online') | list | length %}
-    {% set ag_offline = ag_total - ag_online %}
-    {% set auth_n = auth_required | list | length %}
-    {% set attention = tg_critical + tg_stopped + ag_offline + auth_n %}
-    {% if attention > 0 %}{% set ov = 'crit' %}{% set ov_label = '주의 필요' %}
-    {% elif tg_warning > 0 %}{% set ov = 'warn' %}{% set ov_label = '관찰 중' %}
-    {% else %}{% set ov = 'ok' %}{% set ov_label = '정상 운영 중' %}{% endif %}
-
-    <section class="overview" aria-label="시스템 상태 요약">
-      <div class="status-banner status-{{ ov }}">
-        <span class="status-orb" aria-hidden="true"></span>
-        <div class="status-text">
-          <div class="status-title">시스템 상태 — {{ ov_label }}</div>
-          <div class="status-desc">위험 {{ tg_critical }} · 중지 {{ tg_stopped }} · Agent offline {{ ag_offline }} · 인증 필요 {{ auth_n }}</div>
-        </div>
-        <div class="status-meta"><span class="dot" style="color: var(--ok)"></span> 자동 갱신 30초</div>
+  {# ════════════ 모니터링 모드 (기본 · J1 트리아지) ════════════ #}
+  <main class="container" id="view-monitor">
+    <div class="summary">
+      <button class="kpichip k-all" aria-pressed="true" data-sevclass="all" onclick="setSevFilter(this)"><span class="n">{{ tg_total }}</span><span class="lbl">전체</span></button>
+      <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n">{{ tg_normal }}</span><span class="lbl">정상</span></button>
+      <button class="kpichip k-warn" aria-pressed="false" data-sevclass="sev-warning" onclick="setSevFilter(this)"><span class="n">{{ tg_warning }}</span><span class="lbl">주의</span></button>
+      <button class="kpichip k-crit" aria-pressed="false" data-sevclass="sev-critical" onclick="setSevFilter(this)"><span class="n">{{ tg_critical }}</span><span class="lbl">위험</span></button>
+      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n">{{ tg_stopped }}</span><span class="lbl">중지</span></button>
+      <div class="ministatus">
+        <span class="seg {{ 'bad' if ag_offline else '' }}"><b>Agent</b> {{ ag_online }}/{{ ag_total }} 온라인</span>
+        <span class="seg {{ 'bad' if channels.kakao_queue_lag_seconds else '' }}"><b>Kakao</b> {{ channels.kakao_queue_lag_seconds }}초 지연</span>
+        <span class="seg {{ 'bad' if channels.telegram_error_count else '' }}"><b>Telegram</b> {{ channels.telegram_error_count }}건 오류</span>
       </div>
+    </div>
+    <p class="lead">{% if attention > 0 %}<b>지금 조치할 {{ attention }}건</b>이 위로 정렬됩니다.{% else %}<b>모두 정상 운영 중</b>입니다.{% endif %} 대상 표는 <b>30초마다 자동 갱신</b>되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor·시각이 audit 기록됩니다.</p>
 
-      <div class="kpi-grid">
-        <div class="kpi">
-          <div class="kpi-label">모니터링 대상</div>
-          <div class="kpi-value">{{ tg_total }}</div>
-          <div class="kpi-foot">
-            <span class="dotchip dot-ok">정상 {{ tg_normal }}</span>
-            <span class="dotchip dot-warn">주의 {{ tg_warning }}</span>
-            <span class="dotchip dot-crit">위험 {{ tg_critical }}</span>
-            <span class="dotchip dot-stop">중지 {{ tg_stopped }}</span>
-          </div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Agent 온라인</div>
-          <div class="kpi-value">{{ ag_online }}<span class="kpi-unit">/ {{ ag_total }}</span></div>
-          <div class="kpi-foot"><span class="dotchip {{ 'dot-crit' if ag_offline else 'dot-ok' }}">offline {{ ag_offline }}</span></div>
-        </div>
-        <div class="kpi {{ 'kpi-alert' if auth_n else '' }}">
-          <div class="kpi-label">인증 필요</div>
-          <div class="kpi-value">{{ auth_n }}</div>
-          <div class="kpi-foot"><span class="muted">secret 비노출 · fail-closed</span></div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Kakao queue lag</div>
-          <div class="kpi-value">{{ channels.kakao_queue_lag_seconds }}<span class="kpi-unit">초</span></div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Telegram 전송 오류</div>
-          <div class="kpi-value">{{ channels.telegram_error_count }}<span class="kpi-unit">건</span></div>
-        </div>
+    <section class="workbench" aria-label="대상 워크벤치">
+      <div class="toolbar">
+        <div class="search"><input type="text" id="t-search" placeholder="업체명·센터명으로 검색" oninput="applyFilter()" aria-label="업체 검색"></div>
+        <button class="fchip" aria-pressed="false" data-plat="BAEMIN" onclick="togglePlat(this)">배민</button>
+        <button class="fchip" aria-pressed="false" data-plat="COUPANG" onclick="togglePlat(this)">쿠팡</button>
+        <button class="fchip" aria-pressed="false" data-authonly onclick="toggleAuthOnly(this)">인증필요</button>
+        <div class="toolbar-spacer"></div>
+        <select class="sortsel" id="t-sort" onchange="applySort()"><option value="sev">정렬: 위험순</option><option value="name">이름순</option></select>
+        <span class="count" id="t-count">{{ tg_total }} / {{ tg_total }}곳</span>
       </div>
+      <div class="target-notice" id="target-notice" role="status" aria-live="polite" hidden></div>
+      <div id="targets" hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-entity-changed from:body, every 30s" hx-swap="innerHTML swap:0.15s">
+        {% include "_targets.html" %}
+      </div>
+      <div class="filter-empty" id="filter-empty">조건에 맞는 업체가 없습니다 — 필터를 조정하세요. <button class="btn" onclick="resetFilters()">필터 초기화</button></div>
     </section>
 
-    <p class="lead">관측 + 수동 운영 액션. 대상 표는 <b>30초마다 자동 갱신</b>되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor·시각이 audit 기록됩니다.</p>
-
-    <section id="sec-actions" class="card card--red">
-      <div class="card-head"><span class="card-num">①</span><h2>수동 운영 액션</h2><span class="card-tag">OPERATOR↑ · audit</span></div>
-      <div class="card-body">
-        {% include "_actions.html" %}
+    <details class="aux">
+      <summary>Agent fleet <span class="tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>
+      <div class="aux-body">
+        <div id="agents" hx-get="/admin/agents" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_agents.html" %}</div>
       </div>
-    </section>
-
-    <section id="sec-entities" class="card card--blue">
-      <div class="card-head"><span class="card-num">②</span><h2>엔티티 관리 (생성 · 편집 · 비활성화)</h2><span class="card-tag">soft delete</span></div>
-      <div class="card-body">
-        {% include "_entity_admin.html" %}
+    </details>
+    <details class="aux">
+      <summary>채널 상태 <span class="tag">Kakao {{ channels.kakao_queue_lag_seconds }}s · Telegram {{ channels.telegram_error_count }}건</span></summary>
+      <div class="aux-body">
+        <div id="channels" hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_channels.html" %}</div>
       </div>
-    </section>
-
-    <section id="sec-targets" class="card">
-      <div class="card-head"><span class="card-num">③</span><h2>대상 상태 · 심각도</h2><span class="card-tag">auto · 30s</span></div>
-      <div class="card-body">
-        <div id="targets"
-             hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}"
-             hx-trigger="every 30s"
-             hx-swap="innerHTML swap:0.15s">
-          {% include "_targets.html" %}
-        </div>
+    </details>
+    <details class="aux" {% if auth_n %}open{% endif %}>
+      <summary>인증 필요 대상 <span class="tag">{{ auth_n }}건 · secret 비노출</span></summary>
+      <div class="aux-body">
+        <div id="auth-required" hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
       </div>
-    </section>
-
-    <section id="sec-agents" class="card card--magenta">
-      <div class="card-head"><span class="card-num">④</span><h2>Agent fleet</h2><span class="card-tag">auto · 30s</span></div>
-      <div class="card-body">
-        <div id="agents"
-             hx-get="/admin/agents"
-             hx-trigger="every 30s"
-             hx-swap="innerHTML swap:0.15s">
-          {% include "_agents.html" %}
-        </div>
-      </div>
-    </section>
-
-    <section id="sec-channels" class="card card--green">
-      <div class="card-head"><span class="card-num">⑤</span><h2>채널 상태 (KakaoTalk queue lag · Telegram 전송 오류)</h2><span class="card-tag">auto · 30s</span></div>
-      <div class="card-body">
-        <div id="channels"
-             hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}"
-             hx-trigger="every 30s"
-             hx-swap="innerHTML swap:0.15s">
-          {% include "_channels.html" %}
-        </div>
-      </div>
-    </section>
-
-    <section id="sec-auth" class="card card--red">
-      <div class="card-head"><span class="card-num">⑥</span><h2>인증 필요 대상</h2><span class="card-tag">secret 비노출</span></div>
-      <div class="card-body">
-        <div id="auth-required"
-             hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}"
-             hx-trigger="every 30s"
-             hx-swap="innerHTML swap:0.15s">
-          {% include "_auth_required.html" %}
-        </div>
-      </div>
-    </section>
+    </details>
   </main>
 
+  {# ════════════ 관리 모드 (J2 등록/편집) ════════════ #}
+  <main class="container" id="view-manage" hidden>
+    <h2 style="font-size:1.05rem; margin-bottom:0.5rem;">엔티티 관리 <span class="muted" style="font-weight:500; font-size:0.82rem;">(생성 · 편집 · 비활성화)</span></h2>
+    <p class="lead">업체·계정·채널·전송규칙을 <b>등록·편집</b>합니다. 생성/편집/비활성화는 OPERATOR↑ 권한이며 actor·시각·변경 diff 가 audit 됩니다. 비활성화는 물리 삭제가 아닌 soft delete 입니다.</p>
+    {% include "_entity_admin.html" %}
+    {% if show_debug_actions %}
+    <details class="aux">
+      <summary>고급 운영 액션 <span class="tag">구독 · Dispatch · job · Agent 배정</span></summary>
+      <div class="aux-body">{% include "_actions.html" %}</div>
+    </details>
+    {% endif %}
+  </main>
+
+  {# 업체 상세 드로어 — 행 클릭/딥링크 진입(모바일 전체폭) #}
+  <div class="scrim" id="scrim" hidden onclick="closeDrawer()"></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-label="업체 상세" aria-modal="true" hidden inert aria-hidden="true">
+    <div class="drawer-head">
+      <span class="sev-badge sev-normal" id="d-sev">정상</span>
+      <h2 id="d-name">업체</h2>
+      <button class="drawer-close" onclick="closeDrawer()" aria-label="닫기">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="why sev-normal" id="d-why">정상 동작 중입니다.</div>
+      <dl class="facts">
+        <dt>플랫폼</dt><dd id="d-platform">—</dd>
+        <dt>센터/상점</dt><dd id="d-center">—</dd>
+        <dt>수집 주기</dt><dd id="d-interval">—</dd>
+        <dt>마지막 수집 성공</dt><dd id="d-success">—</dd>
+        <dt>마지막 전송 성공</dt><dd id="d-delivery">—</dd>
+      </dl>
+      <p class="deeplink" id="d-deeplink"></p>
+      <div class="drawer-edit" id="d-center-edit" hidden>
+        <label>센터/상점명 <input type="text" id="d-center-input" autocomplete="off"></label>
+        <button type="button" class="btn primary" onclick="drawerUpdateCenterName()">저장</button>
+      </div>
+    </div>
+    <div id="drawer-result" aria-live="polite" role="status"></div>
+    <div class="drawer-actions" id="drawer-actions"></div>
+  </aside>
+
+  {# 액션 결과 전역 토스트 #}
+  <div id="action-result" aria-live="polite" role="status"></div>
+
   <script>
-    // 라이트/다크 토글 — 신규 deps 0(localStorage). darkmatter 는 다크 우선이라 기본 다크.
-    function toggleTheme() {
-      var root = document.documentElement;
-      var dark = root.classList.toggle("dark");
-      try { localStorage.setItem("adm-theme", dark ? "dark" : "light"); } catch (e) {}
-      syncThemeLabel();
+    // ── 테마 토글(신규 deps 0 — localStorage). darkmatter 는 다크 우선. ──
+    function toggleTheme() { var dark = document.documentElement.classList.toggle("dark");
+      try { localStorage.setItem("adm-theme", dark ? "dark" : "light"); } catch (e) {} syncThemeLabel(); }
+    function syncThemeLabel() { var b = document.getElementById("theme-toggle");
+      if (b) b.textContent = document.documentElement.classList.contains("dark") ? "◐ 라이트" : "☀ 다크"; }
+
+    // ── 모드 전환 ──
+    function switchMode(mode, btn) {
+      document.querySelectorAll(".modetab").forEach(function (t) { t.setAttribute("aria-selected", "false"); });
+      btn.setAttribute("aria-selected", "true");
+      document.getElementById("view-monitor").hidden = (mode !== "monitor");
+      document.getElementById("view-manage").hidden = (mode !== "manage");
+      window.scrollTo({ top: 0 });
     }
-    function syncThemeLabel() {
-      var btn = document.getElementById("theme-toggle");
-      if (btn) btn.textContent = document.documentElement.classList.contains("dark") ? "◐ 라이트" : "☀ 다크";
-    }
-    // 마지막 갱신 시각 표시 — HTMX 부분 swap 마다 갱신해 "라이브" 신뢰감을 준다.
-    function stampUpdated() {
-      var el = document.getElementById("last-updated");
-      if (!el) return;
-      var d = new Date();
-      var p = function (n) { return (n < 10 ? "0" : "") + n; };
+
+    // ── 갱신 시각 stamp + 폴링 실패 표시(라이브 신뢰 보호) ──
+    function stampUpdated() { var el = document.getElementById("last-updated"); if (!el) return;
+      var d = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; };
       el.textContent = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      var pill = document.getElementById("live-pill"); if (pill) { pill.classList.remove("pill-stale"); pill.firstChild && (pill.childNodes[1].nodeValue = " LIVE · 30s"); } }
+    document.body.addEventListener("htmx:afterSwap", function (e) {
+      stampUpdated();
+      if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
+    });
+    document.body.addEventListener("htmx:responseError", markStale);
+    document.body.addEventListener("htmx:sendError", markStale);
+    function markStale() { var pill = document.getElementById("live-pill");
+      if (pill) { pill.classList.add("pill-stale"); pill.childNodes[1].nodeValue = " 갱신 실패 · 재시도 중"; } }
+
+    // ── 클라이언트 검색/필터(≈100행 — 서버 왕복 0, 30초 swap 후 재적용) ──
+    var FIL = { sev: "all", plats: {}, authOnly: false };
+    function setSevFilter(chip) { document.querySelectorAll(".kpichip").forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      chip.setAttribute("aria-pressed", "true"); FIL.sev = chip.dataset.sevclass; applyFilter(); }
+    function togglePlat(chip) { var p = chip.dataset.plat, on = chip.getAttribute("aria-pressed") === "true";
+      chip.setAttribute("aria-pressed", on ? "false" : "true"); if (on) delete FIL.plats[p]; else FIL.plats[p] = 1; applyFilter(); }
+    function toggleAuthOnly(chip) { FIL.authOnly = chip.getAttribute("aria-pressed") !== "true";
+      chip.setAttribute("aria-pressed", FIL.authOnly ? "true" : "false"); applyFilter(); }
+    function resetFilters() {
+      FIL = { sev: "all", plats: {}, authOnly: false };
+      document.querySelectorAll(".kpichip").forEach(function (c) { c.setAttribute("aria-pressed", c.dataset.sevclass === "all" ? "true" : "false"); });
+      document.querySelectorAll(".fchip").forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      var s = document.getElementById("t-search"); if (s) s.value = ""; applyFilter();
     }
-    document.body.addEventListener("htmx:afterSwap", stampUpdated);
-    syncThemeLabel();
-    stampUpdated();
+    function applyFilter() {
+      var q = (document.getElementById("t-search") || {}).value || "";
+      q = q.trim().toLowerCase();
+      var rows = document.querySelectorAll("#tlist .trow"), shown = 0, plats = Object.keys(FIL.plats);
+      rows.forEach(function (r) {
+        var okSev = FIL.sev === "all" || r.dataset.severityClass === FIL.sev;
+        var okPlat = plats.length === 0 || FIL.plats[r.dataset.platform];
+        var okAuth = !FIL.authOnly || r.dataset.failcode === "AUTH_REQUIRED";
+        var okQ = !q || (r.dataset.name + " " + r.dataset.center).toLowerCase().indexOf(q) !== -1;
+        var vis = okSev && okPlat && okAuth && okQ;
+        r.style.display = vis ? "" : "none"; if (vis) shown++;
+      });
+      var cnt = document.getElementById("t-count"); if (cnt) cnt.textContent = shown + " / " + rows.length + "곳";
+      var fe = document.getElementById("filter-empty"); if (fe) fe.style.display = (rows.length > 0 && shown === 0) ? "block" : "none";
+    }
+    function applySort() {
+      var mode = (document.getElementById("t-sort") || {}).value, list = document.getElementById("tlist");
+      if (!list) return; var rows = Array.prototype.slice.call(list.querySelectorAll(".trow"));
+      var rank = { "sev-critical": 0, "sev-stopped": 1, "sev-warning": 2, "sev-normal": 3 };
+      rows.sort(function (a, b) {
+        if (mode === "name") return a.dataset.name.localeCompare(b.dataset.name, "ko");
+        return (rank[a.dataset.severityClass] || 9) - (rank[b.dataset.severityClass] || 9);
+      });
+      rows.forEach(function (r) { list.appendChild(r); });
+    }
+    function showTargetNotice(message) {
+      var notice = document.getElementById("target-notice");
+      if (!notice) return;
+      notice.textContent = message;
+      notice.hidden = false;
+    }
+    function clearTargetNotice() {
+      var notice = document.getElementById("target-notice");
+      if (!notice) return;
+      notice.textContent = "";
+      notice.hidden = true;
+    }
+
+    // ── 업체 상세 드로어(행 data-* 로 서버 왕복 없이 채움) ──
+    var ADM = { target: "", tenant: "", platform: "", name: "", opener: null };
+    function openTargetDrawer(row, opener, opts) {
+      clearTargetNotice();
+      var d = row.dataset;
+      opts = opts || {};
+      ADM = { target: d.target, tenant: d.tenant, platform: d.platform, name: d.name, opener: opener || ADM.opener || document.activeElement };
+      document.getElementById("d-name").textContent = d.name || "업체";
+      var sev = document.getElementById("d-sev"); sev.className = "sev-badge " + (d.severityClass || "sev-normal"); sev.textContent = d.severityLabel || "";
+      var why = document.getElementById("d-why"); why.className = "why " + (d.severityClass || "sev-normal");
+      why.textContent = d.reason || (d.severity === "STOPPED" ? "운영자가 비활성한 대상입니다 — 필요 시 활성화하세요." : d.severity === "NORMAL" ? "정상 동작 중입니다." : "관찰이 필요한 상태입니다.");
+      document.getElementById("d-platform").textContent = d.platformLabel || d.platform || "—";
+      document.getElementById("d-center").textContent = d.center || "⚠ 센터 미설정";
+      document.getElementById("d-interval").textContent = (d.interval && d.interval !== "0") ? (d.interval + "분") : "미설정";
+      document.getElementById("d-success").textContent = d.success || "수집 기록 없음";
+      document.getElementById("d-delivery").textContent = d.delivery || "전송 기록 없음";
+      document.getElementById("d-deeplink").textContent = "딥링크(텔레그램 알림): /admin/t/" + encodeURIComponent(d.target) + "?tenant=" + encodeURIComponent(d.tenant);
+      document.getElementById("d-center-input").value = d.center || "";
+      document.getElementById("d-center-edit").hidden = true;
+      renderDrawerActions(d);
+      document.getElementById("drawer-result").textContent = "";
+      var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+      drawer.hidden = false; drawer.inert = false; drawer.setAttribute("aria-hidden", "false");
+      scrim.hidden = false;
+      drawer.classList.add("open"); scrim.classList.add("open"); document.body.classList.add("drawer-open");
+      if (!opts.keepUrl && d.target) {
+        var nextUrl = "/admin/t/" + encodeURIComponent(d.target) + "?tenant=" + encodeURIComponent(d.tenant || "");
+        if (opts.replaceUrl) history.replaceState(null, "", nextUrl);
+        else history.pushState(null, "", nextUrl);
+      }
+      if (!opts.keepFocus) { var close = drawer.querySelector(".drawer-close"); if (close) close.focus(); }
+    }
+    function closeDrawer() {
+      var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+      drawer.classList.remove("open"); scrim.classList.remove("open"); document.body.classList.remove("drawer-open");
+      drawer.hidden = true; drawer.inert = true; drawer.setAttribute("aria-hidden", "true"); scrim.hidden = true;
+      if (ADM.target) history.pushState(null, "", "/admin?tenant=" + encodeURIComponent(ADM.tenant || ""));
+      if (ADM.opener && typeof ADM.opener.focus === "function") ADM.opener.focus();
+    }
+    function makeDrawerButton(label, className, onClick) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "btn" + (className ? " " + className : "");
+      b.textContent = label; b.onclick = onClick; return b;
+    }
+    function renderDrawerActions(d) {
+      var box = document.getElementById("drawer-actions"); box.textContent = "";
+      var action = d.primaryAction || "details";
+      if (action === "auth-check") box.appendChild(makeDrawerButton(d.primaryLabel || "인증 확인", "primary", function () { drawerPost("/auth-check"); }));
+      else if (action === "center-name") box.appendChild(makeDrawerButton(d.primaryLabel || "센터명 설정", "primary", focusCenterNameEdit));
+      else if (action === "activate") box.appendChild(makeDrawerButton(d.primaryLabel || "활성화", "", function () { drawerPost("/activate", {}, drawerConfirm("활성화")); }));
+      else if (action === "test-crawl") box.appendChild(makeDrawerButton(d.primaryLabel || "지금 수집", d.primaryStyle || "", function () { drawerPost("/test-crawl", {platform: ADM.platform}); }));
+      box.appendChild(makeDrawerButton("미리보기", "", function () { drawerPost("/dry-run"); }));
+      if (d.severity !== "STOPPED") box.appendChild(makeDrawerButton("비활성화", "danger", function () { drawerPost("/pause", {}, drawerConfirm("비활성화")); }));
+    }
+    function drawerConfirm(action) {
+      return "대상 '" + ADM.name + "'을(를) " + action + "할까요?";
+    }
+    function focusCenterNameEdit() {
+      var edit = document.getElementById("d-center-edit"), input = document.getElementById("d-center-input");
+      edit.hidden = false;
+      input.focus();
+      input.select();
+    }
+    function drawerUpdateCenterName() {
+      if (!ADM.target) return;
+      var value = document.getElementById("d-center-input").value;
+      var url = "/admin/monitoring-targets/" + encodeURIComponent(ADM.target) + "?tenant=" + encodeURIComponent(ADM.tenant);
+      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: {center_name: value} });
+    }
+    function drawerPost(suffix, vals, confirmMessage) {
+      if (confirmMessage && !window.confirm(confirmMessage)) return;
+      if (!ADM.target) return;
+      var url = "/admin/targets/" + encodeURIComponent(ADM.target) + suffix + "?tenant=" + encodeURIComponent(ADM.tenant);
+      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: vals || {} });
+    }
+    function findTargetRow(targetId) {
+      var rows = document.querySelectorAll("#tlist .trow");
+      for (var i = 0; i < rows.length; i++) if (rows[i].dataset.target === targetId) return rows[i];
+      return null;
+    }
+    function openAuthRequiredTarget(targetId) {
+      var row = findTargetRow(targetId);
+      if (row) openTargetDrawer(row, row);
+      else showTargetNotice("업체를 찾지 못했습니다.");
+    }
+    function syncOpenDrawerFromRows() {
+      if (!ADM.target) return;
+      var drawer = document.getElementById("drawer");
+      if (drawer.hidden) return;
+      var row = findTargetRow(ADM.target);
+      if (row) openTargetDrawer(row, ADM.opener, {keepFocus: true, keepUrl: true});
+      else {
+        document.getElementById("d-why").textContent = "이 업체는 현재 목록에 없습니다.";
+        showTargetNotice("업체를 찾지 못했습니다.");
+      }
+    }
+    function openInitialTarget() {
+      var id = document.body.dataset.initialTarget;
+      if (!id) return;
+      var row = findTargetRow(id);
+      if (row) openTargetDrawer(row, row, {replaceUrl: true});
+      else showTargetNotice("업체를 찾지 못했습니다.");
+    }
+    function trapDrawerFocus(e) {
+      var drawer = document.getElementById("drawer");
+      if (drawer.hidden || e.key !== "Tab") return;
+      var focusable = drawer.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); trapDrawerFocus(e); });
+
+    syncThemeLabel(); stampUpdated(); openInitialTarget();
   </script>
 </body>
 </html>

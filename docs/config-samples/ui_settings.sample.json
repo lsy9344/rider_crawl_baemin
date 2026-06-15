@@ -25,9 +25,10 @@
       "coupang_auto_email_2fa_enabled": false,
       "coupang_login_id": "",
       "coupang_login_password": "",
-      "gmail_2fa_query": "from:(donotreply@coupang.com) subject:(이메일 인증번호) newer_than:1d",
-      "gmail_credentials_path": "secrets/google/credentials.gmail.json",
-      "gmail_token_path": "secrets/google/token.gmail.json",
+      "verification_email_address": "",
+      "verification_email_app_password": "",
+      "verification_email_subject_keyword": "인증번호",
+      "verification_email_sender_keyword": "coupang",
       "customer_id": "",
       "customer_name": "",
       "platform_account_id": "",
@@ -35,7 +36,8 @@
       "legacy_alias": "크롤링1",
       "telegram_bot_token_ref": "",
       "coupang_login_password_ref": "",
-      "coupang_login_id_ref": ""
+      "coupang_login_id_ref": "",
+      "verification_email_app_password_ref": ""
     }
   ]
 }

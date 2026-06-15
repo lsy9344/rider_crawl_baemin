@@ -76,6 +76,8 @@ def _target(status=MonitoringTargetStatus.ACTIVE, *, tenant=_TENANT) -> Monitori
         platform_account_id="pa-1",
         name="가게",
         center_name="센터",
+        url="https://example.invalid/mt-1",
+        interval_minutes=10,
         status=status,
     )
 
@@ -304,6 +306,20 @@ def test_test_crawl_enqueues_single_job() -> None:
     )
 
     assert queue.job_status(job_id) == JOB_STATUS_PENDING
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json == {
+        "target_id": "mt-1",
+        "tenant_id": _TENANT,
+        "platform": "baemin",
+        "platform_account_id": "pa-1",
+        "primary_url": "https://example.invalid/mt-1",
+        "expected_display_name": "센터",
+        "browser_profile_ref": "profile:mt-1",
+        "timeout_seconds": 60,
+        "parser_version": "baemin-v1",
+        "job_type": "CRAWL_BAEMIN",
+    }
 
 
 def test_test_crawl_unknown_job_type_rejected() -> None:

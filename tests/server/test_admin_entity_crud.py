@@ -43,11 +43,13 @@ from rider_server.services.admin_action_service import (
     TenantScopeViolation,
 )
 from rider_server.services.admin_entity_service import (
+    AdminEntityDuplicateError,
     AdminEntityService,
     InMemoryAdminEntityRepository,
     _secret_ref_or_reject,
     is_center_name_risky,
 )
+from rider_server.services.admin_entity_repository_postgres import PostgresAdminEntityRepository
 from rider_server.services.channel_registration import InvalidChannelTransition
 from rider_server.settings import Settings
 
@@ -56,6 +58,8 @@ _TENANT = "tn-1"
 _OTHER = "tn-2"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
 _REF = "vault://handle/ref"
+_EMAIL_ADDRESS_REF = "vault://mail/address"
+_EMAIL_APP_PASSWORD_REF = "vault://mail/app-password"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
 _OPERATOR = AdminPrincipal(
     actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True, source="ADMIN_UI/operator"
@@ -117,6 +121,25 @@ def _svc(repo: InMemoryAdminEntityRepository) -> AdminEntityService:
     return AdminEntityService(repo)
 
 
+class _FailingSessionFactory:
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        raise AssertionError("empty tenant should not query Postgres")
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_postgres_admin_entity_repository_empty_tenant_lists_are_empty_without_uuid_query() -> None:
+    repo = PostgresAdminEntityRepository(_FailingSessionFactory())  # type: ignore[arg-type]
+
+    assert _run(repo.list_platform_accounts("")) == []
+    assert _run(repo.list_monitoring_targets("")) == []
+    assert _run(repo.list_messenger_channels("")) == []
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (순수) center_name 위험 판정 + secret 핸들 검증
 # ══════════════════════════════════════════════════════════════════════════
@@ -139,6 +162,8 @@ def test_secret_ref_or_reject_accepts_handle_rejects_plaintext_and_empty() -> No
     assert ref.ref == "vault://t/user"
     with pytest.raises(ValueError):  # 평문 token-shape → fail-closed
         _secret_ref_or_reject("123456789:AAHsecrettokenvalue", field="password_ref")
+    with pytest.raises(ValueError):  # 앱 비밀번호처럼 보이는 값도 핸들이 아니면 거부
+        _secret_ref_or_reject("nuda vmiy gtfr ggeg", field="verification_email_app_password_ref")
     with pytest.raises(ValueError):  # 빈 핸들 → fail-closed
         _secret_ref_or_reject("   ", field="username_ref")
 
@@ -183,9 +208,44 @@ def test_create_platform_account_with_refs_only() -> None:
     assert account.username_ref.ref == "vault://u"
     stored = _run(repo.get_platform_account("pa-new"))
     assert stored.platform is Platform.COUPANG
+    assert stored.verification_email_address_ref.ref == ""
+    assert stored.verification_email_app_password_ref.ref == ""
+    assert stored.verification_email_subject_keyword == "인증번호"
+    assert stored.verification_email_sender_keyword == "coupang"
     # audit diff 에 평문 자격증명이 없고 핸들만 있다.
     diff = repo.audits[-1].diff_redacted
     assert diff["username_ref"] == "vault://u"
+
+
+def test_create_platform_account_with_verification_email_refs() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    account = _run(
+        svc.create_platform_account(
+            entity_id="pa-mail",
+            tenant_id=_TENANT,
+            platform=Platform.COUPANG,
+            label="쿠팡",
+            username_ref="vault://u",
+            password_ref="vault://p",
+            verification_email_address_ref=_EMAIL_ADDRESS_REF,
+            verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
+            verification_email_subject_keyword="보안코드",
+            verification_email_sender_keyword="wing",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert account.verification_email_address_ref.ref == _EMAIL_ADDRESS_REF
+    assert account.verification_email_app_password_ref.ref == _EMAIL_APP_PASSWORD_REF
+    assert account.verification_email_subject_keyword == "보안코드"
+    assert account.verification_email_sender_keyword == "wing"
+    diff = repo.audits[-1].diff_redacted
+    assert diff["verification_email_address_ref"] == _EMAIL_ADDRESS_REF
+    assert diff["verification_email_app_password_ref"] == _EMAIL_APP_PASSWORD_REF
 
 
 def test_create_platform_account_plaintext_rejected() -> None:
@@ -207,6 +267,52 @@ def test_create_platform_account_plaintext_rejected() -> None:
             )
         )
     assert _run(repo.get_platform_account("pa-x")) is None  # 미반영(fail-closed)
+
+
+def test_create_platform_account_plaintext_verification_email_ref_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-mail-x",
+                tenant_id=_TENANT,
+                platform=Platform.COUPANG,
+                label="x",
+                username_ref="vault://u",
+                password_ref="vault://p",
+                verification_email_address_ref="fake@example.invalid",
+                verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+    assert _run(repo.get_platform_account("pa-mail-x")) is None
+
+
+def test_create_platform_account_plaintext_verification_email_app_password_ref_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-mail-password-x",
+                tenant_id=_TENANT,
+                platform=Platform.COUPANG,
+                label="x",
+                username_ref="vault://u",
+                password_ref="vault://p",
+                verification_email_address_ref=_EMAIL_ADDRESS_REF,
+                verification_email_app_password_ref="nuda vmiy gtfr ggeg",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+    assert _run(repo.get_platform_account("pa-mail-password-x")) is None
 
 
 def test_create_monitoring_target_links_account_and_flags_coupang_risk() -> None:
@@ -441,6 +547,7 @@ def test_route_create_target_returns_fragment_and_persists() -> None:
     assert resp.status_code == HTTPStatus.OK
     assert "text/html" in resp.headers["content-type"]
     assert "모니터링 대상 생성됨" in resp.text
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert len(_run(repo.list_monitoring_targets("tn-1"))) == 1
 
 
@@ -532,6 +639,53 @@ def test_route_get_entities_form_viewer_ok() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert "플랫폼 계정" in resp.text
+    assert "admin-entity-changed from:body" in resp.text
+    assert 'hx-trigger="load, admin-entity-changed from:body, every 30s"' in resp.text
+    assert "메시지 템플릿 id" not in resp.text
+
+
+def test_entities_form_shows_nearby_create_ctas_for_empty_dependencies() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/entities?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert 'href="#entity-account-form"' in resp.text
+    assert 'href="#entity-channel-form"' in resp.text
+
+
+def test_entities_list_hides_raw_ids_by_default() -> None:
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(_target())
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/monitoring-targets?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "<th>id</th>" not in resp.text
+    assert "<code>mt-1</code>" not in resp.text
+    assert "가게" in resp.text
+
+
+class _DuplicateChannelRepo(InMemoryAdminEntityRepository):
+    async def create_messenger_channel(self, channel, audit, *, registration_code=None):
+        raise AdminEntityDuplicateError("registration_code", "이미 등록된 채널 등록 코드입니다")
+
+
+def test_route_duplicate_messenger_channel_returns_conflict_message() -> None:
+    repo = _DuplicateChannelRepo()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={"messenger": "TELEGRAM", "registration_code": "JOIN-CODE"},
+    )
+
+    assert resp.status_code == HTTPStatus.CONFLICT
+    assert "중복" in resp.text
 
 
 def test_route_list_targets_fragment() -> None:
@@ -588,7 +742,11 @@ def test_update_tenant_records_before_after() -> None:
 def test_update_platform_account_label_keeps_refs() -> None:
     """G2 — ``update_platform_account`` happy path. 라벨만 바꾸고 secret 핸들은 보존."""
     repo = InMemoryAdminEntityRepository()
-    repo.seed_platform_account(_account())  # username_ref/password_ref = vault://handle/ref
+    repo.seed_platform_account(
+        _account(
+            platform=Platform.COUPANG,
+        )
+    )
     svc = _svc(repo)
 
     updated = _run(
@@ -599,9 +757,51 @@ def test_update_platform_account_label_keeps_refs() -> None:
 
     assert updated.label == "새라벨"
     assert updated.username_ref.ref == _REF  # 미입력 → 기존 핸들 보존
+    assert updated.verification_email_app_password_ref.ref == ""
     assert repo.audits[-1].action == "PLATFORM_ACCOUNT_UPDATE"
     diff = repo.audits[-1].diff_redacted
     assert diff["from_label"] == "계정" and diff["to_label"] == "새라벨"
+
+
+def test_update_platform_account_verification_email_ref() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_platform_account(_account(platform=Platform.COUPANG))
+    svc = _svc(repo)
+
+    updated = _run(
+        svc.update_platform_account(
+            "pa-1",
+            tenant_id=_TENANT,
+            verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
+            verification_email_subject_keyword="보안코드",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.verification_email_app_password_ref.ref == _EMAIL_APP_PASSWORD_REF
+    assert updated.verification_email_subject_keyword == "보안코드"
+    diff = repo.audits[-1].diff_redacted
+    assert diff["verification_email_app_password_ref"] == _EMAIL_APP_PASSWORD_REF
+
+
+def test_update_platform_account_plaintext_verification_email_app_password_ref_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_platform_account(_account(platform=Platform.COUPANG))
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.update_platform_account(
+                "pa-1",
+                tenant_id=_TENANT,
+                verification_email_app_password_ref="nuda vmiy gtfr ggeg",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+    assert _run(repo.get_platform_account("pa-1")).verification_email_app_password_ref.ref == ""
+    assert repo.audits == []
 
 
 def test_update_platform_account_plaintext_secret_rejected_on_edit() -> None:
@@ -760,6 +960,7 @@ def test_route_create_customer_persists() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert "고객 생성됨" in resp.text
+    assert resp.headers["HX-Redirect"].startswith("/admin?tenant=")
     assert len(_run(repo.list_tenants())) == 1
 
 

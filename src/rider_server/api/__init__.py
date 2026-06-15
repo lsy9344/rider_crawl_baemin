@@ -6,7 +6,13 @@ dataclass, api 경계는 Pydantic 으로 교차 시 명시적 변환한다(레�
 
 from __future__ import annotations
 
+from .agents import router as agents_router
 from .jobs import default_resolve_agent_id, router as jobs_router
 from .telegram_webhook import router as telegram_webhook_router
 
-__all__ = ["jobs_router", "default_resolve_agent_id", "telegram_webhook_router"]
+__all__ = [
+    "agents_router",
+    "jobs_router",
+    "default_resolve_agent_id",
+    "telegram_webhook_router",
+]

@@ -25,6 +25,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..db.models.agent import Job
+from ..db.models.messaging import DeliveryLog
+from ..domain import DeliveryStatus, FailureCategory
 from .backend import (
     COMPLETE_ACCEPTED,
     COMPLETE_LEASE_LOST,
@@ -35,8 +37,11 @@ from .backend import (
 )
 from .states import (
     JOB_STATUS_CLAIMED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
+    JOB_TYPE_KAKAO_SEND,
     assert_transition,
 )
 
@@ -46,6 +51,29 @@ def _as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
     if value is None or isinstance(value, uuid.UUID):
         return value
     return uuid.UUID(str(value))
+
+
+def kakao_delivery_log_values(
+    *,
+    job_status: str,
+    error_code: str | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Map a completed KAKAO_SEND job status to delivery_logs update values."""
+
+    if job_status == JOB_STATUS_SUCCEEDED:
+        return {
+            "status": DeliveryStatus.SENT.value,
+            "error_code": None,
+            "sent_at": now,
+        }
+    if job_status == JOB_STATUS_FAILED:
+        return {
+            "status": DeliveryStatus.FAILED.value,
+            "error_code": error_code or FailureCategory.KAKAO_FAILURE.value,
+            "sent_at": None,
+        }
+    return None
 
 
 class PostgresQueueBackend(QueueBackend):
@@ -59,6 +87,7 @@ class PostgresQueueBackend(QueueBackend):
         *,
         job_type: str,
         target_id: str | None = None,
+        payload_json: dict[str, Any] | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -69,6 +98,7 @@ class PostgresQueueBackend(QueueBackend):
                     id=job_id,
                     type=job_type,
                     target_id=_as_uuid(target_id),
+                    payload_json=payload_json,
                     agent_id=None,
                     status=JOB_STATUS_PENDING,
                     run_after=run_after,
@@ -117,6 +147,7 @@ class PostgresQueueBackend(QueueBackend):
                         type=job.type,
                         target_id=None if job.target_id is None else str(job.target_id),
                         lease_expires_at=lease_until,
+                        payload_json=job.payload_json,
                         attempts=job.attempts,
                         status=job.status,
                     )
@@ -153,8 +184,70 @@ class PostgresQueueBackend(QueueBackend):
             job.result_json = result_json
             job.error_code = error_code
             job.lease_expires_at = None
+            await self._update_kakao_delivery_log(
+                session,
+                job=job,
+                status=status,
+                error_code=error_code,
+                now=now,
+            )
             await session.commit()
             return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=status)
+
+    async def _update_kakao_delivery_log(
+        self,
+        session: AsyncSession,
+        *,
+        job: Job,
+        status: str,
+        error_code: str | None,
+        now: datetime,
+    ) -> None:
+        if job.type != JOB_TYPE_KAKAO_SEND or not isinstance(job.payload_json, dict):
+            return
+        delivery_log_id = job.payload_json.get("delivery_log_id")
+        if not delivery_log_id:
+            return
+        values = kakao_delivery_log_values(
+            job_status=status,
+            error_code=error_code,
+            now=now,
+        )
+        if values is None:
+            return
+        await session.execute(
+            update(DeliveryLog)
+            .where(DeliveryLog.id == _as_uuid(str(delivery_log_id)))
+            .values(**values)
+        )
+
+    async def in_flight_job(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        now: datetime,
+    ) -> ClaimedJobRecord | None:
+        async with self._session_factory() as session:
+            stmt = select(Job).where(
+                Job.id == _as_uuid(job_id),
+                Job.agent_id == _as_uuid(agent_id),
+                Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
+                Job.lease_expires_at.is_not(None),
+                Job.lease_expires_at > now,
+            )
+            job = (await session.execute(stmt)).scalar_one_or_none()
+            if job is None:
+                return None
+            return ClaimedJobRecord(
+                job_id=str(job.id),
+                type=job.type,
+                target_id=None if job.target_id is None else str(job.target_id),
+                lease_expires_at=job.lease_expires_at,
+                payload_json=job.payload_json,
+                attempts=job.attempts,
+                status=job.status,
+            )
 
     async def extend_lease(
         self,
@@ -201,6 +294,33 @@ class PostgresQueueBackend(QueueBackend):
             result = await session.execute(stmt)
             await session.commit()
             return int(result.rowcount or 0)
+
+    async def restore_claimed_after_snapshot_failure(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        lease_seconds: float,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory() as session:
+            stmt = (
+                select(Job).where(Job.id == _as_uuid(job_id)).with_for_update()
+            )
+            job = (await session.execute(stmt)).scalar_one_or_none()
+            if (
+                job is None
+                or job.agent_id != _as_uuid(agent_id)
+                or job.status != JOB_STATUS_SUCCEEDED
+            ):
+                await session.rollback()
+                return False
+            job.status = JOB_STATUS_CLAIMED
+            job.result_json = None
+            job.error_code = None
+            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            await session.commit()
+            return True
 
     async def emit_event(
         self,

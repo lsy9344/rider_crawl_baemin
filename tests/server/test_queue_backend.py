@@ -28,6 +28,7 @@ from rider_server.queue import (
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
+from rider_server.queue.postgres_queue import kakao_delivery_log_values
 
 _T0 = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -220,6 +221,22 @@ def test_claim_respects_run_after(backend):
         assert len(late) == 1
 
     asyncio.run(_run())
+
+
+def test_kakao_delivery_log_values_map_complete_status() -> None:
+    sent = kakao_delivery_log_values(
+        job_status=JOB_STATUS_SUCCEEDED,
+        error_code=None,
+        now=_T0,
+    )
+    failed = kakao_delivery_log_values(
+        job_status=JOB_STATUS_FAILED,
+        error_code=None,
+        now=_T0,
+    )
+
+    assert sent == {"status": "SENT", "error_code": None, "sent_at": _T0}
+    assert failed == {"status": "FAILED", "error_code": "KAKAO_FAILURE", "sent_at": None}
 
 
 # ── (a) 계약: lease 만료 → recover_stale → 재claim 가능 ───────────────────────────
@@ -415,6 +432,36 @@ def test_claim_respects_max_jobs_limit(backend):
         assert len(rest) == 1
         claimed_ids = {r.job_id for r in first} | {r.job_id for r in rest}
         assert len(claimed_ids) == 3  # 세 job 이 서로 겹치지 않게 분배됨
+
+    asyncio.run(_run())
+
+
+def test_claim_returns_enqueued_payload(backend):
+    async def _run():
+        target_id = "33333333-3333-3333-3333-333333333333"
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_BAEMIN,
+            target_id=target_id,
+            payload_json={
+                "target_id": target_id,
+                "platform": "baemin",
+                "primary_url": "https://example.invalid/performance",
+            },
+            now=_T0,
+        )
+        [record] = await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+        assert record.job_id == job_id
+        assert record.payload_json == {
+            "target_id": target_id,
+            "platform": "baemin",
+            "primary_url": "https://example.invalid/performance",
+        }
 
     asyncio.run(_run())
 

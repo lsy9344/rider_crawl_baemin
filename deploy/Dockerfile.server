@@ -9,6 +9,7 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUTF8=1 \
     PYTHONPATH=/app/src \
     APP_ENV=production
 
@@ -18,11 +19,17 @@ WORKDIR /app
 # 와 일치시킨다(정본은 pyproject — 여기는 lean 이미지를 위해 server extra 만 직접 설치).
 RUN pip install --no-cache-dir \
     "fastapi>=0.136.0,<0.137.0" \
-    "uvicorn[standard]>=0.30.0"
+    "uvicorn[standard]>=0.30.0" \
+    "sqlalchemy[asyncio]>=2.0,<2.1" \
+    "alembic>=1.18,<1.19" \
+    "asyncpg>=0.29" \
+    "jinja2>=3.1,<4"
 
 # rider_server(앱) + rider_crawl(redaction import 대상) 소스만 복사.
 COPY src/rider_server /app/src/rider_server
 COPY src/rider_crawl /app/src/rider_crawl
+COPY migrations /app/migrations
+COPY alembic.ini /app/alembic.ini
 
 EXPOSE 8000
 

@@ -1,111 +1,159 @@
-{# Story 5.11 엔티티 관리(생성/편집/비활성화) 폼 섹션 — Jinja2+HTMX(신규 npm/빌드 0, HTMX 2 CDN). #}
-{# 폼은 정적, 목록만 30초 polling. secret 입력은 *_ref 핸들만(평문 금지 — 라벨로 명시, autoescape 유지). #}
-{# 생성 폼은 HTMX 가 입력을 urlencoded 로 직렬화(hx-post). 편집/비활성화는 id 가 URL path 라 JS 로 조립. #}
+{# Story 5.11 엔티티 관리 — 재설계(가이드 + 드롭다운). 연결 id(계정/업체/채널)는 raw 입력이 아니라
+   HTMX 로 채운 <select> 에서 고른다(비개발 운영자). 생성은 hx-post 폼 직렬화, 편집/비활성화는 id 가
+   URL path 라 JS(crudUpdate) 로 조립. secret 은 *_ref 핸들만(평문 금지). autoescape 유지. #}
 <div class="entity-admin" id="entity-admin">
-  <p class="muted">엔티티 CRUD — 생성/편집/비활성화는 OPERATOR↑ 권한이 필요하며, actor/시각/변경 diff 가 audit 에 기록됩니다. 비활성화는 물리 삭제가 아니라 soft delete(상태 전이)입니다.</p>
   <div id="entity-result" class="action-result muted">엔티티 액션 결과가 여기에 표시됩니다.</div>
 
+  {# ① 새 업체 추가 — 계정은 드롭다운에서 선택(id 직접 입력 0) #}
   <fieldset>
-    <legend>고객(Tenant)</legend>
-    <form hx-post="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
-      <label>고객명 <input type="text" name="name" required></label>
-      <label>사유 <input type="text" name="reason"></label>
-      <button type="submit">생성</button>
-    </form>
-    <div class="edit-row">
-      <label>편집 id <input type="text" id="cust-edit-id"></label>
-      <label>새 고객명 <input type="text" id="cust-edit-name"></label>
-      <button type="button" onclick="crudUpdate('/admin/customers/', 'cust-edit-id', '', {name: cval('cust-edit-name')})">편집</button>
-    </div>
-    <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
-  </fieldset>
-
-  <fieldset>
-    <legend>플랫폼 계정 (secret 은 *_ref 핸들만 — 평문 금지)</legend>
-    <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
-      <label>플랫폼
-        <select name="platform"><option value="BAEMIN">BAEMIN</option><option value="COUPANG">COUPANG</option></select>
-      </label>
-      <label>라벨 <input type="text" name="label"></label>
-      <label>username_ref (핸들만, 평문 금지) <input type="text" name="username_ref" placeholder="vault://..."></label>
-      <label>password_ref (핸들만, 평문 금지) <input type="text" name="password_ref" placeholder="vault://..."></label>
-      <button type="submit">생성</button>
-    </form>
-    <div class="edit-row">
-      <label>편집 id <input type="text" id="acc-edit-id"></label>
-      <label>라벨 <input type="text" id="acc-edit-label"></label>
-      <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', {label: cval('acc-edit-label')})">편집</button>
-    </div>
-    <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
-  </fieldset>
-
-  <fieldset>
-    <legend>모니터링 대상 (쿠팡 center_name 비었거나 배민 기본값이면 위험 경고)</legend>
+    <legend>① 새 업체 추가</legend>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">계정은 등록된 것에서 고르세요. id 를 직접 입력하지 않습니다. 쿠팡은 센터/상점명이 비면 오발송 위험 경고가 뜹니다.</p>
+    <p class="inline-cta"><a href="#entity-account-form">계정 생성</a></p>
     <form hx-post="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
-      <label>platform_account_id <input type="text" name="platform_account_id"></label>
-      <label>표시명 <input type="text" name="name" required></label>
-      <label>center_name(기대 센터/상점명) <input type="text" name="center_name"></label>
-      <label>external_id <input type="text" name="external_id"></label>
-      <label>url <input type="text" name="url"></label>
-      <label>interval_minutes <input type="number" name="interval_minutes" value="0"></label>
-      <button type="submit">생성</button>
-    </form>
-    <div class="edit-row">
-      <label>편집 id <input type="text" id="tgt-edit-id"></label>
-      <label>center_name <input type="text" id="tgt-edit-center"></label>
-      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {center_name: cval('tgt-edit-center')})">편집</button>
-      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '대상을 비활성화(soft delete)하시겠습니까?')">비활성화</button>
-    </div>
-    <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
-  </fieldset>
-
-  <fieldset>
-    <legend>메시지 채널 (chat_id/thread_id/방명 = 라우팅 식별자, secret 아님)</legend>
-    <form hx-post="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
-      <label>메신저
-        <select name="messenger"><option value="TELEGRAM">TELEGRAM</option><option value="KAKAO">KAKAO</option></select>
+      <label>플랫폼 계정
+        <select name="platform_account_id"
+                hx-get="/admin/platform-accounts/options?tenant={{ tenant_id | urlencode }}"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
-      <label>telegram_chat_id <input type="text" name="telegram_chat_id"></label>
-      <label>thread_id <input type="text" name="thread_id"></label>
-      <label>kakao_room_name <input type="text" name="kakao_room_name"></label>
-      <label>registration_code <input type="text" name="registration_code"></label>
-      <button type="submit">생성(PENDING)</button>
+      <label>업체 표시명 <input type="text" name="name" required></label>
+      <label>센터/상점명 (쿠팡 필수) <input type="text" name="center_name"></label>
+      <label>주소(url) <input type="text" name="url"></label>
+      <label>external_id <input type="text" name="external_id"></label>
+      <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
+      <button type="submit" class="create">업체 추가</button>
     </form>
-    <div class="edit-row">
-      <label>편집 id <input type="text" id="ch-edit-id"></label>
-      <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
-      <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', {telegram_chat_id: cval('ch-edit-chat')})">편집</button>
-      <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '채널을 비활성화(soft delete)하시겠습니까?')">비활성화</button>
-    </div>
-    <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
   </fieldset>
 
+  {# ② 전송 연결 — 업체→채널(둘 다 드롭다운, 1:N fan-out) #}
   <fieldset>
-    <legend>전송 규칙 (한 대상 → 여러 채널 1:N fan-out)</legend>
+    <legend>② 전송 연결 (업체 → 채널)</legend>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">한 업체를 여러 채널에 연결할 수 있습니다(1:N). 채널/방명은 라우팅 식별자(secret 아님).</p>
+    <p class="inline-cta"><a href="#entity-channel-form">채널 생성</a></p>
     <form hx-post="/admin/delivery-rules?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
-      <label>target_id <input type="text" name="target_id"></label>
-      <label>channel_id <input type="text" name="channel_id"></label>
-      <label>template_id <input type="text" name="template_id"></label>
+      <label>업체
+        <select name="target_id"
+                hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <label>전송 채널
+        <select name="channel_id"
+                hx-get="/admin/messenger-channels/options?tenant={{ tenant_id | urlencode }}"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <input type="hidden" name="template_id" value="">
       <label>변경시에만 전송 <input type="checkbox" name="send_only_on_change" value="true"></label>
-      <button type="submit">생성</button>
+      <button type="submit" class="create">연결 생성</button>
     </form>
-    <div class="edit-row">
-      <label>편집 id <input type="text" id="rule-edit-id"></label>
-      <button type="button" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '전송 규칙을 비활성화(enabled=False)하시겠습니까?')">비활성화</button>
-    </div>
-    <div hx-get="/admin/delivery-rules?tenant={{ tenant_id | urlencode }}" hx-trigger="load" hx-swap="innerHTML" hx-include="this">
-      <label class="muted">목록 조회 target_id <input type="text" name="target_id"></label>
-    </div>
   </fieldset>
+
+  {# ③ 등록된 업체 — 편집/비활성화(업체 드롭다운에서 선택) #}
+  <fieldset>
+    <legend>③ 등록된 업체 — 편집 / 비활성화</legend>
+    <div class="edit-row" style="border-top:0; padding-top:0">
+      <label>업체 선택
+        <select id="tgt-edit-id"
+                hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <label>센터/상점명 <input type="text" id="tgt-edit-center"></label>
+      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {center_name: cval('tgt-edit-center')})">편집</button>
+      <button type="button" class="danger" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button>
+    </div>
+    <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+  </fieldset>
+
+  {# 보조: 계정·채널·고객 관리(새로 만들 때만) — 접힘 #}
+  <details class="aux">
+    <summary>계정 · 채널 · 고객 관리 <span class="tag">새로 만들 때만</span></summary>
+    <div class="aux-body">
+
+      <fieldset id="entity-account-form">
+        <legend>플랫폼 계정 (secret 은 *_ref 핸들만 — 평문 금지)</legend>
+        <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
+          <label>플랫폼
+            <select name="platform"><option value="BAEMIN">BAEMIN</option><option value="COUPANG">COUPANG</option></select>
+          </label>
+          <label>라벨 <input type="text" name="label"></label>
+          <label>username_ref (핸들만, 평문 금지) <input type="text" name="username_ref" placeholder="vault://..."></label>
+          <label>password_ref (핸들만, 평문 금지) <input type="text" name="password_ref" placeholder="vault://..."></label>
+          <label>verification_email_address_ref (핸들만) <input type="text" name="verification_email_address_ref" placeholder="vault://..."></label>
+          <label>verification_email_app_password_ref (핸들만) <input type="text" name="verification_email_app_password_ref" placeholder="vault://..."></label>
+          <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
+          <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
+          <button type="submit" class="create">계정 생성</button>
+        </form>
+        <div class="edit-row">
+          <label>계정 선택
+            <select id="acc-edit-id"
+                    hx-get="/admin/platform-accounts/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>새 라벨 <input type="text" id="acc-edit-label"></label>
+          <label>verification_email_address_ref <input type="text" id="acc-edit-email-ref" placeholder="비우면 유지"></label>
+          <label>verification_email_app_password_ref <input type="text" id="acc-edit-email-password-ref" placeholder="비우면 유지"></label>
+          <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
+          <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
+          <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', {label: cval('acc-edit-label'), verification_email_address_ref: cval('acc-edit-email-ref'), verification_email_app_password_ref: cval('acc-edit-email-password-ref'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')})">편집</button>
+        </div>
+        <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      <fieldset id="entity-channel-form">
+        <legend>메시지 채널 (chat_id/thread_id/방명 = 라우팅 식별자, secret 아님)</legend>
+        <form hx-post="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
+          <label>메신저
+            <select name="messenger"><option value="TELEGRAM">TELEGRAM</option><option value="KAKAO">KAKAO</option></select>
+          </label>
+          <label>telegram_chat_id <input type="text" name="telegram_chat_id"></label>
+          <label>thread_id <input type="text" name="thread_id"></label>
+          <label>kakao_room_name <input type="text" name="kakao_room_name"></label>
+          <label>registration_code <input type="text" name="registration_code"></label>
+          <button type="submit" class="create">채널 생성(PENDING)</button>
+        </form>
+        <div class="edit-row">
+          <label>채널 선택
+            <select id="ch-edit-id"
+                    hx-get="/admin/messenger-channels/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
+          <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', {telegram_chat_id: cval('ch-edit-chat')})">편집</button>
+          <button type="button" class="danger" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button>
+        </div>
+        <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>고객(Tenant)</legend>
+        <form hx-post="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
+          <label>고객명 <input type="text" name="name" required></label>
+          <label>사유 <input type="text" name="reason"></label>
+          <button type="submit" class="create">고객 생성</button>
+        </form>
+        <div class="edit-row">
+          <label>고객 선택
+            <select id="cust-edit-id"
+                    hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>새 고객명 <input type="text" id="cust-edit-name"></label>
+          <button type="button" onclick="crudUpdate('/admin/customers/', 'cust-edit-id', '', {name: cval('cust-edit-name')})">편집</button>
+        </div>
+        <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+    </div>
+  </details>
 </div>
 
 <script>
   // 편집/비활성화는 id 가 URL path 라 JS 로 조립해 HTMX 로 POST 한다(생성은 hx-post 폼이 직렬화).
+  // 드롭다운(<select>)도 input 과 동일하게 .value 를 읽으므로 cval 이 그대로 동작한다(raw-id 입력 제거).
   var CRUD_TENANT = "{{ tenant_id | urlencode }}";
   function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
   function crudUpdate(prefix, idField, suffix, values, confirmMsg) {
     var id = cval(idField);
-    if (!id) { document.getElementById('entity-result').textContent = "편집 대상 id 를 입력하세요."; return; }
+    if (!id) { document.getElementById('entity-result').textContent = "편집할 대상을 드롭다운에서 선택하세요."; return; }
     if (confirmMsg && !window.confirm(confirmMsg)) { return; }
     var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + CRUD_TENANT;
     htmx.ajax('POST', url, { target: '#entity-result', swap: 'innerHTML', values: values });

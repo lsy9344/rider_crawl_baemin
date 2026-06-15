@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
 from .config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
 from .models import CurrentScreenSnapshot
-from .parser import parse_achievement_report_text, parse_current_screen_html
+from .parser import has_today_delivery_status, parse_achievement_report_text, parse_current_screen_html
 
 
 def crawl_current_screen(
@@ -228,17 +228,23 @@ async def _collect_baemin_achievement_report_text(page: Any, config: AppConfig) 
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while loop.time() < deadline:
         await _scroll_baemin_report(page)
         for text in await _baemin_report_text_candidates(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         await page.wait_for_timeout(1_000)
 
     if last_report_text:
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
@@ -611,17 +617,23 @@ def _collect_baemin_achievement_report_text_sync(page: Any, config: AppConfig) -
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while time.monotonic() < deadline:
         _scroll_baemin_report_sync(page)
         for text in _baemin_report_text_candidates_sync(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         page.wait_for_timeout(1_000)
 
     if last_report_text:
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
