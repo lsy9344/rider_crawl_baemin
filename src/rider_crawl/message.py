@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 import re
 
 from .models import CurrentScreenSnapshot, PeakPeriodSnapshot, PerformanceSnapshot
@@ -87,7 +88,7 @@ def _render_performance_message(
             f"저녁 논피크 : {_format_period(dashboard.dinner_non_peak, times['dinner_non_peak'])}",
             "",
             f"배정 {_format_count(dashboard.assigned_count)}건 / 처리 {_format_count(dashboard.processed_count)}건",
-            f"거절률: {_format_count(dashboard.reject_rate)}%",
+            f"거절률: {_format_adjusted_reject_rate(dashboard.reject_rate)}%",
         ]
     )
     # rider-performance 페이지도 함께 읽는 경우 온라인 수행중 인원을 붙인다.
@@ -135,6 +136,13 @@ def _format_count(value: float | int) -> str:
     return str(value)
 
 
+def _format_adjusted_reject_rate(value: float | int) -> str:
+    adjusted = min(Decimal("100"), Decimal(str(value)) + Decimal("1"))
+    if adjusted == adjusted.to_integral_value():
+        return str(int(adjusted))
+    return format(adjusted.normalize(), "f")
+
+
 def _format_baemin_period(done: float | int, goal: float | int, rate: float | int | None) -> str:
     if goal or rate is not None:
         shown_rate = 0 if rate is None else rate
@@ -145,4 +153,4 @@ def _format_baemin_period(done: float | int, goal: float | int, rate: float | in
 def _rate_line(label: str, value: float | None) -> list[str]:
     if value is None:
         return []
-    return [f"{label} : {_format_count(value)}%"]
+    return [f"{label} : {_format_adjusted_reject_rate(value)}%"]

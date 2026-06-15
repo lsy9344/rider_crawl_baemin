@@ -37,7 +37,7 @@ def test_render_current_screen_message_matches_spec_order():
             "저녁피크 : 0건",
             "저녁논피크 : 3건",
             "",
-            "거절율 : 2.3%",
+            "거절율 : 3.3%",
         ]
     )
 
@@ -115,6 +115,34 @@ def test_render_current_screen_message_includes_achievement_goals_when_available
             "저녁피크 : 433건/330건[100%]",
             "저녁논피크 : 374건/319건[100%]",
             "",
-            "거절율 : 11.82%",
+            "거절율 : 12.82%",
         ]
     )
+
+
+def test_render_current_screen_message_caps_adjusted_reject_rate_at_100_percent():
+    snapshot = CurrentScreenSnapshot(
+        center_name="배민 배달현황",
+        date_label="",
+        shift_label="배달현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at="14:02",
+        available_current=1,
+        available_total=20,
+        waiting_count=19,
+        online_riders=1,
+        rejected_ignored_count=2,
+        cancelled_count=1,
+        completed_count=9,
+        sequence_violation_count=0,
+        lunch_peak_count=7,
+        afternoon_non_peak_count=2,
+        dinner_peak_count=0,
+        dinner_non_peak_count=0,
+        non_peak_count=2,
+        active_riders=1,
+        reject_rate=99.4,
+    )
+
+    assert "거절율 : 100%" in render_current_screen_message(snapshot)
