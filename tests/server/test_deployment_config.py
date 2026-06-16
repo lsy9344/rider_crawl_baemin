@@ -62,6 +62,14 @@ def test_backend_api_env_documents_admin_allowed_origins() -> None:
     assert "RIDER_ADMIN_ALLOWED_ORIGINS" in env
 
 
+def test_telegram_env_documents_default_supported_env_secret_refs() -> None:
+    env = Path("deploy/env/telegram-webhook.env").read_text(encoding="utf-8")
+
+    assert "TELEGRAM_WEBHOOK_SECRET_REF=env:RIDER_TELEGRAM_WEBHOOK_SECRET" in env
+    assert "TELEGRAM_BOT_TOKEN_REF=env:RIDER_TELEGRAM_BOT_TOKEN" in env
+    assert "vault://telegram" not in env
+
+
 def test_readme_documents_coupang_peak_dashboard_as_single_primary_url() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
