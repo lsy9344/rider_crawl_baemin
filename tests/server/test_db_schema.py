@@ -70,7 +70,7 @@ REQUIRED_FIELDS = {
         "id", "tenant_id", "messenger", "telegram_chat_id", "thread_id", "kakao_room_name", "state",
     },
     "delivery_rules": {
-        "id", "target_id", "channel_id", "template_id", "enabled", "send_only_on_change",
+        "id", "tenant_id", "target_id", "channel_id", "template_id", "enabled", "send_only_on_change",
     },
     "snapshots": {
         "id", "target_id", "collected_at", "normalized_json", "parser_version", "quality_state",
@@ -179,6 +179,50 @@ def test_delivery_logs_dedup_unique_constraint():
     assert uniques["uq_delivery_logs_dedup_key"] == {"dedup_key"}
 
 
+def test_cross_tenant_integrity_constraints_are_db_level():
+    """DB가 target/account, target/channel tenant 불일치를 직접 막아야 한다."""
+
+    platform_accounts = Base.metadata.tables["platform_accounts"]
+    monitoring_targets = Base.metadata.tables["monitoring_targets"]
+    messenger_channels = Base.metadata.tables["messenger_channels"]
+    delivery_rules = Base.metadata.tables["delivery_rules"]
+
+    unique_sets = {
+        constraint.name: tuple(col.name for col in constraint.columns)
+        for table in (platform_accounts, monitoring_targets, messenger_channels)
+        for constraint in table.constraints
+        if isinstance(constraint, sa.UniqueConstraint)
+    }
+    assert unique_sets["uq_platform_accounts_tenant_id_id"] == ("tenant_id", "id")
+    assert unique_sets["uq_monitoring_targets_tenant_id_id"] == ("tenant_id", "id")
+    assert unique_sets["uq_messenger_channels_tenant_id_id"] == ("tenant_id", "id")
+
+    fk_sets = {
+        constraint.name: (
+            tuple(element.parent.name for element in constraint.elements),
+            constraint.elements[0].column.table.name,
+            tuple(element.column.name for element in constraint.elements),
+        )
+        for table in (monitoring_targets, delivery_rules)
+        for constraint in table.foreign_key_constraints
+    }
+    assert fk_sets["fk_monitoring_targets_tenant_account"] == (
+        ("tenant_id", "platform_account_id"),
+        "platform_accounts",
+        ("tenant_id", "id"),
+    )
+    assert fk_sets["fk_delivery_rules_tenant_target"] == (
+        ("tenant_id", "target_id"),
+        "monitoring_targets",
+        ("tenant_id", "id"),
+    )
+    assert fk_sets["fk_delivery_rules_tenant_channel"] == (
+        ("tenant_id", "channel_id"),
+        "messenger_channels",
+        ("tenant_id", "id"),
+    )
+
+
 def test_account_id_field_name_preserved_on_auth_sessions():
     # 계약 필드명 account_id 를 platform_account_id 로 바꾸지 않았는지 잠근다.
     cols = set(Base.metadata.tables["auth_sessions"].columns.keys())
@@ -245,6 +289,19 @@ def test_offline_upgrade_emits_dbx_unique_guards():
     assert "token_hash IS NOT NULL" in sql
 
 
+def test_offline_upgrade_emits_cross_tenant_integrity_guards():
+    sql = _offline_sql("upgrade")
+    for name in (
+        "uq_platform_accounts_tenant_id_id",
+        "uq_monitoring_targets_tenant_id_id",
+        "uq_messenger_channels_tenant_id_id",
+        "fk_monitoring_targets_tenant_account",
+        "fk_delivery_rules_tenant_target",
+        "fk_delivery_rules_tenant_channel",
+    ):
+        assert name in sql
+
+
 def test_verification_email_migration_drops_backfill_server_defaults():
     source = (
         MIGRATIONS_DIR / "versions" / "0008_platform_account_verification_email_refs.py"
@@ -280,6 +337,7 @@ EXPECTED_FOREIGN_KEYS = {
     "monitoring_targets": {
         ("tenant_id", "tenants", "id"),
         ("platform_account_id", "platform_accounts", "id"),
+        ("tenant_id", "platform_accounts", "tenant_id"),
     },
     "auth_sessions": {("account_id", "platform_accounts", "id")},
     "browser_profiles": {
@@ -289,7 +347,9 @@ EXPECTED_FOREIGN_KEYS = {
     "snapshots": {("target_id", "monitoring_targets", "id")},
     "delivery_rules": {
         ("target_id", "monitoring_targets", "id"),
+        ("tenant_id", "monitoring_targets", "tenant_id"),
         ("channel_id", "messenger_channels", "id"),
+        ("tenant_id", "messenger_channels", "tenant_id"),
     },
     "jobs": {
         ("target_id", "monitoring_targets", "id"),
@@ -345,12 +405,27 @@ def test_pk_constraint_names_follow_naming_convention():
 
 def test_fk_constraint_names_follow_naming_convention():
     # fk_<table>_<col>_<reftable> — 결정적 이름이 autogenerate drift 0 의 토대다.
+    composite_names = {
+        "fk_monitoring_targets_tenant_account",
+        "fk_delivery_rules_tenant_target",
+        "fk_delivery_rules_tenant_channel",
+    }
     offenders = []
     for table_name, fks in EXPECTED_FOREIGN_KEYS.items():
         table = Base.metadata.tables[table_name]
-        names = {c.name for c in table.constraints if isinstance(c, sa.ForeignKeyConstraint)}
-        for local_col, ref_table, _ in fks:
-            expected = f"fk_{table_name}_{local_col}_{ref_table}"
+        constraints = [
+            c for c in table.constraints if isinstance(c, sa.ForeignKeyConstraint)
+        ]
+        names = {c.name for c in constraints}
+        for constraint in constraints:
+            if len(constraint.elements) > 1:
+                if constraint.name not in composite_names:
+                    offenders.append(constraint.name or "<unnamed-composite-fk>")
+                continue
+            element = constraint.elements[0]
+            expected = (
+                f"fk_{table_name}_{element.parent.name}_{element.column.table.name}"
+            )
             if expected not in names:
                 offenders.append(expected)
     assert offenders == [], offenders
@@ -396,6 +471,28 @@ EXPECTED_JSON_COLUMNS = {
 def test_json_columns_use_portable_json_type(table_name, col_name):
     col = Base.metadata.tables[table_name].columns[col_name]
     assert isinstance(col.type, sa.JSON), f"{table_name}.{col_name} 은 JSON(JSONB) 여야 한다"
+
+
+def test_jobs_json_columns_are_db_checked_as_objects():
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in Base.metadata.tables["jobs"].constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+
+    assert "ck_jobs_payload_json_object" in checks
+    assert "ck_jobs_result_json_object" in checks
+    assert "jsonb_typeof(payload_json) = 'object'" in checks["ck_jobs_payload_json_object"]
+    assert "jsonb_typeof(result_json) = 'object'" in checks["ck_jobs_result_json_object"]
+
+
+def test_offline_upgrade_emits_jobs_json_object_checks():
+    sql = _offline_sql("upgrade")
+
+    assert "ck_jobs_payload_json_object" in sql
+    assert "ck_jobs_result_json_object" in sql
+    assert "jsonb_typeof(payload_json) = 'object'" in sql
+    assert "jsonb_typeof(result_json) = 'object'" in sql
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -451,8 +548,8 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # DBX unique guards moved the single head to 0009.
-    assert heads[0] == "0009_dbx_unique_guards"
+    # Tenant-scoped relational guards moved the single head to 0010.
+    assert heads[0] == "0010_tenant_scope_guards"
     assert (
         script.get_revision("0009_dbx_unique_guards").down_revision
         == "0008_acct_email_2fa_refs"

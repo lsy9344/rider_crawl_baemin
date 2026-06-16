@@ -11,7 +11,7 @@
   <tbody>
     {% for r in auth_required %}
     <tr>
-      <td>인증 필요 대상</td>
+      <td>{{ r.target_name or "대상명 없음" }}</td>
       <td>{{ r.reason }}</td>
       <td>
         {% if r.target_id %}

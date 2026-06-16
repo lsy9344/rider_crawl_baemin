@@ -70,9 +70,8 @@
       <label>규칙 선택
         <select id="rule-edit-id"><option value="">업체 선택 후 규칙 보기</option></select>
       </label>
-      <label>template_id <input type="text" id="rule-edit-template"></label>
       <label>변경시에만 전송 <input type="checkbox" id="rule-edit-change-only" value="true"></label>
-      <button type="button" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '', {template_id: cval('rule-edit-template'), send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button>
+      <button type="button" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button>
       <button type="button" class="danger" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button>
     </div>
   </fieldset>

@@ -626,6 +626,21 @@ def test_dashboard_hides_raw_id_debug_action_panel_by_default() -> None:
     assert "act-job-id" not in body
 
 
+def test_dashboard_mobile_actions_keep_touch_target_size() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+    mobile_css = body[body.index("@media (max-width: 720px)"):]
+
+    assert "min-height: 44px" in mobile_css
+    assert ".trow > .sev-badge { display: none; }" not in mobile_css
+
+
+def test_auth_required_fragment_names_the_target_not_generic_label() -> None:
+    body = _client(_seeded_repo()).get(f"/admin/auth-required?tenant={_TENANT}").text
+
+    assert "가게" in body
+    assert "인증 필요 대상</td>" not in body
+
+
 def test_dashboard_full_page_without_tenant_param_renders() -> None:
     # ?tenant 미지정(빈 tenant seam) 이어도 200 — 대상은 빈 안내문, agent fleet 은 전역 표시.
     r = _client(_seeded_repo()).get("/admin")

@@ -719,6 +719,17 @@ def test_entities_form_exposes_full_edit_and_delivery_rule_controls() -> None:
     assert "interval_minutes: cval('tgt-edit-interval')" in body
 
 
+def test_entities_form_does_not_expose_raw_template_id_editor() -> None:
+    repo = _seeded_repo()
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    body = client.get("/admin/entities?tenant=tn-1").text
+
+    assert 'id="rule-edit-template"' not in body
+    assert 'type="text" id="rule-edit-template"' not in body
+    assert "template_id: cval(" not in body
+
+
 def test_entities_list_hides_raw_ids_by_default() -> None:
     repo = _seeded_repo()
     repo.seed_monitoring_target(_target())

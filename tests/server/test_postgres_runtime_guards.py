@@ -27,6 +27,8 @@ def test_snapshot_fanout_requires_channel_in_locked_job_tenant() -> None:
     assert "record = _record_scoped_to_locked_job(record, job)" in source
     assert '_required_job_payload_text(job, "tenant_id")' in source
     assert "MessengerChannelRow.tenant_id == _uuid(record.tenant_id)" in source
+    assert "DeliveryRuleRow.tenant_id == _uuid(record.tenant_id)" in source
+    assert "DeliveryRuleRow.tenant_id == MessengerChannelRow.tenant_id" in source
 
 
 def test_snapshot_enqueue_only_reserves_telegram_delivery_for_after_commit() -> None:

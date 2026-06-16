@@ -10,7 +10,7 @@ dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하�
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Index, Integer, String
+from sqlalchemy import ForeignKeyConstraint, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -19,6 +19,9 @@ from ._columns import fk, ts, uuid_pk
 
 class PlatformAccount(Base):
     __tablename__ = "platform_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_platform_accounts_tenant_id_id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = fk("tenants.id")
@@ -51,7 +54,15 @@ class MonitoringTarget(Base):
     last_enqueued_at: Mapped[datetime | None] = ts(nullable=True)  # 멱등/가시성
 
     # due 스캔(next_run_at <= now) 최소화 — scheduler tick 성능.
-    __table_args__ = (Index("ix_monitoring_targets_next_run_at", "next_run_at"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_monitoring_targets_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "platform_account_id"],
+            ["platform_accounts.tenant_id", "platform_accounts.id"],
+            name="fk_monitoring_targets_tenant_account",
+        ),
+        Index("ix_monitoring_targets_next_run_at", "next_run_at"),
+    )
 
 
 class AuthSession(Base):

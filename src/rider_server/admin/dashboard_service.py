@@ -111,6 +111,7 @@ class AuthRequiredRow:
     target_id: str | None
     profile_id: str | None
     reason: str
+    target_name: str | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -219,9 +220,26 @@ class DashboardService:
         return await repo.channel_health(tenant_id=tenant_id, now=now)
 
     async def auth_required_rows(
-        self, repo: DashboardRepository, *, tenant_id: str
+        self, repo: DashboardRepository, *, tenant_id: str, now: datetime | None = None
     ) -> list[AuthRequiredRow]:
-        return await repo.auth_required(tenant_id=tenant_id)
+        rows = await repo.auth_required(tenant_id=tenant_id)
+        missing_names = [row for row in rows if row.target_id and not row.target_name]
+        if not missing_names or now is None:
+            return rows
+        targets = {
+            facts.target_id: facts.name
+            for facts in await repo.target_health(tenant_id=tenant_id, now=now)
+        }
+        return [
+            AuthRequiredRow(
+                tenant_id=row.tenant_id,
+                target_id=row.target_id,
+                profile_id=row.profile_id,
+                reason=row.reason,
+                target_name=row.target_name or targets.get(row.target_id or ""),
+            )
+            for row in rows
+        ]
 
 
 # ══════════════════════════════════════════════════════════════════════════

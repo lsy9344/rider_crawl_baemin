@@ -220,8 +220,10 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 select(DeliveryRuleRow, MessengerChannelRow)
                 .join(MessengerChannelRow, DeliveryRuleRow.channel_id == MessengerChannelRow.id)
                 .where(
+                    DeliveryRuleRow.tenant_id == _uuid(record.tenant_id),
                     DeliveryRuleRow.target_id == _uuid(record.target_id),
                     DeliveryRuleRow.enabled.is_(True),
+                    DeliveryRuleRow.tenant_id == MessengerChannelRow.tenant_id,
                     MessengerChannelRow.tenant_id == _uuid(record.tenant_id),
                     MessengerChannelRow.state == "ACTIVE",
                 )

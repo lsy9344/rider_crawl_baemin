@@ -10,7 +10,7 @@ Postgres 에선 JSONB. telegram_chat_id/thread_id 는 라우팅 식별자라 sec
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Index, String, UniqueConstraint, text
+from sqlalchemy import Boolean, ForeignKeyConstraint, Index, String, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base, json_variant
@@ -20,6 +20,7 @@ from ._columns import fk, ts, uuid_pk
 class MessengerChannel(Base):
     __tablename__ = "messenger_channels"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_messenger_channels_tenant_id_id"),
         Index(
             "uq_messenger_channels_active_telegram_topic",
             "telegram_chat_id",
@@ -56,8 +57,21 @@ class MessengerChannel(Base):
 
 class DeliveryRule(Base):
     __tablename__ = "delivery_rules"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "target_id"],
+            ["monitoring_targets.tenant_id", "monitoring_targets.id"],
+            name="fk_delivery_rules_tenant_target",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "channel_id"],
+            ["messenger_channels.tenant_id", "messenger_channels.id"],
+            name="fk_delivery_rules_tenant_channel",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     target_id: Mapped[uuid.UUID] = fk("monitoring_targets.id")
     channel_id: Mapped[uuid.UUID] = fk("messenger_channels.id")
     template_id: Mapped[str] = mapped_column(String, nullable=False, default="")

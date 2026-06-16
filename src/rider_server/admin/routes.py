@@ -281,7 +281,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
     targets = await _target_rows_for_display(repo, tenant_id=tenant_id, now=now)
     agents = await _service.agent_rows(repo, now=now)
     channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
-    auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id)
+    auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -340,5 +340,5 @@ async def auth_required_fragment(
 ) -> HTMLResponse:
     """``GET /admin/auth-required`` — AC4 인증 필요 대상 필터 fragment."""
 
-    rows = await _service.auth_required_rows(_repo(request), tenant_id=_tenant_id(request))
+    rows = await _service.auth_required_rows(_repo(request), tenant_id=_tenant_id(request), now=_now())
     return templates.TemplateResponse(request, "_auth_required.html", {"auth_required": rows})

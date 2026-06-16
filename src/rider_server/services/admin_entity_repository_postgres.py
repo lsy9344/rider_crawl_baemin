@@ -247,15 +247,30 @@ class PostgresAdminEntityRepository:
         await self._insert_with_audit(MessengerChannelRow, values, audit)
 
     async def create_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None:
-        values = {
-            "id": _uuid(rule.id),
-            "target_id": _uuid(rule.target_id),
-            "channel_id": _uuid(rule.channel_id),
-            "template_id": rule.template_id,
-            "enabled": rule.enabled,
-            "send_only_on_change": rule.send_only_on_change,
-        }
-        await self._insert_with_audit(DeliveryRuleRow, values, audit)
+        try:
+            async with self._session_factory() as session:
+                tenant_id = (
+                    await session.execute(
+                        select(MonitoringTargetRow.tenant_id).where(
+                            MonitoringTargetRow.id == _uuid(rule.target_id)
+                        )
+                    )
+                ).scalar_one()
+                await session.execute(
+                    insert(DeliveryRuleRow).values(
+                        id=_uuid(rule.id),
+                        tenant_id=tenant_id,
+                        target_id=_uuid(rule.target_id),
+                        channel_id=_uuid(rule.channel_id),
+                        template_id=rule.template_id,
+                        enabled=rule.enabled,
+                        send_only_on_change=rule.send_only_on_change,
+                    )
+                )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise _duplicate_error(exc) from exc
 
     # ── save(UPDATE + audit, 동일 트랜잭션) ─────────────────────────────────────
     async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:

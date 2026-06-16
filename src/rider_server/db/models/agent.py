@@ -14,7 +14,7 @@ timestamps; plaintext registration codes and bearer tokens never enter the DB.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Index, Integer, String, text
+from sqlalchemy import CheckConstraint, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base, json_variant
@@ -90,4 +90,14 @@ class Job(Base):
 
     # claim 대상 행(status='PENDING', run_after 정렬) 스캔 최소화 — SKIP LOCKED 성능.
     # naming_convention 의존 없이 명시 이름(결정적). 복합 (status, run_after).
-    __table_args__ = (Index("ix_jobs_status", "status", "run_after"),)
+    __table_args__ = (
+        Index("ix_jobs_status", "status", "run_after"),
+        CheckConstraint(
+            "payload_json IS NULL OR jsonb_typeof(payload_json) = 'object'",
+            name="payload_json_object",
+        ),
+        CheckConstraint(
+            "result_json IS NULL OR jsonb_typeof(result_json) = 'object'",
+            name="result_json_object",
+        ),
+    )
