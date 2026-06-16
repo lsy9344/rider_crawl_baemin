@@ -54,6 +54,7 @@ async def _seed(session_factory) -> None:
         session.add(
             Tenant(id=uuid.UUID(_TENANT), name="t", status="ACTIVE", created_at=_T0)
         )
+        await session.flush()
         session.add(
             Subscription(
                 id=uuid.uuid4(),
@@ -88,6 +89,7 @@ async def _seed(session_factory) -> None:
                 },
             )
         )
+        await session.flush()
         # due(next_run_at NULL = 즉시 due), future(미래), paused(상태 비활성).
         session.add(
             MonitoringTarget(
@@ -138,6 +140,7 @@ def _fresh_pg() -> tuple[object, object, object, object]:
     """빈 PG 에 0001+0002+0003 적용 후 (repo, queue_backend, session_factory, teardown)."""
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.queue import PostgresQueueBackend
@@ -151,7 +154,7 @@ def _fresh_pg() -> tuple[object, object, object, object]:
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     repo = PostgresSchedulerRepository(factory)

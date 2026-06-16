@@ -84,23 +84,29 @@ async def _seed(session_factory) -> None:
     async with session_factory() as session:
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
+        await session.flush()
         session.add(_acc(_ACC_A_BAEMIN, _TENANT_A, "BAEMIN", "ACTIVE"))
         session.add(_acc(_ACC_A_COUPANG, _TENANT_A, "COUPANG", "AUTH_REQUIRED"))
         session.add(_acc(_ACC_B_BAEMIN, _TENANT_B, "BAEMIN", "AUTH_REQUIRED"))
         session.add(_acc(_ACC_B_COUPANG, _TENANT_B, "COUPANG", "ACTIVE"))
+        session.add(Agent(id=uuid.UUID(_AGENT_1), name="a1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(seconds=30), capacity_json={}))
+        session.add(Agent(id=uuid.UUID(_AGENT_2), name="a2", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(minutes=10), capacity_json={}))
+        await session.flush()
         session.add(_target(_T_A1, _TENANT_A, _ACC_A_BAEMIN, "ACTIVE"))
         session.add(_target(_T_B1, _TENANT_B, _ACC_B_BAEMIN, "ACTIVE"))
         session.add(_target(_T_A_INACTIVE, _TENANT_A, _ACC_A_BAEMIN, "INACTIVE"))
+        session.add(MessengerChannel(id=uuid.UUID(_CHAN_A), tenant_id=uuid.UUID(_TENANT_A), messenger="TELEGRAM", telegram_chat_id="-100a", thread_id=None, kakao_room_name=None, state="ACTIVE"))
+        session.add(MessengerChannel(id=uuid.UUID(_CHAN_B), tenant_id=uuid.UUID(_TENANT_B), messenger="TELEGRAM", telegram_chat_id="-100b", thread_id=None, kakao_room_name=None, state="ACTIVE"))
+        await session.flush()
         # freshness: T_A1 OK -3min(+MISSING -1min 제외), T_B1 OK -50min(CRITICAL 후보).
         session.add(_snap("51111111-1111-1111-1111-111111111111", _T_A1, _T0 - timedelta(minutes=3), "OK"))
         session.add(_snap("52222222-2222-2222-2222-222222222222", _T_A1, _T0 - timedelta(minutes=1), "MISSING_REQUIRED"))
         session.add(_snap("53333333-3333-3333-3333-333333333333", _T_B1, _T0 - timedelta(minutes=50), "OK"))
-        # channels(telegram) per tenant
-        session.add(MessengerChannel(id=uuid.UUID(_CHAN_A), tenant_id=uuid.UUID(_TENANT_A), messenger="TELEGRAM", telegram_chat_id="-100a", thread_id=None, kakao_room_name=None, state="ACTIVE"))
-        session.add(MessengerChannel(id=uuid.UUID(_CHAN_B), tenant_id=uuid.UUID(_TENANT_B), messenger="TELEGRAM", telegram_chat_id="-100b", thread_id=None, kakao_room_name=None, state="ACTIVE"))
+        await session.flush()
         # messages on existing snapshots
         session.add(Message(id=uuid.UUID("61111111-1111-1111-1111-111111111111"), snapshot_id=uuid.UUID("51111111-1111-1111-1111-111111111111"), template_version="v1", text_hash="h", text_redacted_preview="p"))
         session.add(Message(id=uuid.UUID("62222222-2222-2222-2222-222222222222"), snapshot_id=uuid.UUID("53333333-3333-3333-3333-333333333333"), template_version="v1", text_hash="h", text_redacted_preview="p"))
+        await session.flush()
 
         def _dlog(did, mid, chan, status, sent_at, error_code, dedup):
             return DeliveryLog(id=uuid.UUID(did), message_id=uuid.UUID(mid), channel_id=uuid.UUID(chan), status=status, dedup_key=dedup, error_code=error_code, sent_at=sent_at)
@@ -119,9 +125,6 @@ async def _seed(session_factory) -> None:
         # kakao queue lag fleet: A run_after -90s, B run_after -200s → fleet 최댓값 200s.
         session.add(_job(JOB_TYPE_KAKAO_SEND, _T_A1, "PENDING", run_after=_T0 - timedelta(seconds=90)))
         session.add(_job(JOB_TYPE_KAKAO_SEND, _T_B1, "PENDING", run_after=_T0 - timedelta(seconds=200)))
-        # agents(fleet): A1 online -30s, A2 offline -10min.
-        session.add(Agent(id=uuid.UUID(_AGENT_1), name="a1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(seconds=30), capacity_json={}))
-        session.add(Agent(id=uuid.UUID(_AGENT_2), name="a2", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(minutes=10), capacity_json={}))
         # auth_sessions: A_COUPANG 미해결(gmail 근사 카운트), B_BAEMIN 미해결(BAEMIN→제외), B_COUPANG 해결(제외).
         session.add(AuthSession(id=uuid.uuid4(), account_id=uuid.UUID(_ACC_A_COUPANG), state="AUTH_REQUIRED", reason=None, requested_at=_T0 - timedelta(minutes=2), resolved_at=None))
         session.add(AuthSession(id=uuid.uuid4(), account_id=uuid.UUID(_ACC_B_BAEMIN), state="AUTH_REQUIRED", reason=None, requested_at=_T0 - timedelta(minutes=2), resolved_at=None))
@@ -132,6 +135,7 @@ async def _seed(session_factory) -> None:
 def _fresh_pg():
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.metrics.repository_postgres import PostgresMetricsRepository
@@ -144,7 +148,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     repo = PostgresMetricsRepository(factory)

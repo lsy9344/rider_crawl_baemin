@@ -632,6 +632,9 @@ def test_dashboard_mobile_actions_keep_touch_target_size() -> None:
 
     assert "min-height: 44px" in mobile_css
     assert ".trow > .sev-badge { display: none; }" not in mobile_css
+    assert '"bar badge badge"' in mobile_css
+    assert ".trow > .sev-badge { grid-area: badge;" in mobile_css
+    assert ".t-reason { grid-area: reason;" in mobile_css
 
 
 def test_auth_required_fragment_names_the_target_not_generic_label() -> None:

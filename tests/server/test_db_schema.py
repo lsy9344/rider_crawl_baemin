@@ -489,8 +489,10 @@ def test_jobs_json_columns_are_db_checked_as_objects():
 def test_offline_upgrade_emits_jobs_json_object_checks():
     sql = _offline_sql("upgrade")
 
-    assert "ck_jobs_payload_json_object" in sql
-    assert "ck_jobs_result_json_object" in sql
+    assert "CONSTRAINT ck_jobs_payload_json_object" in sql
+    assert "CONSTRAINT ck_jobs_result_json_object" in sql
+    assert "ck_jobs_ck_jobs_payload_json_object" not in sql
+    assert "ck_jobs_ck_jobs_result_json_object" not in sql
     assert "jsonb_typeof(payload_json) = 'object'" in sql
     assert "jsonb_typeof(result_json) = 'object'" in sql
 
@@ -650,19 +652,23 @@ def test_postgres_upgrade_creates_14_tables_and_dedup_blocks_duplicate():
                 async with Session() as s:
                     s.add(Tenant(id=ids["tenant"], name="t", status="ACTIVE",
                                  created_at=_fixed_dt()))
+                    await s.flush()
                     s.add(PlatformAccount(id=ids["account"], tenant_id=ids["tenant"],
                                           platform="BAEMIN", label="l",
                                           username_ref="vault://u", password_ref="vault://p",
                                           auth_state="UNKNOWN"))
+                    s.add(MessengerChannel(id=ids["channel"], tenant_id=ids["tenant"],
+                                           messenger="TELEGRAM", state="ACTIVE"))
+                    await s.flush()
                     s.add(MonitoringTarget(id=ids["target"], tenant_id=ids["tenant"],
                                            platform_account_id=ids["account"], name="n",
                                            center_name="c", external_id="", url="",
                                            interval_minutes=0, status="ACTIVE"))
-                    s.add(MessengerChannel(id=ids["channel"], tenant_id=ids["tenant"],
-                                           messenger="TELEGRAM", state="ACTIVE"))
+                    await s.flush()
                     s.add(Snapshot(id=ids["snapshot"], target_id=ids["target"],
                                    collected_at=_fixed_dt(), normalized_json={},
                                    parser_version="v1", quality_state="OK"))
+                    await s.flush()
                     s.add(Message(id=ids["message"], snapshot_id=ids["snapshot"],
                                   template_version="v1", text_hash="h", text_redacted_preview="p"))
                     await s.commit()

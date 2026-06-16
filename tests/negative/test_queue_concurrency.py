@@ -60,6 +60,7 @@ def _fresh_pg_backend():
     """빈 PG 에 0001+0002 적용 후 PostgresQueueBackend + teardown 을 돌려준다."""
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.queue import PostgresQueueBackend
@@ -72,7 +73,7 @@ def _fresh_pg_backend():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     # jobs.agent_id FK 충족 — claim/complete agent UUID 를 미리 시드.
     asyncio.run(_seed_agents(factory, (_AGENT_1, _AGENT_2)))

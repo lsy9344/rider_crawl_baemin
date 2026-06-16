@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import Pool
 
 # ADD-8 DB 네이밍 정본 — 인덱스/유니크/FK/PK 제약 이름을 결정적으로 생성한다.
 # (Alembic autogenerate 가 ``uq_delivery_logs_dedup_key`` 같은 이름을 안정적으로 만들도록.)
@@ -48,12 +49,20 @@ def json_variant() -> JSON:
     이식 가능 타입으로 두어 native PG 전용 타입을 모델 레벨에서 강제하지 않는다.
     컬럼마다 새 인스턴스를 돌려준다(타입 객체 공유로 인한 상태 오염 회피).
     """
-    return JSON().with_variant(JSONB, "postgresql")
+    return JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
 
 
-def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
+def create_engine(
+    database_url: str,
+    *,
+    echo: bool = False,
+    poolclass: type[Pool] | None = None,
+) -> AsyncEngine:
     """async 엔진을 만든다. URL 은 호출부(settings/env)가 주입한다(하드코딩 금지)."""
-    return create_async_engine(database_url, echo=echo, future=True)
+    kwargs: dict[str, object] = {}
+    if poolclass is not None:
+        kwargs["poolclass"] = poolclass
+    return create_async_engine(database_url, echo=echo, future=True, **kwargs)
 
 
 def create_session_factory(

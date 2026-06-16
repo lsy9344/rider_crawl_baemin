@@ -46,6 +46,7 @@ async def _seed(session_factory) -> None:
     async with session_factory() as session:
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
+        await session.flush()
         session.add(
             PlatformAccount(
                 id=uuid.UUID(_ACC_A),
@@ -63,6 +64,7 @@ async def _seed(session_factory) -> None:
 def _fresh_pg():
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.services.admin_entity_repository_postgres import (
@@ -77,7 +79,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     repo = PostgresAdminEntityRepository(factory)

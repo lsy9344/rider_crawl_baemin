@@ -92,6 +92,7 @@ def _make_pg_backend():
     from alembic import command
     from alembic.config import Config
     from pathlib import Path
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.queue import PostgresQueueBackend
@@ -105,7 +106,7 @@ def _make_pg_backend():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     # jobs.agent_id 는 agents.id FK — claim/complete 가 쓰는 agent UUID 를 미리 시드해
     # FK 위반 없이 계약 suite 가 실 PG 에서도 통과하게 한다.
@@ -375,6 +376,24 @@ def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
         BaeminAuthState.CENTER_MISMATCH.value,
     )
 
+    active_job = SimpleNamespace(
+        payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
+        result_json={"auth_state": BaeminAuthState.ACTIVE.value},
+    )
+    assert _platform_account_auth_update(active_job, None) == (
+        "33333333-3333-3333-3333-333333333333",
+        BaeminAuthState.ACTIVE.value,
+    )
+
+    verified_job = SimpleNamespace(
+        payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
+        result_json={"auth_state": BaeminAuthState.AUTH_VERIFIED.value},
+    )
+    assert _platform_account_auth_update(verified_job, None) == (
+        "33333333-3333-3333-3333-333333333333",
+        BaeminAuthState.AUTH_VERIFIED.value,
+    )
+
 
 # ── (b) 단일-claim / exactly-once (in-memory, 항상 실행) ──────────────────────────
 
@@ -468,7 +487,6 @@ def test_claim_returns_enqueued_payload(backend):
         target_id = "33333333-3333-3333-3333-333333333333"
         job_id = await backend.enqueue(
             job_type=JOB_TYPE_CRAWL_BAEMIN,
-            target_id=target_id,
             payload_json={
                 "target_id": target_id,
                 "platform": "baemin",

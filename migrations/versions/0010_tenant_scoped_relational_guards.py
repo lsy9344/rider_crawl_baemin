@@ -29,12 +29,12 @@ _CK_JOBS_RESULT_JSON_OBJECT = "ck_jobs_result_json_object"
 
 def upgrade() -> None:
     op.create_check_constraint(
-        _CK_JOBS_PAYLOAD_JSON_OBJECT,
+        op.f(_CK_JOBS_PAYLOAD_JSON_OBJECT),
         "jobs",
         "payload_json IS NULL OR jsonb_typeof(payload_json) = 'object'",
     )
     op.create_check_constraint(
-        _CK_JOBS_RESULT_JSON_OBJECT,
+        op.f(_CK_JOBS_RESULT_JSON_OBJECT),
         "jobs",
         "result_json IS NULL OR jsonb_typeof(result_json) = 'object'",
     )
@@ -91,5 +91,5 @@ def downgrade() -> None:
     op.drop_constraint(_UQ_MONITORING_TARGET, "monitoring_targets", type_="unique")
     op.drop_constraint(_UQ_PLATFORM_ACCOUNT, "platform_accounts", type_="unique")
     op.drop_column("delivery_rules", "tenant_id")
-    op.drop_constraint(_CK_JOBS_RESULT_JSON_OBJECT, "jobs", type_="check")
-    op.drop_constraint(_CK_JOBS_PAYLOAD_JSON_OBJECT, "jobs", type_="check")
+    op.drop_constraint(op.f(_CK_JOBS_RESULT_JSON_OBJECT), "jobs", type_="check")
+    op.drop_constraint(op.f(_CK_JOBS_PAYLOAD_JSON_OBJECT), "jobs", type_="check")

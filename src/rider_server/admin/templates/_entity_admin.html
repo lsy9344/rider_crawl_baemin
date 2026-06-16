@@ -90,7 +90,7 @@
       <label>external_id <input type="text" id="tgt-edit-external"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval"></label>
-      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')})">편집</button>
+      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button>
       <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button>
       <button type="button" class="danger" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button>
     </div>
@@ -128,7 +128,7 @@
           <label>verification_email_app_password_ref <input type="text" id="acc-edit-email-password-ref" placeholder="비우면 유지"></label>
           <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
           <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
-          <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', {label: cval('acc-edit-label'), verification_email_address_ref: cval('acc-edit-email-ref'), verification_email_app_password_ref: cval('acc-edit-email-password-ref'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')})">편집</button>
+          <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), verification_email_address_ref: cval('acc-edit-email-ref'), verification_email_app_password_ref: cval('acc-edit-email-password-ref'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button>
         </div>
         <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -154,7 +154,7 @@
           <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
           <label>thread_id <input type="text" id="ch-edit-thread"></label>
           <label>kakao_room_name <input type="text" id="ch-edit-kakao"></label>
-          <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', {telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')})">편집</button>
+          <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button>
           <button type="button" class="danger" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button>
         </div>
         <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
@@ -174,7 +174,7 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 고객명 <input type="text" id="cust-edit-name"></label>
-          <button type="button" onclick="crudUpdate('/admin/customers/', 'cust-edit-id', '', {name: cval('cust-edit-name')})">편집</button>
+          <button type="button" onclick="crudUpdate('/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name')}))">편집</button>
         </div>
         <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -189,6 +189,15 @@
   var CRUD_TENANT = "{{ tenant_id | urlencode }}";
   function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
   function cchecked(id) { var el = document.getElementById(id); return el && el.checked ? "true" : ""; }
+  function filledValues(values) {
+    var out = {};
+    Object.keys(values).forEach(function(key) {
+      if (values[key] !== "" && values[key] !== null && values[key] !== undefined) {
+        out[key] = values[key];
+      }
+    });
+    return out;
+  }
   function switchTenant(value) {
     if (!value) { return; }
     window.location.href = "/admin?tenant=" + encodeURIComponent(value);

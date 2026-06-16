@@ -75,35 +75,42 @@ async def _seed(session_factory) -> None:
         # ── tenants / subscriptions ──
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
+        await session.flush()
+        for tid in (_TENANT_A, _TENANT_B):
             session.add(
                 Subscription(
                     id=uuid.uuid4(), tenant_id=uuid.UUID(tid),
                     plan="basic", status="PAYMENT_ACTIVE", quotas={},
                 )
             )
+        await session.flush()
         # ── platform_accounts ──
         session.add(PlatformAccount(id=uuid.UUID(_ACC_A_OK), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
         session.add(PlatformAccount(id=uuid.UUID(_ACC_A_AUTH), tenant_id=uuid.UUID(_TENANT_A), platform="COUPANG", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="AUTH_REQUIRED"))
         session.add(PlatformAccount(id=uuid.UUID(_ACC_B), tenant_id=uuid.UUID(_TENANT_B), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
+        session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(seconds=30), capacity_json={"max_in_flight": 5, "capabilities": ["CRAWL_BAEMIN", "KAKAO_SEND"]}))
+        await session.flush()
         # ── monitoring_targets ──
         def _target(tid, tenant, account, name):
             return MonitoringTarget(id=uuid.UUID(tid), tenant_id=uuid.UUID(tenant), platform_account_id=uuid.UUID(account), name=name, center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None)
         session.add(_target(_T1, _TENANT_A, _ACC_A_OK, "A-target"))
         session.add(_target(_T2, _TENANT_A, _ACC_A_AUTH, "A-auth-target"))
         session.add(_target(_T3, _TENANT_B, _ACC_B, "B-target"))
-        # ── snapshots: T1 OK at -5/-3min, MISSING at -1min(제외 대상) ──
-        session.add(_snap("s1111111-1111-1111-1111-111111111111", _T1, _T0 - timedelta(minutes=5), "OK"))
-        session.add(_snap("s2222222-2222-2222-2222-222222222222", _T1, _T0 - timedelta(minutes=3), "OK"))
-        session.add(_snap("s3333333-3333-3333-3333-333333333333", _T1, _T0 - timedelta(minutes=1), "MISSING_REQUIRED"))
-        # T3 snapshot(B) — 격리 확인용
-        session.add(_snap("s4444444-4444-4444-4444-444444444444", _T3, _T0 - timedelta(minutes=2), "OK"))
-        # ── channel(tenant A telegram) ──
         session.add(MessengerChannel(id=uuid.UUID(_CHAN_A), tenant_id=uuid.UUID(_TENANT_A), messenger="TELEGRAM", telegram_chat_id="-100fake", thread_id=None, kakao_room_name=None, state="ACTIVE"))
+        await session.flush()
+        # ── snapshots: T1 OK at -5/-3min, MISSING at -1min(제외 대상) ──
+        session.add(_snap("51111111-1111-1111-1111-111111111111", _T1, _T0 - timedelta(minutes=5), "OK"))
+        session.add(_snap("52222222-2222-2222-2222-222222222222", _T1, _T0 - timedelta(minutes=3), "OK"))
+        session.add(_snap("53333333-3333-3333-3333-333333333333", _T1, _T0 - timedelta(minutes=1), "MISSING_REQUIRED"))
+        # T3 snapshot(B) — 격리 확인용
+        session.add(_snap("54444444-4444-4444-4444-444444444444", _T3, _T0 - timedelta(minutes=2), "OK"))
+        await session.flush()
         # ── messages + delivery_logs(T1): SENT -4/-2min, FAILED TELEGRAM -1min ──
         def _msg(mid, snap_id):
             return Message(id=uuid.UUID(mid), snapshot_id=uuid.UUID(snap_id), template_version="v1", text_hash="h", text_redacted_preview="p")
-        session.add(_msg("11111111-aaaa-1111-1111-111111111111", "s1111111-1111-1111-1111-111111111111"))
-        session.add(_msg("22222222-aaaa-2222-2222-222222222222", "s2222222-2222-2222-2222-222222222222"))
+        session.add(_msg("11111111-aaaa-1111-1111-111111111111", "51111111-1111-1111-1111-111111111111"))
+        session.add(_msg("22222222-aaaa-2222-2222-222222222222", "52222222-2222-2222-2222-222222222222"))
+        await session.flush()
         def _dlog(did, mid, status, sent_at, error_code=None, dedup=""):
             return DeliveryLog(id=uuid.UUID(did), message_id=uuid.UUID(mid), channel_id=uuid.UUID(_CHAN_A), status=status, dedup_key=dedup, error_code=error_code, sent_at=sent_at)
         session.add(_dlog("d1111111-1111-1111-1111-111111111111", "11111111-aaaa-1111-1111-111111111111", "SENT", _T0 - timedelta(minutes=4), None, "k1"))
@@ -116,7 +123,6 @@ async def _seed(session_factory) -> None:
         # agent 가 claim 한 활성 job(현재 job 표시)
         session.add(Job(id=uuid.uuid4(), type="CRAWL_BAEMIN", target_id=uuid.UUID(_T1), agent_id=uuid.UUID(_AGENT), status="RUNNING", claimed_at=_T0 - timedelta(seconds=10), attempts=1))
         # ── agent(fleet) + browser_profile(T2) + auth_session(A2 pending) ──
-        session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(seconds=30), capacity_json={"max_in_flight": 5, "capabilities": ["CRAWL_BAEMIN", "KAKAO_SEND"]}))
         session.add(BrowserProfile(id=uuid.UUID(_PROFILE), agent_id=uuid.UUID(_AGENT), target_id=uuid.UUID(_T2), profile_path_ref="vault://profile", cdp_port=None, state="READY"))
         session.add(AuthSession(id=uuid.uuid4(), account_id=uuid.UUID(_ACC_A_AUTH), state="AUTH_REQUIRED", reason=None, requested_at=_T0 - timedelta(minutes=2), resolved_at=None))
         await session.commit()
@@ -125,6 +131,7 @@ async def _seed(session_factory) -> None:
 def _fresh_pg():
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.admin.dashboard_repository_postgres import PostgresDashboardRepository
     from rider_server.db.base import create_engine, create_session_factory
@@ -137,7 +144,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     repo = PostgresDashboardRepository(factory)

@@ -54,14 +54,17 @@ async def _seed(session_factory) -> None:
     async with session_factory() as session:
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
+        await session.flush()
         session.add(Subscription(id=uuid.UUID(_SUB_A), tenant_id=uuid.UUID(_TENANT_A), plan="basic", status="PAYMENT_ACTIVE", quotas={}))
         session.add(Subscription(id=uuid.UUID(_SUB_B), tenant_id=uuid.UUID(_TENANT_B), plan="basic", status="PAYMENT_ACTIVE", quotas={}))
         session.add(PlatformAccount(id=uuid.UUID(_ACC_A), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
         session.add(PlatformAccount(id=uuid.UUID(_ACC_B), tenant_id=uuid.UUID(_TENANT_B), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
+        session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0, capacity_json={}))
+        await session.flush()
         session.add(MonitoringTarget(id=uuid.UUID(_T_A), tenant_id=uuid.UUID(_TENANT_A), platform_account_id=uuid.UUID(_ACC_A), name="A", center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None))
         session.add(MonitoringTarget(id=uuid.UUID(_T_B), tenant_id=uuid.UUID(_TENANT_B), platform_account_id=uuid.UUID(_ACC_B), name="B", center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None))
+        await session.flush()
         session.add(Job(id=uuid.UUID(_JOB_A), type="CRAWL_BAEMIN", target_id=uuid.UUID(_T_A), status="FAILED", error_code="CRAWL_FAILURE", attempts=1))
-        session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0, capacity_json={}))
         session.add(BrowserProfile(id=uuid.UUID(_PROFILE), agent_id=uuid.UUID(_AGENT), target_id=uuid.UUID(_T_A), profile_path_ref="vault://p", cdp_port=None, state="READY"))
         await session.commit()
 
@@ -69,6 +72,7 @@ async def _seed(session_factory) -> None:
 def _fresh_pg():
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.queue.memory_queue import InMemoryQueueBackend
@@ -85,7 +89,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     repo = PostgresAdminActionRepository(factory)

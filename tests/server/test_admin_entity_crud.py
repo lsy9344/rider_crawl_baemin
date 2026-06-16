@@ -730,6 +730,17 @@ def test_entities_form_does_not_expose_raw_template_id_editor() -> None:
     assert "template_id: cval(" not in body
 
 
+def test_entities_form_filters_blank_edit_fields_before_update() -> None:
+    repo = _seeded_repo()
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    body = client.get("/admin/entities?tenant=tn-1").text
+
+    assert "function filledValues" in body
+    assert "crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({" in body
+    assert "crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', filledValues({" in body
+
+
 def test_entities_list_hides_raw_ids_by_default() -> None:
     repo = _seeded_repo()
     repo.seed_monitoring_target(_target())
@@ -741,6 +752,54 @@ def test_entities_list_hides_raw_ids_by_default() -> None:
     assert "<th>id</th>" not in resp.text
     assert "<code>mt-1</code>" not in resp.text
     assert "가게" in resp.text
+
+
+def test_delivery_rule_list_hides_internal_target_and_channel_ids() -> None:
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(_target())
+    repo.seed_messenger_channel(_channel())
+    repo.seed_delivery_rule(DeliveryRule(id="dr-1", target_id="mt-1", channel_id="ch-1"))
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/delivery-rules?tenant=tn-1&target_id=mt-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "전송 규칙" in resp.text
+    assert "mt-1" not in resp.text
+    assert "ch-1" not in resp.text
+    assert "dr-1" not in resp.text
+
+
+def test_route_success_fragments_hide_created_internal_ids(monkeypatch) -> None:
+    from rider_server.admin import crud_routes
+
+    ids = iter(("mt-created", "dr-created"))
+    monkeypatch.setattr(crud_routes, "_new_id", lambda: next(ids))
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(_target())
+    repo.seed_messenger_channel(_channel())
+    client = TestClient(_app_with(repo))
+
+    target_resp = client.post(
+        "/admin/monitoring-targets?tenant=tn-1",
+        data={
+            "platform_account_id": "pa-1",
+            "name": "새 가게",
+            "center_name": "센터",
+            "interval_minutes": "5",
+        },
+    )
+    rule_resp = client.post(
+        "/admin/delivery-rules?tenant=tn-1",
+        data={"target_id": "mt-1", "channel_id": "ch-1"},
+    )
+
+    assert target_resp.status_code == HTTPStatus.OK
+    assert "mt-created" not in target_resp.text
+    assert rule_resp.status_code == HTTPStatus.OK
+    assert "dr-created" not in rule_resp.text
+    assert "mt-1" not in rule_resp.text
+    assert "ch-1" not in rule_resp.text
 
 
 class _DuplicateChannelRepo(InMemoryAdminEntityRepository):
@@ -1239,7 +1298,9 @@ def test_route_list_delivery_rules_fragment_by_target() -> None:
     resp = client.get("/admin/delivery-rules?tenant=tn-1&target_id=mt-1")
 
     assert resp.status_code == HTTPStatus.OK
-    assert "mt-1" in resp.text
+    assert "전송 규칙 · 항상" in resp.text
+    assert "mt-1" not in resp.text
+    assert "ch-1" not in resp.text
 
 
 # ── (review fix) delivery-rules 조회 tenant 격리 — AC3 조회 경로 누설 차단 ─────────────

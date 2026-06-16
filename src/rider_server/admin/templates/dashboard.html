@@ -278,9 +278,9 @@
 
     @media (max-width: 720px) {
       body { font-size: 13px; } .brand-sub { display: none; } .ministatus { margin-left: 0; width: 100%; }
-      .trow { grid-template-columns: 0.4rem 1fr auto; grid-template-areas: "bar name plat" "bar reason reason" "bar act act"; gap: 0.35rem 0.6rem; padding: 0.8rem 0.85rem; }
+      .trow { grid-template-columns: 0.4rem 1fr auto; grid-template-areas: "bar name plat" "bar badge badge" "bar reason reason" "bar act act"; gap: 0.35rem 0.6rem; padding: 0.8rem 0.85rem; }
       .sevbar { grid-area: bar; height: 100%; } .t-name { grid-area: name; } .plat { grid-area: plat; align-self: start; }
-      .trow > .sev-badge { grid-area: reason; justify-self: start; align-self: start; margin-top: 1.5rem; } .t-reason { grid-area: reason; padding-top: 0.05rem; } .t-reason .rs { white-space: normal; }
+      .trow > .sev-badge { grid-area: badge; justify-self: start; align-self: start; } .t-reason { grid-area: reason; padding-top: 0.05rem; } .t-reason .rs { white-space: normal; }
       .t-act { grid-area: act; justify-self: start; margin-top: 0.2rem; flex-wrap: wrap; }
       .t-act .btn, .drawer-actions .btn, #view-manage button { min-height: 44px; }
       #view-manage input[type="text"], #view-manage input[type="number"], #view-manage select { min-width: 8.5rem; }

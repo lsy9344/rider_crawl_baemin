@@ -48,15 +48,18 @@ async def _seed(session_factory) -> None:
     async with session_factory() as session:
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
+        await session.flush()
         session.add(PlatformAccount(id=uuid.UUID(_ACC_A), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
-        session.add(MonitoringTarget(id=uuid.UUID(_T_A), tenant_id=uuid.UUID(_TENANT_A), platform_account_id=uuid.UUID(_ACC_A), name="A", center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None))
         session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0, capacity_json={}))
+        await session.flush()
+        session.add(MonitoringTarget(id=uuid.UUID(_T_A), tenant_id=uuid.UUID(_TENANT_A), platform_account_id=uuid.UUID(_ACC_A), name="A", center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None))
         await session.commit()
 
 
 def _fresh_pg():
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
     from rider_server.queue.memory_queue import InMemoryQueueBackend
@@ -77,7 +80,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
     asyncio.run(_seed(factory))
     admin = AdminActionService(PostgresAdminActionRepository(factory), InMemoryQueueBackend())
@@ -180,11 +183,12 @@ def test_external_token_rotate_audit_persists_ref_no_plaintext(pg) -> None:
 def test_0005_round_trip_adds_and_drops_columns(pg) -> None:
     from alembic import command
     from sqlalchemy import inspect
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine
 
     _admin, _token, _factory, cfg = pg
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
 
     async def _cols(table):
         async with engine.connect() as conn:

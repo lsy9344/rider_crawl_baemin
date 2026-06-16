@@ -157,7 +157,7 @@ def _channel_label(channel) -> str:
 def _rule_label(rule) -> str:
     flags = "변경시만" if rule.send_only_on_change else "항상"
     template = rule.template_id or "기본"
-    return f"{template} · {flags} · {rule.channel_id}"
+    return f"{template} · {flags}"
 
 
 def _raise_for(exc: Exception) -> None:
@@ -258,7 +258,7 @@ async def list_delivery_rules(
         [
             {
                 "id": r.id,
-                "summary": f"{r.target_id} → {r.channel_id}",
+                "summary": f"전송 규칙 · {'변경시만' if r.send_only_on_change else '항상'}",
                 "state": "ENABLED" if r.enabled else "DISABLED",
             }
             for r in rows
@@ -353,9 +353,7 @@ async def create_customer(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    response = _fragment(
-        request, f"고객 생성됨 (id {tenant.id})", trigger=ENTITY_OPTIONS_CHANGED
-    )
+    response = _fragment(request, f"고객 생성됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED)
     response.headers["HX-Redirect"] = f"/admin?tenant={tenant.id}"
     return response
 
@@ -420,7 +418,7 @@ async def create_platform_account(
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
     return _fragment(
-        request, f"플랫폼 계정 생성됨 (id {account.id})", trigger=ENTITY_OPTIONS_CHANGED
+        request, f"플랫폼 계정 생성됨 ({account.label})", trigger=ENTITY_OPTIONS_CHANGED
     )
 
 
@@ -448,7 +446,7 @@ async def update_platform_account(
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
     return _fragment(
-        request, f"플랫폼 계정 편집됨 (id {account.id})", trigger=ENTITY_OPTIONS_CHANGED
+        request, f"플랫폼 계정 편집됨 ({account.label})", trigger=ENTITY_OPTIONS_CHANGED
     )
 
 
@@ -457,7 +455,7 @@ async def update_platform_account(
 # ══════════════════════════════════════════════════════════════════════════
 
 def _target_message(prefix: str, result) -> str:
-    msg = f"{prefix} (id {result.target.id})"
+    msg = f"{prefix} ({result.target.name})"
     if result.center_name_risky:
         msg += " — ⚠️ 쿠팡 기대 센터/상점명(center_name)이 비었거나 배민 기본값입니다(오발송 위험 경고)"
     return msg
@@ -607,7 +605,7 @@ async def create_messenger_channel(
         _raise_for(exc)
     return _fragment(
         request,
-        f"메시지 채널 생성됨 (id {channel.id}, 상태 {channel.state.value})",
+        f"메시지 채널 생성됨 (상태: {channel.state.value})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
@@ -633,7 +631,7 @@ async def update_messenger_channel(
         _raise_for(exc)
     return _fragment(
         request,
-        f"메시지 채널 라우팅 편집됨 (id {channel.id})",
+        f"메시지 채널 라우팅 편집됨 ({channel.messenger.value})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
@@ -691,7 +689,7 @@ async def create_delivery_rule(
         _raise_for(exc)
     return _fragment(
         request,
-        f"전송 규칙 생성됨 (id {rule.id}: {rule.target_id}→{rule.channel_id})",
+        f"전송 규칙 생성됨 ({'활성' if rule.enabled else '비활성'})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
@@ -716,9 +714,7 @@ async def update_delivery_rule(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(
-        request, f"전송 규칙 편집됨 (id {rule.id})", trigger=ENTITY_OPTIONS_CHANGED
-    )
+    return _fragment(request, "전송 규칙 편집됨", trigger=ENTITY_OPTIONS_CHANGED)
 
 
 @router.post("/delivery-rules/{rule_id}/deactivate", response_class=HTMLResponse)

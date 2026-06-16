@@ -102,6 +102,7 @@ def _fresh_pg():
     """빈 PG 에 0001~0004 적용 후 (engine, session_factory, teardown)."""
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy.pool import NullPool
 
     from rider_server.db.base import create_engine, create_session_factory
 
@@ -113,7 +114,7 @@ def _fresh_pg():
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(_TEST_DB_URL)
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
 
     async def _seed_tenant() -> None:
