@@ -64,6 +64,7 @@ class FakeSchedulerRepo(SchedulerRepository):
         self._active_jobs = set(active_jobs)
         self._capacity = capacity
         self.claim_wins: list[str] = []
+        self.release_calls: list[tuple[str, datetime, datetime | None]] = []
 
     async def due_targets(self, *, now):
         return [t for t in self._targets.values() if policy.is_due(t.next_run_at, now)]
@@ -86,6 +87,14 @@ class FakeSchedulerRepo(SchedulerRepository):
             return False
         self._targets[target_id] = replace(target, next_run_at=next_run_at)
         self.claim_wins.append(target_id)
+        return True
+
+    async def release_due_target(self, target_id, *, claimed_next_run_at, restore_next_run_at):
+        target = self._targets.get(target_id)
+        if target is None or target.next_run_at != claimed_next_run_at:
+            return False
+        self._targets[target_id] = replace(target, next_run_at=restore_next_run_at)
+        self.release_calls.append((target_id, claimed_next_run_at, restore_next_run_at))
         return True
 
     # 테스트 가시성 헬퍼.
@@ -612,6 +621,28 @@ def test_enqueued_job_run_after_is_now_for_immediate_claim() -> None:
     snap = backend.job_snapshot(result.outcomes[0].job_id)
     assert snap is not None
     assert snap.run_after == _NOW
+
+
+def test_enqueue_failure_restores_due_claim_before_reraising() -> None:
+    class FailingQueue(InMemoryQueueBackend):
+        async def enqueue(self, **_kwargs):
+            raise RuntimeError("queue down")
+
+    original_next = _NOW - timedelta(minutes=1)
+    target = _target("t-a", next_run=original_next)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity(n=1)
+    )
+
+    try:
+        asyncio.run(SchedulerService().run_tick(repo, FailingQueue(), now=_NOW))
+    except RuntimeError as exc:
+        assert str(exc) == "queue down"
+    else:
+        raise AssertionError("queue failure should propagate")
+
+    assert repo.next_run_at_of("t-a") == original_next
+    assert len(repo.release_calls) == 1
 
 
 # ── 일반: due 대상이 없으면 tick 은 no-op ─────────────────────────────────────

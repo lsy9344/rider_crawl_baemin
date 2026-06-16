@@ -453,6 +453,43 @@ def test_targets_partial_renders_label_and_class_for_each_severity() -> None:
         assert css in html, css
 
 
+def test_failclosed_display_severity_drives_primary_actions_without_failure_code() -> None:
+    rows = [
+        TargetRow(
+            target_id="t-auth",
+            tenant_id=_TENANT,
+            name="인증가게",
+            center_name="센터",
+            platform="BAEMIN",
+            interval_minutes=10,
+            last_success_at=None,
+            last_delivery_at=None,
+            last_failure_code=None,
+            severity=SEVERITY_AUTH_REQUIRED,
+        ),
+        TargetRow(
+            target_id="t-center",
+            tenant_id=_TENANT,
+            name="센터가게",
+            center_name="",
+            platform="COUPANG",
+            interval_minutes=10,
+            last_success_at=None,
+            last_delivery_at=None,
+            last_failure_code=None,
+            severity=SEVERITY_TARGET_VALIDATION_FAILURE,
+        ),
+    ]
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
+
+    assert 'data-primary-action="auth-check"' in html
+    assert "/admin/targets/t-auth/auth-check" in html
+    assert 'data-primary-action="center-name"' in html
+    assert "로그인 만료 · 인증 확인 필요" in html
+    assert "센터/상점명 불일치" in html
+
+
 def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
     row = TargetRow(
         target_id="t-auth",
@@ -476,6 +513,24 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
     assert 'hx-target="#target-result-t-auth"' in html
 
 
+def test_dashboard_counts_display_failclosed_states_as_stopped_work() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-auth-state",
+            last_success_at=_NOW - timedelta(minutes=1),
+            account_auth_state="AUTH_REQUIRED",
+            lifecycle_state="ACTIVE",
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert '<span class="n">1</span><span class="lbl">중지</span>' in body
+    assert 'data-primary-action="auth-check"' in body
+    assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
+
+
 def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
@@ -486,6 +541,14 @@ def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -
     assert 'renderDrawerActions' in body
     assert 'syncOpenDrawerFromRows' in body
     assert 'trapDrawerFocus' in body
+
+
+def test_drawer_does_not_offer_pause_for_failclosed_display_states() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert "canPause" in body
+    assert '["NORMAL", "WARNING", "CRITICAL"].indexOf(d.severity)' in body
+    assert 'if (d.severity !== "STOPPED") box.appendChild(makeDrawerButton("비활성화"' not in body
 
 
 def test_targets_refresh_on_entity_change_event() -> None:

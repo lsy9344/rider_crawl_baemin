@@ -434,6 +434,23 @@ def test_deactivate_monitoring_target_idempotent_no_extra_audit() -> None:
     assert repo.audits == []  # 이미 비활성 → no-op(중복 audit 0)
 
 
+def test_reactivate_monitoring_target_restores_soft_deleted_target() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target(status=MonitoringTargetStatus.INACTIVE))
+    svc = _svc(repo)
+
+    target = _run(
+        svc.reactivate_monitoring_target(
+            "mt-1", tenant_id=_TENANT, at=_NOW, actor_id=_ACTOR
+        )
+    )
+
+    assert target.status is MonitoringTargetStatus.ACTIVE
+    assert _run(repo.get_monitoring_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
+    assert repo.audits[-1].action == "MONITORING_TARGET_REACTIVATE"
+
+
 def test_deactivate_messenger_channel_soft_delete_inactive() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -707,6 +724,7 @@ def test_route_dashboard_includes_entity_section() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert "엔티티 관리" in resp.text
+    assert "/reactivate" in resp.text
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1084,6 +1102,20 @@ def test_route_deactivate_target_soft_delete() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_monitoring_target("mt-1")).status is MonitoringTargetStatus.INACTIVE
+
+
+def test_route_reactivate_target_restores_soft_delete() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target(status=MonitoringTargetStatus.INACTIVE))
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/monitoring-targets/mt-1/reactivate?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "복구" in resp.text
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
+    assert _run(repo.get_monitoring_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
 
 
 def test_route_deactivate_delivery_rule_disabled() -> None:

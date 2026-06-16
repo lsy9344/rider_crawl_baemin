@@ -513,6 +513,29 @@ async def deactivate_monitoring_target(
     )
 
 
+@router.post("/monitoring-targets/{target_id}/reactivate", response_class=HTMLResponse)
+async def reactivate_monitoring_target(
+    request: Request, target_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    reason = (await _form(request)).get("reason", "")
+    try:
+        target = await _service(request).reactivate_monitoring_target(
+            target_id,
+            tenant_id=_tenant_id(request),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=reason,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request,
+        f"모니터링 대상 복구됨 (상태: {target.status.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 메시지 채널 MessengerChannel — create(PENDING)/update(라우팅)/deactivate
 # ══════════════════════════════════════════════════════════════════════════

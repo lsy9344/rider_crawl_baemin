@@ -119,9 +119,11 @@ async def _form(request: Request) -> dict:
 
 
 def _fragment(request: Request, message: str, *, ok: bool = True) -> HTMLResponse:
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request, "_action_result.html", {"message": message, "ok": ok}
     )
+    response.headers["HX-Trigger"] = "admin-entity-changed"
+    return response
 
 
 def _raise_for(exc: Exception) -> None:

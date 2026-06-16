@@ -103,6 +103,7 @@ class PostgresDashboardRepository(DashboardRepository):
             .join(Tenant, MonitoringTarget.tenant_id == Tenant.id)
             .where(
                 MonitoringTarget.tenant_id == tenant_id,
+                PlatformAccount.tenant_id == MonitoringTarget.tenant_id,
                 MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
             )
         )
@@ -299,6 +300,7 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             .where(
                 PlatformAccount.tenant_id == tenant_id,
+                MonitoringTarget.tenant_id == PlatformAccount.tenant_id,
                 PlatformAccount.auth_state == BaeminAuthState.AUTH_REQUIRED.value,
             )
         )

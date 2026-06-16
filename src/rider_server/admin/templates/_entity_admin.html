@@ -57,6 +57,7 @@
       </label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center"></label>
       <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {center_name: cval('tgt-edit-center')})">편집</button>
+      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button>
       <button type="button" class="danger" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button>
     </div>
     <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>

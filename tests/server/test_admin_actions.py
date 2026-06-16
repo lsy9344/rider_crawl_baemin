@@ -626,6 +626,7 @@ def test_route_activate_returns_fragment_and_persists() -> None:
     resp = client.post("/admin/targets/mt-1/activate?tenant=tn-1")
 
     assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert "활성" in resp.text
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
 
@@ -659,6 +660,7 @@ def test_route_auth_check_triggers() -> None:
     resp = client.post("/admin/targets/mt-1/auth-check?tenant=tn-1")
 
     assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert "AUTH_CHECK" in resp.text
 
 

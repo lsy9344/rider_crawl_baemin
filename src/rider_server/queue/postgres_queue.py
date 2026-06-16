@@ -24,9 +24,10 @@ from typing import Any, Sequence
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..db.models.account import PlatformAccount
 from ..db.models.agent import Job
 from ..db.models.messaging import DeliveryLog
-from ..domain import DeliveryStatus, FailureCategory
+from ..domain import BaeminAuthState, DeliveryStatus, FailureCategory
 from .backend import (
     COMPLETE_ACCEPTED,
     COMPLETE_LEASE_LOST,
@@ -184,6 +185,11 @@ class PostgresQueueBackend(QueueBackend):
             job.result_json = result_json
             job.error_code = error_code
             job.lease_expires_at = None
+            await self._mark_auth_required_account(
+                session,
+                job=job,
+                error_code=error_code,
+            )
             await self._update_kakao_delivery_log(
                 session,
                 job=job,
@@ -193,6 +199,26 @@ class PostgresQueueBackend(QueueBackend):
             )
             await session.commit()
             return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=status)
+
+    async def _mark_auth_required_account(
+        self,
+        session: AsyncSession,
+        *,
+        job: Job,
+        error_code: str | None,
+    ) -> None:
+        if error_code != FailureCategory.AUTH_REQUIRED.value:
+            return
+        if not isinstance(job.payload_json, dict):
+            return
+        platform_account_id = job.payload_json.get("platform_account_id")
+        if not platform_account_id:
+            return
+        await session.execute(
+            update(PlatformAccount)
+            .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
+            .values(auth_state=BaeminAuthState.AUTH_REQUIRED.value)
+        )
 
     async def _update_kakao_delivery_log(
         self,

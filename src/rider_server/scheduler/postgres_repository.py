@@ -97,6 +97,7 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 MonitoringTarget.platform_account_id == PlatformAccount.id,
             )
             .where(
+                PlatformAccount.tenant_id == MonitoringTarget.tenant_id,
                 MonitoringTarget.status == MonitoringTargetStatus.ACTIVE.value,
                 (MonitoringTarget.next_run_at.is_(None))
                 | (MonitoringTarget.next_run_at <= now),
@@ -222,6 +223,27 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 | (MonitoringTarget.next_run_at <= now),
             )
             .values(next_run_at=next_run_at, last_enqueued_at=now)
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+        return (result.rowcount or 0) == 1
+
+    async def release_due_target(
+        self,
+        target_id: str,
+        *,
+        claimed_next_run_at: datetime,
+        restore_next_run_at: datetime | None,
+    ) -> bool:
+        stmt = (
+            update(MonitoringTarget)
+            .where(
+                MonitoringTarget.id == target_id,
+                MonitoringTarget.status == MonitoringTargetStatus.ACTIVE.value,
+                MonitoringTarget.next_run_at == claimed_next_run_at,
+            )
+            .values(next_run_at=restore_next_run_at)
         )
         async with self._session_factory() as session:
             result = await session.execute(stmt)

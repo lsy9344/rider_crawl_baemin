@@ -292,12 +292,23 @@
   {% set tg_normal = targets | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
   {% set tg_warning = targets | selectattr('severity', 'equalto', 'WARNING') | list | length %}
   {% set tg_critical = targets | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
-  {% set tg_stopped = targets | selectattr('severity', 'equalto', 'STOPPED') | list | length %}
+  {% set tg_stopped = (
+    targets | selectattr('severity', 'equalto', 'STOPPED') | list | length
+  ) + (
+    targets | selectattr('severity', 'equalto', 'AUTH_REQUIRED') | list | length
+  ) + (
+    targets | selectattr('severity', 'equalto', 'TARGET_VALIDATION_FAILURE') | list | length
+  ) + (
+    targets | selectattr('severity', 'equalto', 'KAKAO_MISDELIVERY_RISK') | list | length
+  ) + (
+    targets | selectattr('severity', 'equalto', 'OPERATOR_STOPPED') | list | length
+  ) %}
   {% set ag_total = agents | list | length %}
   {% set ag_online = agents | selectattr('online') | list | length %}
   {% set ag_offline = ag_total - ag_online %}
   {% set auth_n = auth_required | list | length %}
-  {% set attention = tg_critical + tg_stopped + ag_offline + auth_n %}
+  {% set auth_targetless = auth_required | selectattr('target_id', 'none') | list | length %}
+  {% set attention = tg_critical + tg_stopped + ag_offline + auth_targetless %}
 
   <header class="topbar">
     <div class="appbar">
@@ -465,7 +476,7 @@
       rows.forEach(function (r) {
         var okSev = FIL.sev === "all" || r.dataset.severityClass === FIL.sev;
         var okPlat = plats.length === 0 || FIL.plats[r.dataset.platform];
-        var okAuth = !FIL.authOnly || r.dataset.failcode === "AUTH_REQUIRED";
+        var okAuth = !FIL.authOnly || r.dataset.severity === "AUTH_REQUIRED" || r.dataset.failcode === "AUTH_REQUIRED";
         var okQ = !q || (r.dataset.name + " " + r.dataset.center).toLowerCase().indexOf(q) !== -1;
         var vis = okSev && okPlat && okAuth && okQ;
         r.style.display = vis ? "" : "none"; if (vis) shown++;
@@ -548,7 +559,8 @@
       else if (action === "activate") box.appendChild(makeDrawerButton(d.primaryLabel || "활성화", "", function () { drawerPost("/activate", {}, drawerConfirm("활성화")); }));
       else if (action === "test-crawl") box.appendChild(makeDrawerButton(d.primaryLabel || "지금 수집", d.primaryStyle || "", function () { drawerPost("/test-crawl", {platform: ADM.platform}); }));
       box.appendChild(makeDrawerButton("미리보기", "", function () { drawerPost("/dry-run"); }));
-      if (d.severity !== "STOPPED") box.appendChild(makeDrawerButton("비활성화", "danger", function () { drawerPost("/pause", {}, drawerConfirm("비활성화")); }));
+      var canPause = ["NORMAL", "WARNING", "CRITICAL"].indexOf(d.severity) !== -1;
+      if (canPause) box.appendChild(makeDrawerButton("비활성화", "danger", function () { drawerPost("/pause", {}, drawerConfirm("비활성화")); }));
     }
     function drawerConfirm(action) {
       return "대상 '" + ADM.name + "'을(를) " + action + "할까요?";

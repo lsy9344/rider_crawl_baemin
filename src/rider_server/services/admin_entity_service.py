@@ -67,6 +67,7 @@ ACTION_PLATFORM_ACCOUNT_UPDATE = "PLATFORM_ACCOUNT_UPDATE"
 ACTION_MONITORING_TARGET_CREATE = "MONITORING_TARGET_CREATE"
 ACTION_MONITORING_TARGET_UPDATE = "MONITORING_TARGET_UPDATE"
 ACTION_MONITORING_TARGET_DEACTIVATE = "MONITORING_TARGET_DEACTIVATE"
+ACTION_MONITORING_TARGET_REACTIVATE = "MONITORING_TARGET_REACTIVATE"
 ACTION_MESSENGER_CHANNEL_CREATE = "MESSENGER_CHANNEL_CREATE"
 ACTION_MESSENGER_CHANNEL_UPDATE = "MESSENGER_CHANNEL_UPDATE"
 ACTION_MESSENGER_CHANNEL_DEACTIVATE = "MESSENGER_CHANNEL_DEACTIVATE"
@@ -734,6 +735,39 @@ class AdminEntityService:
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_MONITORING_TARGET_DEACTIVATE,
+            target_type=TARGET_TYPE_TARGET,
+            target_id=target_id,
+            at=at,
+            diff={
+                "from_status": existing.status.value,
+                "to_status": updated.status.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.save_monitoring_target(updated, audit)
+        return updated
+
+    async def reactivate_monitoring_target(
+        self,
+        target_id: str,
+        *,
+        tenant_id: str,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> MonitoringTarget:
+        """INACTIVE soft-delete 상태의 대상을 명시적으로 복구한다."""
+
+        existing = await self._scoped_target(target_id, tenant_id=tenant_id)
+        if existing.status is not MonitoringTargetStatus.INACTIVE:
+            return existing
+        updated = replace(existing, status=MonitoringTargetStatus.ACTIVE)
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_MONITORING_TARGET_REACTIVATE,
             target_type=TARGET_TYPE_TARGET,
             target_id=target_id,
             at=at,

@@ -179,6 +179,7 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 .where(
                     DeliveryRuleRow.target_id == _uuid(record.target_id),
                     DeliveryRuleRow.enabled.is_(True),
+                    MessengerChannelRow.tenant_id == _uuid(record.tenant_id),
                     MessengerChannelRow.state == "ACTIVE",
                 )
             )

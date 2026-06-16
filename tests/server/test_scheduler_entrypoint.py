@@ -54,6 +54,12 @@ class _Repo(SchedulerRepository):
         self.target = replace(self.target, next_run_at=next_run_at)
         return True
 
+    async def release_due_target(self, target_id, *, claimed_next_run_at, restore_next_run_at):
+        if self.target.next_run_at != claimed_next_run_at:
+            return False
+        self.target = replace(self.target, next_run_at=restore_next_run_at)
+        return True
+
 
 def test_run_once_entrypoint_seam_enqueues_crawl_job() -> None:
     backend = InMemoryQueueBackend()

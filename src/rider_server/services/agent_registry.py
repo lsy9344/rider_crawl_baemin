@@ -73,7 +73,7 @@ class RegisterAgentInput:
 class RegisterAgentResult:
     agent_id: str
     agent_token: str
-    tenant_scope: list[str]
+    tenant_scope: dict[str, Any]
     config_version: int
 
 
@@ -290,7 +290,7 @@ class InMemoryAgentRegistry:
         return RegisterAgentResult(
             agent_id=updated.id,
             agent_token=token,
-            tenant_scope=[],
+            tenant_scope={},
             config_version=DEFAULT_CONFIG_VERSION,
         )
 

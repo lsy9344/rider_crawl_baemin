@@ -133,6 +133,16 @@ class SchedulerRepository(abc.ABC):
         (AC4). [architecture-contract.md:66 "idempotent job creation"]
         """
 
+    @abc.abstractmethod
+    async def release_due_target(
+        self,
+        target_id: str,
+        *,
+        claimed_next_run_at: datetime,
+        restore_next_run_at: datetime | None,
+    ) -> bool:
+        """enqueue 실패 시 선점 전 ``next_run_at`` 으로 되돌린다."""
+
 
 class SchedulerService:
     """scheduler tick 오케스트레이터(정책↔포트↔queue 조립)."""
@@ -260,13 +270,21 @@ class SchedulerService:
                 continue
 
             # ⑤-b enqueue(5.3 QueueBackend.enqueue 그대로 — run_after=now: 즉시 claim 가능).
-            job_id = await queue_backend.enqueue(
-                job_type=job_type,
-                target_id=target.target_id,
-                payload_json=_crawl_job_payload(target, job_type),
-                run_after=now,
-                now=now,
-            )
+            try:
+                job_id = await queue_backend.enqueue(
+                    job_type=job_type,
+                    target_id=target.target_id,
+                    payload_json=_crawl_job_payload(target, job_type),
+                    run_after=now,
+                    now=now,
+                )
+            except Exception:
+                await repo.release_due_target(
+                    target.target_id,
+                    claimed_next_run_at=advanced_next,
+                    restore_next_run_at=target.next_run_at,
+                )
+                raise
             in_flight += 1
             enqueued_count += 1
             outcomes.append(

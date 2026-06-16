@@ -46,6 +46,7 @@ class PostgresAgentRegistry:
             row = (
                 await session.execute(
                     select(AgentRow).where(AgentRow.registration_code_hash == code_hash)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
             if row is None:
@@ -66,9 +67,12 @@ class PostgresAgentRegistry:
                 raise DuplicateMachineRegistration("machine already registered")
 
             token = generate_agent_token()
-            await session.execute(
+            result = await session.execute(
                 update(AgentRow)
-                .where(AgentRow.id == row.id)
+                .where(
+                    AgentRow.id == row.id,
+                    AgentRow.registration_code_used_at.is_(None),
+                )
                 .values(
                     name=request.hostname.strip() or "agent",
                     machine_id=request.machine_fingerprint.strip(),
@@ -80,11 +84,14 @@ class PostgresAgentRegistry:
                     token_issued_at=now,
                 )
             )
+            if (result.rowcount or 0) != 1:
+                await session.rollback()
+                raise RegistrationCodeAlreadyUsed("registration code already used")
             await session.commit()
             return RegisterAgentResult(
                 agent_id=str(row.id),
                 agent_token=token,
-                tenant_scope=[],
+                tenant_scope={},
                 config_version=DEFAULT_CONFIG_VERSION,
             )
 

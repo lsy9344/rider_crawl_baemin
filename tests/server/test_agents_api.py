@@ -65,7 +65,7 @@ def test_register_consumes_one_time_code_and_returns_token_once() -> None:
 
     assert body["agent_id"] == _AGENT_ID
     assert body["agent_token"]
-    assert body["tenant_scope"] == []
+    assert body["tenant_scope"] == {}
     assert body["config_version"] == 1
     assert _CODE not in body["agent_token"]
     assert _CODE not in str(body)

@@ -29,6 +29,7 @@ from rider_server.scheduler import policy
 from rider_server.scheduler.postgres_repository import (
     _ACTIVE_JOB_STATUSES,
     _CRAWL_JOB_TYPES,
+    PostgresSchedulerRepository,
     _to_lifecycle_status,
     _to_subscription_status,
 )
@@ -89,3 +90,7 @@ def test_repository_active_status_scope_is_pending_claimed_running() -> None:
         JOB_STATUS_CLAIMED,
         JOB_STATUS_RUNNING,
     }
+
+
+def test_postgres_repository_has_release_due_target_for_enqueue_failures() -> None:
+    assert hasattr(PostgresSchedulerRepository, "release_due_target")
