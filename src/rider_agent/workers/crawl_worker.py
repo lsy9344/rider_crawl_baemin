@@ -393,6 +393,9 @@ def _build_config(
         coupang_login_id=coupang_login_id,
         coupang_login_password=coupang_login_password,
         verification_email_address=verification_email_address,
+        verification_email_mailbox_lock_id=(
+            payload.verification_email_address_ref or verification_email_address
+        ),
         verification_email_app_password=verification_email_app_password,
         verification_email_subject_keyword=payload.verification_email_subject_keyword
         or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD,

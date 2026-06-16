@@ -195,6 +195,7 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert config.verification_email_app_password == "mail-app-password"
     assert config.verification_email_subject_keyword == "보안코드"
     assert config.verification_email_sender_keyword == "wing"
+    assert config.verification_email_mailbox_lock_id == "vault://mail/address"
 
 
 def test_coupang_job_rejects_plaintext_secret_fields_before_crawl() -> None:

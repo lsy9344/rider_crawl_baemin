@@ -60,6 +60,7 @@ class AppConfig:
     coupang_login_password: str = field(default="", repr=False)
     # 인증 이메일 자격증명(IMAP). 공급자(naver/gmail)는 주소 도메인으로 자동 결정한다.
     verification_email_address: str = ""
+    verification_email_mailbox_lock_id: str = ""
     verification_email_app_password: str = field(default="", repr=False)
     verification_email_subject_keyword: str = DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
     verification_email_sender_keyword: str = DEFAULT_EMAIL_2FA_SENDER_KEYWORD

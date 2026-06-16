@@ -900,6 +900,53 @@ def test_coupang_login_required_recovers_when_auto_2fa_enabled_and_recovery_succ
     assert html == "<html>라이더 현황 ok</html>"
 
 
+def test_coupang_recovery_uses_mailbox_run_lock_before_recover(tmp_path, monkeypatch):
+    config = replace(
+        _config(tmp_path, coupang_auto_email_2fa_enabled=True),
+        verification_email_mailbox_lock_id="vault://mail/address",
+    )
+    page = _RecoverablePage(
+        config.coupang_eats_url,
+        login_html="<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>",
+        ready_html="<html>라이더 현황 ok</html>",
+    )
+    browser = _FakeBrowser([page])
+    events: list[str] = []
+    lock_paths: list[Path] = []
+
+    class FakeRunLock:
+        def __init__(self, path, *, stale_timeout_seconds):
+            lock_paths.append(path)
+            assert stale_timeout_seconds == config.run_lock_timeout_seconds
+
+        def __enter__(self):
+            events.append("lock-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
+    def _recover(received_page, _config):
+        events.append("recover")
+        received_page.mark_recovered()
+        return True
+
+    monkeypatch.setattr(crawler, "RunLock", FakeRunLock)
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=_recover,
+    )
+
+    assert events == ["lock-enter", "recover", "lock-exit"]
+    assert len(lock_paths) == 1
+    assert lock_paths[0].parent == config.runtime_dir / "state" / "mailbox_locks"
+    assert "vault://mail/address" not in str(lock_paths[0])
+    assert html == "<html>라이더 현황 ok</html>"
+
+
 def test_coupang_login_required_stops_when_recovery_fails(tmp_path):
     config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
     browser = _FakeBrowser(

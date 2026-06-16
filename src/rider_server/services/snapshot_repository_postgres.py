@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_crawl.models import (
@@ -25,7 +27,15 @@ from rider_server.db.models.messaging import (
     MessengerChannel as MessengerChannelRow,
     Snapshot as SnapshotRow,
 )
-from rider_server.domain import DeliveryStatus, FailureCategory, Message, Messenger
+from rider_server.domain import (
+    DeliveryLog,
+    DeliveryStatus,
+    FailureCategory,
+    Message,
+    Messenger,
+    MessengerChannel,
+    MessengerChannelState,
+)
 from rider_server.queue import (
     COMPLETE_ACCEPTED,
     COMPLETE_LEASE_LOST,
@@ -43,7 +53,11 @@ from rider_server.queue.states import (
 from rider_server.services.idempotency import IdempotentDeliveryService
 from rider_server.services.message_render_service import MessageRenderService
 
+from .delivery_failure_policy import DeliveryFailurePolicy
+from .dispatch_fanout_service import DispatchJob
 from .job_result_ingest_service import JobResultIngestService, SnapshotIngestRecord
+
+TelegramSender = Callable[[MessengerChannel, DispatchJob, str], None]
 
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
@@ -77,9 +91,15 @@ def _dispatch_job_id_for_job(job_id: str, channel_id: str) -> uuid.UUID:
 class PostgresSnapshotIngestRepository(JobResultIngestService):
     """Persist prepared Agent snapshot ingest records to ``snapshots``."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        telegram_sender: TelegramSender | None = None,
+    ) -> None:
         super().__init__(save_snapshot=self.save_snapshot)
         self._session_factory = session_factory
+        self._telegram_sender = telegram_sender
 
     async def save_snapshot(self, record: SnapshotIngestRecord) -> None:
         async with self._session_factory() as session:
@@ -197,9 +217,11 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
             log_id = _delivery_log_id_for_job(record.job_id, channel_id)
             status = DeliveryStatus.RETRYING.value
             error_code = None
+            sent_at = None
             if channel.messenger == Messenger.TELEGRAM.value:
-                status = DeliveryStatus.HELD.value
-                error_code = FailureCategory.TELEGRAM_FAILURE.value
+                if self._telegram_sender is None:
+                    status = DeliveryStatus.HELD.value
+                    error_code = FailureCategory.TELEGRAM_FAILURE.value
 
             await session.execute(
                 insert(DeliveryLogRow).values(
@@ -209,9 +231,40 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     status=status,
                     dedup_key=dedup_key,
                     error_code=error_code,
-                    sent_at=None,
+                    sent_at=sent_at,
                 )
             )
+
+            if channel.messenger == Messenger.TELEGRAM.value:
+                if self._telegram_sender is not None:
+                    job = DispatchJob(
+                        id=str(_dispatch_job_id_for_job(record.job_id, channel_id)),
+                        target_id=record.target_id,
+                        channel_id=channel_id,
+                        message_id=message.id,
+                        messenger=Messenger.TELEGRAM,
+                        template_version=message.template_version,
+                        message_hash=message.text_hash,
+                    )
+                    log = await _attempt_telegram_delivery(
+                        channel=_channel_to_domain(channel),
+                        job=job,
+                        message=message,
+                        log_id=str(log_id),
+                        collected_at=record.collected_at,
+                        now=now,
+                        send=self._telegram_sender,
+                    )
+                    await session.execute(
+                        update(DeliveryLogRow)
+                        .where(DeliveryLogRow.id == log_id)
+                        .values(
+                            status=log.status.value,
+                            error_code=log.error_code,
+                            sent_at=log.sent_at,
+                        )
+                    )
+                continue
 
             if channel.messenger != Messenger.KAKAO.value:
                 continue
@@ -237,6 +290,49 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     result_json=None,
                 )
             )
+
+
+async def _attempt_telegram_delivery(
+    *,
+    channel: MessengerChannel,
+    job: DispatchJob,
+    message: Message,
+    log_id: str,
+    collected_at: datetime,
+    now: datetime,
+    send: TelegramSender,
+) -> DeliveryLog:
+    """Send one Telegram dispatch outside the event loop and return its log values."""
+
+    def _send(dispatch_job: DispatchJob) -> None:
+        send(channel, dispatch_job, message.text)
+
+    result = await asyncio.to_thread(
+        DeliveryFailurePolicy.attempt_delivery,
+        job,
+        collected_at=collected_at,
+        reserve=lambda _key: True,
+        send=_send,
+        release=lambda _key: None,
+        classify=lambda _exc: DeliveryFailurePolicy.channel_failure_category(Messenger.TELEGRAM),
+        log_id_for=lambda _job: log_id,
+        sent_at=now,
+        attempt=1,
+        max_attempts=3,
+    )
+    return result.log
+
+
+def _channel_to_domain(row: MessengerChannelRow) -> MessengerChannel:
+    return MessengerChannel(
+        id=str(row.id),
+        tenant_id=str(row.tenant_id),
+        messenger=Messenger(row.messenger),
+        telegram_chat_id=row.telegram_chat_id,
+        thread_id=row.thread_id,
+        kakao_room_name=row.kakao_room_name,
+        state=MessengerChannelState(row.state),
+    )
 
 
 def _message_from_record(

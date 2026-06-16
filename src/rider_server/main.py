@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -40,6 +41,7 @@ from .api import (
     telegram_webhook_router,
 )
 from .db.base import create_engine, create_session_factory
+from .domain import MessengerChannel
 from .metrics.policy import evaluate_alerts
 from .metrics.repository_postgres import PostgresMetricsRepository
 from .metrics.service import (
@@ -73,8 +75,10 @@ from .services.admin_entity_service import (
 )
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
+from .services.dispatch_fanout_service import DispatchJob
 from .services.job_result_ingest_service import JobResultIngestService
 from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
+from .services.telegram_central_dispatch import CentralTelegramSender
 from .settings import Settings
 
 
@@ -164,7 +168,10 @@ def _default_job_result_ingest_service(settings: Settings) -> JobResultIngestSer
 
     if settings.database_url:
         engine = create_engine(settings.database_url)
-        return PostgresSnapshotIngestRepository(create_session_factory(engine))
+        return PostgresSnapshotIngestRepository(
+            create_session_factory(engine),
+            telegram_sender=_default_telegram_sender(settings),
+        )
     return None
 
 
@@ -219,6 +226,34 @@ def _default_resolve_telegram_secret(settings: Settings):
         return _resolve_env_secret_ref(settings.telegram_webhook_secret_ref)
 
     return resolve
+
+
+def _default_resolve_telegram_token(settings: Settings):
+    """bot token 해석 seam 기본값(``env:NAME`` ref만 지원, 그 외 fail-closed)."""
+
+    def resolve(_channel: MessengerChannel) -> str:
+        token = _resolve_env_secret_ref(settings.telegram_bot_token_ref)
+        if not token:
+            raise RuntimeError("telegram bot token ref is not resolvable")
+        return token
+
+    return resolve
+
+
+def _default_telegram_sender(settings: Settings):
+    if not settings.sending_enabled or not settings.telegram_bot_token_ref:
+        return None
+
+    resolve_token = _default_resolve_telegram_token(settings)
+
+    def send(channel: MessengerChannel, job: DispatchJob, text: str) -> None:
+        CentralTelegramSender(
+            channels={channel.id: channel},
+            resolve_token=resolve_token,
+            urlopen=urlopen,
+        ).send(job, text)
+
+    return send
 
 
 def _iso_utc_now() -> str:
@@ -291,6 +326,9 @@ def create_app(
         app.state.settings
     )
     app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
+        app.state.settings
+    )
+    app.state.resolve_telegram_token = _default_resolve_telegram_token(
         app.state.settings
     )
     # Story 5.6: 읽기 전용 Admin 대시보드 repository + admin 세션 seam(5.8 이 MFA/4역할으로 교체).

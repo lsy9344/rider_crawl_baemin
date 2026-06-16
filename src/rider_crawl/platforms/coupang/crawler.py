@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime
 from html.parser import HTMLParser
@@ -9,6 +10,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from rider_crawl.browser_launcher import BrowserActionRequiredError, CdpUnavailableError, ensure_local_cdp_address
 from rider_crawl.config import DEFAULT_COUPANG_RIDER_PERFORMANCE_URL, AppConfig
+from rider_crawl.lock import RunLock
 from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 
 from .parser import MissingPerformanceDataError, parse_current_screen_html, parse_peak_dashboard_html
@@ -657,7 +659,15 @@ def _try_recover_coupang_session(
 
     recover = recover_session or _default_recover_coupang_session
     try:
-        succeeded = bool(recover(page, config))
+        lock_id = _mailbox_lock_id(config)
+        if lock_id:
+            with RunLock(
+                _mailbox_lock_path(config),
+                stale_timeout_seconds=config.run_lock_timeout_seconds,
+            ):
+                succeeded = bool(recover(page, config))
+        else:
+            succeeded = bool(recover(page, config))
     except Exception as exc:
         # 복구 실패는 자동 복구 불가로 본다. 단, 왜 실패했는지 안전한 범위에서 로그에 남긴다.
         _log_recovery_failure(config, exc)
@@ -665,6 +675,21 @@ def _try_recover_coupang_session(
     if not succeeded:
         _log_recovery_failure(config, RuntimeError("자동복구 불가 화면(로그인 제출 실패 또는 비대상 화면)"))
     return succeeded
+
+
+def _mailbox_lock_id(config: AppConfig) -> str:
+    value = (
+        getattr(config, "verification_email_mailbox_lock_id", "")
+        or config.verification_email_address
+    )
+    value = str(value or "").strip()
+    return value.casefold() if "@" in value else value
+
+
+def _mailbox_lock_path(config: AppConfig) -> Path:
+    lock_id = _mailbox_lock_id(config)
+    handle = hashlib.sha256(lock_id.encode("utf-8")).hexdigest()[:16]
+    return config.runtime_dir / "state" / "mailbox_locks" / f"mailbox.{handle}.lock"
 
 
 _EMAIL_PROVIDER_BY_DOMAIN = {
