@@ -56,8 +56,8 @@ REQUIRED_FIELDS = {
     "tenants": {"id", "name", "status", "created_at"},
     "subscriptions": {"tenant_id", "plan", "status", "current_period_end", "quotas"},
     "platform_accounts": {
-        "id", "tenant_id", "platform", "label", "username_ref", "password_ref",
-        "verification_email_address_ref", "verification_email_app_password_ref",
+        "id", "tenant_id", "platform", "label", "username", "password",
+        "verification_email_address", "verification_email_app_password",
         "verification_email_subject_keyword", "verification_email_sender_keyword",
         "auth_state",
     },
@@ -92,8 +92,9 @@ REQUIRED_FIELDS = {
     },
 }
 
-# 평문 secret 컬럼명 금지(NFR-8) — ``*_ref`` 만 허용. exact-name 매칭(username_ref ≠ username).
-FORBIDDEN_PLAINTEXT_COLUMNS = {"password", "username", "token", "secret", "profile_path"}
+# 평문 secret 컬럼명 금지(NFR-8) — ``*_ref`` 만 허용(profile_path_ref 등). PlatformAccount 자격증명은 plain text.
+# NOTE: PlatformAccount credential columns(plain storage), browser_profiles.profile_path_ref 는 여전히 ref.
+FORBIDDEN_PLAINTEXT_COLUMNS = {"token", "secret", "profile_path"}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -156,13 +157,13 @@ def test_no_plaintext_secret_columns():
     assert offenders == [], offenders
 
 
-def test_secret_ref_columns_present():
+def test_platform_account_credential_columns_present():
     pa = set(Base.metadata.tables["platform_accounts"].columns.keys())
     assert {
-        "username_ref",
-        "password_ref",
-        "verification_email_address_ref",
-        "verification_email_app_password_ref",
+        "username",
+        "password",
+        "verification_email_address",
+        "verification_email_app_password",
     } <= pa
     bp = set(Base.metadata.tables["browser_profiles"].columns.keys())
     assert "profile_path_ref" in bp
@@ -550,8 +551,8 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # Tenant-scoped relational guards moved the single head to 0010.
-    assert heads[0] == "0010_tenant_scope_guards"
+    # 0012: tenant 별 텔레그램 설정 컬럼 추가가 single head 를 0012 로 이동.
+    assert heads[0] == "0012_tenant_telegram_config"
     assert (
         script.get_revision("0009_dbx_unique_guards").down_revision
         == "0008_acct_email_2fa_refs"
@@ -655,7 +656,7 @@ def test_postgres_upgrade_creates_14_tables_and_dedup_blocks_duplicate():
                     await s.flush()
                     s.add(PlatformAccount(id=ids["account"], tenant_id=ids["tenant"],
                                           platform="BAEMIN", label="l",
-                                          username_ref="vault://u", password_ref="vault://p",
+                                          username="vault://u", password="vault://p",
                                           auth_state="UNKNOWN"))
                     s.add(MessengerChannel(id=ids["channel"], tenant_id=ids["tenant"],
                                            messenger="TELEGRAM", state="ACTIVE"))

@@ -40,17 +40,28 @@ router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
 # ── secret 검증(순수·상수시간) ────────────────────────────────────────────────────
 
 
-def verify_webhook_secret(provided: str | None, expected: str | None) -> bool:
+def verify_webhook_secret(
+    provided: str | None, expected: "str | list[str] | None"
+) -> bool:
     """webhook secret 헤더를 상수시간 비교한다(fail-closed).
 
-    설정 secret(``expected``)이 없거나 헤더(``provided``)가 없으면 **거부**한다(미설정 환경에서
-    임의 요청 수락 금지). 둘 다 있으면 ``secrets.compare_digest`` 로 timing-safe 비교한다.
-    secret 값은 반환/로그하지 않는다.
+    ``expected`` 는 단일 secret(전역 호환) 또는 secret 목록(0012 — tenant 별 secret 집합 ∪ env)일
+    수 있다. 헤더(``provided``)가 없거나 유효 secret 집합이 비어 있으면 **거부**한다(미설정 환경에서
+    임의 요청 수락 금지). 집합의 각 원소를 ``secrets.compare_digest`` 로 timing-safe 비교해 하나라도
+    일치하면 통과한다(단일 webhook 엔드포인트에서 tenant 별 secret 을 본문 파싱 이전에 검증). secret
+    값은 반환/로그하지 않는다.
     """
 
-    if not expected or not provided:
+    if not provided:
         return False
-    return secrets.compare_digest(provided, expected)
+    if expected is None:
+        return False
+    candidates = [expected] if isinstance(expected, str) else list(expected)
+    matched = False
+    for candidate in candidates:
+        if candidate and secrets.compare_digest(provided, candidate):
+            matched = True  # early-return 하지 않아 타이밍 노출을 줄인다(전체 후보 비교)
+    return matched
 
 
 # ── Telegram Update 페이로드(Pydantic v2, snake_case·camelCase alias 금지) ──────────

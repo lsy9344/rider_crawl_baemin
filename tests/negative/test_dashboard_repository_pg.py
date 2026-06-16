@@ -85,9 +85,9 @@ async def _seed(session_factory) -> None:
             )
         await session.flush()
         # ── platform_accounts ──
-        session.add(PlatformAccount(id=uuid.UUID(_ACC_A_OK), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
-        session.add(PlatformAccount(id=uuid.UUID(_ACC_A_AUTH), tenant_id=uuid.UUID(_TENANT_A), platform="COUPANG", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="AUTH_REQUIRED"))
-        session.add(PlatformAccount(id=uuid.UUID(_ACC_B), tenant_id=uuid.UUID(_TENANT_B), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
+        session.add(PlatformAccount(id=uuid.UUID(_ACC_A_OK), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username="vault://u", password="vault://p", auth_state="ACTIVE"))
+        session.add(PlatformAccount(id=uuid.UUID(_ACC_A_AUTH), tenant_id=uuid.UUID(_TENANT_A), platform="COUPANG", label="l", username="vault://u", password="vault://p", auth_state="AUTH_REQUIRED"))
+        session.add(PlatformAccount(id=uuid.UUID(_ACC_B), tenant_id=uuid.UUID(_TENANT_B), platform="BAEMIN", label="l", username="vault://u", password="vault://p", auth_state="ACTIVE"))
         session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0 - timedelta(seconds=30), capacity_json={"max_in_flight": 5, "capabilities": ["CRAWL_BAEMIN", "KAKAO_SEND"]}))
         await session.flush()
         # ── monitoring_targets ──

@@ -1,8 +1,10 @@
 """platform_accounts·monitoring_targets·auth_sessions ORM 모델 — Story 5.2 (AC1·AC2).
 
-secret 평문 금지(NFR-8): ``username_ref``/``password_ref`` 와 쿠팡 인증 메일 ref만 둔다 — 평문
-``password``/``username``/``token`` 컬럼 0. ``monitoring_targets.center_name`` 은 domain
-공개 경계 필드라 보존한다(FR-20 기대 센터/상점명 검증 정본). ``auth_sessions`` 는 domain
+자격증명은 평문으로 DB에 저장한다(운영 간소화). ``username``/``password`` 는
+배민·쿠팡 사이트 로그인 ID/비밀번호, ``verification_email_address``/
+``verification_email_app_password`` 는 쿠팡이츠 2차 인증용 IMAP 메일 주소와
+앱 비밀번호다. ``monitoring_targets.center_name`` 은 domain 공개 경계 필드라
+보존한다(FR-20 기대 센터/상점명 검증 정본). ``auth_sessions`` 는 domain
 dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하며, **계약 필드명
 ``account_id`` 를 그대로** 쓴다(``platform_account_id`` 로 바꾸지 않는다).
 """
@@ -27,10 +29,10 @@ class PlatformAccount(Base):
     tenant_id: Mapped[uuid.UUID] = fk("tenants.id")
     platform: Mapped[str] = mapped_column(String, nullable=False)  # Platform 값
     label: Mapped[str] = mapped_column(String, nullable=False)
-    username_ref: Mapped[str] = mapped_column(String, nullable=False)  # SecretRef 핸들(평문 아님)
-    password_ref: Mapped[str] = mapped_column(String, nullable=False)  # SecretRef 핸들(평문 아님)
-    verification_email_address_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
-    verification_email_app_password_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    username: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 ID(평문)
+    password: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 비밀번호(평문)
+    verification_email_address: Mapped[str] = mapped_column(String, nullable=False, default="")  # 2차인증 이메일 주소(평문)
+    verification_email_app_password: Mapped[str] = mapped_column(String, nullable=False, default="")  # IMAP 앱 비밀번호(평문)
     verification_email_subject_keyword: Mapped[str] = mapped_column(String, nullable=False, default="인증번호")
     verification_email_sender_keyword: Mapped[str] = mapped_column(String, nullable=False, default="coupang")
     auth_state: Mapped[str] = mapped_column(String, nullable=False)  # BaeminAuthState 값

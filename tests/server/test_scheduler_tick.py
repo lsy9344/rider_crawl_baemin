@@ -115,10 +115,10 @@ def _target(
     tenant=None,
     interval=_INTERVAL_MIN,
     next_run=None,
-    username_ref="",
-    password_ref="",
-    verification_email_address_ref="",
-    verification_email_app_password_ref="",
+    username="",
+    password="",
+    verification_email_address="",
+    verification_email_app_password="",
     verification_email_subject_keyword="인증번호",
     verification_email_sender_keyword="coupang",
 ):
@@ -131,10 +131,10 @@ def _target(
         platform_account_id=f"acct-{tid}",
         primary_url=f"https://example.invalid/{tid}",
         expected_display_name=f"센터-{tid}",
-        username_ref=username_ref,
-        password_ref=password_ref,
-        verification_email_address_ref=verification_email_address_ref,
-        verification_email_app_password_ref=verification_email_app_password_ref,
+        username=username,
+        password=password,
+        verification_email_address=verification_email_address,
+        verification_email_app_password=verification_email_app_password,
         verification_email_subject_keyword=verification_email_subject_keyword,
         verification_email_sender_keyword=verification_email_sender_keyword,
     )
@@ -208,10 +208,10 @@ def test_scheduler_enqueues_coupang_secret_refs_needed_for_email_2fa() -> None:
     target = _target(
         "t-coupang",
         platform="COUPANG",
-        username_ref="vault://coupang/login-id",
-        password_ref="vault://coupang/login-password",
-        verification_email_address_ref="vault://mail/address",
-        verification_email_app_password_ref="vault://mail/app-password",
+        username="vault://coupang/login-id",
+        password="vault://coupang/login-password",
+        verification_email_address="vault://mail/address",
+        verification_email_app_password="vault://mail/app-password",
         verification_email_subject_keyword="보안코드",
         verification_email_sender_keyword="wing",
     )
@@ -227,10 +227,10 @@ def test_scheduler_enqueues_coupang_secret_refs_needed_for_email_2fa() -> None:
     job = backend.job_snapshot(result.outcomes[0].job_id)
     assert job is not None
     assert job.payload_json["job_type"] == JOB_TYPE_CRAWL_COUPANG
-    assert job.payload_json["username_ref"] == "vault://coupang/login-id"
-    assert job.payload_json["password_ref"] == "vault://coupang/login-password"
-    assert job.payload_json["verification_email_address_ref"] == "vault://mail/address"
-    assert job.payload_json["verification_email_app_password_ref"] == "vault://mail/app-password"
+    assert job.payload_json["username"] == "vault://coupang/login-id"
+    assert job.payload_json["password"] == "vault://coupang/login-password"
+    assert job.payload_json["verification_email_address"] == "vault://mail/address"
+    assert job.payload_json["verification_email_app_password"] == "vault://mail/app-password"
     assert job.payload_json["verification_email_subject_keyword"] == "보안코드"
     assert job.payload_json["verification_email_sender_keyword"] == "wing"
     assert job.payload_json["coupang_auto_email_2fa_enabled"] is True

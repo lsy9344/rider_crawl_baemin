@@ -75,7 +75,7 @@ _OTP_RE = re.compile(
 # ``[:=]`` 가 바로 뒤따라야 하므로 ``password_ref`` 처럼 ``_ref`` 가 붙은 키는 매칭되지 않는다.
 _SENSITIVE_KEY = (
     r"(?:[A-Za-z0-9]+_)*"
-    r"(?:password|passwd|pwd"
+    r"(?:password|passwd|pwd|username"
     r"|telegram_bot_token|bot_token|access_token|refresh_token|id_token|token"
     r"|client_secret|secret"
     r"|refresh"
@@ -162,6 +162,7 @@ _SECRET_KEY_SUFFIXES = (
     "password",
     "passwd",
     "pwd",
+    "username",
     "token",
     "secret",
     "otp",

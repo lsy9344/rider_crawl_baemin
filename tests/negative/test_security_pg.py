@@ -49,7 +49,7 @@ async def _seed(session_factory) -> None:
         for tid in (_TENANT_A, _TENANT_B):
             session.add(Tenant(id=uuid.UUID(tid), name="t", status="ACTIVE", created_at=_T0))
         await session.flush()
-        session.add(PlatformAccount(id=uuid.UUID(_ACC_A), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username_ref="vault://u", password_ref="vault://p", auth_state="ACTIVE"))
+        session.add(PlatformAccount(id=uuid.UUID(_ACC_A), tenant_id=uuid.UUID(_TENANT_A), platform="BAEMIN", label="l", username="vault://u", password="vault://p", auth_state="ACTIVE"))
         session.add(Agent(id=uuid.UUID(_AGENT), name="agent-1", machine_id="m", version="1.0.0", os="windows", status="active", last_heartbeat_at=_T0, capacity_json={}))
         await session.flush()
         session.add(MonitoringTarget(id=uuid.UUID(_T_A), tenant_id=uuid.UUID(_TENANT_A), platform_account_id=uuid.UUID(_ACC_A), name="A", center_name="c", external_id="", url="", interval_minutes=10, status="ACTIVE", next_run_at=None))

@@ -197,7 +197,13 @@ def test_default_snapshot_ingest_wires_telegram_sender_when_sending_enabled(monk
     assert captured["telegram_sender"] is not None
 
 
-def test_default_snapshot_ingest_leaves_telegram_sender_off_when_sending_disabled(monkeypatch) -> None:
+def test_default_snapshot_ingest_wires_sender_with_db_even_when_global_gate_off(monkeypatch) -> None:
+    """0012: DB(tenant provider) 있으면 전역 env send 게이트가 꺼져 있어도 sender 를 구성한다.
+
+    실발송 차단은 더 이상 "sender 미구성"이 아니라 **발송 직전 tenant 게이트**(fail-closed)로
+    수행한다 — 전역 OFF 라도 특정 tenant 가 sending_enabled=True 면 그 tenant 만 발송 가능하다.
+    실제 게이트 동작은 test_tenant_telegram_gate 에서 단위 검증한다.
+    """
     captured: dict[str, object] = {}
 
     def fake_repo(session_factory, *, telegram_sender=None):
@@ -212,4 +218,5 @@ def test_default_snapshot_ingest_leaves_telegram_sender_off_when_sending_disable
     _default_job_result_ingest_service(_settings(sending_enabled=False))
 
     assert captured["session_factory"] == "sessions"
-    assert captured["telegram_sender"] is None
+    # DB provider 가 존재하므로 sender 는 구성된다(게이트는 per-tenant 로 이동).
+    assert captured["telegram_sender"] is not None

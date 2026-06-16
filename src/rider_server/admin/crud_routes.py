@@ -106,6 +106,13 @@ def _bool(form: dict, key: str) -> bool:
     return form.get(key, "").strip().lower() in {"true", "on", "1", "yes"}
 
 
+def _optional_bool(value: str | None) -> bool | None:
+    """명시 3-state 토글 — None(키 없음=유지) / True / False. 편집 폼의 부분 갱신용."""
+    if value is None:
+        return None
+    return value.strip().lower() in {"true", "on", "1", "yes"}
+
+
 def _int_or(form: dict, key: str, default: int = 0) -> int:
     try:
         return int(form.get(key, "").strip())
@@ -363,10 +370,16 @@ async def update_customer(
     request: Request, tenant_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
+    # tenant 별 텔레그램 설정(0012). 토큰/secret 은 폼에 키가 없으면 None(유지), 있으면 set/clear.
+    # crudUpdate(filledValues) 는 빈 값을 아예 보내지 않으므로 "비우면 유지" 시맨틱이 자연스럽다.
+    # sending_enabled 는 명시 토글 — "true"/"false" 문자열로 보낸다(없으면 None=유지).
     try:
         tenant = await _service(request).update_tenant(
             tenant_id,
             name=form.get("name"),
+            telegram_bot_token=form.get("telegram_bot_token"),
+            telegram_webhook_secret=form.get("telegram_webhook_secret"),
+            sending_enabled=_optional_bool(form.get("sending_enabled")),
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),
@@ -404,12 +417,12 @@ async def create_platform_account(
             tenant_id=_tenant_id(request),
             platform=platform,
             label=form.get("label", "").strip(),
-            username_ref=form.get("username_ref", ""),
-            password_ref=form.get("password_ref", ""),
+            username=form.get("username", ""),
+            password=form.get("password", ""),
             at=_now(),
             actor_id=_resolve_actor(request),
-            verification_email_address_ref=form.get("verification_email_address_ref", ""),
-            verification_email_app_password_ref=form.get("verification_email_app_password_ref", ""),
+            verification_email_address=form.get("verification_email_address", ""),
+            verification_email_app_password=form.get("verification_email_app_password", ""),
             verification_email_subject_keyword=form.get("verification_email_subject_keyword", ""),
             verification_email_sender_keyword=form.get("verification_email_sender_keyword", ""),
             source=_resolve_source(request),
@@ -432,12 +445,12 @@ async def update_platform_account(
             account_id,
             tenant_id=_tenant_id(request),
             label=form.get("label"),
-            username_ref=form.get("username_ref"),
-            password_ref=form.get("password_ref"),
+            username=form.get("username"),
+            password=form.get("password"),
             at=_now(),
             actor_id=_resolve_actor(request),
-            verification_email_address_ref=form.get("verification_email_address_ref"),
-            verification_email_app_password_ref=form.get("verification_email_app_password_ref"),
+            verification_email_address=form.get("verification_email_address"),
+            verification_email_app_password=form.get("verification_email_app_password"),
             verification_email_subject_keyword=form.get("verification_email_subject_keyword"),
             verification_email_sender_keyword=form.get("verification_email_sender_keyword"),
             source=_resolve_source(request),

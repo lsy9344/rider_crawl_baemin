@@ -1,0 +1,15 @@
+# Terraform 로컬 상태/캐시/비밀 — 절대 커밋 금지.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+# 저장된 plan 은 민감값을 담을 수 있어 커밋 금지.
+tfplan.bin
+*.tfplan
+# .terraform.lock.hcl 은 의도적으로 커밋한다(provider 버전 고정) — ignore 하지 않음.
+# private key 및 로컬 secret.
+.secrets/
+*.pem
+# 운영자 IP 등 환경별 값.
+*.tfvars
+!example.tfvars

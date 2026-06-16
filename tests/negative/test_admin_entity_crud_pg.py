@@ -53,8 +53,8 @@ async def _seed(session_factory) -> None:
                 tenant_id=uuid.UUID(_TENANT_A),
                 platform="COUPANG",
                 label="l",
-                username_ref="vault://u",
-                password_ref="vault://p",
+                username="vault://u",
+                password="vault://p",
                 auth_state="UNKNOWN",
             )
         )
@@ -124,13 +124,13 @@ def test_create_account_stores_refs_and_soft_delete_roundtrip() -> None:
                 tenant_id=_TENANT_A,
                 platform=Platform.BAEMIN,
                 label="배민",
-                username_ref="vault://u2",
-                password_ref="vault://p2",
+                username="vault://u2",
+                password="vault://p2",
                 at=_T0,
                 actor_id=_ACTOR,
             )
             account = await repo.get_platform_account(acc_id)
-            assert account.username_ref.ref == "vault://u2"  # 핸들만 영속(평문 0)
+            assert account.username == "vault://u2"  # 평문 영속
 
             await svc.create_monitoring_target(
                 entity_id=tgt_id,

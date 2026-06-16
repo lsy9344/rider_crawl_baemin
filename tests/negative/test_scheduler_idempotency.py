@@ -70,8 +70,8 @@ async def _seed(session_factory) -> None:
                 tenant_id=uuid.UUID(_TENANT),
                 platform="BAEMIN",
                 label="l",
-                username_ref="vault://u",
-                password_ref="vault://p",
+                username="vault://u",
+                password="vault://p",
                 auth_state="UNKNOWN",
             )
         )

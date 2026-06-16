@@ -15,9 +15,6 @@
   * audit diff/redaction = 5.7 :func:`build_diff_redacted` + :class:`AuditEntry`/:class:`AuditResult`.
   * tenant scope = 5.7 ``_scoped_*`` 패턴(load 후 ``tenant_id`` 불일치 → :class:`TenantScopeViolation`
     = ``AdminActionNotFound`` 하위 → 404, 존재 누설 방지).
-  * secret 위생 = 5.8 :func:`looks_like_plaintext_secret`(평문이면 fail-closed ``ValueError``).
-  * 채널 비활성 상태머신 = 5.5 :func:`assert_channel_transition`(전이표 재사용 — register/verify/
-    activate 재구현 0). audit 동일 트랜잭션을 위해 entity repo ``save`` 경유로 영속한다.
   * center_name 위험 판정 = 쿠팡 기대 센터/상점명 정본(``rider_crawl.config.DEFAULT_BAEMIN_CENTER_NAME``).
 
 **결정성(5.7 규약):** 내부에서 ``datetime.now()`` 를 호출하지 않는다 — 시각 ``at`` 과 신규 ``id``
@@ -44,8 +41,6 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
-    SecretRef,
-    SecretStorageClass,
     Tenant,
 )
 from rider_server.services.admin_action_service import (
@@ -56,7 +51,6 @@ from rider_server.services.admin_action_service import (
     TenantScopeViolation,
     build_diff_redacted,
 )
-from rider_server.services.agent_token_service import looks_like_plaintext_secret
 from rider_server.services.channel_registration import assert_channel_transition
 
 # ── audit action 코드(UPPER_SNAKE 기계가독 — 신규 plain-string 상수, enum 아님) ─────────
@@ -82,13 +76,6 @@ TARGET_TYPE_DELIVERY_RULE = "delivery_rule"
 
 DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD = "인증번호"
 DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD = "coupang"
-_SECRET_REF_PREFIXES = (
-    "local:",
-    "agent:",
-    "secretref-",
-    "arn:",
-    "projects/",
-)
 
 
 class AdminEntityDuplicateError(ValueError):
@@ -119,37 +106,23 @@ def is_center_name_risky(platform: Platform, center_name: str) -> bool:
     return not normalized or normalized == DEFAULT_BAEMIN_CENTER_NAME
 
 
-def _secret_ref_or_reject(value: str, *, field: str) -> SecretRef:
-    """폼 입력 ``value`` 를 ``SecretRef`` 핸들로 변환하되 평문 secret 이면 fail-closed 거부(AC3).
-
-    ``username_ref``/``password_ref`` 는 ``*_ref`` 불투명 핸들만 허용한다(평문 token/OTP/password
-    패턴이면 :func:`looks_like_plaintext_secret` 가 True → ``ValueError``). 빈 값도 거부한다(핸들
-    필수). 평문은 응답/로그/audit 에 절대 싣지 않는다(``rotate_external_token`` 선례). storage_class
-    는 중앙 보관(``CENTRAL``) — secret 본문은 DB 밖(Secrets Manager)에 있고 DB 는 핸들만 둔다.
-    """
-
-    handle = (value or "").strip()
-    if not handle:
-        raise ValueError(f"{field} 핸들(*_ref)이 필요합니다(fail-closed)")
-    if looks_like_plaintext_secret(handle) or not _looks_like_secret_ref(handle):
-        raise ValueError(f"평문 secret 금지 — {field} 는 *_ref 핸들만 허용(fail-closed)")
-    return SecretRef(ref=handle, storage_class=SecretStorageClass.CENTRAL)
-
-
-def _looks_like_secret_ref(handle: str) -> bool:
-    return "://" in handle or handle.startswith(_SECRET_REF_PREFIXES)
-
-
-def _optional_secret_ref_or_empty(value: str | None, *, field: str) -> SecretRef:
-    handle = (value or "").strip()
-    if not handle:
-        return SecretRef(ref="", storage_class=SecretStorageClass.CENTRAL)
-    return _secret_ref_or_reject(handle, field=field)
-
-
 def _keyword_or_default(value: str | None, default: str) -> str:
     normalized = (value or "").strip()
     return normalized or default
+
+
+def _secret_change_label(old: str, new: str) -> str:
+    """secret 변경을 audit 에 안전하게 기록 — 값은 절대 싣지 않고 변경 유형만 반환.
+
+    ``unchanged``(동일) / ``set``(빈→값 또는 값→다른 값) / ``cleared``(값→빈). 평문/마스킹
+    secret 이 audit diff 로 새어나가지 않도록 한다(redaction 의존 없이 구조적으로 안전).
+    """
+
+    if old == new:
+        return "unchanged"
+    if not new:
+        return "cleared"
+    return "set"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -394,17 +367,43 @@ class AdminEntityService:
         *,
         name: str | None = None,
         status: CustomerLifecycleState | None = None,
+        telegram_bot_token: str | None = None,
+        telegram_webhook_secret: str | None = None,
+        sending_enabled: bool | None = None,
         at: datetime,
         actor_id: str | None,
         source: str | None = None,
         reason: str | None = None,
     ) -> Tenant:
-        """고객명/lifecycle 상태를 편집한다(scope = 자신의 id)."""
+        """고객명/lifecycle 상태 + tenant 별 텔레그램 설정을 편집한다(scope = 자신의 id).
+
+        텔레그램 봇 토큰/webhook secret 은 ``None`` 이면 기존 값을 유지하고(빈 문자열은 명시
+        삭제로 취급), 평문 저장한다(0011 선례). audit diff 에는 secret 값을 절대 싣지 않고 변경
+        여부(set/cleared/unchanged)만 기록한다. ``sending_enabled`` 는 ``None`` 이면 유지한다.
+        """
 
         existing = await self._scoped_tenant(tenant_id)
         new_name = name if name is not None and name.strip() else existing.name
         new_status = status or existing.status
-        updated = replace(existing, name=new_name, status=new_status)
+        new_token = (
+            telegram_bot_token if telegram_bot_token is not None else existing.telegram_bot_token
+        )
+        new_secret = (
+            telegram_webhook_secret
+            if telegram_webhook_secret is not None
+            else existing.telegram_webhook_secret
+        )
+        new_sending = (
+            sending_enabled if sending_enabled is not None else existing.sending_enabled
+        )
+        updated = replace(
+            existing,
+            name=new_name,
+            status=new_status,
+            telegram_bot_token=new_token,
+            telegram_webhook_secret=new_secret,
+            sending_enabled=new_sending,
+        )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_TENANT_UPDATE,
@@ -416,6 +415,15 @@ class AdminEntityService:
                 "to_name": updated.name,
                 "from_status": existing.status.value,
                 "to_status": updated.status.value,
+                # secret 값은 audit 에 싣지 않는다 — 변경 여부만 기록(평문/마스킹 누출 방지).
+                "telegram_bot_token": _secret_change_label(
+                    existing.telegram_bot_token, updated.telegram_bot_token
+                ),
+                "telegram_webhook_secret": _secret_change_label(
+                    existing.telegram_webhook_secret, updated.telegram_webhook_secret
+                ),
+                "from_sending_enabled": existing.sending_enabled,
+                "to_sending_enabled": updated.sending_enabled,
                 "reason": reason,
             },
             source=source,
@@ -434,30 +442,20 @@ class AdminEntityService:
         tenant_id: str,
         platform: Platform,
         label: str,
-        username_ref: str,
-        password_ref: str,
+        username: str = "",
+        password: str = "",
         at: datetime,
         actor_id: str | None,
-        verification_email_address_ref: str = "",
-        verification_email_app_password_ref: str = "",
+        verification_email_address: str = "",
+        verification_email_app_password: str = "",
         verification_email_subject_keyword: str = DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD,
         verification_email_sender_keyword: str = DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD,
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정을 생성한다 — 자격증명은 평문 금지(``*_ref`` 핸들만, fail-closed 400)."""
+        """플랫폼 계정을 생성한다 — 자격증명은 평문으로 DB에 저장한다."""
 
         await self._scoped_tenant(tenant_id)  # 부모 tenant 존재/scope 확인
-        username = _secret_ref_or_reject(username_ref, field="username_ref")
-        password = _secret_ref_or_reject(password_ref, field="password_ref")
-        email_address = _optional_secret_ref_or_empty(
-            verification_email_address_ref,
-            field="verification_email_address_ref",
-        )
-        email_app_password = _optional_secret_ref_or_empty(
-            verification_email_app_password_ref,
-            field="verification_email_app_password_ref",
-        )
         email_subject_keyword = _keyword_or_default(
             verification_email_subject_keyword,
             DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD,
@@ -471,10 +469,10 @@ class AdminEntityService:
             tenant_id=tenant_id,
             platform=platform,
             label=label,
-            username_ref=username,
-            password_ref=password,
-            verification_email_address_ref=email_address,
-            verification_email_app_password_ref=email_app_password,
+            username=username.strip(),
+            password=password,
+            verification_email_address=verification_email_address.strip(),
+            verification_email_app_password=verification_email_app_password,
             verification_email_subject_keyword=email_subject_keyword,
             verification_email_sender_keyword=email_sender_keyword,
             auth_state=BaeminAuthState.UNKNOWN,
@@ -489,11 +487,6 @@ class AdminEntityService:
                 "op": "create",
                 "platform": platform.value,
                 "label": label,
-                # *_ref 핸들은 secret 아님(redact 보존) — 평문 자격증명은 애초에 들어오지 않는다.
-                "username_ref": username.ref,
-                "password_ref": password.ref,
-                "verification_email_address_ref": email_address.ref,
-                "verification_email_app_password_ref": email_app_password.ref,
                 "verification_email_subject_keyword": email_subject_keyword,
                 "verification_email_sender_keyword": email_sender_keyword,
                 "reason": reason,
@@ -512,46 +505,35 @@ class AdminEntityService:
         at: datetime,
         actor_id: str | None,
         label: str | None = None,
-        username_ref: str | None = None,
-        password_ref: str | None = None,
-        verification_email_address_ref: str | None = None,
-        verification_email_app_password_ref: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        verification_email_address: str | None = None,
+        verification_email_app_password: str | None = None,
         verification_email_subject_keyword: str | None = None,
         verification_email_sender_keyword: str | None = None,
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정 라벨/자격증명 핸들을 편집한다(평문이면 거부 — AC3)."""
+        """플랫폼 계정 라벨/자격증명을 편집한다(평문 DB 저장)."""
 
         existing = await self._scoped_platform_account(account_id, tenant_id=tenant_id)
         new_label = label if label is not None and label.strip() else existing.label
         new_username = (
-            _secret_ref_or_reject(username_ref, field="username_ref")
-            if username_ref is not None and username_ref.strip()
-            else existing.username_ref
+            username.strip() if username is not None and username.strip() else existing.username
         )
         new_password = (
-            _secret_ref_or_reject(password_ref, field="password_ref")
-            if password_ref is not None and password_ref.strip()
-            else existing.password_ref
+            password if password is not None and password.strip() else existing.password
         )
         new_email_address = (
-            _secret_ref_or_reject(
-                verification_email_address_ref,
-                field="verification_email_address_ref",
-            )
-            if verification_email_address_ref is not None
-            and verification_email_address_ref.strip()
-            else existing.verification_email_address_ref
+            verification_email_address.strip()
+            if verification_email_address is not None and verification_email_address.strip()
+            else existing.verification_email_address
         )
         new_email_app_password = (
-            _secret_ref_or_reject(
-                verification_email_app_password_ref,
-                field="verification_email_app_password_ref",
-            )
-            if verification_email_app_password_ref is not None
-            and verification_email_app_password_ref.strip()
-            else existing.verification_email_app_password_ref
+            verification_email_app_password
+            if verification_email_app_password is not None
+            and verification_email_app_password.strip()
+            else existing.verification_email_app_password
         )
         new_email_subject_keyword = (
             _keyword_or_default(
@@ -572,10 +554,10 @@ class AdminEntityService:
         updated = replace(
             existing,
             label=new_label,
-            username_ref=new_username,
-            password_ref=new_password,
-            verification_email_address_ref=new_email_address,
-            verification_email_app_password_ref=new_email_app_password,
+            username=new_username,
+            password=new_password,
+            verification_email_address=new_email_address,
+            verification_email_app_password=new_email_app_password,
             verification_email_subject_keyword=new_email_subject_keyword,
             verification_email_sender_keyword=new_email_sender_keyword,
         )
@@ -588,9 +570,6 @@ class AdminEntityService:
             diff={
                 "from_label": existing.label,
                 "to_label": updated.label,
-                "username_ref": updated.username_ref.ref,  # 핸들만(secret 아님)
-                "verification_email_address_ref": updated.verification_email_address_ref.ref,
-                "verification_email_app_password_ref": updated.verification_email_app_password_ref.ref,
                 "verification_email_subject_keyword": updated.verification_email_subject_keyword,
                 "verification_email_sender_keyword": updated.verification_email_sender_keyword,
                 "reason": reason,

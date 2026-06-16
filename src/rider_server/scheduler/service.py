@@ -52,10 +52,10 @@ class DueTarget:
     platform_account_id: str = ""
     primary_url: str = ""
     expected_display_name: str = ""
-    username_ref: str = ""
-    password_ref: str = ""
-    verification_email_address_ref: str = ""
-    verification_email_app_password_ref: str = ""
+    username: str = ""
+    password: str = ""
+    verification_email_address: str = ""
+    verification_email_app_password: str = ""
     verification_email_subject_keyword: str = "인증번호"
     verification_email_sender_keyword: str = "coupang"
 
@@ -314,17 +314,17 @@ def _crawl_job_payload(target: DueTarget, job_type: str) -> dict[str, object]:
     if platform == "coupang":
         payload.update(
             {
-                "username_ref": target.username_ref,
-                "password_ref": target.password_ref,
-                "verification_email_address_ref": target.verification_email_address_ref,
-                "verification_email_app_password_ref": target.verification_email_app_password_ref,
+                "username": target.username,
+                "password": target.password,
+                "verification_email_address": target.verification_email_address,
+                "verification_email_app_password": target.verification_email_app_password,
                 "verification_email_subject_keyword": target.verification_email_subject_keyword,
                 "verification_email_sender_keyword": target.verification_email_sender_keyword,
                 "coupang_auto_email_2fa_enabled": bool(
-                    target.username_ref
-                    and target.password_ref
-                    and target.verification_email_address_ref
-                    and target.verification_email_app_password_ref
+                    target.username
+                    and target.password
+                    and target.verification_email_address
+                    and target.verification_email_app_password
                 ),
             }
         )

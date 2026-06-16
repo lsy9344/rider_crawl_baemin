@@ -36,8 +36,8 @@ from rider_server.domain import (
 )
 
 # --- 가짜 fixture(평문 secret 없음 — A1) ---
-_FAKE_USERNAME_REF = SecretRef("vault://t/user-ref", SecretStorageClass.AGENT_LOCAL)
-_FAKE_PASSWORD_REF = SecretRef("vault://t/pass-ref", SecretStorageClass.AGENT_LOCAL)
+_FAKE_USERNAME = "vault://t/user-ref"
+_FAKE_PASSWORD = "vault://t/pass-ref"
 _FAKE_PROFILE_REF = SecretRef("local:profile-ref", SecretStorageClass.AGENT_LOCAL)
 
 
@@ -85,7 +85,16 @@ def test_all_eight_models_importable() -> None:
 
 
 def test_model_field_sets_match_contract() -> None:
-    assert _fields(Tenant) == {"id", "name", "status", "created_at"}
+    # 0012: tenant 별 텔레그램 설정(봇 토큰/webhook secret/실발송 게이트) 추가.
+    assert _fields(Tenant) == {
+        "id",
+        "name",
+        "status",
+        "created_at",
+        "telegram_bot_token",
+        "telegram_webhook_secret",
+        "sending_enabled",
+    }
     assert _fields(Subscription) == {
         "id",
         "tenant_id",
@@ -99,10 +108,10 @@ def test_model_field_sets_match_contract() -> None:
         "tenant_id",
         "platform",
         "label",
-        "username_ref",
-        "password_ref",
-        "verification_email_address_ref",
-        "verification_email_app_password_ref",
+        "username",
+        "password",
+        "verification_email_address",
+        "verification_email_app_password",
         "verification_email_subject_keyword",
         "verification_email_sender_keyword",
         "auth_state",
@@ -158,12 +167,12 @@ def test_default_typed_state_fields() -> None:
         tenant_id="tnt-1",
         platform=Platform.BAEMIN,
         label="배민 계정",
-        username_ref=_FAKE_USERNAME_REF,
-        password_ref=_FAKE_PASSWORD_REF,
+        username=_FAKE_USERNAME,
+        password=_FAKE_PASSWORD,
     )
     assert account.auth_state is BaeminAuthState.UNKNOWN
-    assert account.verification_email_address_ref.ref == ""
-    assert account.verification_email_app_password_ref.ref == ""
+    assert account.verification_email_address == ""
+    assert account.verification_email_app_password == ""
     assert account.verification_email_subject_keyword == "인증번호"
     assert account.verification_email_sender_keyword == "coupang"
     assert make_target().status is MonitoringTargetStatus.ACTIVE
@@ -199,22 +208,19 @@ def test_browser_profile_links_target() -> None:
     assert profile.target_id == target.id  # 대상 ↔ 프로필 역참조 연결
 
 
-def test_platform_account_uses_secret_refs_not_plaintext() -> None:
+def test_platform_account_credentials_are_plain_strings() -> None:
     account = PlatformAccount(
         id="acc-1",
         tenant_id="tnt-1",
         platform=Platform.COUPANG,
         label="쿠팡 계정",
-        username_ref=_FAKE_USERNAME_REF,
-        password_ref=_FAKE_PASSWORD_REF,
+        username=_FAKE_USERNAME,
+        password=_FAKE_PASSWORD,
     )
-    assert isinstance(account.username_ref, SecretRef)
-    assert isinstance(account.password_ref, SecretRef)
-    assert isinstance(account.verification_email_address_ref, SecretRef)
-    assert isinstance(account.verification_email_app_password_ref, SecretRef)
-    # SecretRef는 참조 핸들만 — 평문 필드(value/secret/password/token …)를 갖지 않는다.
-    plaintext_keys = {"value", "secret", "password", "token", "plaintext", "raw"}
-    assert _fields(SecretRef) & plaintext_keys == set()
+    assert isinstance(account.username, str)
+    assert isinstance(account.password, str)
+    assert isinstance(account.verification_email_address, str)
+    assert isinstance(account.verification_email_app_password, str)
 
 
 # --- AC3(fan-out): 한 대상 → 2채널 ---

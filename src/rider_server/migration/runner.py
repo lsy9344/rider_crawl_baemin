@@ -35,7 +35,6 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from rider_crawl.secret_store import classify_secret_storage
 from rider_crawl.ui_settings import UiSettings, UiSettingsStore
 from rider_server.domain import (
     BaeminAuthState,
@@ -44,8 +43,6 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
-    SecretRef,
-    SecretStorageClass,
     Tenant,
 )
 
@@ -251,12 +248,12 @@ def map_active_tab(settings: UiSettings, *, created_at: datetime) -> TargetMappi
         tenant_id=settings.customer_id,
         platform=_platform_from_name(settings.platform_name),
         label=settings.legacy_alias,
-        username_ref=_secret_ref_for(
-            settings.coupang_login_id_ref, secret_kind="coupang_login_id"
-        ),
-        password_ref=_secret_ref_for(
-            settings.coupang_login_password_ref, secret_kind="coupang_login_password"
-        ),
+        username=settings.coupang_login_id or settings.coupang_login_id_ref or "",
+        password=settings.coupang_login_password or settings.coupang_login_password_ref or "",
+        verification_email_address=settings.verification_email_address,
+        verification_email_app_password=settings.verification_email_app_password,
+        verification_email_subject_keyword=settings.verification_email_subject_keyword,
+        verification_email_sender_keyword=settings.verification_email_sender_keyword,
         auth_state=BaeminAuthState.UNKNOWN,
     )
     monitoring_target = MonitoringTarget(
@@ -284,15 +281,6 @@ def _platform_from_name(platform_name: str) -> Platform:
         raise ValueError(f"unknown platform_name for migration: {platform_name!r}") from exc
 
 
-def _secret_ref_for(ref: str, *, secret_kind: str) -> SecretRef:
-    # ``SecretRef.storage_class`` 는 ref 접두사가 아니라 ``secret_kind`` 로 분류한다(정확성).
-    # Story 2.4 ``classify_secret_storage`` (소문자 central/agent_local/not_stored)를 2.5 도메인
-    # 대문자 enum ``SecretStorageClass`` 로 1:1 변환한다(별개 레이어). ref가 비면(자격증명 미설정)
-    # ``NOT_STORED`` 로 만든다 — storage_class는 기본값 없는 필수 필드라 항상 채워야 한다.
-    if not ref:
-        return SecretRef(ref="", storage_class=SecretStorageClass.NOT_STORED, secret_kind=secret_kind)
-    storage_class = SecretStorageClass[classify_secret_storage(secret_kind).upper()]
-    return SecretRef(ref=ref, storage_class=storage_class, secret_kind=secret_kind)
 
 
 # ── Task 6: 상태 폴더 복사(원본 미삭제) + seed 추출 ──────────────────────

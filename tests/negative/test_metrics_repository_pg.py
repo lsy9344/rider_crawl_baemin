@@ -63,7 +63,7 @@ async def _seed(session_factory) -> None:
     def _acc(acc_id, tenant, platform, auth_state):
         return PlatformAccount(
             id=uuid.UUID(acc_id), tenant_id=uuid.UUID(tenant), platform=platform,
-            label="l", username_ref="vault://u", password_ref="vault://p",
+            label="l", username="vault://u", password="vault://p",
             auth_state=auth_state,
         )
 

@@ -53,12 +53,7 @@ ERROR_PLAINTEXT_SECRET_NOT_ALLOWED = "PLAINTEXT_SECRET_NOT_ALLOWED"
 
 QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
-_PLAINTEXT_SECRET_KEYS = frozenset(
-    {
-        "coupang_login_password",
-        "verification_email_app_password",
-    }
-)
+_PLAINTEXT_SECRET_KEYS = frozenset[str]()
 
 
 @dataclass(frozen=True)
@@ -72,12 +67,10 @@ class CrawlJobPayload:
     browser_profile_ref: str
     timeout_seconds: int
     parser_version: str
-    username_ref: str = ""
-    password_ref: str = ""
+    username: str = ""
+    password: str = ""
     coupang_login_id: str = ""
     coupang_login_password: str = ""
-    verification_email_address_ref: str = ""
-    verification_email_app_password_ref: str = ""
     verification_email_address: str = ""
     verification_email_app_password: str = ""
     verification_email_subject_keyword: str = ""
@@ -259,14 +252,10 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
         browser_profile_ref=str(raw.get("browser_profile_ref") or "").strip(),
         timeout_seconds=timeout_seconds,
         parser_version=str(raw.get("parser_version") or f"{platform}-v1").strip(),
-        username_ref=_text(raw, "username_ref", "coupang_login_id_ref"),
-        password_ref=_text(raw, "password_ref", "coupang_login_password_ref"),
+        username=_text(raw, "username", "coupang_login_id_ref"),
+        password=_text(raw, "password", "coupang_login_password_ref"),
         coupang_login_id=_text(raw, "coupang_login_id"),
         coupang_login_password=_text(raw, "coupang_login_password"),
-        verification_email_address_ref=_text(raw, "verification_email_address_ref"),
-        verification_email_app_password_ref=_text(
-            raw, "verification_email_app_password_ref"
-        ),
         verification_email_address=_text(raw, "verification_email_address"),
         verification_email_app_password=_text(raw, "verification_email_app_password"),
         verification_email_subject_keyword=_text(raw, "verification_email_subject_keyword"),
@@ -323,19 +312,27 @@ def _plaintext_secret_keys(raw: dict[str, Any]) -> list[str]:
     ]
 
 
-def _resolved_or_value(
+def _resolve_credential(
     *,
-    value: str,
+    plain: str,
     ref: str,
     secret_resolver: Callable[[str], str | None] | None,
 ) -> str:
-    if value:
-        return value
+    if plain and secret_resolver is not None:
+        resolved = _safe_resolve(secret_resolver, plain)
+        if resolved:
+            return resolved
+    if plain:
+        return plain
     if not ref or secret_resolver is None:
-        return ""
+        return ref
+    return _safe_resolve(secret_resolver, ref) or ref
+
+
+def _safe_resolve(resolver: Callable[[str], str | None], ref: str) -> str:
     try:
-        return str(secret_resolver(ref) or "").strip()
-    except Exception:  # noqa: BLE001 - secret resolver failures fail closed.
+        return str(resolver(ref) or "").strip()
+    except Exception:
         return ""
 
 
@@ -346,24 +343,24 @@ def _build_config(
     user_data_dir: Path,
     secret_resolver: Callable[[str], str | None] | None = None,
 ) -> AppConfig:
-    coupang_login_id = _resolved_or_value(
-        value=payload.coupang_login_id,
-        ref=payload.username_ref,
+    coupang_login_id = _resolve_credential(
+        plain=payload.coupang_login_id or payload.username,
+        ref=payload.username,
         secret_resolver=secret_resolver,
     )
-    coupang_login_password = _resolved_or_value(
-        value=payload.coupang_login_password,
-        ref=payload.password_ref,
+    coupang_login_password = _resolve_credential(
+        plain=payload.coupang_login_password or payload.password,
+        ref=payload.password,
         secret_resolver=secret_resolver,
     )
-    verification_email_address = _resolved_or_value(
-        value=payload.verification_email_address,
-        ref=payload.verification_email_address_ref,
+    verification_email_address = _resolve_credential(
+        plain=payload.verification_email_address,
+        ref=payload.verification_email_address,
         secret_resolver=secret_resolver,
     )
-    verification_email_app_password = _resolved_or_value(
-        value=payload.verification_email_app_password,
-        ref=payload.verification_email_app_password_ref,
+    verification_email_app_password = _resolve_credential(
+        plain=payload.verification_email_app_password,
+        ref=payload.verification_email_app_password,
         secret_resolver=secret_resolver,
     )
     enable_email_2fa = bool(
@@ -397,7 +394,7 @@ def _build_config(
         coupang_login_password=coupang_login_password,
         verification_email_address=verification_email_address,
         verification_email_mailbox_lock_id=(
-            payload.verification_email_address_ref or verification_email_address
+            payload.verification_email_address or verification_email_address
         ),
         verification_email_app_password=verification_email_app_password,
         verification_email_subject_keyword=payload.verification_email_subject_keyword

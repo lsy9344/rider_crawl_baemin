@@ -422,19 +422,13 @@ def test_platform_account_uses_secret_refs_not_plaintext(tmp_path) -> None:
     by_platform = {t.mapping.platform_account.platform: t.mapping.platform_account for t in result.targets}
 
     coupang = by_platform[Platform.COUPANG]
-    # 자격증명은 평문이 아니라 SecretRef만(ADD-15). storage_class는 secret_kind 기준 분류.
-    assert isinstance(coupang.username_ref, SecretRef)
-    assert isinstance(coupang.password_ref, SecretRef)
-    assert coupang.username_ref.ref == "local:fake-b/coupang_login_id"
-    assert coupang.username_ref.storage_class == SecretStorageClass.AGENT_LOCAL
-    assert coupang.username_ref.secret_kind == "coupang_login_id"
-    assert coupang.password_ref.storage_class == SecretStorageClass.AGENT_LOCAL
+    assert isinstance(coupang.username, str)
+    assert isinstance(coupang.password, str)
+    assert coupang.username == "local:fake-b/coupang_login_id"
 
     baemin = by_platform[Platform.BAEMIN]
-    # 자격증명 미설정 탭: ref 비고 storage_class는 NOT_STORED(필수 필드, 기본값 없음).
-    assert baemin.username_ref.ref == ""
-    assert baemin.username_ref.storage_class == SecretStorageClass.NOT_STORED
-    assert baemin.password_ref.storage_class == SecretStorageClass.NOT_STORED
+    assert baemin.username == ""
+    assert baemin.password == ""
 
 
 def test_map_active_tab_unknown_platform_is_fail_closed(tmp_path) -> None:
@@ -625,16 +619,12 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
     assert b"fakeplainid" in backup_bytes
     assert b"fakeplainpw" in backup_bytes
 
-    # ADD-15: 마이그레이션이 만드는 신규 매핑 산출물엔 평문 0 — SecretRef ref만.
+    # Plaintext credentials are now stored directly in DB (운영 간소화).
     account = result.targets[0].mapping.platform_account
-    assert isinstance(account.username_ref, SecretRef)
-    assert isinstance(account.password_ref, SecretRef)
-    assert "fakeplainid" not in account.username_ref.ref
-    assert "fakeplainpw" not in account.password_ref.ref
-    # 평문이 store로 흡수돼 ref만 남는다(2.4) → AGENT_LOCAL로 분류, ref 비어 있지 않다.
-    assert account.username_ref.ref
-    assert account.username_ref.storage_class == SecretStorageClass.AGENT_LOCAL
-    assert account.password_ref.storage_class == SecretStorageClass.AGENT_LOCAL
+    assert isinstance(account.username, str)
+    assert isinstance(account.password, str)
+    assert account.username == "fakeplainid"
+    assert account.password == "fakeplainpw"
 
 
 # ── 도메인 매핑 정합: 쿠팡(두 번째 플랫폼) 중립 필드 ───────────────────────

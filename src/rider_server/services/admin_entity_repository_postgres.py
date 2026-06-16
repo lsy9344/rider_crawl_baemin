@@ -39,8 +39,6 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
-    SecretRef,
-    SecretStorageClass,
     Tenant,
 )
 
@@ -61,26 +59,22 @@ def _tenant_to_domain(row: TenantRow) -> Tenant:
         name=row.name,
         status=CustomerLifecycleState(row.status),
         created_at=row.created_at,
+        telegram_bot_token=row.telegram_bot_token,
+        telegram_webhook_secret=row.telegram_webhook_secret,
+        sending_enabled=row.sending_enabled,
     )
 
 
 def _account_to_domain(row: PlatformAccountRow) -> PlatformAccount:
-    # storage_class 는 스키마에 없는 메타데이터라 중앙 보관(CENTRAL)으로 재구성한다(핸들만 영속).
     return PlatformAccount(
         id=str(row.id),
         tenant_id=str(row.tenant_id),
         platform=Platform(row.platform),
         label=row.label,
-        username_ref=SecretRef(ref=row.username_ref, storage_class=SecretStorageClass.CENTRAL),
-        password_ref=SecretRef(ref=row.password_ref, storage_class=SecretStorageClass.CENTRAL),
-        verification_email_address_ref=SecretRef(
-            ref=row.verification_email_address_ref,
-            storage_class=SecretStorageClass.CENTRAL,
-        ),
-        verification_email_app_password_ref=SecretRef(
-            ref=row.verification_email_app_password_ref,
-            storage_class=SecretStorageClass.CENTRAL,
-        ),
+        username=row.username,
+        password=row.password,
+        verification_email_address=row.verification_email_address,
+        verification_email_app_password=row.verification_email_app_password,
         verification_email_subject_keyword=row.verification_email_subject_keyword,
         verification_email_sender_keyword=row.verification_email_sender_keyword,
         auth_state=BaeminAuthState(row.auth_state),
@@ -190,6 +184,9 @@ class PostgresAdminEntityRepository:
             "name": tenant.name,
             "status": tenant.status.value,
             "created_at": tenant.created_at,
+            "telegram_bot_token": tenant.telegram_bot_token,
+            "telegram_webhook_secret": tenant.telegram_webhook_secret,
+            "sending_enabled": tenant.sending_enabled,
         }
         await self._insert_with_audit(TenantRow, values, audit)
 
@@ -201,10 +198,10 @@ class PostgresAdminEntityRepository:
             "tenant_id": _uuid(account.tenant_id),
             "platform": account.platform.value,
             "label": account.label,
-            "username_ref": account.username_ref.ref,  # 핸들만(평문 0)
-            "password_ref": account.password_ref.ref,
-            "verification_email_address_ref": account.verification_email_address_ref.ref,
-            "verification_email_app_password_ref": account.verification_email_app_password_ref.ref,
+            "username": account.username,
+            "password": account.password,
+            "verification_email_address": account.verification_email_address,
+            "verification_email_app_password": account.verification_email_app_password,
             "verification_email_subject_keyword": account.verification_email_subject_keyword,
             "verification_email_sender_keyword": account.verification_email_sender_keyword,
             "auth_state": account.auth_state.value,
@@ -277,7 +274,13 @@ class PostgresAdminEntityRepository:
         await self._update_with_audit(
             TenantRow,
             tenant.id,
-            {"name": tenant.name, "status": tenant.status.value},
+            {
+                "name": tenant.name,
+                "status": tenant.status.value,
+                "telegram_bot_token": tenant.telegram_bot_token,
+                "telegram_webhook_secret": tenant.telegram_webhook_secret,
+                "sending_enabled": tenant.sending_enabled,
+            },
             audit,
         )
 
@@ -289,10 +292,10 @@ class PostgresAdminEntityRepository:
             account.id,
             {
                 "label": account.label,
-                "username_ref": account.username_ref.ref,
-                "password_ref": account.password_ref.ref,
-                "verification_email_address_ref": account.verification_email_address_ref.ref,
-                "verification_email_app_password_ref": account.verification_email_app_password_ref.ref,
+                "username": account.username,
+                "password": account.password,
+                "verification_email_address": account.verification_email_address,
+                "verification_email_app_password": account.verification_email_app_password,
                 "verification_email_subject_keyword": account.verification_email_subject_keyword,
                 "verification_email_sender_keyword": account.verification_email_sender_keyword,
             },

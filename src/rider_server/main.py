@@ -12,6 +12,7 @@ redaction 은 재구현하지 않고 :func:`rider_crawl.redaction.redacted_error
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import datetime, timezone
@@ -79,6 +80,7 @@ from .services.dispatch_fanout_service import DispatchJob
 from .services.job_result_ingest_service import JobResultIngestService
 from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .services.telegram_central_dispatch import CentralTelegramSender
+from .services.tenant_telegram_config import TenantTelegramConfigProvider
 from .settings import Settings
 
 
@@ -168,9 +170,10 @@ def _default_job_result_ingest_service(settings: Settings) -> JobResultIngestSer
 
     if settings.database_url:
         engine = create_engine(settings.database_url)
+        provider = _default_tenant_telegram_provider(settings)
         return PostgresSnapshotIngestRepository(
             create_session_factory(engine),
-            telegram_sender=_default_telegram_sender(settings),
+            telegram_sender=_default_telegram_sender(settings, provider),
         )
     return None
 
@@ -214,39 +217,105 @@ def _resolve_env_secret_ref(ref: str | None) -> str | None:
     return os.environ.get(name) or None
 
 
-def _default_resolve_telegram_secret(settings: Settings):
-    """webhook secret 해석 seam 기본값(``env:NAME`` ref만 지원, 그 외 fail-closed).
+def _default_tenant_telegram_provider(settings: Settings) -> TenantTelegramConfigProvider | None:
+    """tenant 별 텔레그램 설정 provider 기본값 — ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 None.
 
-    ``telegram_webhook_secret_ref`` 는 ``*_ref`` 핸들이라 설정 객체에는 평문을 싣지 않는다.
-    운영 기본값은 ``env:RIDER_SECRET_NAME`` 형태만 해석하고, 다른 backend ref는 fail-closed로
-    둔다. Vault/KMS 등은 ``app.state.resolve_telegram_secret`` 주입 seam으로 교체한다.
+    None 이면 런타임 경로는 env ref(전역)로만 동작한다(무-DB 개발/테스트 안전). 0012 이후 운영
+    경로는 이 provider 로 tenant 별 봇 토큰/webhook secret/send 게이트를 읽는다.
     """
 
-    def resolve() -> str | None:
-        return _resolve_env_secret_ref(settings.telegram_webhook_secret_ref)
+    if settings.database_url:
+        engine = create_engine(settings.database_url)
+        return TenantTelegramConfigProvider(create_session_factory(engine))
+    return None
+
+
+def _default_resolve_telegram_secret(
+    settings: Settings, provider: TenantTelegramConfigProvider | None = None
+):
+    """webhook secret 해석 seam 기본값 — tenant DB secret(0012) ∪ env ref(전역 호환).
+
+    단일 webhook 엔드포인트가 본문 파싱 **이전** 에 secret 을 검증해야 하므로(보안 불변식), 검증
+    함수는 "유효 secret 집합"을 돌려준다: 모든 tenant 의 ``telegram_webhook_secret`` + env ref
+    (``telegram_webhook_secret_ref``). 라우트는 들어온 헤더를 이 집합과 상수시간 비교한다(하나라도
+    일치 시 통과, 모두 없으면 fail-closed). 평문 secret 은 반환 외 로그/응답에 싣지 않는다.
+    """
+
+    def resolve() -> list[str]:
+        secrets_set: list[str] = []
+        env_secret = _resolve_env_secret_ref(settings.telegram_webhook_secret_ref)
+        if env_secret:
+            secrets_set.append(env_secret)
+        if provider is not None:
+            try:
+                secrets_set.extend(asyncio.run(provider.list_active_webhook_secrets()))
+            except Exception:  # noqa: BLE001 - DB 장애가 webhook 처리를 깨지 않도록(env fallback 유지)
+                pass
+        return secrets_set
 
     return resolve
 
 
-def _default_resolve_telegram_token(settings: Settings):
-    """bot token 해석 seam 기본값(``env:NAME`` ref만 지원, 그 외 fail-closed)."""
+def _default_resolve_telegram_token(
+    settings: Settings, provider: TenantTelegramConfigProvider | None = None
+):
+    """bot token 해석 seam 기본값 — tenant DB 토큰(0012) 우선, 없으면 env ref(전역 호환).
 
-    def resolve(_channel: MessengerChannel) -> str:
+    ``resolve(channel)`` 은 ``channel.tenant_id`` 로 tenant 의 ``telegram_bot_token`` 을 조회한다.
+    중앙 전송은 ``asyncio.to_thread`` 워커(러닝 루프 없음)에서 호출되므로 ``asyncio.run`` 으로 async
+    조회를 안전하게 구동한다. tenant 토큰이 비어 있으면 env ref 로 폴백하고, 둘 다 없으면 fail-closed.
+    """
+
+    def resolve(channel: MessengerChannel) -> str:
+        if provider is not None:
+            try:
+                cfg = asyncio.run(provider.get(channel.tenant_id))
+            except Exception:  # noqa: BLE001 - DB 조회 실패는 env 폴백으로 넘긴다
+                cfg = None
+            if cfg is not None and cfg.telegram_bot_token:
+                return cfg.telegram_bot_token
         token = _resolve_env_secret_ref(settings.telegram_bot_token_ref)
         if not token:
-            raise RuntimeError("telegram bot token ref is not resolvable")
+            raise RuntimeError("telegram bot token is not resolvable (tenant or env)")
         return token
 
     return resolve
 
 
-def _default_telegram_sender(settings: Settings):
-    if not settings.sending_enabled or not settings.telegram_bot_token_ref:
+def _tenant_sending_enabled(
+    settings: Settings, provider: TenantTelegramConfigProvider | None, tenant_id: str
+) -> bool:
+    """실발송 게이트(tenant 별, 0012) — tenant ``sending_enabled`` 이 정본, 없으면 env 전역 폴백.
+
+    fail-closed: provider/tenant 미해결이면 env 전역 ``settings.sending_enabled`` 로만 판단한다.
+    """
+
+    if provider is not None and tenant_id:
+        try:
+            cfg = asyncio.run(provider.get(tenant_id))
+        except Exception:  # noqa: BLE001 - DB 실패는 전역 폴백
+            cfg = None
+        if cfg is not None:
+            return cfg.sending_enabled
+    return settings.sending_enabled
+
+
+def _default_telegram_sender(
+    settings: Settings, provider: TenantTelegramConfigProvider | None = None
+):
+    # tenant DB provider 가 있으면(운영) tenant 별 게이트/토큰으로 동작하므로 전역 env 게이트가
+    # 꺼져 있어도 sender 를 구성한다. provider 가 없으면(무-DB) 기존 env 전역 게이트를 그대로 쓴다.
+    if provider is None and (not settings.sending_enabled or not settings.telegram_bot_token_ref):
         return None
 
-    resolve_token = _default_resolve_telegram_token(settings)
+    resolve_token = _default_resolve_telegram_token(settings, provider)
 
     def send(channel: MessengerChannel, job: DispatchJob, text: str) -> None:
+        # 발송 직전 tenant 게이트 확인(fail-closed) — OFF 면 실 send 호출 자체를 막는다.
+        if not _tenant_sending_enabled(settings, provider, channel.tenant_id):
+            raise RuntimeError(
+                "sending disabled for tenant (sending_enabled=False) — fail-closed"
+            )
         CentralTelegramSender(
             channels={channel.id: channel},
             resolve_token=resolve_token,
@@ -325,11 +394,16 @@ def create_app(
     app.state.channel_repository = channel_repository or _default_channel_repository(
         app.state.settings
     )
-    app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
+    # 0012: tenant 별 텔레그램 설정 provider(DB 있으면 PostgreSQL) — 토큰/webhook secret/send
+    # 게이트를 tenant 행에서 읽는다. 무-DB(개발/테스트)면 None → env ref 전역으로만 동작.
+    app.state.tenant_telegram_provider = _default_tenant_telegram_provider(
         app.state.settings
     )
+    app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
+        app.state.settings, app.state.tenant_telegram_provider
+    )
     app.state.resolve_telegram_token = _default_resolve_telegram_token(
-        app.state.settings
+        app.state.settings, app.state.tenant_telegram_provider
     )
     # Story 5.6: 읽기 전용 Admin 대시보드 repository + admin 세션 seam(5.8 이 MFA/4역할으로 교체).
     app.state.dashboard_repository = (

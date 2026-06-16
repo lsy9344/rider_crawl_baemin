@@ -32,8 +32,6 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
-    SecretRef,
-    SecretStorageClass,
     Tenant,
 )
 from rider_server.main import create_app
@@ -46,7 +44,6 @@ from rider_server.services.admin_entity_service import (
     AdminEntityDuplicateError,
     AdminEntityService,
     InMemoryAdminEntityRepository,
-    _secret_ref_or_reject,
     is_center_name_risky,
 )
 from rider_server.services.admin_entity_repository_postgres import PostgresAdminEntityRepository
@@ -80,8 +77,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _ref(handle: str = _REF) -> SecretRef:
-    return SecretRef(ref=handle, storage_class=SecretStorageClass.CENTRAL)
+def _ref(handle: str = _REF) -> str:
+    return handle
 
 
 def _tenant(tenant_id: str = _TENANT) -> Tenant:
@@ -96,8 +93,8 @@ def _account(account_id="pa-1", *, tenant=_TENANT, platform=Platform.BAEMIN) -> 
         tenant_id=tenant,
         platform=platform,
         label="계정",
-        username_ref=_ref(),
-        password_ref=_ref(),
+        username=_ref(),
+        password=_ref(),
         auth_state=BaeminAuthState.UNKNOWN,
     )
 
@@ -148,7 +145,7 @@ def test_postgres_admin_entity_repository_empty_tenant_lists_are_empty_without_u
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# (순수) center_name 위험 판정 + secret 핸들 검증
+# (순수) center_name 위험 판정
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_center_name_risky_coupang_blank_or_baemin_default() -> None:
@@ -162,17 +159,6 @@ def test_center_name_not_risky_coupang_valid_or_baemin() -> None:
     # 배민은 검증 대상이 아니라 항상 False(차단 아님).
     assert is_center_name_risky(Platform.BAEMIN, "") is False
     assert is_center_name_risky(Platform.BAEMIN, DEFAULT_BAEMIN_CENTER_NAME) is False
-
-
-def test_secret_ref_or_reject_accepts_handle_rejects_plaintext_and_empty() -> None:
-    ref = _secret_ref_or_reject("vault://t/user", field="username_ref")
-    assert ref.ref == "vault://t/user"
-    with pytest.raises(ValueError):  # 평문 token-shape → fail-closed
-        _secret_ref_or_reject("123456789:AAHsecrettokenvalue", field="password_ref")
-    with pytest.raises(ValueError):  # 앱 비밀번호처럼 보이는 값도 핸들이 아니면 거부
-        _secret_ref_or_reject("nuda vmiy gtfr ggeg", field="verification_email_app_password_ref")
-    with pytest.raises(ValueError):  # 빈 핸들 → fail-closed
-        _secret_ref_or_reject("   ", field="username_ref")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -194,7 +180,7 @@ def test_create_tenant_persists_and_audits() -> None:
     assert repo.audits[-1].result == "SUCCESS"
 
 
-def test_create_platform_account_with_refs_only() -> None:
+def test_create_platform_account_with_creds_plaintext() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
@@ -205,26 +191,26 @@ def test_create_platform_account_with_refs_only() -> None:
             tenant_id=_TENANT,
             platform=Platform.COUPANG,
             label="쿠팡",
-            username_ref="vault://u",
-            password_ref="vault://p",
+            username="vault://u",
+            password="vault://p",
             at=_NOW,
             actor_id=_ACTOR,
         )
     )
 
-    assert account.username_ref.ref == "vault://u"
+    assert account.username == "vault://u"
     stored = _run(repo.get_platform_account("pa-new"))
     assert stored.platform is Platform.COUPANG
-    assert stored.verification_email_address_ref.ref == ""
-    assert stored.verification_email_app_password_ref.ref == ""
+    assert stored.verification_email_address == ""
+    assert stored.verification_email_app_password == ""
     assert stored.verification_email_subject_keyword == "인증번호"
     assert stored.verification_email_sender_keyword == "coupang"
-    # audit diff 에 평문 자격증명이 없고 핸들만 있다.
     diff = repo.audits[-1].diff_redacted
-    assert diff["username_ref"] == "vault://u"
+    assert "username" not in diff
+    assert "password" not in diff
 
 
-def test_create_platform_account_with_verification_email_refs() -> None:
+def test_create_platform_account_with_verification_email() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
@@ -235,10 +221,10 @@ def test_create_platform_account_with_verification_email_refs() -> None:
             tenant_id=_TENANT,
             platform=Platform.COUPANG,
             label="쿠팡",
-            username_ref="vault://u",
-            password_ref="vault://p",
-            verification_email_address_ref=_EMAIL_ADDRESS_REF,
-            verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
+            username="vault://u",
+            password="vault://p",
+            verification_email_address=_EMAIL_ADDRESS_REF,
+            verification_email_app_password=_EMAIL_APP_PASSWORD_REF,
             verification_email_subject_keyword="보안코드",
             verification_email_sender_keyword="wing",
             at=_NOW,
@@ -246,80 +232,36 @@ def test_create_platform_account_with_verification_email_refs() -> None:
         )
     )
 
-    assert account.verification_email_address_ref.ref == _EMAIL_ADDRESS_REF
-    assert account.verification_email_app_password_ref.ref == _EMAIL_APP_PASSWORD_REF
+    assert account.verification_email_address == _EMAIL_ADDRESS_REF
+    assert account.verification_email_app_password == _EMAIL_APP_PASSWORD_REF
     assert account.verification_email_subject_keyword == "보안코드"
     assert account.verification_email_sender_keyword == "wing"
     diff = repo.audits[-1].diff_redacted
-    assert diff["verification_email_address_ref"] == _EMAIL_ADDRESS_REF
-    assert diff["verification_email_app_password_ref"] == _EMAIL_APP_PASSWORD_REF
+    assert "verification_email_address" not in diff
+    assert "verification_email_app_password" not in diff
 
 
-def test_create_platform_account_plaintext_rejected() -> None:
+def test_create_platform_account_plaintext_now_accepted() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    with pytest.raises(ValueError):
-        _run(
-            svc.create_platform_account(
-                entity_id="pa-x",
-                tenant_id=_TENANT,
-                platform=Platform.BAEMIN,
-                label="x",
-                username_ref="123456789:AAHsecrettokenvalue",  # 평문 token-shape
-                password_ref="vault://p",
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
+    account = _run(
+        svc.create_platform_account(
+            entity_id="pa-plain",
+            tenant_id=_TENANT,
+            platform=Platform.BAEMIN,
+            label="plain",
+            username="myuser",
+            password="mypass",
+            at=_NOW,
+            actor_id=_ACTOR,
         )
-    assert _run(repo.get_platform_account("pa-x")) is None  # 미반영(fail-closed)
+    )
 
-
-def test_create_platform_account_plaintext_verification_email_ref_rejected() -> None:
-    repo = InMemoryAdminEntityRepository()
-    repo.seed_tenant(_tenant())
-    svc = _svc(repo)
-
-    with pytest.raises(ValueError):
-        _run(
-            svc.create_platform_account(
-                entity_id="pa-mail-x",
-                tenant_id=_TENANT,
-                platform=Platform.COUPANG,
-                label="x",
-                username_ref="vault://u",
-                password_ref="vault://p",
-                verification_email_address_ref="fake@example.invalid",
-                verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
-        )
-    assert _run(repo.get_platform_account("pa-mail-x")) is None
-
-
-def test_create_platform_account_plaintext_verification_email_app_password_ref_rejected() -> None:
-    repo = InMemoryAdminEntityRepository()
-    repo.seed_tenant(_tenant())
-    svc = _svc(repo)
-
-    with pytest.raises(ValueError):
-        _run(
-            svc.create_platform_account(
-                entity_id="pa-mail-password-x",
-                tenant_id=_TENANT,
-                platform=Platform.COUPANG,
-                label="x",
-                username_ref="vault://u",
-                password_ref="vault://p",
-                verification_email_address_ref=_EMAIL_ADDRESS_REF,
-                verification_email_app_password_ref="nuda vmiy gtfr ggeg",
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
-        )
-    assert _run(repo.get_platform_account("pa-mail-password-x")) is None
+    assert account.username == "myuser"
+    assert account.password == "mypass"
+    assert _run(repo.get_platform_account("pa-plain")).username == "myuser"
 
 
 def test_create_monitoring_target_links_account_and_flags_coupang_risk() -> None:
@@ -625,7 +567,7 @@ def test_route_cross_tenant_update_404() -> None:
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
-def test_route_plaintext_secret_400() -> None:
+def test_route_platform_account_plaintext_accepted() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -635,12 +577,13 @@ def test_route_plaintext_secret_400() -> None:
         data={
             "platform": "BAEMIN",
             "label": "x",
-            "username_ref": "123456789:AAHsecrettokenvalue",  # 평문
-            "password_ref": "vault://p",
+            "username": "myuser",
+            "password": "vault://p",
         },
     )
 
-    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert resp.status_code == HTTPStatus.OK
+    assert "플랫폼 계정 생성됨" in resp.text
 
 
 def test_route_deactivate_channel_soft_delete() -> None:
@@ -873,8 +816,8 @@ def test_update_tenant_records_before_after() -> None:
     assert diff["from_status"] == "ACTIVE" and diff["to_status"] == "SUSPENDED"
 
 
-def test_update_platform_account_label_keeps_refs() -> None:
-    """G2 — ``update_platform_account`` happy path. 라벨만 바꾸고 secret 핸들은 보존."""
+def test_update_platform_account_label_keeps_creds() -> None:
+    """G2 — ``update_platform_account`` happy path. 라벨만 바꾸고 자격증명은 보존."""
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(
         _account(
@@ -890,14 +833,14 @@ def test_update_platform_account_label_keeps_refs() -> None:
     )
 
     assert updated.label == "새라벨"
-    assert updated.username_ref.ref == _REF  # 미입력 → 기존 핸들 보존
-    assert updated.verification_email_app_password_ref.ref == ""
+    assert updated.username == _REF
+    assert updated.verification_email_app_password == ""
     assert repo.audits[-1].action == "PLATFORM_ACCOUNT_UPDATE"
     diff = repo.audits[-1].diff_redacted
     assert diff["from_label"] == "계정" and diff["to_label"] == "새라벨"
 
 
-def test_update_platform_account_verification_email_ref() -> None:
+def test_update_platform_account_verification_email() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(_account(platform=Platform.COUPANG))
     svc = _svc(repo)
@@ -906,58 +849,35 @@ def test_update_platform_account_verification_email_ref() -> None:
         svc.update_platform_account(
             "pa-1",
             tenant_id=_TENANT,
-            verification_email_app_password_ref=_EMAIL_APP_PASSWORD_REF,
+            verification_email_app_password=_EMAIL_APP_PASSWORD_REF,
             verification_email_subject_keyword="보안코드",
             at=_NOW,
             actor_id=_ACTOR,
         )
     )
 
-    assert updated.verification_email_app_password_ref.ref == _EMAIL_APP_PASSWORD_REF
+    assert updated.verification_email_app_password == _EMAIL_APP_PASSWORD_REF
     assert updated.verification_email_subject_keyword == "보안코드"
     diff = repo.audits[-1].diff_redacted
-    assert diff["verification_email_app_password_ref"] == _EMAIL_APP_PASSWORD_REF
+    assert "verification_email_app_password" not in diff
 
 
-def test_update_platform_account_plaintext_verification_email_app_password_ref_rejected() -> None:
-    repo = InMemoryAdminEntityRepository()
-    repo.seed_platform_account(_account(platform=Platform.COUPANG))
-    svc = _svc(repo)
-
-    with pytest.raises(ValueError):
-        _run(
-            svc.update_platform_account(
-                "pa-1",
-                tenant_id=_TENANT,
-                verification_email_app_password_ref="nuda vmiy gtfr ggeg",
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
-        )
-    assert _run(repo.get_platform_account("pa-1")).verification_email_app_password_ref.ref == ""
-    assert repo.audits == []
-
-
-def test_update_platform_account_plaintext_secret_rejected_on_edit() -> None:
-    """G3 (AC3 핵심) — secret 위생은 **편집 경로에서도** 강제된다(dev 는 생성 경로만 커버).
-
-    평문 token-shape 를 update 로 주면 fail-closed ``ValueError`` 로 거부되고, 기존 핸들은
-    오염되지 않는다(부분 반영 0).
-    """
+def test_update_platform_account_plaintext_now_accepted() -> None:
+    """G3 — 평문 자격증명을 update 로 주면 그대로 저장된다(SecretRef 제거됨)."""
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(_account())
     svc = _svc(repo)
 
-    with pytest.raises(ValueError):
-        _run(
-            svc.update_platform_account(
-                "pa-1", tenant_id=_TENANT,
-                password_ref="123456789:AAHsecrettokenvalue",  # 평문
-                at=_NOW, actor_id=_ACTOR,
-            )
+    updated = _run(
+        svc.update_platform_account(
+            "pa-1", tenant_id=_TENANT,
+            password="my-new-password",
+            at=_NOW, actor_id=_ACTOR,
         )
-    assert _run(repo.get_platform_account("pa-1")).password_ref.ref == _REF  # 미오염
-    assert repo.audits == []  # 거부 → audit 0
+    )
+
+    assert updated.password == "my-new-password"
+    assert repo.audits[-1].action == "PLATFORM_ACCOUNT_UPDATE"
 
 
 def test_update_messenger_channel_routing_fields_no_transition() -> None:
@@ -1129,7 +1049,7 @@ def test_route_create_platform_account_happy() -> None:
 
     resp = client.post(
         "/admin/platform-accounts?tenant=tn-1",
-        data={"platform": "BAEMIN", "label": "배민", "username_ref": "vault://u", "password_ref": "vault://p"},
+        data={"platform": "BAEMIN", "label": "배민", "username": "vault://u", "password": "vault://p"},
     )
 
     assert resp.status_code == HTTPStatus.OK
@@ -1145,7 +1065,7 @@ def test_route_create_platform_account_unknown_platform_400() -> None:
 
     resp = client.post(
         "/admin/platform-accounts?tenant=tn-1",
-        data={"platform": "NOTREAL", "label": "x", "username_ref": "vault://u", "password_ref": "vault://p"},
+        data={"platform": "NOTREAL", "label": "x", "username": "vault://u", "password": "vault://p"},
     )
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST

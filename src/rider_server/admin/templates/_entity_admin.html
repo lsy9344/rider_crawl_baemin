@@ -103,16 +103,16 @@
     <div class="aux-body">
 
       <fieldset id="entity-account-form">
-        <legend>플랫폼 계정 (secret 은 *_ref 핸들만 — 평문 금지)</legend>
+        <legend>플랫폼 계정 (자격증명 평문 — DB 직접 저장)</legend>
         <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="#entity-result" hx-swap="innerHTML">
           <label>플랫폼
             <select name="platform"><option value="BAEMIN">BAEMIN</option><option value="COUPANG">COUPANG</option></select>
           </label>
           <label>라벨 <input type="text" name="label"></label>
-          <label>username_ref (핸들만, 평문 금지) <input type="text" name="username_ref" placeholder="vault://..."></label>
-          <label>password_ref (핸들만, 평문 금지) <input type="text" name="password_ref" placeholder="vault://..."></label>
-          <label>verification_email_address_ref (핸들만) <input type="text" name="verification_email_address_ref" placeholder="vault://..."></label>
-          <label>verification_email_app_password_ref (핸들만) <input type="text" name="verification_email_app_password_ref" placeholder="vault://..."></label>
+          <label>로그인 ID <input type="text" name="username" placeholder="배민/쿠팡 로그인 아이디"></label>
+          <label>로그인 비밀번호 <input type="password" name="password" placeholder="배민/쿠팡 로그인 비밀번호"></label>
+          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" placeholder="your@email.com"></label>
+          <label>이메일 앱 비밀번호 <input type="password" name="verification_email_app_password" placeholder="IMAP 앱 비밀번호 (공백 제거)"></label>
           <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
           <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
           <button type="submit" class="create">계정 생성</button>
@@ -124,11 +124,13 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 라벨 <input type="text" id="acc-edit-label"></label>
-          <label>verification_email_address_ref <input type="text" id="acc-edit-email-ref" placeholder="비우면 유지"></label>
-          <label>verification_email_app_password_ref <input type="text" id="acc-edit-email-password-ref" placeholder="비우면 유지"></label>
+          <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
+          <label>로그인 비밀번호 <input type="password" id="acc-edit-password" placeholder="비우면 유지"></label>
+          <label>2차인증 이메일 <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
+          <label>앱 비밀번호 <input type="password" id="acc-edit-email-password" placeholder="비우면 유지"></label>
           <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
           <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
-          <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), verification_email_address_ref: cval('acc-edit-email-ref'), verification_email_app_password_ref: cval('acc-edit-email-password-ref'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button>
+          <button type="button" onclick="crudUpdate('/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button>
         </div>
         <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -177,6 +179,30 @@
           <button type="button" onclick="crudUpdate('/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name')}))">편집</button>
         </div>
         <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      {# 고객(Tenant)별 텔레그램 설정(0012) — 봇 토큰·webhook secret·실발송 게이트. 토큰/secret 은
+         평문 저장(redaction 으로 로그/응답 마스킹). 비우면 기존 값 유지, 실발송 게이트는 명시 토글. #}
+      <fieldset>
+        <legend>고객별 텔레그램 설정 (봇 토큰 · webhook secret · 실발송)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">선택한 고객(Tenant)에만 적용됩니다. 토큰/secret 은 비워두면 기존 값을 유지하고, 입력하면 교체합니다. 실발송 게이트는 기본 OFF(fail-closed)이며 켜야 실제 메시지가 나갑니다.</p>
+        <div class="edit-row" style="border-top:0; padding-top:0">
+          <label>고객 선택
+            <select id="tg-edit-id"
+                    hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>텔레그램 봇 토큰 <input type="password" id="tg-edit-token" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>webhook secret <input type="password" id="tg-edit-secret" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>실발송(sending_enabled)
+            <select id="tg-edit-sending">
+              <option value="">변경 안 함</option>
+              <option value="true">ON — 실발송 허용</option>
+              <option value="false">OFF — 차단(fail-closed)</option>
+            </select>
+          </label>
+          <button type="button" onclick="crudUpdate('/admin/customers/', 'tg-edit-id', '', filledValues({telegram_bot_token: cval('tg-edit-token'), telegram_webhook_secret: cval('tg-edit-secret'), sending_enabled: cval('tg-edit-sending')}))">텔레그램 설정 저장</button>
+        </div>
       </fieldset>
 
     </div>

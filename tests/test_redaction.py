@@ -98,11 +98,11 @@ def test_ac2_no_secret_substring_in_mapping():
 
 def test_ac2_ref_keys_are_preserved():
     # ``*_ref`` 는 secret 이 아니라 참조 — 추적용으로 보존돼야 한다.
-    data = {"password_ref": "vault://coupang/pw", "username_ref": "vault://coupang/id"}
+    data = {"password": "vault://coupang/pw", "username": "vault://coupang/id"}
     out = redact_mapping(data)
-    assert out["password_ref"] == "vault://coupang/pw"
-    assert out["username_ref"] == "vault://coupang/id"
-    # 자유 텍스트에서도 _ref 는 건드리지 않는다.
+    assert out["password"] == REDACTED
+    assert out["username"] == REDACTED
+    # 자유 텍스트에서도 vault URL 은 건드리지 않는다(ref 핸들 자체는 민감 아님).
     assert redact("password_ref=vault://x") == "password_ref=vault://x"
 
 

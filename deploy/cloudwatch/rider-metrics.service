@@ -1,0 +1,32 @@
+# rider_server 운영 7지표 CloudWatch 푸셔 (systemd, 60초 루프).
+#
+# 설치(EC2, ubuntu):
+#   sudo install -m 0755 /opt/rider-server/cloudwatch/push_metrics.sh /usr/local/bin/rider-push-metrics.sh
+#   sudo install -m 0644 /opt/rider-server/cloudwatch/rider-metrics.service /etc/systemd/system/rider-metrics.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rider-metrics.service
+#
+# 권한: EC2 인스턴스 역할(rider-server-ec2-role)의 cloudwatch:PutMetricData(namespace=RiderServer).
+# 의존: aws-cli v2, jq, curl. 앱(backend-api) 8000 포트가 localhost 에 떠 있어야 함.
+
+[Unit]
+Description=rider_server operational metrics -> CloudWatch custom metrics pusher
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# 앱은 localhost:8000(docker compose 포트 매핑). 리전은 IMDS 자동 해석(또는 여기서 고정).
+Environment=METRICS_URL=http://localhost:8000/metrics/operational
+Environment=CW_NAMESPACE=RiderServer
+Environment=CW_ENV=production
+Environment=AWS_REGION=ap-northeast-2
+ExecStart=/usr/local/bin/rider-push-metrics.sh
+Restart=always
+RestartSec=15
+# 경량 푸셔 — 자원 상한을 낮게 잡아 t4g.micro 영향 최소화.
+MemoryMax=64M
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

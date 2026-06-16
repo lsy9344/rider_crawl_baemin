@@ -174,10 +174,10 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username_ref": "vault://coupang/login-id",
-            "password_ref": "vault://coupang/login-password",
-            "verification_email_address_ref": "vault://mail/address",
-            "verification_email_app_password_ref": "vault://mail/app-password",
+            "username": "vault://coupang/login-id",
+            "password": "vault://coupang/login-password",
+            "verification_email_address": "vault://mail/address",
+            "verification_email_app_password": "vault://mail/app-password",
             "verification_email_subject_keyword": "보안코드",
             "verification_email_sender_keyword": "wing",
             "coupang_auto_email_2fa_enabled": True,
@@ -200,7 +200,7 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert config.verification_email_mailbox_lock_id == "vault://mail/address"
 
 
-def test_coupang_job_rejects_plaintext_secret_fields_before_crawl() -> None:
+def test_coupang_job_plaintext_secret_fields_now_accepted() -> None:
     calls: list[str | None] = []
     secrets = {
         "vault://coupang/login-id": "coupang-login-id",
@@ -223,12 +223,10 @@ def test_coupang_job_rejects_plaintext_secret_fields_before_crawl() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username_ref": "vault://coupang/login-id",
-            "password_ref": "vault://coupang/login-password",
-            "verification_email_address_ref": "vault://mail/address",
-            "verification_email_app_password_ref": "vault://mail/app-password",
-            "coupang_login_password": "plain-password",
-            "verification_email_app_password": "plain-app-password",
+            "username": "vault://coupang/login-id",
+            "password": "vault://coupang/login-password",
+            "verification_email_address": "myemail@gmail.com",
+            "verification_email_app_password": "myapppassword",
             "coupang_auto_email_2fa_enabled": True,
         },
     )
@@ -236,9 +234,8 @@ def test_coupang_job_rejects_plaintext_secret_fields_before_crawl() -> None:
 
     result = worker.execute(job)
 
-    assert result.status == JOB_STATUS_FAILED
-    assert result.error_code == "PLAINTEXT_SECRET_NOT_ALLOWED"
-    assert calls == []
+    assert result.status == JOB_STATUS_SUCCESS
+    assert calls == ["coupang"]
 
 
 def test_auth_required_does_not_call_crawler() -> None:
@@ -460,10 +457,10 @@ def test_run_agent_passes_store_resolver_to_crawl_worker(tmp_path) -> None:
                     "target_id": "target-1",
                     "lease_expires_at": 5_000_000_000.0,
                     **base_job.payload,
-                    "username_ref": "vault://coupang/login-id",
-                    "password_ref": "vault://coupang/login-password",
-                    "verification_email_address_ref": "vault://mail/address",
-                    "verification_email_app_password_ref": "vault://mail/app-password",
+                    "username": "vault://coupang/login-id",
+                    "password": "vault://coupang/login-password",
+                    "verification_email_address": "vault://mail/address",
+                    "verification_email_app_password": "vault://mail/app-password",
                     "coupang_auto_email_2fa_enabled": True,
                 }
             ]
