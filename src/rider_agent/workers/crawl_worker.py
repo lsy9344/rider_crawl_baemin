@@ -38,6 +38,7 @@ from rider_agent.reuse import (
 AUTH_STATE_ACTIVE = "ACTIVE"
 AUTH_STATE_AUTH_REQUIRED = "AUTH_REQUIRED"
 AUTH_STATE_USER_ACTION_PENDING = "USER_ACTION_PENDING"
+AUTH_STATE_CENTER_MISMATCH = "CENTER_MISMATCH"
 
 ERROR_AUTH_REQUIRED = "AUTH_REQUIRED"
 ERROR_USER_ACTION_PENDING = "USER_ACTION_PENDING"
@@ -45,6 +46,7 @@ ERROR_PROFILE_UNAVAILABLE = "PROFILE_UNAVAILABLE"
 ERROR_CDP_UNREACHABLE = "CDP_UNREACHABLE"
 ERROR_PARSER_MISSING_DATA = "PARSER_MISSING_DATA"
 ERROR_CENTER_MISMATCH = "CENTER_MISMATCH"
+ERROR_TARGET_VALIDATION_FAILURE = "TARGET_VALIDATION_FAILURE"
 ERROR_CRAWL_TIMEOUT = "CRAWL_TIMEOUT"
 ERROR_CRAWL_FAILURE = "CRAWL_FAILURE"
 ERROR_PLAINTEXT_SECRET_NOT_ALLOWED = "PLAINTEXT_SECRET_NOT_ALLOWED"
@@ -132,11 +134,12 @@ class CrawlWorker:
             mismatch = _display_name_mismatch(raw, payload.expected_display_name)
             if mismatch:
                 return make_failure_result(
-                    ERROR_CENTER_MISMATCH,
+                    ERROR_TARGET_VALIDATION_FAILURE,
                     "crawl result display name mismatch",
                     result_json={
                         "target_id": payload.target_id,
                         "platform": payload.platform,
+                        "auth_state": AUTH_STATE_CENTER_MISMATCH,
                         "mismatch": ERROR_CENTER_MISMATCH,
                     },
                 )

@@ -44,6 +44,7 @@ from rider_server.domain import (
 )
 from rider_server.queue.backend import QueueBackend
 from rider_server.queue.states import (
+    JOB_TYPE_AUTH_CHECK,
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
     JOB_STATUS_PENDING,
@@ -229,6 +230,16 @@ def build_diff_redacted(payload: dict) -> dict:
 
 def _test_crawl_payload(target: MonitoringTarget, job_type: str) -> dict[str, object]:
     platform = _platform_for_crawl_job(job_type)
+    return _target_job_payload(target, job_type=job_type, platform=platform)
+
+
+def _auth_check_payload(target: MonitoringTarget) -> dict[str, object]:
+    return _target_job_payload(target, job_type=JOB_TYPE_AUTH_CHECK, platform="baemin")
+
+
+def _target_job_payload(
+    target: MonitoringTarget, *, job_type: str, platform: str
+) -> dict[str, object]:
     return {
         "target_id": target.id,
         "tenant_id": target.tenant_id,
@@ -527,11 +538,12 @@ class AdminActionService:
     ) -> str:
         """대상에 대해 ``AUTH_CHECK`` job 1건을 트리거한다(인증 상태 재확인)."""
 
-        from rider_server.queue.states import JOB_TYPE_AUTH_CHECK
-
-        await self._scoped_target(target_id, tenant_id=tenant_id)
+        target = await self._scoped_target(target_id, tenant_id=tenant_id)
         job_id = await self._queue.enqueue(
-            job_type=JOB_TYPE_AUTH_CHECK, target_id=target_id, now=at
+            job_type=JOB_TYPE_AUTH_CHECK,
+            target_id=target_id,
+            payload_json=_auth_check_payload(target),
+            now=at,
         )
         audit = self._audit(
             actor_id=actor_id,

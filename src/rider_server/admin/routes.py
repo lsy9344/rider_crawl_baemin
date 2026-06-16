@@ -200,17 +200,22 @@ def _tenant_id(request: Request) -> str:
     return request.query_params.get("tenant", "").strip()
 
 
-async def _dashboard_tenant_id(request: Request) -> str:
+async def _dashboard_tenants(request: Request):
+    service = getattr(request.app.state, "admin_entity_service", None)
+    if service is None:
+        return []
+    try:
+        return await service.list_tenants()
+    except Exception:
+        return []
+
+
+async def _dashboard_tenant_id(request: Request, *, tenants=None) -> str:
     tenant_id = _tenant_id(request)
     if tenant_id:
         return tenant_id
-    service = getattr(request.app.state, "admin_entity_service", None)
-    if service is None:
-        return ""
-    try:
-        tenants = await service.list_tenants()
-    except Exception:
-        return ""
+    if tenants is None:
+        tenants = await _dashboard_tenants(request)
     return tenants[0].id if len(tenants) == 1 else ""
 
 
@@ -271,7 +276,8 @@ async def target_deeplink(
 async def _dashboard_response(request: Request, *, initial_target_id: str) -> HTMLResponse:
     now = _now()
     repo = _repo(request)
-    tenant_id = await _dashboard_tenant_id(request)
+    tenants = await _dashboard_tenants(request)
+    tenant_id = await _dashboard_tenant_id(request, tenants=tenants)
     targets = await _target_rows_for_display(repo, tenant_id=tenant_id, now=now)
     agents = await _service.agent_rows(repo, now=now)
     channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
@@ -281,6 +287,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
         "dashboard.html",
         {
             "tenant_id": tenant_id,
+            "tenants": tenants,
             "targets": targets,
             "agents": agents,
             "channels": channels,

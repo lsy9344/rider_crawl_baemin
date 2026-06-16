@@ -43,6 +43,10 @@ def upgrade() -> None:
             server_default="coupang",
         ),
     )
+    op.alter_column("platform_accounts", "verification_email_address_ref", server_default=None)
+    op.alter_column("platform_accounts", "verification_email_app_password_ref", server_default=None)
+    op.alter_column("platform_accounts", "verification_email_subject_keyword", server_default=None)
+    op.alter_column("platform_accounts", "verification_email_sender_keyword", server_default=None)
 
 
 def downgrade() -> None:

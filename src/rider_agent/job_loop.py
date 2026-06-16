@@ -10,10 +10,10 @@
   execute→complete)을 ``threading.Event``(stop) + **주입 sleep/now** 로 짠 **순수 동기**
   루프로 구현한다(``asyncio`` 금지). 단발 실패가 루프 thread 를 죽이지 않고(best-effort),
   ``401``/revoke 는 재등록 필요 상태로 surfacing 한다.
-* **lease 인지(client 4가지만).** (a) claim 응답의 ``lease_expires_at`` 를 기록, (b) in-flight
-  job 을 heartbeat ``active_jobs`` provider 로 노출(서버 연장 입력), (c) complete/success
-  직전 lease self-check, (d) 서버 거부(409/410) 흡수. **단일-claim 강제·lease 부여/연장/
-  stale 회수/재할당은 서버(Epic 5) 소유.**
+* **lease 인지(client 3가지만).** (a) claim 응답의 ``lease_expires_at`` 를 기록, (b) in-flight
+  job 을 heartbeat ``active_jobs`` provider 로 노출(서버 연장 입력), (c) complete 때 서버
+  거부(409/410) 흡수. **단일-claim 강제·lease 부여/연장/stale 회수/재할당/최종 complete
+  소유 검증은 서버(Epic 5) 소유.**
 * **startup 배선.** :func:`start_heartbeat_thread` 로 4.3 :class:`HeartbeatReporter` 를 띄우고,
   :func:`run_agent` 가 architecture-contract startup(load identity → validate token →
   start heartbeat thread → main loop)을 구현한다. ``active_jobs_provider=runner.active_jobs``
@@ -38,7 +38,6 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -355,36 +354,6 @@ def emit_job_event(
     )
 
 
-# ── lease 시각 파싱(client self-check) ────────────────────────────────────────
-
-
-def _coerce_lease_epoch(value: Any) -> float | None:
-    """``lease_expires_at`` 를 epoch 초(float)로 강제 변환한다. 파싱 불가/누락은 ``None``.
-
-    숫자(epoch)·숫자 문자열·ISO 8601 문자열(``Z`` 포함)을 받는다. 서버 계약(Epic 5)이 형식을
-    확정하지 않았으므로 흔한 형태를 모두 수용하되, 모르는 형태는 ``None`` 으로 보수 처리한다
-    (self-check 가 fail-closed 로 abandon 하도록 — 이중 성공 방지).
-    """
-
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            pass
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-        except (ValueError, OSError):
-            return None
-    return None
-
-
 # ── 루프 primitive + lease 인지 + 결과 보고 ───────────────────────────────────
 
 
@@ -397,10 +366,10 @@ class JobRunner:
     ``token_check`` 는 모두 주입 가능해 테스트가 실 네트워크·실 thread·실 시계 없이 결정적으로
     검증한다.
 
-    lease 인지(client 4가지): (a) claim 한 job 의 ``lease_expires_at`` 를 in-flight 에 기록,
-    (b) :meth:`active_jobs` 로 heartbeat 에 노출(서버 연장 입력), (c) complete/success 직전
-    :meth:`_is_lease_expired` self-check 로 만료면 abandon(성공 보고 안 함), (d) 서버 거부
-    (409/410)를 crash 없이 흡수. **단일-claim 강제·실제 연장/회수/재할당은 서버(Epic 5).**
+    lease 인지(client 3가지): (a) claim 한 job 의 ``lease_expires_at`` 를 in-flight 에 기록,
+    (b) :meth:`active_jobs` 로 heartbeat 에 노출(서버 연장 입력), (c) 서버 complete 거부
+    (409/410)를 crash 없이 흡수. **단일-claim 강제·실제 연장/회수/재할당/complete 소유
+    검증은 서버(Epic 5).**
     """
 
     def __init__(
@@ -439,7 +408,6 @@ class JobRunner:
         #: surfacing 상태(4.2 ``TOKEN_STATUS_*`` 어휘 재사용 — 새 ad-hoc 플래그 금지).
         self.token_status: str = TOKEN_STATUS_VALID
         self.last_error_event: dict[str, Any] | None = None
-        self.last_abandoned_job_id: str | None = None
 
     # ── 공개 상태/배선 ────────────────────────────────────────────────────────
 
@@ -515,7 +483,7 @@ class JobRunner:
         for job in jobs:
             self._process_job(job)
 
-    # ── job 처리(execute → lease self-check → complete) ───────────────────────
+    # ── job 처리(execute → complete) ──────────────────────────────────────────
 
     def _process_job(self, job: ClaimedJob) -> None:
         self._track(job)
@@ -536,11 +504,6 @@ class JobRunner:
             started_at=started_at,
             finished_at=finished_at,
         )
-
-        # lease self-check: 성공 보고 직전 자기 lease 만료 여부 확인(이중 성공 방지).
-        if result.status == JOB_STATUS_SUCCESS and self._is_lease_expired(job):
-            self._abandon(job)
-            return
 
         self._complete(job, result)
 
@@ -574,17 +537,6 @@ class JobRunner:
             # 재완료/재시도는 서버 lease 만료→재할당(Epic 5)에 맡긴다(best-effort).
             self._untrack(job.job_id)
 
-    def _abandon(self, job: ClaimedJob) -> None:
-        """lease 만료로 성공 보고를 포기한다(서버가 회수했을 수 있음 — 이중 성공 방지)."""
-
-        self.last_abandoned_job_id = job.job_id
-        self._record_error(
-            ERROR_JOB_LEASE_LOST,
-            "lease expired before complete — abandoning job (not reporting success)",
-            None,
-        )
-        self._untrack(job.job_id)
-
     def _emit_started(self, job: ClaimedJob) -> None:
         # 최소 진행 이벤트(claim 직후). best-effort — 실패해도 루프를 죽이지 않는다.
         try:
@@ -600,16 +552,6 @@ class JobRunner:
             )
         except Exception as exc:  # noqa: BLE001 — 이벤트 보고 실패는 무시(진행에 영향 없음).
             self._record_error(ERROR_JOB_EVENT, "job started event failed", exc)
-
-    # ── lease self-check ──────────────────────────────────────────────────────
-
-    def _is_lease_expired(self, job: ClaimedJob) -> bool:
-        """자기 lease 가 만료되었는가. 파싱 불가/누락은 fail-closed(만료로 간주 → 성공 보고 안 함)."""
-
-        epoch = _coerce_lease_epoch(job.lease_expires_at)
-        if epoch is None:
-            return True
-        return self._now() >= epoch
 
     # ── in-flight 추적(thread-safe) ───────────────────────────────────────────
 

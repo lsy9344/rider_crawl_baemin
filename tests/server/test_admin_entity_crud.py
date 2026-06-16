@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 
 import pytest
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as _TestClient
 
 from rider_crawl.config import DEFAULT_BAEMIN_CENTER_NAME
 from rider_server.domain import (
@@ -61,12 +61,19 @@ _REF = "vault://handle/ref"
 _EMAIL_ADDRESS_REF = "vault://mail/address"
 _EMAIL_APP_PASSWORD_REF = "vault://mail/app-password"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
+_SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 _OPERATOR = AdminPrincipal(
     actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True, source="ADMIN_UI/operator"
 )
 _VIEWER = AdminPrincipal(
     actor_id=_ACTOR, role=AdminRole.VIEWER, mfa_verified=True, source="ADMIN_UI/viewer"
 )
+
+
+def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
+    headers = dict(_SAME_ORIGIN_HEADERS)
+    headers.update(kwargs.pop("headers", {}) or {})
+    return _TestClient(app, *args, headers=headers, **kwargs)
 
 
 def _run(coro):
@@ -673,6 +680,45 @@ def test_entities_form_shows_nearby_create_ctas_for_empty_dependencies() -> None
     assert 'href="#entity-channel-form"' in resp.text
 
 
+def test_entities_form_without_tenant_renders_tenant_switcher() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_tenant(_tenant(_OTHER))
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/entities")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert 'id="entity-tenant-switch"' in resp.text
+    assert 'value="tn-1"' in resp.text
+    assert 'value="tn-2"' in resp.text
+    assert "switchTenant" in resp.text
+
+
+def test_entities_form_exposes_full_edit_and_delivery_rule_controls() -> None:
+    repo = _seeded_repo()
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    body = client.get("/admin/entities?tenant=tn-1").text
+
+    for marker in (
+        'id="tgt-edit-name"',
+        'id="tgt-edit-external"',
+        'id="tgt-edit-url"',
+        'id="tgt-edit-interval"',
+        'id="ch-edit-thread"',
+        'id="ch-edit-kakao"',
+        'id="rule-list-target"',
+        'id="rule-edit-id"',
+        'id="delivery-rule-list"',
+        "loadDeliveryRules",
+    ):
+        assert marker in body
+    assert "thread_id: cval('ch-edit-thread')" in body
+    assert "kakao_room_name: cval('ch-edit-kakao')" in body
+    assert "interval_minutes: cval('tgt-edit-interval')" in body
+
+
 def test_entities_list_hides_raw_ids_by_default() -> None:
     repo = _seeded_repo()
     repo.seed_monitoring_target(_target())
@@ -1077,6 +1123,7 @@ def test_route_create_delivery_rule_fan_out_persists() -> None:
 
     assert r1.status_code == HTTPStatus.OK and r2.status_code == HTTPStatus.OK
     assert "전송 규칙 생성됨" in r1.text
+    assert r1.headers["HX-Trigger"] == "admin-entity-changed"
     assert len(_run(repo.list_delivery_rules("mt-1"))) == 2
 
 
@@ -1129,6 +1176,7 @@ def test_route_deactivate_delivery_rule_disabled() -> None:
     resp = client.post("/admin/delivery-rules/dr-1/deactivate?tenant=tn-1")
 
     assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert _run(repo.get_delivery_rule("dr-1")).enabled is False
 
 

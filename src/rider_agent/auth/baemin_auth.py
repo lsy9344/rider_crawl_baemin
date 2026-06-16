@@ -29,9 +29,9 @@
   2FA·OTP 자동입력 경로)와 ``pyautogui``/``pywinauto``/``pyperclip`` 류를 **import 도 호출도
   하지 않는다** — 4.1 AST 부정 가드로 영구 고정한다(배민은 OTP 자동화 금지, 쿠팡 2FA 와 정반대
   정책). 프로필을 **열고** 사람-완료를 **감지**만 한다.
-* **``rider_crawl`` 0줄·실제 ``CRAWL_BAEMIN`` 워커/서버 측 ``auth_sessions``/job 생성/queue 는
-  본 스토리 범위가 아니다.** 배민 login-page 감지 로직을 ``rider_crawl`` 에 새로 넣지 않고 주입
-  ``login_probe``/``detect_completion`` 으로 흡수한다. 기본 real probe 정밀화는 후속 스토리.
+* **``rider_crawl`` 0줄·서버 측 ``auth_sessions``/job 생성/queue 는 본 스토리 범위가 아니다.**
+  배민 login-page 감지 로직을 ``rider_crawl`` 에 새로 넣지 않고, 기본 probe 도 기존
+  ``crawl_snapshot``/``BrowserActionRequiredError`` seam 을 재사용한다.
 
 상태/오류 어휘는 **평문 문자열 상수**다(``rider_server.domain.states`` 의 ``BaeminAuthState``·
 ``FailureCategory.AUTH_REQUIRED`` 값과 정합) — ``rider_server`` 를 직접 import 하면 단방향 가드
@@ -47,6 +47,7 @@ enum/"정확히 N개" lock 도 두지 않는다(memory: enum-member-count-locks)
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from rider_crawl.redaction import redact
@@ -124,63 +125,62 @@ def classify_baemin_auth_state(
     return AUTH_STATE_UNKNOWN
 
 
-# ── 기본 probe/open/detect (주입 미시 — Windows-gated lazy 플레이스홀더) ─────────
-# secure_store._dpapi_crypt·autostart._default_runner 선례: 실 브라우저/실 crawl 은 함수 내부
-# lazy + win32-gated 라 import 시점에 무거운/플랫폼 의존을 끌지 않는다(import-safety). 운영
-# 배선(Epic 5)은 job payload 계약에 맞춘 real probe 를 주입하고, 테스트는 항상 fake 를 주입한다
-# — 이 기본 경로는 호출하지 않는다(배민 login-page 정밀 감지는 rider_crawl 0줄 유지 위해 후속
-# 스토리 소유). [Source: src/rider_agent/secure_store.py(87-101), src/rider_agent/autostart.py(135-156·263-274)]
+# ── 기본 probe/open/detect (reuse seam 기반 실제 배선) ─────────────────────────
+# 실 브라우저/실 crawl import 는 함수 내부 lazy 로 유지한다(import-safety). 새 크롤러/인증
+# 우회는 만들지 않고, crawl worker 가 이미 쓰는 job payload → AppConfig 변환과 reuse seam 을
+# 그대로 재사용한다.
 
 
-def _require_windows(what: str) -> None:
-    import sys
+def _config_from_auth_job(job: ClaimedJob) -> Any:
+    from rider_agent.workers.crawl_worker import _build_config, payload_from_job
 
-    if sys.platform != "win32":
-        raise RuntimeError(
-            f"{what}는 Windows에서만 동작한다(비-Windows는 주입 fake 로 검증)"
-        )
+    payload = payload_from_job(job)
+    cdp_url = str((job.payload or {}).get("cdp_url") or "http://127.0.0.1:9222")
+    return _build_config(
+        payload,
+        cdp_url=cdp_url,
+        user_data_dir=Path("runtime") / "agent-browser-profiles" / payload.target_id,
+    )
 
 
 def default_login_probe(job: ClaimedJob) -> str:
-    """기본 배민 로그인 상태 probe(Windows-gated lazy — 운영은 주입 probe 사용).
+    """기본 배민 로그인 상태 probe(reuse ``crawl_snapshot`` 기반 read-only 판정).
 
-    실 배민 로그인 상태의 read-only 판정(달성현황 도달 등)은 job payload 계약(Epic 5)과
-    ``rider_crawl`` 0줄 유지 정책에 묶여 있어 정밀 구현은 후속 스토리 소유다. 운영/Epic 5 는
-    이 자리에 reuse seam(``crawl_snapshot``/``BrowserActionRequiredError``) 기반 real probe 를
-    주입하고, 테스트는 fake ``login_probe`` 를 주입한다(이 기본은 호출되지 않는다).
+    정상 snapshot 을 얻으면 ``ACTIVE``, ``BrowserActionRequiredError`` 는 ``AUTH_REQUIRED``,
+    그 외 파서/연결류 예외는 인증 문제로 단정하지 않고 ``UNKNOWN`` 으로 둔다.
     """
 
-    _require_windows("배민 기본 login probe")
-    raise NotImplementedError(
-        "배민 real login probe는 운영/Epic 5가 주입한다(본 스토리는 분류기/실행자 primitive)"
-    )
+    from rider_agent import reuse
+
+    config = _config_from_auth_job(job)
+    platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
+    try:
+        reuse.crawl_snapshot(config, platform_name=platform or "baemin")
+    except BrowserActionRequiredError as exc:
+        return classify_baemin_auth_state(error=exc)
+    except Exception:
+        return AUTH_STATE_UNKNOWN
+    return classify_baemin_auth_state(snapshot_ok=True)
 
 
 def default_open_auth_browser(job: ClaimedJob) -> None:
-    """기본 프로필 브라우저 열기(Windows-gated lazy — 운영은 주입 open_auth_browser 사용).
+    """기본 프로필 브라우저 열기.
 
-    프로필 브라우저를 사람용 인증 모드로 **열기만** 한다(``prepare_chrome``/
-    ``BrowserProfileManager`` reuse). job payload→config 배선은 Epic 5 소유라 운영/테스트가
-    주입한다. **OTP 취득·자동입력·우회 0** — 열기 이상은 하지 않는다.
+    ``prepare_chrome`` 를 재사용해 프로필을 **열기만** 한다. OTP 취득·자동입력·우회는 하지 않는다.
     """
 
-    _require_windows("배민 기본 프로필 열기")
-    raise NotImplementedError(
-        "프로필 열기 배선(prepare_chrome/BrowserProfileManager)은 운영/Epic 5가 주입한다"
-    )
+    from rider_agent import reuse
+
+    reuse.prepare_chrome(_config_from_auth_job(job), platform_name="Windows")
 
 
 def default_detect_completion(job: ClaimedJob) -> bool:
-    """기본 사람-완료 감지(Windows-gated lazy — 운영은 주입 detect_completion 사용).
+    """기본 사람-완료 감지(read-only).
 
-    사람이 완료한 로그인 상태를 **read-only 로 감지**(달성현황 도달 여부 등)만 한다 —
-    인증번호를 읽거나 입력·제출하지 않는다. 정밀 판정은 후속 스토리/운영 주입 소유.
+    로그인 완료 여부만 다시 probe 한다. 인증번호를 읽거나 입력·제출하지 않는다.
     """
 
-    _require_windows("배민 기본 사람-완료 감지")
-    raise NotImplementedError(
-        "사람-완료 감지(read-only)는 운영/Epic 5가 주입한다(OTP 취득·입력 0)"
-    )
+    return default_login_probe(job) == AUTH_STATE_ACTIVE
 
 
 # ── AUTH_CHECK 실행자(로그인 상태만 점검·보고 — 수집/전송 0) ────────────────────

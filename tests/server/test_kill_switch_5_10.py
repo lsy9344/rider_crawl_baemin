@@ -28,7 +28,7 @@ import asyncio
 from datetime import datetime, timezone
 from http import HTTPStatus
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as _TestClient
 
 from rider_server.domain import DeliveryStatus, Messenger
 from rider_server.main import create_app
@@ -49,9 +49,16 @@ _SENT_AT = datetime(2026, 6, 14, 12, 0, 5, tzinfo=timezone.utc)
 _TENANT = "tn-1"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
+_SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 _OPERATOR = AdminPrincipal(
     actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True, source="ADMIN_UI/operator"
 )
+
+
+def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
+    headers = dict(_SAME_ORIGIN_HEADERS)
+    headers.update(kwargs.pop("headers", {}) or {})
+    return _TestClient(app, *args, headers=headers, **kwargs)
 
 
 def _run(coro):

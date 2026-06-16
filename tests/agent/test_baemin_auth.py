@@ -622,13 +622,130 @@ def test_run_agent_open_auth_browser_timeout_completes_without_hang(tmp_path):
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_default_probes_are_windows_gated_or_injection_required():
-    # 비-Windows(WSL/CI)에선 RuntimeError, Windows 에선 NotImplementedError(운영 주입 요구) —
-    # 어느 쪽이든 기본 경로가 실 브라우저/실 crawl 을 끌지 않는다(import-safety·주입 강제).
-    job = _auth_job()
-    for fn in (default_login_probe, default_open_auth_browser, default_detect_completion):
-        with pytest.raises((RuntimeError, NotImplementedError)):
-            fn(job)
+def test_default_login_probe_reuses_crawl_snapshot_for_active(monkeypatch):
+    calls = []
+
+    def fake_crawl_snapshot(config, *, platform_name=None):
+        calls.append((config, platform_name))
+        return object()
+
+    monkeypatch.setattr("rider_agent.reuse.crawl_snapshot", fake_crawl_snapshot)
+
+    state = default_login_probe(
+        _auth_job(
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "baemin",
+                "primary_url": "https://self.baemin.example/stats",
+                "expected_display_name": "배민센터A",
+                "timeout_seconds": 30,
+            }
+        )
+    )
+
+    assert state == AUTH_STATE_ACTIVE
+    assert len(calls) == 1
+    config, platform_name = calls[0]
+    assert platform_name == "baemin"
+    assert config.coupang_eats_url == "https://self.baemin.example/stats"
+    assert config.baemin_center_name == "배민센터A"
+    assert config.send_enabled is False
+
+
+def test_default_login_probe_maps_browser_action_required(monkeypatch):
+    def fake_crawl_snapshot(config, *, platform_name=None):
+        raise BrowserActionRequiredError("login needed")
+
+    monkeypatch.setattr("rider_agent.reuse.crawl_snapshot", fake_crawl_snapshot)
+
+    assert default_login_probe(_auth_job(payload={"platform": "baemin"})) == AUTH_STATE_AUTH_REQUIRED
+
+
+def test_default_login_probe_maps_ambiguous_errors_to_unknown(monkeypatch):
+    def fake_crawl_snapshot(config, *, platform_name=None):
+        raise RuntimeError("parser or connection problem")
+
+    monkeypatch.setattr("rider_agent.reuse.crawl_snapshot", fake_crawl_snapshot)
+
+    assert default_login_probe(_auth_job(payload={"platform": "baemin"})) == AUTH_STATE_UNKNOWN
+
+
+def test_default_open_auth_browser_and_detect_completion_reuse_existing_seams(monkeypatch):
+    prepare_calls = []
+
+    def fake_prepare_chrome(config, *, platform_name=None):
+        prepare_calls.append((config, platform_name))
+        return "ready"
+
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", fake_prepare_chrome)
+
+    job = _auth_job(
+        type=CAPABILITY_OPEN_AUTH_BROWSER,
+        payload={
+            "tenant_id": "tenant-fake-1",
+            "target_id": FAKE_TARGET,
+            "platform": "baemin",
+            "primary_url": "https://self.baemin.example/stats",
+            "expected_display_name": "배민센터A",
+        },
+    )
+    default_open_auth_browser(job)
+
+    assert len(prepare_calls) == 1
+    config, platform_name = prepare_calls[0]
+    assert platform_name == "Windows"
+    assert config.coupang_eats_url == "https://self.baemin.example/stats"
+
+    monkeypatch.setattr("rider_agent.auth.baemin_auth.default_login_probe", lambda j: AUTH_STATE_ACTIVE)
+    assert default_detect_completion(job) is True
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth.default_login_probe", lambda j: AUTH_STATE_AUTH_REQUIRED
+    )
+    assert default_detect_completion(job) is False
+
+
+def test_run_agent_default_auth_worker_completes_auth_check_with_real_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr("rider_agent.reuse.crawl_snapshot", lambda config, *, platform_name=None: object())
+    store = _FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    job_dict = {
+        "job_id": "job-fake-auth-default-real-1",
+        "type": CAPABILITY_AUTH_CHECK,
+        "target_id": FAKE_TARGET,
+        "lease_expires_at": FUTURE_LEASE,
+        "payload": {
+            "tenant_id": "tenant-fake-1",
+            "target_id": FAKE_TARGET,
+            "platform": "baemin",
+            "primary_url": "https://self.baemin.example/stats",
+            "expected_display_name": "배민센터A",
+            "timeout_seconds": 30,
+        },
+    }
+    transport = _FakeTransport(claim_script=[{"jobs": [job_dict]}])
+    stop = threading.Event()
+    sleep = _StoppingSleep(stop, stop_after=1)
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        start_auth_worker=True,
+    )
+
+    assert summary.started is True
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    body = completes[0][1]
+    assert body["status"] == JOB_STATUS_SUCCESS
+    assert body["result_json"] == {"target_id": FAKE_TARGET, "auth_state": AUTH_STATE_ACTIVE}
 
 
 # ══════════════════════════════════════════════════════════════════════════

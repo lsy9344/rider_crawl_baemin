@@ -7,6 +7,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from sqlalchemy import insert, select, update
@@ -55,9 +56,22 @@ from rider_server.services.message_render_service import MessageRenderService
 
 from .delivery_failure_policy import DeliveryFailurePolicy
 from .dispatch_fanout_service import DispatchJob
-from .job_result_ingest_service import JobResultIngestService, SnapshotIngestRecord
+from .job_result_ingest_service import (
+    JobResultIngestError,
+    JobResultIngestService,
+    SnapshotIngestRecord,
+)
 
 TelegramSender = Callable[[MessengerChannel, DispatchJob, str], None]
+
+
+@dataclass(frozen=True)
+class _PendingTelegramDelivery:
+    channel: MessengerChannel
+    job: DispatchJob
+    message: Message
+    log_id: uuid.UUID
+    collected_at: datetime
 
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
@@ -131,7 +145,7 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         agent_uuid = _uuid(agent_id)
         snapshot_id = _snapshot_id_for_job(record.job_id)
         message_id = _message_id_for_job(record.job_id)
-        message = _message_from_record(record, snapshot_id=snapshot_id, message_id=message_id)
+        pending_telegram_deliveries: list[_PendingTelegramDelivery] = []
 
         async with self._session_factory() as session:
             async with session.begin():
@@ -147,6 +161,11 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 expired = job.lease_expires_at is None or now >= job.lease_expires_at
                 if owner_mismatch or not_in_flight or expired:
                     return CompleteOutcome(COMPLETE_LEASE_LOST, record.job_id)
+
+                record = _record_scoped_to_locked_job(record, job)
+                message = _message_from_record(
+                    record, snapshot_id=snapshot_id, message_id=message_id
+                )
 
                 assert_transition(job.status, status)
                 job.status = status
@@ -173,13 +192,16 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                         text_redacted_preview=message.text_redacted_preview,
                     )
                 )
-                await self._enqueue_dispatch_records(
+                pending_telegram_deliveries = await self._enqueue_dispatch_records(
                     session,
                     record=record,
                     message=message,
                     message_id=message_id,
                     now=now,
                 )
+
+        for delivery in pending_telegram_deliveries:
+            await self._deliver_telegram_after_commit(delivery, now=now)
 
         return CompleteOutcome(COMPLETE_ACCEPTED, record.job_id, final_status=status)
 
@@ -191,7 +213,8 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         message: Message,
         message_id: uuid.UUID,
         now: datetime,
-    ) -> None:
+    ) -> list[_PendingTelegramDelivery]:
+        pending_telegram_deliveries: list[_PendingTelegramDelivery] = []
         rows = (
             await session.execute(
                 select(DeliveryRuleRow, MessengerChannelRow)
@@ -246,22 +269,13 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                         template_version=message.template_version,
                         message_hash=message.text_hash,
                     )
-                    log = await _attempt_telegram_delivery(
-                        channel=_channel_to_domain(channel),
-                        job=job,
-                        message=message,
-                        log_id=str(log_id),
-                        collected_at=record.collected_at,
-                        now=now,
-                        send=self._telegram_sender,
-                    )
-                    await session.execute(
-                        update(DeliveryLogRow)
-                        .where(DeliveryLogRow.id == log_id)
-                        .values(
-                            status=log.status.value,
-                            error_code=log.error_code,
-                            sent_at=log.sent_at,
+                    pending_telegram_deliveries.append(
+                        _PendingTelegramDelivery(
+                            channel=_channel_to_domain(channel),
+                            job=job,
+                            message=message,
+                            log_id=log_id,
+                            collected_at=record.collected_at,
                         )
                     )
                 continue
@@ -290,6 +304,61 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     result_json=None,
                 )
             )
+        return pending_telegram_deliveries
+
+    async def _deliver_telegram_after_commit(
+        self,
+        delivery: _PendingTelegramDelivery,
+        *,
+        now: datetime,
+    ) -> None:
+        if self._telegram_sender is None:
+            return
+        log = await _attempt_telegram_delivery(
+            channel=delivery.channel,
+            job=delivery.job,
+            message=delivery.message,
+            log_id=str(delivery.log_id),
+            collected_at=delivery.collected_at,
+            now=now,
+            send=self._telegram_sender,
+        )
+        async with self._session_factory() as session:
+            await session.execute(
+                update(DeliveryLogRow)
+                .where(DeliveryLogRow.id == delivery.log_id)
+                .values(
+                    status=log.status.value,
+                    error_code=log.error_code,
+                    sent_at=log.sent_at,
+                )
+            )
+            await session.commit()
+
+
+def _record_scoped_to_locked_job(
+    record: SnapshotIngestRecord,
+    job: JobRow,
+) -> SnapshotIngestRecord:
+    """Derive server-owned scope fields from the locked job, not Agent result JSON."""
+
+    if job.target_id is None:
+        raise JobResultIngestError("job target_id is required")
+    return replace(
+        record,
+        target_id=str(job.target_id),
+        tenant_id=_required_job_payload_text(job, "tenant_id"),
+        platform=_required_job_payload_text(job, "platform").casefold(),
+        platform_account_id=_required_job_payload_text(job, "platform_account_id"),
+    )
+
+
+def _required_job_payload_text(job: JobRow, key: str) -> str:
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise JobResultIngestError(f"job payload {key} is required")
+    return value.strip()
 
 
 async def _attempt_telegram_delivery(
@@ -318,7 +387,7 @@ async def _attempt_telegram_delivery(
         log_id_for=lambda _job: log_id,
         sent_at=now,
         attempt=1,
-        max_attempts=3,
+        max_attempts=1,
     )
     return result.log
 

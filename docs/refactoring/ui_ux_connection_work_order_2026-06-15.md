@@ -125,6 +125,7 @@
 
 - 자동 테스트 기준으로 현재 작업트리는 깨지지 않았다.
 - `skipped`에는 `TEST_DATABASE_URL` 미설정 때문에 건너뛴 PostgreSQL-gated 검증이 포함된다.
+- 2026-06-16 local Admin security fix evidence: this environment has no `TEST_DATABASE_URL`, so PostgreSQL-gated tests were not run locally and must run in CI/release environment.
 - 아래 P0 DB unique 항목은 실제 PostgreSQL edge case라, 순수 in-memory 테스트 통과만으로 완료 처리하면 안 된다.
 
 ### 3.2 수동 UI 점검

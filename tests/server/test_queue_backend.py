@@ -15,9 +15,11 @@ import asyncio
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from rider_server.domain import BaeminAuthState, FailureCategory
 from rider_server.queue import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_FAILED,
@@ -28,7 +30,10 @@ from rider_server.queue import (
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
-from rider_server.queue.postgres_queue import kakao_delivery_log_values
+from rider_server.queue.postgres_queue import (
+    _platform_account_auth_update,
+    kakao_delivery_log_values,
+)
 
 _T0 = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -347,6 +352,28 @@ def test_transition_table_rejects_pending_to_succeeded():
     assert_transition(JOB_STATUS_PENDING, JOB_STATUS_CLAIMED)  # 정의됨 → 통과
     with pytest.raises(InvalidJobTransition):
         assert_transition(JOB_STATUS_PENDING, JOB_STATUS_SUCCEEDED)
+
+
+def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
+    job = SimpleNamespace(
+        payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
+        result_json={"auth_state": BaeminAuthState.USER_ACTION_PENDING.value},
+    )
+    assert _platform_account_auth_update(job, None) == (
+        "33333333-3333-3333-3333-333333333333",
+        BaeminAuthState.USER_ACTION_PENDING.value,
+    )
+
+    mismatch_job = SimpleNamespace(
+        payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
+        result_json={"mismatch": BaeminAuthState.CENTER_MISMATCH.value},
+    )
+    assert _platform_account_auth_update(
+        mismatch_job, FailureCategory.TARGET_VALIDATION_FAILURE.value
+    ) == (
+        "33333333-3333-3333-3333-333333333333",
+        BaeminAuthState.CENTER_MISMATCH.value,
+    )
 
 
 # ── (b) 단일-claim / exactly-once (in-memory, 항상 실행) ──────────────────────────

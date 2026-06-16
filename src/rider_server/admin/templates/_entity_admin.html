@@ -3,6 +3,19 @@
    URL path 라 JS(crudUpdate) 로 조립. secret 은 *_ref 핸들만(평문 금지). autoescape 유지. #}
 <div class="entity-admin" id="entity-admin">
   <div id="entity-result" class="action-result muted">엔티티 액션 결과가 여기에 표시됩니다.</div>
+  {% set tenant_rows = tenants | default([]) %}
+  {% if tenant_rows %}
+  <div class="edit-row" style="border-top:0; padding-top:0">
+    <label>작업 고객
+      <select id="entity-tenant-switch" onchange="switchTenant(this.value)">
+        <option value="">고객 선택…</option>
+        {% for tenant in tenant_rows %}
+        <option value="{{ tenant.id }}" {% if tenant.id == tenant_id %}selected{% endif %}>{{ tenant.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  {% endif %}
 
   {# ① 새 업체 추가 — 계정은 드롭다운에서 선택(id 직접 입력 0) #}
   <fieldset>
@@ -44,6 +57,24 @@
       <label>변경시에만 전송 <input type="checkbox" name="send_only_on_change" value="true"></label>
       <button type="submit" class="create">연결 생성</button>
     </form>
+    <div class="edit-row">
+      <label>규칙 조회 업체
+        <select id="rule-list-target"
+                hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <button type="button" onclick="loadDeliveryRules()">규칙 보기</button>
+    </div>
+    <div id="delivery-rule-list" hx-swap="innerHTML"></div>
+    <div class="edit-row">
+      <label>규칙 선택
+        <select id="rule-edit-id"><option value="">업체 선택 후 규칙 보기</option></select>
+      </label>
+      <label>template_id <input type="text" id="rule-edit-template"></label>
+      <label>변경시에만 전송 <input type="checkbox" id="rule-edit-change-only" value="true"></label>
+      <button type="button" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '', {template_id: cval('rule-edit-template'), send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button>
+      <button type="button" class="danger" onclick="crudUpdate('/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button>
+    </div>
   </fieldset>
 
   {# ③ 등록된 업체 — 편집/비활성화(업체 드롭다운에서 선택) #}
@@ -55,8 +86,12 @@
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
+      <label>표시명 <input type="text" id="tgt-edit-name"></label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center"></label>
-      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {center_name: cval('tgt-edit-center')})">편집</button>
+      <label>external_id <input type="text" id="tgt-edit-external"></label>
+      <label>주소(url) <input type="text" id="tgt-edit-url"></label>
+      <label>수집 주기(분) <input type="number" id="tgt-edit-interval"></label>
+      <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '', {name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')})">편집</button>
       <button type="button" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button>
       <button type="button" class="danger" onclick="crudUpdate('/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button>
     </div>
@@ -118,7 +153,9 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
-          <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', {telegram_chat_id: cval('ch-edit-chat')})">편집</button>
+          <label>thread_id <input type="text" id="ch-edit-thread"></label>
+          <label>kakao_room_name <input type="text" id="ch-edit-kakao"></label>
+          <button type="button" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '', {telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')})">편집</button>
           <button type="button" class="danger" onclick="crudUpdate('/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button>
         </div>
         <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
@@ -152,11 +189,23 @@
   // 드롭다운(<select>)도 input 과 동일하게 .value 를 읽으므로 cval 이 그대로 동작한다(raw-id 입력 제거).
   var CRUD_TENANT = "{{ tenant_id | urlencode }}";
   function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
+  function cchecked(id) { var el = document.getElementById(id); return el && el.checked ? "true" : ""; }
+  function switchTenant(value) {
+    if (!value) { return; }
+    window.location.href = "/admin?tenant=" + encodeURIComponent(value);
+  }
   function crudUpdate(prefix, idField, suffix, values, confirmMsg) {
     var id = cval(idField);
     if (!id) { document.getElementById('entity-result').textContent = "편집할 대상을 드롭다운에서 선택하세요."; return; }
     if (confirmMsg && !window.confirm(confirmMsg)) { return; }
     var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + CRUD_TENANT;
     htmx.ajax('POST', url, { target: '#entity-result', swap: 'innerHTML', values: values });
+  }
+  function loadDeliveryRules() {
+    var target = cval('rule-list-target');
+    if (!target) { document.getElementById('entity-result').textContent = "규칙을 볼 업체를 선택하세요."; return; }
+    var qs = "?tenant=" + CRUD_TENANT + "&target_id=" + encodeURIComponent(target);
+    htmx.ajax('GET', '/admin/delivery-rules' + qs, { target: '#delivery-rule-list', swap: 'innerHTML' });
+    htmx.ajax('GET', '/admin/delivery-rules/options' + qs, { target: '#rule-edit-id', swap: 'innerHTML' });
   }
 </script>

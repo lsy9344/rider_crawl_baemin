@@ -215,6 +215,9 @@ def _offline_sql(direction: str) -> str:
 
 def test_offline_upgrade_emits_all_14_create_tables():
     sql = _offline_sql("upgrade")
+    created = set(re.findall(r"CREATE TABLE ([a-z_]+) \(", sql))
+    assert created - {"alembic_version"} == EXPECTED_TABLES
+    assert "alembic_version" in created
     for name in EXPECTED_TABLES:
         assert f"CREATE TABLE {name} " in sql, f"CREATE TABLE {name} 누락"
 
@@ -240,6 +243,19 @@ def test_offline_upgrade_emits_dbx_unique_guards():
     assert "registration_code IS NOT NULL" in sql
     assert "registration_code_hash IS NOT NULL" in sql
     assert "token_hash IS NOT NULL" in sql
+
+
+def test_verification_email_migration_drops_backfill_server_defaults():
+    source = (
+        MIGRATIONS_DIR / "versions" / "0008_platform_account_verification_email_refs.py"
+    ).read_text(encoding="utf-8")
+    for column in (
+        "verification_email_address_ref",
+        "verification_email_app_password_ref",
+        "verification_email_subject_keyword",
+        "verification_email_sender_keyword",
+    ):
+        assert f'op.alter_column("platform_accounts", "{column}", server_default=None)' in source
 
 
 def test_offline_downgrade_drops_all_14_tables_round_trip():

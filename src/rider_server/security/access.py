@@ -112,14 +112,14 @@ def admin_origin_allowed(request: Request) -> bool:
     """Admin 쓰기 요청의 Origin/Referer same-origin 가드.
 
     브라우저가 ``Origin`` 을 보내면 그것을 우선 검증하고, 없지만 ``Referer`` 가 있으면 Referer 를
-    검증한다. 둘 다 없으면 내부 프록시/테스트 호환을 위해 허용한다.
+    검증한다. 둘 다 없으면 cookie/session 기반 admin write 는 CSRF 방어를 위해 거부한다.
     """
 
     if request.method.upper() not in _UNSAFE_METHODS:
         return True
     source = request.headers.get("origin") or request.headers.get("referer")
     if not source:
-        return True
+        return False
     normalized = _normalize_origin(source)
     return normalized is not None and normalized in _admin_allowed_origins(request)
 

@@ -44,6 +44,7 @@ _SECURITY_DIR = _REPO_ROOT / "src" / "rider_server" / "security"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
 _TENANT = "tn-1"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
+_SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 
 
 def _run(coro):
@@ -129,7 +130,10 @@ def test_no_principal_is_401() -> None:
 
 def test_operator_passes_action_gate() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR))
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
     # 성공 액션 audit 에 source 가 principal 출처로 채워진다(redaction 통과).
@@ -141,7 +145,18 @@ def test_admin_post_same_origin_header_is_allowed() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR))
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
-        headers={"Origin": "http://testserver"},
+        headers=_SAME_ORIGIN_HEADERS,
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
+
+
+def test_admin_post_same_origin_referer_is_allowed_when_origin_missing() -> None:
+    app, repo = _app(_principal(AdminRole.OPERATOR))
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={"Referer": "http://testserver/admin?tenant=tn-1"},
     )
 
     assert resp.status_code == HTTPStatus.OK
@@ -198,24 +213,32 @@ def test_admin_post_cross_site_referer_is_denied_when_origin_missing() -> None:
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
 
 
-def test_admin_post_without_origin_or_referer_remains_allowed() -> None:
-    # 일부 내부 프록시/테스트 클라이언트는 둘 다 보내지 않는다. 미전송은 호환을 위해 허용한다.
+def test_admin_post_without_origin_or_referer_is_denied_and_audited() -> None:
+    # 쿠키/세션 기반 admin 쓰기는 Origin/Referer 가 둘 다 없으면 CSRF 방어를 위해 거부한다.
     app, repo = _app(_principal(AdminRole.OPERATOR))
     resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
 
-    assert resp.status_code == HTTPStatus.OK
-    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
+    assert repo.audits[-1].result == "DENIED"
+    assert "ORIGIN_NOT_ALLOWED" in (repo.audits[-1].reason or "")
 
 
 def test_secret_admin_satisfies_operator_gate() -> None:
     # rank 단조 — SECRET_ADMIN(2) 은 OPERATOR(1) 게이트 통과.
     app, repo = _app(_principal(AdminRole.SECRET_ADMIN))
-    assert TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1").status_code == HTTPStatus.OK
+    assert TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    ).status_code == HTTPStatus.OK
 
 
 def test_viewer_denied_on_action_gate_and_audited() -> None:
     app, repo = _app(_principal(AdminRole.VIEWER))
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert resp.json()["error"]["code"] == "FORBIDDEN"
     assert repo.audits[-1].result == "DENIED"  # 거부 시도도 남는다
@@ -225,7 +248,10 @@ def test_viewer_denied_on_action_gate_and_audited() -> None:
 
 def test_mfa_unverified_privileged_denied_and_audited() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR, mfa=False))
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert repo.audits[-1].result == "DENIED"
 
@@ -233,13 +259,17 @@ def test_mfa_unverified_privileged_denied_and_audited() -> None:
 def test_mfa_toggle_off_allows_unverified() -> None:
     # MFA 강제 토글 off → 미검증이어도 통과(task 5.3 토글).
     app, repo = _app(_principal(AdminRole.OPERATOR, mfa=False), mfa_required=False)
-    assert TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1").status_code == HTTPStatus.OK
+    assert TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    ).status_code == HTTPStatus.OK
 
 
 def test_ip_not_in_allowlist_is_denied_and_audited() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("10.0.0.0/8",))
     resp = TestClient(app).post(
-        "/admin/targets/mt-1/pause?tenant=tn-1", headers={"X-Forwarded-For": "192.168.1.1"}
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "192.168.1.1"},
     )
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert repo.audits[-1].result == "DENIED"
@@ -248,14 +278,18 @@ def test_ip_not_in_allowlist_is_denied_and_audited() -> None:
 def test_ip_in_allowlist_passes() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("10.0.0.0/8",))
     resp = TestClient(app).post(
-        "/admin/targets/mt-1/pause?tenant=tn-1", headers={"X-Forwarded-For": "10.1.2.3"}
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "10.1.2.3"},
     )
     assert resp.status_code == HTTPStatus.OK
 
 
 def test_break_glass_override_passes_and_strongly_audited() -> None:
     app, repo = _app(_principal(AdminRole.BREAK_GLASS, source="ADMIN_UI/break-glass"))
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )
     assert resp.status_code == HTTPStatus.OK
     # break-glass 사용이 강제 audit(action·result·source).
     bg = [a for a in repo.audits if a.action == "BREAK_GLASS_OVERRIDE"]
@@ -309,7 +343,10 @@ def test_no_principal_post_does_not_amplify_audit() -> None:
 def test_allowlist_set_without_source_header_is_failclosed_403() -> None:
     # source 미상(XFF 없음 → client host 가 IP 아님)인데 allowlist 설정 → fail-closed 403 + DENIED.
     app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("10.0.0.0/8",))
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")  # XFF 헤더 없음
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )  # XFF 헤더 없음
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert repo.audits[-1].result == "DENIED"  # 인증된 주체의 거부는 남는다
 
@@ -322,7 +359,10 @@ def test_async_resolve_admin_principal_seam_supported() -> None:
         return _principal(AdminRole.OPERATOR)
 
     app.state.resolve_admin_principal = _async_operator
-    resp = TestClient(app).post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = TestClient(app).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers=_SAME_ORIGIN_HEADERS,
+    )
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
 

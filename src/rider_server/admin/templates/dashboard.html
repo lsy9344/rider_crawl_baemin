@@ -87,6 +87,8 @@
     .pill { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; font-size: 0.72rem; letter-spacing: 0.01em;
       padding: 0.3rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); white-space: nowrap; }
     .pill-tenant { color: var(--secondary); border-color: color-mix(in srgb, var(--secondary) 35%, var(--border)); }
+    .tenant-select { font-family: var(--font-sans); font-size: 0.74rem; color: var(--foreground); background: var(--card);
+      border: 1px solid color-mix(in srgb, var(--secondary) 35%, var(--border)); border-radius: 999px; padding: 0.32rem 0.65rem; }
     .pill-live { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
     .pill-time { font-family: var(--font-mono); color: var(--muted-foreground); }
     .pill-stale { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
@@ -317,7 +319,16 @@
         <div><div class="brand-title">운영 대시보드</div><div class="brand-sub">rider_server · ops console</div></div>
       </div>
       <div class="appbar-right">
+        {% set tenant_rows = tenants | default([]) %}
         {% if tenant_id %}<span class="pill pill-tenant">tenant · {{ tenant_id }}</span>{% endif %}
+        {% if tenant_rows %}
+        <select id="tenant-switch" class="tenant-select" aria-label="고객 선택" onchange="switchTenant(this.value)">
+          <option value="">고객 선택…</option>
+          {% for tenant in tenant_rows %}
+          <option value="{{ tenant.id }}" {% if tenant.id == tenant_id %}selected{% endif %}>{{ tenant.name }}</option>
+          {% endfor %}
+        </select>
+        {% endif %}
         <span class="pill pill-live" id="live-pill"><span class="dot"></span> LIVE · 30s</span>
         <span class="pill pill-time" title="마지막 자동 갱신 시각">갱신 <span id="last-updated">—</span></span>
         <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">◐ 라이트</button>
@@ -336,7 +347,7 @@
       <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n">{{ tg_normal }}</span><span class="lbl">정상</span></button>
       <button class="kpichip k-warn" aria-pressed="false" data-sevclass="sev-warning" onclick="setSevFilter(this)"><span class="n">{{ tg_warning }}</span><span class="lbl">주의</span></button>
       <button class="kpichip k-crit" aria-pressed="false" data-sevclass="sev-critical" onclick="setSevFilter(this)"><span class="n">{{ tg_critical }}</span><span class="lbl">위험</span></button>
-      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n">{{ tg_stopped }}</span><span class="lbl">중지</span></button>
+      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n">{{ tg_stopped }}</span><span class="lbl">조치 필요</span></button>
       <div class="ministatus">
         <span class="seg {{ 'bad' if ag_offline else '' }}"><b>Agent</b> {{ ag_online }}/{{ ag_total }} 온라인</span>
         <span class="seg {{ 'bad' if channels.kakao_queue_lag_seconds else '' }}"><b>Kakao</b> {{ channels.kakao_queue_lag_seconds }}초 지연</span>
@@ -524,10 +535,12 @@
       document.getElementById("d-success").textContent = d.success || "수집 기록 없음";
       document.getElementById("d-delivery").textContent = d.delivery || "전송 기록 없음";
       document.getElementById("d-deeplink").textContent = "딥링크(텔레그램 알림): /admin/t/" + encodeURIComponent(d.target) + "?tenant=" + encodeURIComponent(d.tenant);
-      document.getElementById("d-center-input").value = d.center || "";
-      document.getElementById("d-center-edit").hidden = true;
+      if (!opts.preserveState) {
+        document.getElementById("d-center-input").value = d.center || "";
+        document.getElementById("d-center-edit").hidden = true;
+        document.getElementById("drawer-result").textContent = "";
+      }
       renderDrawerActions(d);
-      document.getElementById("drawer-result").textContent = "";
       var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
       drawer.hidden = false; drawer.inert = false; drawer.setAttribute("aria-hidden", "false");
       scrim.hidden = false;
@@ -541,10 +554,13 @@
     }
     function closeDrawer() {
       var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+      var active = document.activeElement;
+      var restore = ADM.opener && !drawer.contains(ADM.opener) && document.documentElement.contains(ADM.opener) && typeof ADM.opener.focus === "function" ? ADM.opener : null;
+      if (restore) restore.focus();
+      else if (active && drawer.contains(active) && typeof active.blur === "function") active.blur();
       drawer.classList.remove("open"); scrim.classList.remove("open"); document.body.classList.remove("drawer-open");
       drawer.hidden = true; drawer.inert = true; drawer.setAttribute("aria-hidden", "true"); scrim.hidden = true;
       if (ADM.target) history.pushState(null, "", "/admin?tenant=" + encodeURIComponent(ADM.tenant || ""));
-      if (ADM.opener && typeof ADM.opener.focus === "function") ADM.opener.focus();
     }
     function makeDrawerButton(label, className, onClick) {
       var b = document.createElement("button");
@@ -598,7 +614,7 @@
       var drawer = document.getElementById("drawer");
       if (drawer.hidden) return;
       var row = findTargetRow(ADM.target);
-      if (row) openTargetDrawer(row, ADM.opener, {keepFocus: true, keepUrl: true});
+      if (row) openTargetDrawer(row, ADM.opener, {keepFocus: true, keepUrl: true, preserveState: true});
       else {
         document.getElementById("d-why").textContent = "이 업체는 현재 목록에 없습니다.";
         showTargetNotice("업체를 찾지 못했습니다.");

@@ -82,6 +82,13 @@ def _tenant_id(request: Request) -> str:
     return request.query_params.get("tenant", "").strip()
 
 
+async def _tenant_rows(request: Request):
+    try:
+        return await _service(request).list_tenants()
+    except Exception:
+        return []
+
+
 async def _form(request: Request) -> dict:
     """urlencoded 폼 본문을 stdlib ``parse_qs`` 로 파싱(HTMX 기본 content-type, multipart 미사용)."""
 
@@ -147,6 +154,12 @@ def _channel_label(channel) -> str:
     return f"{channel.messenger.value} · {routing}" if routing else channel.messenger.value
 
 
+def _rule_label(rule) -> str:
+    flags = "변경시만" if rule.send_only_on_change else "항상"
+    template = rule.template_id or "기본"
+    return f"{template} · {flags} · {rule.channel_id}"
+
+
 def _raise_for(exc: Exception) -> None:
     """service 예외 → HTTP 상태(전역 핸들러가 envelope 로 변환). NotFound/scope→404, ValueError→400."""
 
@@ -170,7 +183,9 @@ async def entities_admin(
     """``GET /admin/entities`` — 엔티티 생성/편집 폼 섹션(정적 폼 + 목록 polling 컨테이너)."""
 
     return templates.TemplateResponse(
-        request, "_entity_admin.html", {"tenant_id": _tenant_id(request)}
+        request,
+        "_entity_admin.html",
+        {"tenant_id": _tenant_id(request), "tenants": await _tenant_rows(request)},
     )
 
 
@@ -248,6 +263,25 @@ async def list_delivery_rules(
             }
             for r in rows
         ],
+    )
+
+
+@router.get("/delivery-rules/options", response_class=HTMLResponse)
+async def delivery_rule_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    target_id = request.query_params.get("target_id", "").strip()
+    rows = (
+        await _service(request).list_delivery_rules(
+            target_id, tenant_id=_tenant_id(request)
+        )
+        if target_id
+        else []
+    )
+    return _options(
+        request,
+        [{"id": r.id, "label": _rule_label(r)} for r in rows],
+        placeholder="규칙 선택…",
     )
 
 
@@ -655,7 +689,11 @@ async def create_delivery_rule(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"전송 규칙 생성됨 (id {rule.id}: {rule.target_id}→{rule.channel_id})")
+    return _fragment(
+        request,
+        f"전송 규칙 생성됨 (id {rule.id}: {rule.target_id}→{rule.channel_id})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
 
 
 @router.post("/delivery-rules/{rule_id}", response_class=HTMLResponse)
@@ -678,7 +716,9 @@ async def update_delivery_rule(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"전송 규칙 편집됨 (id {rule.id})")
+    return _fragment(
+        request, f"전송 규칙 편집됨 (id {rule.id})", trigger=ENTITY_OPTIONS_CHANGED
+    )
 
 
 @router.post("/delivery-rules/{rule_id}/deactivate", response_class=HTMLResponse)
@@ -697,4 +737,8 @@ async def deactivate_delivery_rule(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"전송 규칙 비활성화됨 (enabled={rule.enabled})")
+    return _fragment(
+        request,
+        f"전송 규칙 비활성화됨 (enabled={rule.enabled})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )

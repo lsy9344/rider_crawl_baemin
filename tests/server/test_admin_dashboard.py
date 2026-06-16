@@ -513,7 +513,7 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
     assert 'hx-target="#target-result-t-auth"' in html
 
 
-def test_dashboard_counts_display_failclosed_states_as_stopped_work() -> None:
+def test_dashboard_counts_display_failclosed_states_as_action_required_work() -> None:
     repo = InMemoryDashboardRepository()
     repo.seed_target(
         _target(
@@ -526,7 +526,8 @@ def test_dashboard_counts_display_failclosed_states_as_stopped_work() -> None:
 
     body = _client(repo).get(f"/admin?tenant={_TENANT}").text
 
-    assert '<span class="n">1</span><span class="lbl">중지</span>' in body
+    assert '<span class="n">1</span><span class="lbl">조치 필요</span>' in body
+    assert '<span class="n">1</span><span class="lbl">중지</span>' not in body
     assert 'data-primary-action="auth-check"' in body
     assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
 
@@ -594,6 +595,29 @@ def test_dashboard_drawer_contains_center_name_edit_flow() -> None:
     assert "/admin/monitoring-targets/" in body
 
 
+def test_drawer_refresh_sync_preserves_editor_and_result_state_contract() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+    open_fn = body[body.index("function openTargetDrawer"):body.index("function closeDrawer")]
+    sync_fn = body[body.index("function syncOpenDrawerFromRows"):body.index("function openInitialTarget")]
+
+    preserve_guard = open_fn.index("if (!opts.preserveState)")
+    assert open_fn.index('document.getElementById("d-center-input").value = d.center || "";') > preserve_guard
+    assert open_fn.index('document.getElementById("d-center-edit").hidden = true;') > preserve_guard
+    assert open_fn.index('document.getElementById("drawer-result").textContent = "";') > preserve_guard
+    assert "preserveState: true" in sync_fn
+
+
+def test_drawer_close_restores_focus_before_hiding_dialog_contract() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+    close_fn = body[body.index("function closeDrawer"):body.index("function makeDrawerButton")]
+
+    hide_at = close_fn.index("drawer.hidden = true")
+    aria_hidden_at = close_fn.index('drawer.setAttribute("aria-hidden", "true")')
+    assert close_fn.index("restore.focus()") < hide_at
+    assert close_fn.index("active.blur()") < hide_at
+    assert hide_at < aria_hidden_at
+
+
 def test_dashboard_hides_raw_id_debug_action_panel_by_default() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
@@ -633,6 +657,40 @@ def test_dashboard_without_tenant_uses_single_known_tenant() -> None:
     assert r.status_code == 200
     assert "tenant · tn-1" in r.text
     assert 'hx-get="/admin/targets?tenant=tn-1"' in r.text
+
+
+def test_dashboard_without_tenant_multiple_known_tenants_renders_switcher() -> None:
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객A",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_OTHER_TENANT,
+            name="고객B",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    app = _allow_viewer(
+        create_app(
+            _FAKE_SETTINGS,
+            dashboard_repository=_seeded_repo(),
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+    body = TestClient(app, raise_server_exceptions=False).get("/admin").text
+
+    assert 'id="tenant-switch"' in body
+    assert 'value="tn-1"' in body
+    assert 'value="tn-2"' in body
+    assert "switchTenant" in body
+    assert 'hx-get="/admin/targets?tenant="' in body
 
 
 class _FailingSessionFactory:

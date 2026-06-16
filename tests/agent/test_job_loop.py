@@ -34,7 +34,6 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
     start_heartbeat_thread,
-    _coerce_lease_epoch,
 )
 from rider_agent.registration import (
     DEFAULT_SERVER_BASE_URL,
@@ -59,7 +58,7 @@ _IDENTITY = AgentIdentity(
     config_version="cfg-fake-1",
 )
 
-# 먼 미래 lease(서버 부여값) — self-check 가 만료로 보지 않게(year ~2128).
+# 먼 미래 lease(서버 부여값).
 FUTURE_LEASE = 5_000_000_000.0
 
 _JOB_DICT = {
@@ -474,7 +473,7 @@ def test_runner_survives_executor_exception_and_reports_failure():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# AC2 — lease: 기록 + active_jobs 노출 + self-check + 서버 거부 흡수
+# AC2 — lease: 기록 + active_jobs 노출 + 서버 거부 흡수
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -500,9 +499,10 @@ def test_runner_records_lease_and_exposes_active_jobs_in_flight():
     assert runner.active_jobs() == []
 
 
-def test_runner_abandons_on_expired_lease_instead_of_reporting_success():
+def test_runner_reports_success_even_when_original_claim_lease_looks_expired():
     transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
-    # started=100, finished=200, lease-check now=5000 > lease=1000 → 만료.
+    # started=100, finished=200. 서버 heartbeat가 lease를 연장했을 수 있으므로
+    # client는 원래 claim lease만 보고 success를 버리지 않는다.
     clock = SequenceClock([100.0, 200.0, 5000.0])
     job_expired = dict(_JOB_DICT, lease_expires_at=1000.0)
     transport.claim_script = [{"jobs": [job_expired]}]
@@ -510,22 +510,22 @@ def test_runner_abandons_on_expired_lease_instead_of_reporting_success():
     runner = _runner(transport, now=clock, execute_job=lambda j: make_success_result())
     runner.run()
 
-    # 성공으로 complete 하지 않는다(서버가 회수했을 수 있음 — 이중 성공 방지).
-    assert transport.calls_for("/complete") == []
-    assert runner.last_abandoned_job_id == "job-fake-1"
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    assert completes[0][1]["status"] == JOB_STATUS_SUCCESS
     assert runner.active_jobs() == []
 
 
-def test_runner_fail_closed_when_lease_missing():
-    # lease_expires_at 누락 → self-check fail-closed(만료로 간주 → 성공 보고 안 함).
+def test_runner_reports_success_when_claim_lease_missing_and_lets_server_decide():
     job_no_lease = {"job_id": "job-fake-1", "type": "CRAWL_BAEMIN"}
     transport = FakeTransport(claim_script=[{"jobs": [job_no_lease]}])
 
     runner = _runner(transport, execute_job=lambda j: make_success_result())
     runner.run()
 
-    assert transport.calls_for("/complete") == []
-    assert runner.last_abandoned_job_id == "job-fake-1"
+    completes = transport.calls_for("/complete")
+    assert len(completes) == 1
+    assert completes[0][1]["status"] == JOB_STATUS_SUCCESS
 
 
 @pytest.mark.parametrize("status_code", [409, 410])
@@ -926,25 +926,24 @@ def test_runner_survives_started_event_failure_and_still_completes():
     assert FAKE_TOKEN not in " ".join(logs)
 
 
-# ── AC2.5 — lease self-check 는 success 만 막는다(실패 결과는 lease 무관하게 보고) ──
+# ── AC2.5 — complete lease 판정은 서버에 맡긴다 ────────────────────────────────
 
 
 def test_runner_reports_failure_result_even_when_lease_expired():
-    # 실패 결과는 lease 가 만료돼도 그대로 보고한다(self-check 는 잘못된 '성공'만 막는다).
+    # 실패 결과도 client local lease 판단 없이 서버에 보고한다.
     job_expired = dict(_JOB_DICT, lease_expires_at=1000.0)
     transport = FakeTransport(claim_script=[{"jobs": [job_expired]}])
 
     def execute(job):
         return make_failure_result("AGENT_JOB_EXECUTION_ERROR", "boom")
 
-    # now=5000 > lease=1000 이지만 결과가 FAILED 라 abandon 하지 않는다.
+    # now=5000 > lease=1000 이지만 client는 local lease 판단 없이 서버에 보고한다.
     runner = _runner(transport, now=lambda: 5000.0, execute_job=execute)
     runner.run()
 
     completes = transport.calls_for("/complete")
     assert len(completes) == 1
     assert completes[0][1]["status"] == JOB_STATUS_FAILED
-    assert runner.last_abandoned_job_id is None  # abandon 아님.
 
 
 # ── AC1 — claim 한 job 이 여러 개면 모두 실행·complete 한다 ──────────────────────
@@ -990,32 +989,3 @@ def test_run_agent_does_not_start_loop_when_token_revoked(tmp_path):
     assert summary.token_status == TOKEN_STATUS_REVOKED
     assert transport.calls == []  # claim/heartbeat 미전송(루프 미진입).
     assert statuses == [TOKEN_STATUS_REVOKED]
-
-
-# ── AC2.5 — lease 시각 파싱(self-check 입력): 다양한 형태 + fail-closed ──────────
-
-
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        (5_000_000_000.0, 5_000_000_000.0),  # epoch float
-        (5_000_000_000, 5_000_000_000.0),  # epoch int
-        ("5000000000", 5_000_000_000.0),  # 숫자 문자열
-        (None, None),  # 누락
-        ("", None),  # 빈 문자열
-        ("not-a-timestamp", None),  # 비-숫자/비-ISO → fail-closed
-        (True, None),  # bool 은 epoch 로 취급하지 않는다(가드)
-    ],
-)
-def test_coerce_lease_epoch_parses_or_fails_closed(value, expected):
-    assert _coerce_lease_epoch(value) == expected
-
-
-def test_coerce_lease_epoch_parses_iso8601_forms():
-    # ISO 8601(`+00:00` 과 `Z` 접미사 둘 다)을 같은 양수 epoch 로 변환한다.
-    offset_form = _coerce_lease_epoch("2128-01-01T00:00:00+00:00")
-    z_form = _coerce_lease_epoch("2128-01-01T00:00:00Z")
-
-    assert isinstance(offset_form, float)
-    assert offset_form > 4_000_000_000.0
-    assert z_form == offset_form

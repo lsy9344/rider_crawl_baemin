@@ -17,8 +17,10 @@ from rider_agent.secure_store import AgentIdentity, save_agent_identity
 from rider_agent.workers.crawl_worker import (
     AUTH_STATE_ACTIVE,
     AUTH_STATE_AUTH_REQUIRED,
+    AUTH_STATE_CENTER_MISMATCH,
     ERROR_AUTH_REQUIRED,
     ERROR_CENTER_MISMATCH,
+    ERROR_TARGET_VALIDATION_FAILURE,
     ERROR_PROFILE_UNAVAILABLE,
     CrawlWorker,
     build_execute_job,
@@ -260,7 +262,8 @@ def test_center_mismatch_is_fail_closed() -> None:
     result = worker.execute(_crawl_job(expected="배민센터A"))
 
     assert result.status == JOB_STATUS_FAILED
-    assert result.error_code == ERROR_CENTER_MISMATCH
+    assert result.error_code == ERROR_TARGET_VALIDATION_FAILURE
+    assert result.result_json["auth_state"] == AUTH_STATE_CENTER_MISMATCH
     assert result.result_json["mismatch"] == ERROR_CENTER_MISMATCH
 
 

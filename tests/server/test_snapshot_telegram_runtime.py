@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from rider_server.domain import DeliveryStatus, Message, Messenger, MessengerChannel, MessengerChannelState
+import pytest
+
+from rider_server.domain import (
+    DeliveryStatus,
+    Message,
+    Messenger,
+    MessengerChannel,
+    MessengerChannelState,
+)
 from rider_server.main import _default_job_result_ingest_service
+from rider_server.services.job_result_ingest_service import JobResultIngestError, SnapshotIngestRecord
 from rider_server.services.dispatch_fanout_service import DispatchJob
-from rider_server.services.snapshot_repository_postgres import _attempt_telegram_delivery
+from rider_server.services.snapshot_repository_postgres import (
+    _attempt_telegram_delivery,
+    _record_scoped_to_locked_job,
+)
 from rider_server.settings import Settings
 
 _NOW = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -64,6 +77,57 @@ def _message() -> Message:
     )
 
 
+def _snapshot_record() -> SnapshotIngestRecord:
+    return SnapshotIngestRecord(
+        job_id="33333333-3333-3333-3333-333333333333",
+        agent_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        target_id="44444444-4444-4444-4444-444444444444",
+        tenant_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        platform="baemin",
+        platform_account_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        collected_at=_NOW,
+        parser_version="baemin-v1",
+        quality_state="OK",
+        normalized_json={
+            "center_name": "센터",
+            "completed": 1,
+            "assigned": 1,
+            "canceled": 0,
+            "rejected": 0,
+        },
+        artifact_refs=[],
+        completed_at=_NOW,
+    )
+
+
+def test_snapshot_record_scope_uses_locked_job_payload_over_agent_result() -> None:
+    job = SimpleNamespace(
+        target_id="55555555-5555-5555-5555-555555555555",
+        payload_json={
+            "tenant_id": "22222222-2222-2222-2222-222222222222",
+            "platform": "COUPANG",
+            "platform_account_id": "99999999-9999-9999-9999-999999999999",
+        },
+    )
+
+    scoped = _record_scoped_to_locked_job(_snapshot_record(), job)
+
+    assert scoped.target_id == "55555555-5555-5555-5555-555555555555"
+    assert scoped.tenant_id == "22222222-2222-2222-2222-222222222222"
+    assert scoped.platform == "coupang"
+    assert scoped.platform_account_id == "99999999-9999-9999-9999-999999999999"
+
+
+def test_snapshot_record_scope_requires_server_owned_job_payload() -> None:
+    job = SimpleNamespace(
+        target_id="55555555-5555-5555-5555-555555555555",
+        payload_json={"platform": "baemin", "platform_account_id": "account"},
+    )
+
+    with pytest.raises(JobResultIngestError, match="job payload tenant_id is required"):
+        _record_scoped_to_locked_job(_snapshot_record(), job)
+
+
 def test_snapshot_telegram_attempt_success_marks_sent_and_calls_sender() -> None:
     calls: list[tuple[str, str, str]] = []
 
@@ -110,7 +174,7 @@ def test_snapshot_telegram_attempt_failure_uses_telegram_failure_policy() -> Non
         )
     )
 
-    assert log.status is DeliveryStatus.RETRYING
+    assert log.status is DeliveryStatus.FAILED
     assert log.error_code == "TELEGRAM_FAILURE"
     assert log.sent_at is None
 

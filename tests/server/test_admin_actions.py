@@ -19,7 +19,7 @@ from http import HTTPStatus
 
 import pytest
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as _TestClient
 
 from rider_server.domain import (
     Messenger,
@@ -55,10 +55,17 @@ _TENANT = "tn-1"
 _OTHER = "tn-2"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
 _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None)
+_SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 # Story 5.8: 액션 라우트는 OPERATOR↑ 게이트(fail-closed). 5.7 라우트 테스트는 MFA 검증된
 # OPERATOR principal 을 주입해 통과시킨다(의도된 보안 강화 — story 4.5).
 _OPERATOR = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True,
                            source="ADMIN_UI/operator")
+
+
+def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
+    headers = dict(_SAME_ORIGIN_HEADERS)
+    headers.update(kwargs.pop("headers", {}) or {})
+    return _TestClient(app, *args, headers=headers, **kwargs)
 
 
 def _run(coro):
@@ -583,6 +590,20 @@ def test_auth_check_enqueues_auth_check_job_and_audit() -> None:
     job_id = _run(svc.auth_check(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
 
     assert queue.job_status(job_id) == JOB_STATUS_PENDING  # AUTH_CHECK job 1건 PENDING 진입
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json == {
+        "target_id": "mt-1",
+        "tenant_id": _TENANT,
+        "platform": "baemin",
+        "platform_account_id": "pa-1",
+        "primary_url": "https://example.invalid/mt-1",
+        "expected_display_name": "센터",
+        "browser_profile_ref": "profile:mt-1",
+        "timeout_seconds": 60,
+        "parser_version": "baemin-v1",
+        "job_type": "AUTH_CHECK",
+    }
     assert repo.audits[-1].action == "AUTH_CHECK"
 
 

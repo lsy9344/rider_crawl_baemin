@@ -77,6 +77,37 @@ def kakao_delivery_log_values(
     return None
 
 
+def _platform_account_auth_update(
+    job: Job,
+    error_code: str | None,
+) -> tuple[str, str] | None:
+    """Return ``(platform_account_id, auth_state)`` to persist for crawl/auth results."""
+
+    if not isinstance(job.payload_json, dict):
+        return None
+    platform_account_id = job.payload_json.get("platform_account_id")
+    if not platform_account_id:
+        return None
+
+    result_json = job.result_json if isinstance(job.result_json, dict) else {}
+    auth_state = result_json.get("auth_state")
+    if auth_state in {
+        BaeminAuthState.AUTH_REQUIRED.value,
+        BaeminAuthState.USER_ACTION_PENDING.value,
+        BaeminAuthState.CENTER_MISMATCH.value,
+        BaeminAuthState.BLOCKED_OR_CAPTCHA.value,
+    }:
+        return str(platform_account_id), str(auth_state)
+
+    if result_json.get("mismatch") == BaeminAuthState.CENTER_MISMATCH.value:
+        return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
+    if error_code == FailureCategory.AUTH_REQUIRED.value:
+        return str(platform_account_id), BaeminAuthState.AUTH_REQUIRED.value
+    if error_code == FailureCategory.TARGET_VALIDATION_FAILURE.value:
+        return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
+    return None
+
+
 class PostgresQueueBackend(QueueBackend):
     """``jobs`` 테이블 기반 ``QueueBackend``(``FOR UPDATE SKIP LOCKED`` 정본)."""
 
@@ -207,17 +238,14 @@ class PostgresQueueBackend(QueueBackend):
         job: Job,
         error_code: str | None,
     ) -> None:
-        if error_code != FailureCategory.AUTH_REQUIRED.value:
+        update_values = _platform_account_auth_update(job, error_code)
+        if update_values is None:
             return
-        if not isinstance(job.payload_json, dict):
-            return
-        platform_account_id = job.payload_json.get("platform_account_id")
-        if not platform_account_id:
-            return
+        platform_account_id, auth_state = update_values
         await session.execute(
             update(PlatformAccount)
             .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
-            .values(auth_state=BaeminAuthState.AUTH_REQUIRED.value)
+            .values(auth_state=auth_state)
         )
 
     async def _update_kakao_delivery_log(
