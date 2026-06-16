@@ -131,15 +131,23 @@ class _VisibleTextParser(HTMLParser):
 
 
 class _HtmlTableParser(HTMLParser):
+    # 배민 배달현황 표는 2단 헤더를 쓴다: ``완료``가 ``colspan=4``(푸드/비마트/배민스토어/
+    # 합계)로 쪼개지고, ``이름``·``배차취소`` 등은 ``rowspan=2``로 두 헤더 행을 가로지른다.
+    # 그래서 헤더 행은 36칸으로 보이지만 실제 데이터 행은 39칸이다. colspan/rowspan을
+    # 무시하고 평면 추출하면 ``완료`` 이후 모든 열이 밀려 ``배달취소(라이더귀책)`` 자리에
+    # ``완료(합계)`` 값이 들어간다(라이더마다 완료==배달취소로 보이는 버그). 셀의 span을
+    # 보존했다가 ``_expand_table_grid``로 격자를 펼쳐 헤더·데이터 열 수를 일치시킨다.
     def __init__(self) -> None:
         super().__init__()
         self.tables: list[list[list[str]]] = []
         self._table_depth = 0
-        self._current_table: list[list[str]] | None = None
-        self._current_row: list[str] | None = None
+        # 각 셀을 (텍스트, colspan, rowspan)으로 모은다.
+        self._current_table: list[list[tuple[str, int, int]]] | None = None
+        self._current_row: list[tuple[str, int, int]] | None = None
         self._current_cell: list[str] | None = None
+        self._current_span: tuple[int, int] = (1, 1)
 
-    def handle_starttag(self, tag: str, _attrs) -> None:
+    def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
         if tag == "table":
             self._table_depth += 1
@@ -149,6 +157,8 @@ class _HtmlTableParser(HTMLParser):
             self._current_row = []
         elif self._table_depth and tag in {"th", "td"}:
             self._current_cell = []
+            attrs_dict = {name.lower(): (value or "") for name, value in attrs}
+            self._current_span = (_span_value(attrs_dict.get("colspan")), _span_value(attrs_dict.get("rowspan")))
 
     def handle_data(self, data: str) -> None:
         if self._current_cell is not None:
@@ -158,17 +168,68 @@ class _HtmlTableParser(HTMLParser):
         tag = tag.lower()
         if tag in {"th", "td"} and self._current_cell is not None:
             if self._current_row is not None:
-                self._current_row.append(_normalize_cell_text("".join(self._current_cell)))
+                text = _normalize_cell_text("".join(self._current_cell))
+                colspan, rowspan = self._current_span
+                self._current_row.append((text, colspan, rowspan))
             self._current_cell = None
         elif tag == "tr" and self._current_row is not None:
-            if self._current_table is not None and any(cell for cell in self._current_row):
+            # 빈 행이라도 rowspan 정렬을 위해 일단 보관한다(펼친 뒤 빈 행을 거른다).
+            if self._current_table is not None:
                 self._current_table.append(self._current_row)
             self._current_row = None
         elif tag == "table" and self._table_depth:
             if self._table_depth == 1 and self._current_table is not None:
-                self.tables.append(self._current_table)
+                self.tables.append(_expand_table_grid(self._current_table))
                 self._current_table = None
             self._table_depth -= 1
+
+
+def _span_value(raw: str | None) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+def _expand_table_grid(raw_rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:
+    """colspan/rowspan을 펼쳐 모든 행이 같은 leaf 열을 갖는 격자로 만든다.
+
+    colspan은 같은 텍스트를 그만큼 반복하고, rowspan은 아래 행의 해당 열을 같은
+    텍스트로 채운다. 평면 추출과 달리 ``완료``(colspan=4)가 4개 열로, ``이름``
+    (rowspan=2)이 둘째 헤더 행까지 이어지므로 헤더와 데이터 열이 정확히 맞춰진다.
+    """
+    grid: list[list[str]] = []
+    # 열 인덱스 -> [채울 텍스트, 남은 행 수]
+    active: dict[int, list] = {}
+    for raw in raw_rows:
+        out: list[str] = []
+        col = 0
+        i = 0
+        n = len(raw)
+        while i < n or any(remaining > 0 and c >= col for c, (_text, remaining) in active.items()):
+            if col in active and active[col][1] > 0:
+                text, remaining = active[col]
+                out.append(text)
+                remaining -= 1
+                if remaining > 0:
+                    active[col][1] = remaining
+                else:
+                    del active[col]
+                col += 1
+                continue
+            if i < n:
+                text, colspan, rowspan = raw[i]
+                i += 1
+                for _ in range(colspan):
+                    out.append(text)
+                    if rowspan > 1:
+                        active[col] = [text, rowspan - 1]
+                    col += 1
+            else:
+                col += 1
+        grid.append(out)
+    return [row for row in grid if any(cell for cell in row)]
 
 
 def html_to_text(html: str) -> str:
@@ -552,6 +613,10 @@ def _parse_baemin_table(table: list[list[str]]) -> BaeminDeliveryHistoryTable | 
             mapped = _map_row_by_headers(headers, data_row)
             name = mapped.get("이름", "").strip()
             if not name:
+                continue
+            # 2단 헤더의 둘째 행(서브헤더)은 rowspan으로 ``이름`` 열이 헤더 라벨
+            # 그대로 채워진다. 이를 라이더로 오인하지 않도록 헤더 라벨 행은 건너뛴다.
+            if name in {"이름", "운행상태", "수행상태"}:
                 continue
             if name == "합계":
                 summary = mapped

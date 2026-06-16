@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 import re
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
-from .config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
+from .config import (
+    DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
+    DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
+    AppConfig,
+)
 from .models import CurrentScreenSnapshot
 from .parser import (
+    baemin_delivery_history_to_snapshot,
     has_today_delivery_status,
     parse_achievement_report_text,
+    parse_baemin_delivery_history_html,
     parse_current_screen_html,
 )
 
@@ -21,17 +27,130 @@ def crawl_current_screen(
     config: AppConfig,
     *,
     fetch_html: Callable[[AppConfig], str] | None = None,
+    fetch_cancel_summary: Callable[[AppConfig], CurrentScreenSnapshot | None] | None = None,
 ) -> CurrentScreenSnapshot:
     content = (fetch_html or fetch_page_html)(config)
     if _looks_like_baemin_achievement_report(content):
-        return parse_achievement_report_text(
+        snapshot = parse_achievement_report_text(
             content,
             center_id=config.baemin_center_id,
             center_name=config.baemin_center_name,
         )
+        # 달성현황(report) 페이지엔 취소 데이터가 없다. 취소율은 배달현황(history)
+        # 표에서만 얻을 수 있어, 별도 페이지를 읽어 합계 취소율을 메시지에 붙인다.
+        # 실패해도 기존 달성현황 메시지는 그대로 보내야 하므로 None이면 무시한다.
+        # 주입된 fetch_html(테스트)에서는 fetch_cancel_summary가 주어질 때만 시도한다.
+        if fetch_cancel_summary is not None:
+            cancel = fetch_cancel_summary(config)
+        elif fetch_html is None:
+            cancel = crawl_baemin_cancel_summary(config)
+        else:
+            cancel = None
+        if cancel is not None:
+            snapshot = _merge_cancel_rate(snapshot, cancel)
+        return snapshot
     if fetch_html is not None:
         _validate_baemin_center_in_html(config, content, require_evidence=True)
     return parse_current_screen_html(content)
+
+
+def _merge_cancel_rate(
+    snapshot: CurrentScreenSnapshot, cancel: CurrentScreenSnapshot
+) -> CurrentScreenSnapshot:
+    # '취소율'은 거절과 취소를 합쳐 (거절+취소)/(완료+거절+취소)로 계산한다. 배달현황
+    # 스냅샷의 reject_rate가 바로 이 합산율이라(baemin_delivery_history_to_snapshot
+    # 참고) 그대로 가져와 cancel_rate에 싣는다. 피크 실적은 달성현황 값을 그대로 둔다.
+    return replace(snapshot, cancel_rate=cancel.reject_rate)
+
+
+def crawl_baemin_cancel_summary(config: AppConfig) -> CurrentScreenSnapshot | None:
+    """배민 배달현황(history) 표를 읽어 합계 취소율 스냅샷을 만든다.
+
+    취소율은 부가 정보라 어떤 실패도 달성현황 전송을 막아선 안 된다. 그래서 수집·파싱
+    중 어떤 예외가 나도 None을 돌려 호출 측이 취소율 줄만 생략하게 한다.
+    """
+    try:
+        html = fetch_baemin_delivery_history_html(config)
+        table = parse_baemin_delivery_history_html(html)
+        return baemin_delivery_history_to_snapshot(table)
+    except Exception:
+        return None
+
+
+def fetch_baemin_delivery_history_html(config: AppConfig) -> str:
+    if config.browser_mode == "cdp":
+        return _fetch_baemin_history_via_cdp(config)
+    if config.browser_mode == "persistent":
+        return _fetch_baemin_history_via_persistent_context(config)
+    raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
+
+
+def _fetch_baemin_history_via_cdp(config: AppConfig) -> str:
+    ensure_local_cdp_address(config.cdp_url)
+    return asyncio.run(_fetch_baemin_history_via_cdp_async(config))
+
+
+async def _fetch_baemin_history_via_cdp_async(config: AppConfig) -> str:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.connect_over_cdp(config.cdp_url)
+        # 사용자의 달성현황 탭은 건드리지 않도록 전용 새 탭을 열어 읽고 닫는다.
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await context.new_page()
+        try:
+            return await _collect_baemin_history_html(page, config)
+        finally:
+            await page.close()
+
+
+def _fetch_baemin_history_via_persistent_context(config: AppConfig) -> str:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+
+    config.browser_user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            str(config.browser_user_data_dir),
+            headless=config.headless,
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(
+                DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
+                wait_until="domcontentloaded",
+                timeout=config.page_timeout_seconds,
+            )
+            if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+                page.goto(
+                    DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
+                    wait_until="domcontentloaded",
+                    timeout=config.page_timeout_seconds,
+                )
+            try:
+                page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+            except PlaywrightTimeoutError:
+                pass
+            return page.content()
+        finally:
+            context.close()
+
+
+async def _collect_baemin_history_html(page: Any, config: AppConfig) -> str:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    await _goto_page(page, DEFAULT_BAEMIN_DELIVERY_HISTORY_URL, config)
+    # 새 탭이라도 센터는 로그인 세션을 따라가지만, 센터 선택 화면으로 튕기면 설정 센터를
+    # 골라준 뒤 다시 배달현황으로 이동한다(달성현황 수집과 동일한 안전장치).
+    if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+        await _select_baemin_center(page, config)
+        await _goto_page(page, DEFAULT_BAEMIN_DELIVERY_HISTORY_URL, config)
+    try:
+        await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+    except PlaywrightTimeoutError:
+        pass
+    return await page.content()
 
 
 def fetch_page_html(config: AppConfig) -> str:

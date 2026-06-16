@@ -61,9 +61,9 @@ def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, so
             f"저녁논피크 : {_format_baemin_period(snapshot.dinner_non_peak_count, snapshot.dinner_non_peak_goal, snapshot.dinner_non_peak_rate)}",
         ]
     )
-    rate_lines = _rate_line("거절율", snapshot.reject_rate)
-    if rate_lines:
-        lines.extend(["", *rate_lines])
+    tail_lines = _cancel_rate_lines(snapshot.cancel_rate)
+    if tail_lines:
+        lines.extend(["", *tail_lines])
     return "\n".join(lines)
 
 
@@ -150,7 +150,16 @@ def _format_baemin_period(done: float | int, goal: float | int, rate: float | in
     return f"{_format_count(done)}건"
 
 
-def _rate_line(label: str, value: float | None) -> list[str]:
-    if value is None:
+def _cancel_rate_lines(cancel_rate: float | None) -> list[str]:
+    # '취소율'은 거절+취소를 합산한 비율이다(미션 10% 기준 지표). 거절율 줄은 따로
+    # 두지 않으며, +1%p 보정·경고·건수 없이 '취소율 : X%'만 표기한다.
+    if cancel_rate is None:
         return []
-    return [f"{label} : {_format_adjusted_reject_rate(value)}%"]
+    return [f"취소율 : {_format_plain_rate(cancel_rate)}%"]
+
+
+def _format_plain_rate(value: float | int) -> str:
+    decimal_value = Decimal(str(value))
+    if decimal_value == decimal_value.to_integral_value():
+        return str(int(decimal_value))
+    return format(decimal_value.normalize(), "f")

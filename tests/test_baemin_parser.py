@@ -155,3 +155,64 @@ def test_baemin_delivery_history_rejects_invalid_required_numeric_value():
         assert "완료" in str(exc)
     else:
         raise AssertionError("expected MissingPerformanceDataError")
+
+
+# 실제 배민 배달현황 표의 2단 헤더: ``완료``가 colspan=4(푸드/비마트/배민스토어/합계)로
+# 쪼개지고, ``이름``·``배차취소``·``배달취소``는 rowspan=2로 두 헤더 행을 가로지른다.
+# 그래서 헤더는 36칸처럼 보이지만 데이터 행은 39칸이다. colspan/rowspan을 무시하면
+# ``완료`` 이후 열이 밀려 ``배달취소(라이더귀책)`` 자리에 ``완료(합계)`` 값이 들어간다.
+_BAEMIN_HISTORY_COLSPAN_HTML = """
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">이름</th><th rowspan="2">운행상태</th><th rowspan="2">휴대폰번호</th>
+      <th colspan="4">완료</th><th>거절</th>
+      <th rowspan="2">배차취소</th><th rowspan="2">배달취소(라이더귀책)</th>
+      <th rowspan="2">아침점심피크</th><th rowspan="2">오후논피크</th>
+      <th rowspan="2">저녁피크</th><th rowspan="2">심야논피크</th><th rowspan="2">아이디</th>
+    </tr>
+    <tr><th>푸드</th><th>비마트</th><th>배민스토어</th><th>합계</th><th>푸드</th></tr>
+    <tr>
+      <th>합계</th><th>-</th><th>-</th>
+      <th>49</th><th>0</th><th>0</th><th>49</th><th>1</th><th>1</th><th>0</th>
+      <th>31</th><th>18</th><th>0</th><th>0</th><th>-</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>강민기</td><td>운행 종료</td><td>010-1111-2222</td>
+      <td>29</td><td>0</td><td>0</td><td>29</td><td>1</td><td>1</td><td>0</td>
+      <td>20</td><td>9</td><td>0</td><td>0</td><td>rider01</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
+
+def test_parse_baemin_delivery_history_html_aligns_columns_under_colspan_header():
+    table = parse_baemin_delivery_history_html(_BAEMIN_HISTORY_COLSPAN_HTML)
+
+    assert table.summary is not None
+    # ``완료``는 '합계' 하위 열을 취해야 하고, 취소 열이 ``완료`` 값과 섞이면 안 된다.
+    assert table.summary["완료"] == "49"
+    assert table.summary["거절"] == "1"
+    assert table.summary["배차취소"] == "1"
+    assert table.summary["배달취소(라이더귀책)"] == "0"
+    # 서브헤더(푸드/비마트/배민스토어/합계) 행이 라이더로 잡혀선 안 된다.
+    assert len(table.riders) == 1
+    rider = table.riders[0]
+    assert rider["이름"] == "강민기"
+    assert rider["완료"] == "29"
+    assert rider["배달취소(라이더귀책)"] == "0"
+
+
+def test_baemin_delivery_history_to_snapshot_computes_cancel_rate_under_colspan_header():
+    table = parse_baemin_delivery_history_html(_BAEMIN_HISTORY_COLSPAN_HTML)
+
+    snapshot = baemin_delivery_history_to_snapshot(table)
+
+    # 취소 1 / (완료 49 + 거절 1 + 취소 1) = 1/51 ≈ 2.0%
+    assert snapshot.completed_count == 49
+    assert snapshot.cancelled_count == 1
+    assert snapshot.cancel_rate == 2.0
+    assert snapshot.reject_rate == 3.9

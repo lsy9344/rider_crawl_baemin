@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import sys
 import types
 
@@ -7,6 +8,30 @@ import pytest
 from rider_crawl.config import AppConfig
 from rider_crawl import crawler
 from rider_crawl.crawler import crawl_current_screen
+from rider_crawl.models import CurrentScreenSnapshot
+
+
+# 취소율 병합 테스트용 최소 배달현황 스냅샷(필수 필드만 채움).
+_MINIMAL_SNAPSHOT = CurrentScreenSnapshot(
+    center_name="배민 배달현황",
+    date_label="",
+    shift_label="배달현황",
+    shift_time_range="",
+    shift_status="",
+    updated_at="14:02",
+    available_current=0,
+    available_total=0,
+    waiting_count=0,
+    online_riders=0,
+    rejected_ignored_count=0,
+    cancelled_count=0,
+    completed_count=0,
+    sequence_violation_count=0,
+    lunch_peak_count=0,
+    dinner_peak_count=0,
+    non_peak_count=0,
+    active_riders=0,
+)
 
 
 def test_crawl_current_screen_parses_html_from_injected_fetcher(tmp_path):
@@ -91,6 +116,75 @@ def test_crawl_current_screen_parses_achievement_report_text_from_injected_fetch
     assert snapshot.lunch_peak_goal == 231
     assert snapshot.dinner_non_peak_count == 374
     assert snapshot.reject_rate == 11.82
+
+
+def test_crawl_current_screen_merges_cancel_rate_from_history(tmp_path):
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+        ]
+    )
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+
+    # 배달현황 스냅샷의 reject_rate가 (거절+취소)/전체 합산율이고, 이 값이 취소율로 실린다.
+    history = dataclasses.replace(
+        _MINIMAL_SNAPSHOT, reject_rate=4.7, cancel_rate=1.2, cancelled_count=2
+    )
+
+    snapshot = crawl_current_screen(
+        config,
+        fetch_html=lambda _config: text,
+        fetch_cancel_summary=lambda _config: history,
+    )
+
+    # 달성현황 피크 실적은 그대로, 배달현황의 거절+취소 합산율이 취소율로 덧붙는다.
+    assert snapshot.lunch_peak_count == 323
+    assert snapshot.cancel_rate == 4.7
+
+
+def test_crawl_current_screen_keeps_report_when_cancel_summary_unavailable(tmp_path):
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+        ]
+    )
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+
+    snapshot = crawl_current_screen(
+        config,
+        fetch_html=lambda _config: text,
+        fetch_cancel_summary=lambda _config: None,
+    )
+
+    # 취소율 수집 실패(None)는 달성현황 전송을 막지 않고 취소율만 비운다.
+    assert snapshot.lunch_peak_count == 323
+    assert snapshot.cancel_rate is None
 
 
 def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
