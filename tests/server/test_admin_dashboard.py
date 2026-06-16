@@ -641,7 +641,9 @@ def test_auth_required_fragment_names_the_target_not_generic_label() -> None:
     body = _client(_seeded_repo()).get(f"/admin/auth-required?tenant={_TENANT}").text
 
     assert "가게" in body
+    assert "로그인 만료 · 인증 확인 필요" in body
     assert "인증 필요 대상</td>" not in body
+    assert "ACCOUNT_AUTH_REQUIRED" not in body
 
 
 def test_dashboard_full_page_without_tenant_param_renders() -> None:

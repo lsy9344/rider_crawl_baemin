@@ -12,7 +12,7 @@
     {% for r in auth_required %}
     <tr>
       <td>{{ r.target_name or "대상명 없음" }}</td>
-      <td>{{ r.reason }}</td>
+      <td>{{ r.reason | reason_text }}</td>
       <td>
         {% if r.target_id %}
         <button type="button" class="btn ghost" data-target="{{ r.target_id }}" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>

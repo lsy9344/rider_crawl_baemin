@@ -87,6 +87,7 @@ templates.env.filters["severity_class"] = _severity_class
 # 모두 순수 표시 변환이다(상태 변경 0, DB 0). FailureCategory/플랫폼 값은 plain-string 으로만
 # 비교한다(domain enum import 불필요 — 어휘는 코드값 그대로). 읽기 전용 가드 무관(write 호출 0).
 _REASON_TEXT: dict[str, str] = {
+    "ACCOUNT_AUTH_REQUIRED": "로그인 만료 · 인증 확인 필요",
     "AUTH_REQUIRED": "로그인 만료 · 인증 확인 필요",
     "TARGET_VALIDATION_FAILURE": "센터/상점명 불일치 — 오발송 위험",
     "CRAWL_FAILURE": "수집 실패 — 확인 필요",
