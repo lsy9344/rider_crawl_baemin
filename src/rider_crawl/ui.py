@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import BooleanVar, Canvas, StringVar, Tk, messagebox
@@ -122,6 +122,12 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
     messenger_name = _messenger_name(values.get("messenger_name", "telegram"))
     platform_name = _platform_name(values.get("platform_name", "baemin"))
 
+    schedule_enabled = bool(values.get("schedule_enabled", defaults.schedule_enabled))
+    start_time = _parse_hhmm(values.get("start_time", ""), "시작시간", required=schedule_enabled)
+    stop_time = _parse_hhmm(values.get("stop_time", ""), "종료시간", required=schedule_enabled)
+    if schedule_enabled and start_time == stop_time:
+        raise ValueError("시작시간과 종료시간이 같을 수 없습니다")
+
     return UiSettings(
         performance_url=str(values["performance_url"]).strip(),
         peak_dashboard_url=str(values["peak_dashboard_url"]).strip(),
@@ -144,6 +150,9 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=run_lock_timeout_seconds,
         page_timeout_seconds=page_timeout_seconds,
+        schedule_enabled=schedule_enabled,
+        start_time=start_time,
+        stop_time=stop_time,
         coupang_auto_email_2fa_enabled=bool(
             values.get("coupang_auto_email_2fa_enabled", defaults.coupang_auto_email_2fa_enabled)
         ),
@@ -184,6 +193,9 @@ class RiderBotUi:
         # 않도록 stop_event/워커를 탭 인덱스별로 따로 보관한다.
         self.stop_events_by_tab: dict[int, threading.Event] = {}
         self.workers_by_tab: dict[int, list[threading.Thread]] = {}
+        # 탭별 시작/정지 시간 스케줄의 직전 '시간대 안' 여부. 상승 에지(밖→안)에서만
+        # 자동 시작해, 시간대 안에서 에러로 멈춘 탭을 매 틱 되살리지 않는다.
+        self._schedule_prev_in_window: dict[int, bool] = {}
         # 텔레그램 명령 폴러는 봇 토큰 단위로 하나만 돈다. 여러 탭이 같은 토큰을
         # 공유하면 getUpdates를 두 폴러가 나눠 받아 '!조회' 명령이 다른 탭으로 가
         # 누락될 수 있으므로, 토큰별로 폴러 하나를 두고 그 토큰을 쓰는 활성 탭 전부를
@@ -211,6 +223,7 @@ class RiderBotUi:
 
         self._build()
         self._poll_messages()
+        self._poll_schedule()
 
     def _build_vars(self, settings: UiSettings) -> dict[str, StringVar | BooleanVar]:
         return {
@@ -229,6 +242,8 @@ class RiderBotUi:
             "telegram_message_thread_id": StringVar(value=settings.telegram_message_thread_id),
             "messenger_name": StringVar(value=settings.messenger_name),
             "interval_minutes": StringVar(value=str(settings.interval_minutes)),
+            "start_time": StringVar(value=settings.start_time),
+            "stop_time": StringVar(value=settings.stop_time),
             "page_timeout_seconds": StringVar(value=str(settings.page_timeout_seconds)),
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
             "coupang_login_id": StringVar(value=settings.coupang_login_id),
@@ -239,6 +254,7 @@ class RiderBotUi:
             "headless": BooleanVar(value=settings.headless),
             "send_enabled": BooleanVar(value=settings.send_enabled),
             "send_only_on_change": BooleanVar(value=settings.send_only_on_change),
+            "schedule_enabled": BooleanVar(value=settings.schedule_enabled),
             "coupang_auto_email_2fa_enabled": BooleanVar(value=settings.coupang_auto_email_2fa_enabled),
         }
 
@@ -400,6 +416,18 @@ class RiderBotUi:
             text="쿠팡 로그인 만료 시 자동복구(이메일 2FA)",
             variable=tab_vars["coupang_auto_email_2fa_enabled"],
         ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            checks,
+            text="시작/종료 시간 사용(시작시간에 자동 시작, 종료시간엔 크롤링 유지·전송만 정지)",
+            variable=tab_vars["schedule_enabled"],
+        ).grid(row=4, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        schedule_box = ttk.Frame(checks)
+        schedule_box.grid(row=5, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ttk.Label(schedule_box, text="시작시간:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(schedule_box, textvariable=tab_vars["start_time"], width=10).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(schedule_box, text="(24시간 HH:MM, 예: 09:00)").grid(row=0, column=2, sticky="w", padx=(8, 0), pady=2)
+        ttk.Label(schedule_box, text="종료시간:").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(schedule_box, textvariable=tab_vars["stop_time"], width=10).grid(row=1, column=1, sticky="w", pady=2)
         self._bind_messenger_field_states(tab_vars, entry_widgets)
         self._bind_platform_field_states(tab_vars, entry_widgets)
 
@@ -456,7 +484,9 @@ class RiderBotUi:
                 "8. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
                 "9. 여러 계정은 탭마다 다른 CDP 포트와 브라우저 프로필 경로를 사용하세요.\n"
                 "10. 처음에는 메시지 전송을 끄고 1회 실행으로 메시지를 확인하세요.\n"
-                "11. 시작/중지는 현재 보고 있는 탭에만 적용됩니다. 탭별로 따로 시작하고 각 탭의 메세지 전송 간격으로 반복됩니다."
+                "11. 시작/중지는 현재 보고 있는 탭에만 적용됩니다. 탭별로 따로 시작하고 각 탭의 메세지 전송 간격으로 반복됩니다.\n"
+                "12. '시작/종료 시간 사용'을 켜면 시작시간(HH:MM)에 그 탭이 자동으로 시작되고, 종료시간에는 "
+                "크롤링은 계속하되 메시지 전송만 멈춥니다(다음 시작시간에 전송 재개). 앱이 켜져 있어야 동작합니다."
             ),
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -545,7 +575,12 @@ class RiderBotUi:
             self.status_var.set(f"크롤링{tab_index + 1} 설정 오류")
             return
 
-        threading.Thread(target=self._run_once_background, args=(tab_index, settings), daemon=True).start()
+        threading.Thread(
+            target=self._run_once_background,
+            args=(tab_index, settings),
+            kwargs={"respect_schedule": False},
+            daemon=True,
+        ).start()
 
     def start(self) -> None:
         # '시작'은 현재 보고 있는 탭 하나만 실행한다. 다른 탭은 영향을 주지 않으므로
@@ -572,6 +607,13 @@ class RiderBotUi:
             self.status_var.set(f"크롤링{tab_index + 1} 설정 오류")
             return
 
+        self._start_tab(tab_index, settings)
+        self.status_var.set(f"크롤링{tab_index + 1} 실행 중")
+
+    def _start_tab(self, tab_index: int, settings: UiSettings) -> None:
+        # 워커/스케줄러/텔레그램 폴러를 띄우는 핵심. 수동 start()와 스케줄 자동시작이
+        # 공유한다. 호출 전에 _has_live_workers/실적 URL/자동복구 자격증명 검증은
+        # 호출부(start 또는 _auto_start_tab)가 책임진다.
         stop_event = threading.Event()
         self.stop_events_by_tab[tab_index] = stop_event
         scheduler = BotScheduler(
@@ -592,7 +634,49 @@ class RiderBotUi:
         self._start_telegram_listener(tab_index, settings)
         worker.start()
         self._refresh_run_controls()
-        self.status_var.set(f"크롤링{tab_index + 1} 실행 중")
+
+    def _auto_start_tab(self, tab_index: int) -> None:
+        # 스케줄 폴러가 부르는 자동 시작. 수동 start()와 달리 모달(messagebox)을 띄우지
+        # 않는다(자리를 비운 시간에 모달이 뜨면 앱이 멈춘다) — 문제가 있으면 로그로만 남긴다.
+        if self._has_live_workers(tab_index):
+            return
+        settings = self.settings_tabs[tab_index]
+        if not settings.performance_url.strip():
+            self.messages.put(("log", f"크롤링{tab_index + 1} 스케줄 시작 건너뜀: 실적 URL 없음"))
+            return
+        try:
+            _validate_coupang_auto_2fa_credentials(tab_index, settings)
+        except ValueError as exc:
+            self.messages.put(("error", f"크롤링{tab_index + 1} 스케줄 시작 실패: {exc}"))
+            return
+        self.messages.put(("status", f"크롤링{tab_index + 1} 스케줄 자동 시작"))
+        self.messages.put(("log", f"크롤링{tab_index + 1} 시작 시간 도달 — 자동 시작"))
+        self._start_tab(tab_index, settings)
+
+    def _poll_schedule(self) -> None:
+        # 시작/정지 시간 스케줄을 약 20초마다 점검한다. 시작 시간 도달(상승 에지) 또는 앱
+        # 시작 직후 시간대 안이면 그 탭을 자동 시작한다. 정지 시간엔 워커를 멈추지 않는다
+        # — 전송 게이트(_run_once_background)가 그 시간대엔 전송만 억제하고 크롤링은 계속한다.
+        try:
+            now = datetime.now()
+            now_minutes = now.hour * 60 + now.minute
+            for tab_index, settings in enumerate(self.settings_tabs):
+                start = _hhmm_to_minutes(settings.start_time)
+                stop = _hhmm_to_minutes(settings.stop_time)
+                if not settings.schedule_enabled or start is None or stop is None or start == stop:
+                    # 스케줄을 끄거나 시간이 없으면 에지 추적 상태를 비워, 다시 켤 때
+                    # 시간대 안이면 상승 에지로 새로 자동 시작되도록 한다.
+                    self._schedule_prev_in_window.pop(tab_index, None)
+                    continue
+                in_window = _within_window(now_minutes, start, stop)
+                prev = self._schedule_prev_in_window.get(tab_index, False)
+                self._schedule_prev_in_window[tab_index] = in_window
+                if in_window and not prev:
+                    # 상승 에지(또는 앱 시작 직후 시간대 안). 이미 돌고 있으면 _auto_start_tab이
+                    # 알아서 건너뛴다. 에러로 멈춘 탭은 다음 시작 시간(다음 상승 에지)에만 재시도된다.
+                    self._auto_start_tab(tab_index)
+        finally:
+            self.root.after(20000, self._poll_schedule)
 
     def stop(self) -> None:
         tab_index = self._selected_tab_index()
@@ -611,6 +695,8 @@ class RiderBotUi:
         tab_index: int,
         settings: UiSettings,
         stop_event: threading.Event | None = None,
+        *,
+        respect_schedule: bool = True,
     ) -> bool:
         if _stop_requested(stop_event):
             self.messages.put(("status", f"크롤링{tab_index + 1} 중지됨"))
@@ -628,8 +714,16 @@ class RiderBotUi:
             if _stop_requested(stop_event):
                 self.messages.put(("status", f"{label} 중지됨"))
                 return False
+            config = settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}")
+            # 정지 시간대(스케줄)면 크롤링·메시지 생성은 그대로 하되 전송만 끈다(Option B).
+            # send_enabled=False면 run_once가 sender를 호출하지 않고 last_hash도 안 남겨,
+            # 시간대가 다시 열리면 다음 회차에 전송이 재개된다. '1회 실행'은 respect_schedule=False라
+            # 시간대와 무관하게 전송한다.
+            if respect_schedule and not _send_window_open(settings, datetime.now()):
+                config = replace(config, send_enabled=False)
+                self.messages.put(("log", f"{label} 전송 정지 시간대 — 크롤링만 수행(전송 생략)"))
             result = run_once(
-                settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
+                config,
                 send_message=self._send_message_with_kakao_lock,
             )
         except CdpUnavailableError as exc:
@@ -1023,6 +1117,62 @@ def _positive_int(raw: Any, label: str) -> int:
     if value <= 0:
         raise ValueError(f"{label}은 1 이상이어야 합니다")
     return value
+
+
+def _hhmm_to_minutes(text: Any) -> int | None:
+    """"HH:MM"을 자정 기준 분(0~1439)으로 바꾼다. 형식이 틀리면 None."""
+
+    value = str(text or "").strip()
+    if not value:
+        return None
+    parts = value.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        return None
+    return hours * 60 + minutes
+
+
+def _parse_hhmm(raw: Any, label: str, *, required: bool) -> str:
+    """입력을 정규화한 "HH:MM"으로 돌려준다. required면 빈 값/형식 오류 시 ValueError."""
+
+    value = str(raw or "").strip()
+    if not value:
+        if required:
+            raise ValueError(f"{label}을 HH:MM 형식으로 입력하세요")
+        return ""
+    minutes = _hhmm_to_minutes(value)
+    if minutes is None:
+        raise ValueError(f"{label}은 HH:MM(24시간) 형식으로 입력하세요 (예: 09:00)")
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _within_window(now_minutes: int, start_minutes: int, stop_minutes: int) -> bool:
+    """now가 [start, stop) 구간 안인지. start>stop이면 자정을 넘기는 구간으로 본다."""
+
+    if start_minutes == stop_minutes:
+        # 같은 시각이면 구간을 정의할 수 없다 — 항상 닫힘으로 본다(저장 시점에 막지만 방어).
+        return False
+    if start_minutes < stop_minutes:
+        return start_minutes <= now_minutes < stop_minutes
+    return now_minutes >= start_minutes or now_minutes < stop_minutes
+
+
+def _send_window_open(settings: UiSettings, now: datetime) -> bool:
+    """이 탭의 전송 허용 시간대가 지금 열려 있는지. 스케줄 미사용/시간 미설정이면 항상 True."""
+
+    if not settings.schedule_enabled:
+        return True
+    start = _hhmm_to_minutes(settings.start_time)
+    stop = _hhmm_to_minutes(settings.stop_time)
+    if start is None or stop is None or start == stop:
+        return True
+    return _within_window(now.hour * 60 + now.minute, start, stop)
 
 
 def _messenger_name(raw: Any) -> str:

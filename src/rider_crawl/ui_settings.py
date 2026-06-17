@@ -38,6 +38,12 @@ class UiSettings:
     timezone: str
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
+    # 탭별 시작/정지 시간 스케줄. 켜면 시작 시간에 그 탭이 자동으로 크롤링을 시작하고,
+    # 정지 시간에는 크롤링은 계속하되 메시지 전송만 억제한다(완전 정지 아님). 끄면(기본)
+    # 기존처럼 100% 수동(시작/중지 버튼)으로만 동작한다. 시간은 "HH:MM"(24시간) 문자열.
+    schedule_enabled: bool = False
+    start_time: str = ""
+    stop_time: str = ""
     # 쿠팡이츠 로그인 만료 시 자동복구(이메일 2FA) 설정. .env가 아니라 UI에서 입력받아
     # 탭별로 저장한다. 기본은 비활성이며, 켜기 전까지는 기존처럼 로그인 만료 시 탭이 멈춘다.
     # 인증 이메일은 Gmail/Naver를 IMAP(주소+앱 비밀번호)로 통일하며, 공급자는 주소

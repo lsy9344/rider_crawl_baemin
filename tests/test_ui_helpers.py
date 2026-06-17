@@ -1,6 +1,8 @@
 import queue
 import threading
 import time
+import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1669,6 +1671,326 @@ def test_app_configs_from_settings_names_tabs_and_skips_blank_urls(tmp_path):
     assert configs[0].state_subdir == "crawling1"
     assert configs[0].telegram_bot_token == "token"
     assert configs[0].telegram_chat_id == "-100123"
+
+
+# --- 시작/정지 시간 스케줄 ---------------------------------------------------
+
+
+def test_hhmm_to_minutes_parses_valid_times():
+    assert ui._hhmm_to_minutes("00:00") == 0
+    assert ui._hhmm_to_minutes("09:30") == 570
+    assert ui._hhmm_to_minutes("23:59") == 1439
+    # 한 자리 시/분도 허용(정규화는 _parse_hhmm가 담당).
+    assert ui._hhmm_to_minutes("9:5") == 545
+
+
+def test_hhmm_to_minutes_returns_none_for_invalid():
+    assert ui._hhmm_to_minutes("") is None
+    assert ui._hhmm_to_minutes("24:00") is None
+    assert ui._hhmm_to_minutes("12:60") is None
+    assert ui._hhmm_to_minutes("abc") is None
+    assert ui._hhmm_to_minutes("1:2:3") is None
+    assert ui._hhmm_to_minutes("0930") is None
+
+
+def test_within_window_same_day_range():
+    # 09:00~22:00. 시작은 포함, 정지는 제외.
+    start, stop = 540, 1320
+    assert ui._within_window(540, start, stop) is True
+    assert ui._within_window(600, start, stop) is True
+    assert ui._within_window(1319, start, stop) is True
+    assert ui._within_window(1320, start, stop) is False
+    assert ui._within_window(300, start, stop) is False
+
+
+def test_within_window_crosses_midnight():
+    # 22:00~06:00(자정 넘김).
+    start, stop = 1320, 360
+    assert ui._within_window(1400, start, stop) is True   # 23:20
+    assert ui._within_window(300, start, stop) is True    # 05:00
+    assert ui._within_window(1320, start, stop) is True   # 22:00 포함
+    assert ui._within_window(360, start, stop) is False   # 06:00 제외
+    assert ui._within_window(600, start, stop) is False   # 10:00
+
+
+def test_within_window_equal_times_is_closed():
+    assert ui._within_window(600, 540, 540) is False
+
+
+def test_send_window_open_true_when_schedule_disabled(tmp_path):
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = False
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+    # 스케줄을 끄면 시간과 무관하게 항상 전송 허용.
+    assert ui._send_window_open(settings, datetime(2026, 1, 1, 3, 0)) is True
+
+
+def test_send_window_open_reflects_window_when_enabled(tmp_path):
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = True
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+    assert ui._send_window_open(settings, datetime(2026, 1, 1, 10, 0)) is True
+    assert ui._send_window_open(settings, datetime(2026, 1, 1, 23, 0)) is False
+
+
+def test_send_window_open_true_when_times_missing(tmp_path):
+    # 스케줄을 켰지만 시간이 비었으면(방어) 억제하지 않는다.
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = True
+    settings.start_time = ""
+    settings.stop_time = ""
+    assert ui._send_window_open(settings, datetime(2026, 1, 1, 3, 0)) is True
+
+
+def test_coerce_settings_normalizes_schedule_times(tmp_path):
+    settings = coerce_settings(
+        {
+            "performance_url": "https://example.test/rider",
+            "peak_dashboard_url": "",
+            "browser_mode": "cdp",
+            "cdp_url": "http://127.0.0.1:9222",
+            "browser_user_data_dir": str(tmp_path / "browser"),
+            "log_dir": str(tmp_path / "logs"),
+            "kakao_chat_name": "",
+            "telegram_bot_token": "token",
+            "telegram_chat_id": "-100123",
+            "interval_minutes": "35",
+            "page_timeout_seconds": "60000",
+            "run_lock_timeout_seconds": "900",
+            "headless": False,
+            "send_enabled": True,
+            "send_only_on_change": False,
+            "schedule_enabled": True,
+            "start_time": "9:5",
+            "stop_time": "22:00",
+        }
+    )
+
+    assert settings.schedule_enabled is True
+    assert settings.start_time == "09:05"
+    assert settings.stop_time == "22:00"
+
+
+def test_coerce_settings_defaults_schedule_off_when_fields_missing(tmp_path):
+    settings = _settings(tmp_path)
+    assert settings.schedule_enabled is False
+    assert settings.start_time == ""
+    assert settings.stop_time == ""
+
+
+def _schedule_form(tmp_path, **overrides):
+    values = {
+        "performance_url": "https://example.test/rider",
+        "peak_dashboard_url": "",
+        "browser_mode": "cdp",
+        "cdp_url": "http://127.0.0.1:9222",
+        "browser_user_data_dir": str(tmp_path / "browser"),
+        "log_dir": str(tmp_path / "logs"),
+        "kakao_chat_name": "",
+        "telegram_bot_token": "token",
+        "telegram_chat_id": "-100123",
+        "interval_minutes": "35",
+        "page_timeout_seconds": "60000",
+        "run_lock_timeout_seconds": "900",
+        "headless": False,
+        "send_enabled": True,
+        "send_only_on_change": False,
+        "schedule_enabled": True,
+        "start_time": "09:00",
+        "stop_time": "22:00",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_coerce_settings_rejects_equal_schedule_times(tmp_path):
+    with pytest.raises(ValueError, match="같을 수 없습니다"):
+        coerce_settings(_schedule_form(tmp_path, start_time="09:00", stop_time="09:00"))
+
+
+def test_coerce_settings_rejects_invalid_schedule_time(tmp_path):
+    with pytest.raises(ValueError, match="HH:MM"):
+        coerce_settings(_schedule_form(tmp_path, start_time="25:00"))
+
+
+def test_coerce_settings_rejects_empty_start_time_when_enabled(tmp_path):
+    with pytest.raises(ValueError, match="시작시간"):
+        coerce_settings(_schedule_form(tmp_path, start_time=""))
+
+
+def test_run_once_suppresses_send_during_stop_window(tmp_path, monkeypatch):
+    # Option B: 정지 시간대면 크롤링·메시지 생성은 하되 전송만 끈다(send_enabled=False).
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.crawl_locks_by_tab = {}
+    app.kakao_send_lock = threading.Lock()
+    app.telegram_send_locks = {}
+    settings = _settings(tmp_path)  # send_enabled=True
+    settings.schedule_enabled = True
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+
+    monkeypatch.setattr("rider_crawl.ui._send_window_open", lambda *a, **k: False)
+    captured: dict[str, bool] = {}
+
+    def fake_run_once(config, **_kwargs):
+        captured["send_enabled"] = config.send_enabled
+        return RunResult(message="m", sent=False, skipped=False, message_hash="h")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", fake_run_once)
+
+    result = app._run_once_background(0, settings, threading.Event())
+
+    assert result is True
+    assert captured["send_enabled"] is False
+    assert any(
+        kind == "log" and "전송 정지 시간대" in payload
+        for kind, payload in list(app.messages.queue)
+    )
+
+
+def test_run_once_does_not_suppress_send_for_manual_run(tmp_path, monkeypatch):
+    # '1회 실행'은 respect_schedule=False라 정지 시간대여도 전송한다(수동 명시 실행).
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.crawl_locks_by_tab = {}
+    app.kakao_send_lock = threading.Lock()
+    app.telegram_send_locks = {}
+    settings = _settings(tmp_path)  # send_enabled=True
+
+    monkeypatch.setattr("rider_crawl.ui._send_window_open", lambda *a, **k: False)
+    captured: dict[str, bool] = {}
+
+    def fake_run_once(config, **_kwargs):
+        captured["send_enabled"] = config.send_enabled
+        return RunResult(message="m", sent=True, skipped=False, message_hash="h")
+
+    monkeypatch.setattr("rider_crawl.ui.run_once", fake_run_once)
+
+    app._run_once_background(0, settings, respect_schedule=False)
+
+    assert captured["send_enabled"] is True
+
+
+def test_poll_schedule_auto_starts_on_rising_edge_only(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app._schedule_prev_in_window = {}
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = True
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+    app.settings_tabs = [settings]
+    app.root = types.SimpleNamespace(after=lambda *a, **k: None)
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: started.append(idx))
+    monkeypatch.setattr(
+        "rider_crawl.ui.datetime",
+        types.SimpleNamespace(now=lambda: types.SimpleNamespace(hour=10, minute=0)),
+    )
+
+    # 10:00 → 시간대 안, 직전 상태 없음(False) → 상승 에지 → 자동 시작.
+    app._poll_schedule()
+    assert started == [0]
+    # 다음 틱: 여전히 시간대 안이지만 상승 에지가 아니므로 다시 시작하지 않는다.
+    app._poll_schedule()
+    assert started == [0]
+
+
+def test_poll_schedule_does_not_start_outside_window(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app._schedule_prev_in_window = {}
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = True
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+    app.settings_tabs = [settings]
+    app.root = types.SimpleNamespace(after=lambda *a, **k: None)
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: started.append(idx))
+    monkeypatch.setattr(
+        "rider_crawl.ui.datetime",
+        types.SimpleNamespace(now=lambda: types.SimpleNamespace(hour=3, minute=0)),
+    )
+
+    app._poll_schedule()
+    assert started == []
+
+
+def test_poll_schedule_ignores_disabled_schedule(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app._schedule_prev_in_window = {0: True}
+    settings = _settings(tmp_path)
+    settings.schedule_enabled = False
+    app.settings_tabs = [settings]
+    app.root = types.SimpleNamespace(after=lambda *a, **k: None)
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: started.append(idx))
+    monkeypatch.setattr(
+        "rider_crawl.ui.datetime",
+        types.SimpleNamespace(now=lambda: types.SimpleNamespace(hour=10, minute=0)),
+    )
+
+    app._poll_schedule()
+    assert started == []
+    # 스케줄을 끄면 에지 추적 상태도 비워, 다시 켤 때 새로 자동 시작되도록 한다.
+    assert 0 not in app._schedule_prev_in_window
+
+
+def test_auto_start_tab_starts_idle_tab(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {}
+    settings = _settings(tmp_path)  # 배민(자동복구 off) → 자격증명 검증 통과
+    app.settings_tabs = [settings]
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_start_tab", lambda idx, s: started.append(idx))
+
+    app._auto_start_tab(0)
+
+    assert started == [0]
+
+
+def test_auto_start_tab_skips_when_already_running(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {0: [_FakeThread(alive=True)]}
+    app.settings_tabs = [_settings(tmp_path)]
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_start_tab", lambda idx, s: started.append(idx))
+
+    app._auto_start_tab(0)
+
+    assert started == []
+
+
+def test_auto_start_tab_skips_when_no_performance_url(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {}
+    settings = _settings(tmp_path)
+    settings.performance_url = ""
+    app.settings_tabs = [settings]
+
+    started: list[int] = []
+    monkeypatch.setattr(app, "_start_tab", lambda idx, s: started.append(idx))
+
+    app._auto_start_tab(0)
+
+    assert started == []
+    assert any(
+        kind == "log" and "실적 URL 없음" in payload
+        for kind, payload in list(app.messages.queue)
+    )
 
 
 def _settings(

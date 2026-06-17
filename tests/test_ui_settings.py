@@ -144,6 +144,40 @@ def test_ui_settings_save_all_and_load_all_round_trip(tmp_path):
     assert loaded[1].browser_user_data_dir == Path("runtime/browser-profile-2")
 
 
+def test_ui_settings_schedule_fields_round_trip(tmp_path):
+    store = UiSettingsStore(tmp_path / "settings.json")
+    settings = UiSettings.defaults()
+    settings.schedule_enabled = True
+    settings.start_time = "09:00"
+    settings.stop_time = "22:00"
+
+    store.save(settings)
+    loaded = store.load()
+
+    assert loaded.schedule_enabled is True
+    assert loaded.start_time == "09:00"
+    assert loaded.stop_time == "22:00"
+
+
+def test_ui_settings_load_defaults_schedule_for_legacy_json_without_fields(tmp_path):
+    # 스케줄 필드가 없던 옛 저장 파일은 기본값(꺼짐/빈 시간)으로 로드돼 기존 동작을 유지한다.
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "performance_url": "https://example.test/delivery/history"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = UiSettingsStore(path).load()
+
+    assert loaded.schedule_enabled is False
+    assert loaded.start_time == ""
+    assert loaded.stop_time == ""
+
+
 def test_ui_settings_load_keeps_legacy_minute_interval(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(
