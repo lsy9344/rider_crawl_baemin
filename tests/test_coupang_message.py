@@ -35,10 +35,15 @@ def test_render_coupang_performance_message_matches_original_format():
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
+            "██████████",
             "점심 피크 : 완료 (10:55~12:59)",
+            "██████████",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
+            "█████░░░░░",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
+            "████░░░░░░",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
+            "█░░░░░░░░░",
             "",
             "배정 103건 / 처리 67건",
             "거절률: 7.5%",
@@ -71,10 +76,15 @@ def test_render_coupang_performance_message_omits_active_riders_when_current_scr
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
+            "██████████",
             "점심 피크 : 완료 (10:55~12:59)",
+            "██████████",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
+            "█████░░░░░",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
+            "████░░░░░░",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
+            "█░░░░░░░░░",
             "",
             "배정 103건 / 처리 67건",
             "거절률: 7.5%",
@@ -147,6 +157,29 @@ def test_render_coupang_performance_message_keeps_current_tab_label_when_present
 
     assert message.splitlines()[0:2] == ["[실시간 실적봇]", "[크롤링2]"]
     assert "점심 논피크 : 완료 (13:00~16:54)" in message
+
+
+def test_render_coupang_performance_message_fills_gauge_for_zero_total_done():
+    # 목표(total)가 0이면 _format_period가 '완료'로 표기한다. 게이지도 '완료'에 맞춰
+    # 가득 채워야 한다(빈 게이지면 '완료'와 모순). 라이브에서 아침 0/0이 ░로 나오던 버그.
+    snapshot = PerformanceSnapshot(
+        current_screen=None,
+        peak_dashboard=PeakDashboardSnapshot(
+            updated_at="19:44",
+            assigned_count=204,
+            processed_count=190,
+            reject_rate=6.2,
+            morning=PeakPeriodSnapshot(done=0, total=0),
+            lunch_peak=PeakPeriodSnapshot(done=28, total=28),
+            lunch_non_peak=PeakPeriodSnapshot(done=57, total=57),
+            dinner_peak=PeakPeriodSnapshot(done=84, total=90),
+            dinner_non_peak=PeakPeriodSnapshot(done=0, total=48),
+        ),
+    )
+
+    lines = render_current_screen_message(snapshot, now=WEEKDAY).splitlines()
+    morning_idx = lines.index("아침 : 완료 (06:00~10:54)")
+    assert lines[morning_idx + 1] == "██████████"
 
 
 def _current_screen(*, active_riders: int) -> CurrentScreenSnapshot:

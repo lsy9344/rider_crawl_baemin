@@ -24,6 +24,16 @@ WEEKEND_PEAK_TIMES = {
     "dinner_non_peak": "20:00~03:59",
 }
 
+# 각 피크 구간의 목표 대비 진행률을 10칸 게이지로 표시한다. 채워진 칸은 █,
+# 빈 칸은 ░이며, 목표를 달성/초과하면 10칸을 모두 채운다.
+GAUGE_CELLS = 10
+
+
+def _progress_gauge(ratio: float) -> str:
+    clamped = min(max(ratio, 0.0), 1.0)
+    filled = int(clamped * GAUGE_CELLS + 0.5)
+    return "█" * filled + "░" * (GAUGE_CELLS - filled)
+
 
 def _peak_times(*, now: datetime | None = None) -> dict[str, str]:
     # weekday(): 월=0 ... 금=4, 토=5, 일=6. 토·일이면 주말 표를 쓴다.
@@ -51,15 +61,27 @@ def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, so
     ]
     if source_label.strip():
         lines.append(f"[{source_label.strip()}]")
-    lines.extend(
-        [
-            f"{timestamp} 기준",
-            "",
-            f"오전오후피크 : {_format_baemin_period(snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate)}",
-            f"오후논피크 : {_format_baemin_period(snapshot.afternoon_non_peak_count, snapshot.afternoon_non_peak_goal, snapshot.afternoon_non_peak_rate)}",
-            f"저녁피크 : {_format_baemin_period(snapshot.dinner_peak_count, snapshot.dinner_peak_goal, snapshot.dinner_peak_rate)}",
-            f"저녁논피크 : {_format_baemin_period(snapshot.dinner_non_peak_count, snapshot.dinner_non_peak_goal, snapshot.dinner_non_peak_rate)}",
-        ]
+    lines.append(f"{timestamp} 기준")
+    lines.append("")
+    _append_baemin_period(
+        lines, "오전오후피크", snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate
+    )
+    _append_baemin_period(
+        lines,
+        "오후논피크",
+        snapshot.afternoon_non_peak_count,
+        snapshot.afternoon_non_peak_goal,
+        snapshot.afternoon_non_peak_rate,
+    )
+    _append_baemin_period(
+        lines, "저녁피크", snapshot.dinner_peak_count, snapshot.dinner_peak_goal, snapshot.dinner_peak_rate
+    )
+    _append_baemin_period(
+        lines,
+        "저녁논피크",
+        snapshot.dinner_non_peak_count,
+        snapshot.dinner_non_peak_goal,
+        snapshot.dinner_non_peak_rate,
     )
     tail_lines = _cancel_rate_lines(snapshot.cancel_rate)
     if tail_lines:
@@ -82,10 +104,15 @@ def _render_performance_message(
             f"⏰ {dashboard.updated_at} 기준",
             "",
             f"아침 : {_format_period(dashboard.morning, times['morning'])}",
+            _period_gauge(dashboard.morning),
             f"점심 피크 : {_format_period(dashboard.lunch_peak, times['lunch_peak'])}",
+            _period_gauge(dashboard.lunch_peak),
             f"점심 논피크 : {_format_period(dashboard.lunch_non_peak, times['lunch_non_peak'])}",
+            _period_gauge(dashboard.lunch_non_peak),
             f"저녁 피크 : {_format_period(dashboard.dinner_peak, times['dinner_peak'])}",
+            _period_gauge(dashboard.dinner_peak),
             f"저녁 논피크 : {_format_period(dashboard.dinner_non_peak, times['dinner_non_peak'])}",
+            _period_gauge(dashboard.dinner_non_peak),
             "",
             f"배정 {_format_count(dashboard.assigned_count)}건 / 처리 {_format_count(dashboard.processed_count)}건",
             f"거절률: {_format_adjusted_reject_rate(dashboard.reject_rate)}%",
@@ -120,6 +147,16 @@ def _format_baemin_date_prefix(date_label: str) -> str:
     return f"{{{label}}}"
 
 
+def _period_gauge(period: PeakPeriodSnapshot) -> str:
+    if period.total and period.total > 0:
+        ratio = period.done / period.total
+    else:
+        # 목표(total)가 0이면 진행률을 나눌 수 없다. 이때 _format_period는 done>=total을
+        # '완료'로 표기하므로(예: 아침 0/0), 게이지도 '완료'면 가득, 아니면 빈칸으로 맞춘다.
+        ratio = 1.0 if period.done >= period.total else 0.0
+    return _progress_gauge(ratio)
+
+
 def _format_period(period: PeakPeriodSnapshot, time_range: str = "") -> str:
     if period.done >= period.total:
         status = "완료"
@@ -148,6 +185,27 @@ def _format_baemin_period(done: float | int, goal: float | int, rate: float | in
         shown_rate = 0 if rate is None else rate
         return f"{_format_count(done)}건/{_format_count(goal)}건[{_format_count(shown_rate)}%]"
     return f"{_format_count(done)}건"
+
+
+def _append_baemin_period(
+    lines: list[str], label: str, done: float | int, goal: float | int, rate: float | int | None
+) -> None:
+    lines.append(f"{label} : {_format_baemin_period(done, goal, rate)}")
+    gauge = _baemin_period_gauge(done, goal, rate)
+    if gauge is not None:
+        lines.append(gauge)
+
+
+def _baemin_period_gauge(done: float | int, goal: float | int, rate: float | int | None) -> str | None:
+    # 목표(goal)가 있으면 수행/목표 비율로, 목표 없이 달성률(rate)만 있으면 그 값으로
+    # 게이지를 그린다. 목표·달성률이 모두 없는 옛 'X건' 표기에는 게이지를 붙이지 않는다.
+    if goal:
+        ratio = done / goal
+    elif rate is not None:
+        ratio = rate / 100
+    else:
+        return None
+    return _progress_gauge(ratio)
 
 
 def _cancel_rate_lines(cancel_rate: float | None) -> list[str]:
