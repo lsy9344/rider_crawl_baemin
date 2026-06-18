@@ -23,6 +23,8 @@ from datetime import datetime
 
 from . import severity
 
+ALL_TENANTS = "all"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 중립 facts(repository 출력) — ORM Row/SQL 누출 금지
@@ -43,6 +45,7 @@ class TargetHealthFacts:
     last_failure_code: str | None  # 최신 non-null FailureCategory(jobs/delivery_logs.error_code)
     account_auth_state: str | None  # platform_accounts.auth_state(BaeminAuthState 값)
     lifecycle_state: str | None  # tenants.status(CustomerLifecycleState 값)
+    customer_name: str = ""
     auth_session_pending: bool = False  # auth_sessions 인증대기 행 존재
 
 
@@ -76,6 +79,7 @@ class TargetRow:
     last_delivery_at: datetime | None
     last_failure_code: str | None
     severity: str
+    customer_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -185,6 +189,7 @@ class DashboardService:
             last_delivery_at=facts.last_delivery_at,
             last_failure_code=facts.last_failure_code,
             severity=overall,
+            customer_name=facts.customer_name,
         )
 
     @staticmethod
@@ -276,6 +281,8 @@ class InMemoryDashboardRepository(DashboardRepository):
     async def target_health(
         self, *, tenant_id: str, now: datetime
     ) -> list[TargetHealthFacts]:
+        if tenant_id == ALL_TENANTS:
+            return [row for rows in self._targets.values() for row in rows]
         return list(self._targets.get(tenant_id, []))
 
     async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
@@ -284,9 +291,21 @@ class InMemoryDashboardRepository(DashboardRepository):
     async def channel_health(
         self, *, tenant_id: str, now: datetime
     ) -> ChannelHealthRow:
+        if tenant_id == ALL_TENANTS:
+            return ChannelHealthRow(
+                kakao_queue_lag_seconds=max(
+                    (row.kakao_queue_lag_seconds for row in self._channels.values()),
+                    default=0,
+                ),
+                telegram_error_count=sum(
+                    row.telegram_error_count for row in self._channels.values()
+                ),
+            )
         return self._channels.get(
             tenant_id, ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=0)
         )
 
     async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
+        if tenant_id == ALL_TENANTS:
+            return [row for rows in self._auth_required.values() for row in rows]
         return list(self._auth_required.get(tenant_id, []))
