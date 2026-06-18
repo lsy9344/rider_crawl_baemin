@@ -42,9 +42,9 @@ variable "ssh_ingress_cidr" {
 }
 
 variable "app_ingress_cidr" {
-  description = "앱 포트(8000) 허용 source CIDR. Agent outbound HTTPS 출처. 기본 전체(0.0.0.0/0) — 운영 전 도메인/TLS/IP 제한 권장."
+  description = "앱 포트(8000) 허용 source CIDR. 빈 값이면 SG 규칙 미생성(fail-closed). 운영은 ALB/reverse proxy+TLS 또는 고정 Agent 출처 CIDR로 제한."
   type        = string
-  default     = "0.0.0.0/0"
+  default     = ""
 }
 
 variable "db_name" {

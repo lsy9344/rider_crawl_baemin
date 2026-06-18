@@ -6,7 +6,7 @@
 #
 # 비용: custom metric 소수 + 표준 해상도(60s) → 저비용. CloudWatch agent(유료 로그수집) 미사용.
 # 권한: EC2 인스턴스 역할(rider-server-ec2-role)에 cloudwatch:PutMetricData(namespace=RiderServer 제한).
-# 의존: aws-cli v2, jq, curl(EC2 에 jq 만 설치하면 됨).
+# 의존: aws-cli v2, jq, curl(Terraform user-data가 기본 설치).
 #
 # 환경변수(systemd unit 에서 주입, 기본값 내장):
 #   METRICS_URL   기본 http://localhost:8000/metrics/operational

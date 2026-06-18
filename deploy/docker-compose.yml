@@ -42,7 +42,7 @@ services:
       dockerfile: deploy/Dockerfile.server
     image: rider-server:dev
     ports:
-      - "8000:8000"
+      - "${RIDER_BACKEND_BIND:-127.0.0.1}:8000:8000"
     env_file:
       - ./env/backend-api.env
       # Story 5.5 — Telegram webhook secret/public URL 분리 env(평문 secret 없음, *_ref 만).

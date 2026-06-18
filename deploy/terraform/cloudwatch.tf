@@ -65,8 +65,8 @@ resource "aws_cloudwatch_metric_alarm" "agents_offline" {
   evaluation_periods  = 5
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  # 푸셔 미가동/데이터 결손 시 오탐 방지: 누락은 알람으로 보지 않음(missing).
-  treat_missing_data = "notBreaching"
+  # 푸셔 미가동/데이터 결손도 관측 장애로 본다.
+  treat_missing_data = "breaching"
   alarm_actions      = local.alarm_actions
   ok_actions         = local.alarm_actions
   tags               = { Name = "${var.project}-agents-offline" }
@@ -84,7 +84,7 @@ resource "aws_cloudwatch_metric_alarm" "targets_critical" {
   evaluation_periods  = 10
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "breaching"
   alarm_actions       = local.alarm_actions
   ok_actions          = local.alarm_actions
   tags                = { Name = "${var.project}-targets-critical" }
@@ -102,14 +102,14 @@ resource "aws_cloudwatch_metric_alarm" "telegram_errors" {
   evaluation_periods  = 5
   threshold           = var.telegram_error_alarm_threshold
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "breaching"
   alarm_actions       = local.alarm_actions
   ok_actions          = local.alarm_actions
   tags                = { Name = "${var.project}-telegram-errors" }
 }
 
 # (d) oldest_heartbeat_age_seconds 과도 — Agent 전원 침묵(heartbeat 노화). CRITICAL.
-# null(Agent 0대)일 땐 푸셔가 metric 을 보내지 않으므로 missing → notBreaching 로 오탐 회피.
+# null(Agent 0대) 또는 푸셔 미가동으로 metric 이 빠지면 관측 장애로 본다.
 resource "aws_cloudwatch_metric_alarm" "heartbeat_stale" {
   alarm_name          = "${var.project}-heartbeat-stale"
   alarm_description   = "가장 오래된 heartbeat 가 ${var.heartbeat_stale_seconds}s 초과 (5분 지속). Agent 침묵."
@@ -121,7 +121,7 @@ resource "aws_cloudwatch_metric_alarm" "heartbeat_stale" {
   evaluation_periods  = 5
   threshold           = var.heartbeat_stale_seconds
   comparison_operator = "GreaterThanThreshold"
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "breaching"
   alarm_actions       = local.alarm_actions
   ok_actions          = local.alarm_actions
   tags                = { Name = "${var.project}-heartbeat-stale" }

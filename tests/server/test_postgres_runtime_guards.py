@@ -43,6 +43,19 @@ def test_snapshot_enqueue_only_reserves_telegram_delivery_for_after_commit() -> 
     assert "_attempt_telegram_delivery(" not in enqueue_body
 
 
+def test_snapshot_delivery_log_dedup_conflict_does_not_abort_complete() -> None:
+    source = _source("src/rider_server/services/snapshot_repository_postgres.py")
+    enqueue_body = source[
+        source.index("async def _enqueue_dispatch_records") : source.index(
+            "async def _deliver_telegram_after_commit"
+        )
+    ]
+
+    assert "on_conflict_do_nothing" in enqueue_body
+    assert "DeliveryLogRow.dedup_key" in enqueue_body
+    assert "if int(result.rowcount or 0) == 0:" in enqueue_body
+
+
 def test_queue_complete_marks_auth_required_platform_account() -> None:
     source = _source("src/rider_server/queue/postgres_queue.py")
 

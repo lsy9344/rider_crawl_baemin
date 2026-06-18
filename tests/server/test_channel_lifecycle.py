@@ -290,6 +290,7 @@ def test_register_unknown_code_does_not_register():
     svc = ChannelRegistrationService(repo)
     reg = asyncio.run(svc.register(code="NOPE", chat_id="-100777"))
     assert reg.registered is False
+    assert reg.reason == "unknown_registration_code"
     assert reg.channel is None
 
 
@@ -301,6 +302,7 @@ def test_register_known_code_empty_chat_id_is_fail_closed():
     for bad in ("", "   ", None):
         reg = asyncio.run(svc.register(code="CODE-1", chat_id=bad))
         assert reg.registered is False
+        assert reg.reason == "missing_chat_id"
         assert reg.channel is not None and reg.channel.id == "ch-1"
         assert reg.channel.telegram_chat_id is None  # 라우팅 미기록
 

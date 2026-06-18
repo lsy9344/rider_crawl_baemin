@@ -198,6 +198,30 @@ def test_webhook_registers_chat_and_thread_on_valid_secret():
     assert channel.state is MessengerChannelState.PENDING  # 등록=PENDING (검증 전)
 
 
+def test_webhook_accepts_awaitable_secret_resolver():
+    import asyncio
+
+    repo = InMemoryChannelRepository()
+    repo.seed(_pending_channel(), registration_code=_REG_CODE)
+    app = create_app(_FAKE_SETTINGS, channel_repository=repo)
+
+    async def _resolve_secret():
+        return [_FAKE_SECRET]
+
+    app.state.resolve_telegram_secret = _resolve_secret
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post(
+        "/v1/telegram/webhook",
+        json=_update(f"/register {_REG_CODE}", chat_id=-100777),
+        headers={WEBHOOK_SECRET_HEADER: _FAKE_SECRET},
+    )
+
+    assert r.status_code == 200
+    channel = asyncio.run(repo.get(_CHANNEL_ID))
+    assert channel.telegram_chat_id == "-100777"
+
+
 def test_webhook_duplicate_register_is_idempotent():
     import asyncio
 

@@ -270,6 +270,7 @@ class RegisterResult:
 
     channel: MessengerChannel | None
     registered: bool
+    reason: str | None = None
 
 
 # ── async lifecycle service(상태 전이는 여기서만) ──────────────────────────────────
@@ -293,11 +294,19 @@ class ChannelRegistrationService:
 
         channel = await self._repo.get_by_registration_code(code)
         if channel is None:
-            return RegisterResult(channel=None, registered=False)
+            return RegisterResult(
+                channel=None,
+                registered=False,
+                reason="unknown_registration_code",
+            )
 
         normalized_chat = (chat_id or "").strip()
         if not normalized_chat:
-            return RegisterResult(channel=channel, registered=False)
+            return RegisterResult(
+                channel=channel,
+                registered=False,
+                reason="missing_chat_id",
+            )
         normalized_thread = _normalize_thread_id(thread_id)
 
         already_routed = (

@@ -241,16 +241,26 @@ def _default_resolve_telegram_secret(
     일치 시 통과, 모두 없으면 fail-closed). 평문 secret 은 반환 외 로그/응답에 싣지 않는다.
     """
 
-    def resolve() -> list[str]:
+    def resolve():
         secrets_set: list[str] = []
         env_secret = _resolve_env_secret_ref(settings.telegram_webhook_secret_ref)
         if env_secret:
             secrets_set.append(env_secret)
         if provider is not None:
+            async def _resolve_with_provider() -> list[str]:
+                try:
+                    return [
+                        *secrets_set,
+                        *(await provider.list_active_webhook_secrets()),
+                    ]
+                except Exception:  # noqa: BLE001 - DB 장애가 webhook 처리를 깨지 않도록(env fallback 유지)
+                    return secrets_set
+
             try:
-                secrets_set.extend(asyncio.run(provider.list_active_webhook_secrets()))
-            except Exception:  # noqa: BLE001 - DB 장애가 webhook 처리를 깨지 않도록(env fallback 유지)
-                pass
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_resolve_with_provider())
+            return _resolve_with_provider()
         return secrets_set
 
     return resolve

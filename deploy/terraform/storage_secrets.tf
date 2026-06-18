@@ -41,7 +41,7 @@ resource "random_password" "db" {
 resource "aws_secretsmanager_secret" "db" {
   name                    = "${var.project}/db-credentials"
   description             = "rider-server PostgreSQL credentials (managed by terraform)"
-  recovery_window_in_days = 0 # 개발/재생성 편의 — 운영은 7~30 권장
+  recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "db" {
@@ -59,7 +59,7 @@ resource "aws_secretsmanager_secret_version" "db" {
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${var.project}/app-secrets"
   description             = "rider-server app secrets (telegram webhook/bot token refs). Fill values post-apply."
-  recovery_window_in_days = 0
+  recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "app" {

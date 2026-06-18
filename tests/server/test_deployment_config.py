@@ -56,6 +56,30 @@ def test_compose_defines_durable_db_and_migration_service() -> None:
     assert "condition: service_completed_successfully" in compose
 
 
+def test_terraform_defaults_do_not_publicly_expose_app_port() -> None:
+    variables = Path("deploy/terraform/variables.tf").read_text(encoding="utf-8")
+    security = Path("deploy/terraform/security.tf").read_text(encoding="utf-8")
+
+    app_var = variables[variables.index('variable "app_ingress_cidr"') :]
+    app_var = app_var[: app_var.index('variable "db_name"')]
+    assert 'default     = ""' in app_var
+    assert "count             = var.app_ingress_cidr == \"\" ? 0 : 1" in security
+
+
+def test_terraform_secrets_keep_recovery_window() -> None:
+    secrets = Path("deploy/terraform/storage_secrets.tf").read_text(encoding="utf-8")
+
+    assert "recovery_window_in_days = 0" not in secrets
+    assert secrets.count("recovery_window_in_days = 7") >= 2
+
+
+def test_cloudwatch_metric_absence_is_alarm_state() -> None:
+    cloudwatch = Path("deploy/terraform/cloudwatch.tf").read_text(encoding="utf-8")
+
+    assert 'treat_missing_data = "notBreaching"' not in cloudwatch
+    assert cloudwatch.count('"breaching"') >= 4
+
+
 def test_backend_api_env_documents_admin_allowed_origins() -> None:
     env = Path("deploy/env/backend-api.env").read_text(encoding="utf-8")
 

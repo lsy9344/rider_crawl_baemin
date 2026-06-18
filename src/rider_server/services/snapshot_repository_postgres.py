@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from sqlalchemy import insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_crawl.models import (
@@ -248,8 +249,8 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     status = DeliveryStatus.HELD.value
                     error_code = FailureCategory.TELEGRAM_FAILURE.value
 
-            await session.execute(
-                insert(DeliveryLogRow).values(
+            result = await session.execute(
+                pg_insert(DeliveryLogRow).values(
                     id=log_id,
                     message_id=message_id,
                     channel_id=channel.id,
@@ -257,8 +258,10 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     dedup_key=dedup_key,
                     error_code=error_code,
                     sent_at=sent_at,
-                )
+                ).on_conflict_do_nothing(index_elements=[DeliveryLogRow.dedup_key])
             )
+            if int(result.rowcount or 0) == 0:
+                continue
 
             if channel.messenger == Messenger.TELEGRAM.value:
                 if self._telegram_sender is not None:

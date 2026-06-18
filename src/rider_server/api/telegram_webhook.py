@@ -22,6 +22,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from http import HTTPStatus
+from inspect import isawaitable
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
@@ -140,6 +141,8 @@ async def telegram_webhook(request: Request) -> dict:
     """
 
     expected = request.app.state.resolve_telegram_secret()
+    if isawaitable(expected):
+        expected = await expected
     provided = request.headers.get(WEBHOOK_SECRET_HEADER)
     if not verify_webhook_secret(provided, expected):
         # secret 값/입력 echo 없이 거부(전역 envelope → {"error":{"code":"UNAUTHORIZED",...}}).

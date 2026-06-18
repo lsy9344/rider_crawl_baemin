@@ -31,19 +31,23 @@ resource "aws_instance" "app" {
     tags                  = { Name = "${var.project}-root", Backup = "true" }
   }
 
-  # Docker + compose plugin 설치(부팅 1회). 앱/DB 배포는 다음 단계(compose 업로드 후 up).
+  # Docker + compose plugin + metric pusher deps 설치(부팅 1회).
+  # 앱/DB 배포와 rider-metrics.service enable 은 다음 단계(compose/서비스 파일 업로드 후 수행).
   user_data = <<-EOF
     #!/bin/bash
     set -euxo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y ca-certificates curl gnupg
+    apt-get install -y ca-certificates curl gnupg jq unzip
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --update
     systemctl enable --now docker
     usermod -aG docker ubuntu
     mkdir -p /opt/rider-server

@@ -1,7 +1,8 @@
 # 보안 그룹 + 전용 키페어.
 #
 # SSH(22)는 운영자 IP(var.ssh_ingress_cidr)로만 — 빈 값이면 규칙 자체를 만들지 않는다(fail-closed).
-# 앱(8000)은 Agent outbound HTTPS 출처용. 운영 전 도메인/TLS 종료(80/443)+IP 제한으로 좁힐 것.
+# 앱(8000)은 Agent outbound HTTPS 출처용. 빈 값이면 규칙을 만들지 않는다(fail-closed).
+# 운영 전 도메인/TLS 종료(80/443)+IP 제한으로 좁힐 것.
 # egress 는 전체 허용(Agent→배민/쿠팡 웹, AWS API, 패키지 설치).
 
 resource "aws_security_group" "app" {
@@ -23,6 +24,7 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "app_http" {
+  count             = var.app_ingress_cidr == "" ? 0 : 1
   security_group_id = aws_security_group.app.id
   description       = "backend-api (uvicorn)"
   cidr_ipv4         = var.app_ingress_cidr
