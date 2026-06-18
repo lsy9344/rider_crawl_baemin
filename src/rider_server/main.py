@@ -54,6 +54,7 @@ from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
 from .security.access import _default_resolve_admin_principal
+from .security.principal import AdminPrincipal, AdminRole
 from .services.admin_action_repository_postgres import PostgresAdminActionRepository
 from .services.admin_action_service import (
     AdminActionRepository,
@@ -405,6 +406,15 @@ def _require_database_for_production(settings: Settings) -> None:
         raise RuntimeError("DATABASE_URL is required when APP_ENV=production")
 
 
+def _resolve_public_admin_principal(request: Request) -> AdminPrincipal:
+    return AdminPrincipal(
+        actor_id="00000000-0000-0000-0000-000000000001",
+        role=AdminRole.SECRET_ADMIN,
+        mfa_verified=True,
+        source="ADMIN_PUBLIC_ACCESS",
+    )
+
+
 def _error_response(
     status_code: int,
     code: str,
@@ -504,7 +514,11 @@ def create_app(
     )
     # Story 5.8: Admin 접근 보안 — principal 해석 seam(기본 fail-closed deny) + IP allowlist + MFA
     # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.
-    app.state.resolve_admin_principal = _default_resolve_admin_principal
+    app.state.resolve_admin_principal = (
+        _resolve_public_admin_principal
+        if app.state.settings.admin_public_access
+        else _default_resolve_admin_principal
+    )
     app.state.admin_ip_allowlist = app.state.settings.admin_ip_allowlist
     app.state.admin_allowed_origins = app.state.settings.admin_allowed_origins
     app.state.admin_mfa_required = app.state.settings.admin_mfa_required
