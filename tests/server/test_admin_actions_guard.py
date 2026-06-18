@@ -133,10 +133,12 @@ def test_entity_modules_never_import_rider_agent() -> None:
 def test_entity_service_is_the_write_owner() -> None:
     """positive: 엔티티 service 는 audit/채널 상태머신을 compose 한다(정책 재구현 아님).
 
-    PlatformAccount password 류는 ref 핸들만 저장한다. CRUD service 경계에서 평문을
-    fail-closed 로 막아 라우트/ORM 쪽에 정책을 흩뿌리지 않는다.
+    PlatformAccount password 류는 CRUD service 경계에서 정규화하고, 실제 값은 audit diff 에
+    싣지 않는다.
     """
     source = ENTITY_SERVICE.read_text(encoding="utf-8")
     assert "build_diff_redacted" in source
     assert "assert_channel_transition" in source
-    assert "_secret_ref_or_empty" in source
+    assert "_credential_or_empty" in source
+    assert '"password_change": _secret_change_label' in source
+    assert '"verification_email_app_password_change": _secret_change_label' in source

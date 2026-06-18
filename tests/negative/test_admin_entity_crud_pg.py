@@ -182,3 +182,82 @@ def test_cross_tenant_target_not_exposed() -> None:
             await engine.dispose()
 
     asyncio.run(_exercise())
+
+
+@_pg_gate
+def test_delete_empty_tenant_removes_row_and_audits_same_tx() -> None:
+    svc, repo, engine = _fresh_pg()
+
+    async def _exercise():
+        try:
+            from sqlalchemy import select
+
+            from rider_server.db.models.audit import AuditLog
+
+            deleted = await svc.delete_tenant(
+                _TENANT_B, at=_T0, actor_id=_ACTOR, reason="정리"
+            )
+            assert deleted.id == _TENANT_B
+            assert await repo.get_tenant(_TENANT_B) is None
+
+            async with repo._session_factory() as session:
+                audits = (
+                    await session.execute(
+                        select(AuditLog).where(AuditLog.target_id == uuid.UUID(_TENANT_B))
+                    )
+                ).scalars().all()
+            assert len(audits) == 1
+            assert audits[0].action == "TENANT_DELETE"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_exercise())
+
+
+@_pg_gate
+def test_delete_tenant_with_account_or_subscription_is_blocked_no_audit() -> None:
+    from rider_server.services.admin_entity_service import AdminEntityDeleteBlockedError
+
+    svc, repo, engine = _fresh_pg()
+
+    async def _exercise():
+        try:
+            from sqlalchemy import func, insert, select
+
+            from rider_server.db.models.audit import AuditLog
+            from rider_server.db.models.tenancy import Subscription
+
+            with pytest.raises(AdminEntityDeleteBlockedError):
+                await svc.delete_tenant(_TENANT_A, at=_T0, actor_id=_ACTOR)
+            assert await repo.get_tenant(_TENANT_A) is not None
+
+            sub_id = uuid.uuid4()
+            async with repo._session_factory() as session:
+                await session.execute(
+                    insert(Subscription).values(
+                        id=sub_id,
+                        tenant_id=uuid.UUID(_TENANT_B),
+                        plan="basic",
+                        status="PAYMENT_ACTIVE",
+                        quotas={},
+                    )
+                )
+                await session.commit()
+
+            with pytest.raises(AdminEntityDeleteBlockedError):
+                await svc.delete_tenant(_TENANT_B, at=_T0, actor_id=_ACTOR)
+            assert await repo.get_tenant(_TENANT_B) is not None
+
+            async with repo._session_factory() as session:
+                audit_count = (
+                    await session.execute(
+                        select(func.count()).select_from(AuditLog).where(
+                            AuditLog.action == "TENANT_DELETE"
+                        )
+                    )
+                ).scalar_one()
+            assert audit_count == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_exercise())

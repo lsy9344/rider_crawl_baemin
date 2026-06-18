@@ -77,3 +77,9 @@ def test_admin_ip_allowlist_parses_comma_list() -> None:
 def test_admin_mfa_required_defaults_true() -> None:
     assert Settings.from_env({}).admin_mfa_required is True
     assert Settings.from_env({"RIDER_ADMIN_MFA_REQUIRED": "false"}).admin_mfa_required is False
+
+
+def test_admin_public_access_defaults_off_and_parses_truthy() -> None:
+    assert Settings.from_env({}).admin_public_access is False
+    assert Settings.from_env({"RIDER_ADMIN_PUBLIC_ACCESS": "1"}).admin_public_access is True
+    assert Settings.from_env({"RIDER_ADMIN_PUBLIC_ACCESS": "false"}).admin_public_access is False

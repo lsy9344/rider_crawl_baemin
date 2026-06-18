@@ -141,6 +141,26 @@ def _worker(send=None, **kwargs):
     return KakaoSenderWorker(send=send if send is not None else RecordingSend(), **kwargs)
 
 
+def test_request_from_server_claim_payload_shape() -> None:
+    job = ClaimedJob.from_dict(
+        {
+            "job_id": "job-server-1",
+            "type": CAPABILITY_KAKAO_SEND,
+            "target_id": "target-1",
+            "lease_expires_at": "2026-06-18T00:00:00Z",
+            "payload": {"kakao_room_name": FAKE_ROOM, "message": FAKE_MESSAGE},
+        }
+    )
+
+    request = request_from_job(job)
+
+    assert request == KakaoSendRequest(
+        job_id="job-server-1",
+        room_name=FAKE_ROOM,
+        message=FAKE_MESSAGE,
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC1 — FIFO 단일-세션 직렬 + 병렬 입력 금지 + 주입 primitive
 # ══════════════════════════════════════════════════════════════════════════

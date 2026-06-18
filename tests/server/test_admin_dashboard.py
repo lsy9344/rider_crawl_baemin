@@ -713,6 +713,21 @@ def test_dashboard_without_tenant_multiple_known_tenants_renders_switcher() -> N
     assert 'hx-get="/admin/targets?tenant="' in body
 
 
+def test_dashboard_hash_manage_opens_manage_tab() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'function initialMode()' in body
+    assert 'location.hash === "#manage"' in body
+    assert 'switchMode(initialMode()' in body
+
+
+def test_dashboard_query_mode_manage_opens_manage_tab_after_tenant_switch() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}&mode=manage").text
+
+    assert 'new URLSearchParams(location.search).get("mode") === "manage"' in body
+    assert 'switchMode(initialMode()' in body
+
+
 class _FailingSessionFactory:
     def __call__(self):
         return self

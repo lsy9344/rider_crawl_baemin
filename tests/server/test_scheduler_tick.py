@@ -78,7 +78,7 @@ class FakeSchedulerRepo(SchedulerRepository):
     async def has_active_crawl_job(self, target_id):
         return target_id in self._active_jobs
 
-    async def capacity_snapshot(self):
+    async def capacity_snapshot(self, *, now):
         return self._capacity
 
     async def claim_due_target(self, target_id, *, now, next_run_at):

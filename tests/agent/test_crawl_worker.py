@@ -238,6 +238,44 @@ def test_coupang_job_plaintext_secret_fields_now_accepted() -> None:
     assert calls == ["coupang"]
 
 
+def test_coupang_unresolved_secret_ref_fails_before_crawl() -> None:
+    calls: list[str | None] = []
+
+    def fake_crawl(config, *, platform_name=None):
+        calls.append(platform_name)
+        return _coupang_snapshot()
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "username": "vault://coupang/login-id",
+            "password": "vault://coupang/missing-password",
+            "verification_email_address": "vault://mail/address",
+            "verification_email_app_password": "vault://mail/app-password",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+    secrets = {
+        "vault://coupang/login-id": "coupang-login-id",
+        "vault://mail/address": "mailbox@example.invalid",
+        "vault://mail/app-password": "mail-app-password",
+    }
+    worker = CrawlWorker(crawl_snapshot=fake_crawl, secret_resolver=secrets.get)
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == "SECRET_REF_UNRESOLVED"
+    assert calls == []
+
+
 def test_auth_required_does_not_call_crawler() -> None:
     calls: list[str] = []
     worker = CrawlWorker(

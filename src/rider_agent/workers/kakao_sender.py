@@ -157,12 +157,22 @@ def request_from_job(job: ClaimedJob) -> KakaoSendRequest | None:
     호출자가 임의 전송 없이 ``KAKAO_FAILURE`` 로 종결하게 한다. [Source: data-api-contract.md(30·69)]
     """
 
-    payload = job.payload if isinstance(job.payload, dict) else {}
+    payload = _raw_payload(job)
     room = _first_str(payload, _ROOM_KEYS)
     message = _first_str(payload, _MESSAGE_KEYS)
     if room is None or message is None:
         return None
     return KakaoSendRequest(job_id=job.job_id, room_name=room, message=message)
+
+
+def _raw_payload(job: ClaimedJob) -> dict[str, Any]:
+    raw = dict(job.payload or {})
+    nested = raw.get("payload")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        merged.update(raw)
+        return merged
+    return raw
 
 
 def _first_str(payload: dict[str, Any], keys: Sequence[str]) -> str | None:

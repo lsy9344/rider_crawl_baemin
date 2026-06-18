@@ -83,6 +83,7 @@ async def _seed(session_factory) -> None:
                 version="0.0.0",
                 os="linux",
                 status="active",
+                last_heartbeat_at=_T0,
                 capacity_json={
                     "max_in_flight": 10,
                     "capabilities": [JOB_TYPE_CRAWL_BAEMIN],

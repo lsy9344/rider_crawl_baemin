@@ -180,6 +180,16 @@ def test_delivery_logs_dedup_unique_constraint():
     assert uniques["uq_delivery_logs_dedup_key"] == {"dedup_key"}
 
 
+def test_jobs_have_stale_lease_recovery_index():
+    indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in Base.metadata.tables["jobs"].indexes
+    }
+
+    assert indexes["ix_jobs_status"] == ("status", "run_after")
+    assert indexes["ix_jobs_status_lease_expires_at"] == ("status", "lease_expires_at")
+
+
 def test_cross_tenant_integrity_constraints_are_db_level():
     """DB가 target/account, target/channel tenant 불일치를 직접 막아야 한다."""
 
@@ -301,6 +311,14 @@ def test_offline_upgrade_emits_cross_tenant_integrity_guards():
         "fk_delivery_rules_tenant_channel",
     ):
         assert name in sql
+
+
+def test_offline_upgrade_emits_jobs_stale_lease_index():
+    sql = _offline_sql("upgrade")
+
+    assert "CREATE INDEX ix_jobs_status_lease_expires_at" in sql
+    assert "lease_expires_at" in sql
+    assert "WHERE status IN ('CLAIMED', 'RUNNING') AND lease_expires_at IS NOT NULL" in sql
 
 
 def test_verification_email_migration_drops_backfill_server_defaults():
@@ -551,8 +569,16 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0012: tenant 별 텔레그램 설정 컬럼 추가가 single head 를 0012 로 이동.
-    assert heads[0] == "0012_tenant_telegram_config"
+    # 0013: stale lease recovery 인덱스 추가가 single head 를 0013 으로 이동.
+    assert heads[0] == "0013_jobs_stale_lease_index"
+    assert (
+        script.get_revision("0013_jobs_stale_lease_index").down_revision
+        == "0012_tenant_telegram_config"
+    )
+    assert (
+        script.get_revision("0012_tenant_telegram_config").down_revision
+        == "0011_rename_ref_to_plaintext"
+    )
     assert (
         script.get_revision("0009_dbx_unique_guards").down_revision
         == "0008_acct_email_2fa_refs"

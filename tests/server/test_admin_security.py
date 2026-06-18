@@ -304,6 +304,19 @@ def test_viewer_can_read_dashboard() -> None:
     assert TestClient(app).get("/admin?tenant=tn-1").status_code == HTTPStatus.OK
 
 
+def test_admin_public_access_setting_allows_dashboard_without_external_principal() -> None:
+    settings = Settings(
+        app_env="test",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        admin_public_access=True,
+    )
+    app = create_app(settings)
+
+    assert TestClient(app).get("/admin?tenant=tn-1").status_code == HTTPStatus.OK
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (3-QA) 보강 — enforce_session(읽기 경로) deny 분기·anti-flooding·source 미상·async seam
 # ══════════════════════════════════════════════════════════════════════════

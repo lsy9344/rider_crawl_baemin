@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -17,6 +18,8 @@ from rider_server.main import _default_job_result_ingest_service
 from rider_server.services.job_result_ingest_service import JobResultIngestError, SnapshotIngestRecord
 from rider_server.services.dispatch_fanout_service import DispatchJob
 from rider_server.services.snapshot_repository_postgres import (
+    PostgresSnapshotIngestRepository,
+    _PendingTelegramDelivery,
     _attempt_telegram_delivery,
     _record_scoped_to_locked_job,
 )
@@ -177,6 +180,39 @@ def test_snapshot_telegram_attempt_failure_uses_telegram_failure_policy() -> Non
     assert log.status is DeliveryStatus.FAILED
     assert log.error_code == "TELEGRAM_FAILURE"
     assert log.sent_at is None
+
+
+def test_post_commit_telegram_log_update_failure_does_not_escape_complete() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def send(channel: MessengerChannel, job: DispatchJob, text: str) -> None:
+        calls.append((channel.id, job.id, text))
+
+    class FailingSessionFactory:
+        def __call__(self):
+            raise RuntimeError("delivery log database unavailable")
+
+    repo = PostgresSnapshotIngestRepository(
+        FailingSessionFactory(),
+        telegram_sender=send,
+    )
+    delivery = _PendingTelegramDelivery(
+        channel=_channel(),
+        job=_job(),
+        message=_message(),
+        log_id=uuid.UUID("77777777-7777-7777-7777-777777777777"),
+        collected_at=_NOW,
+    )
+
+    asyncio.run(repo._deliver_telegram_after_commit(delivery, now=_NOW))
+
+    assert calls == [
+        (
+            "11111111-1111-1111-1111-111111111111",
+            "33333333-3333-3333-3333-333333333333",
+            "[test] live result",
+        )
+    ]
 
 
 def test_default_snapshot_ingest_wires_telegram_sender_when_sending_enabled(monkeypatch) -> None:

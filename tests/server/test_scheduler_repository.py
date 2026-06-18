@@ -15,6 +15,9 @@ fake 값만 — 실제 토큰/전화/이메일/chat_id 형태 없음.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 
 from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
@@ -29,6 +32,7 @@ from rider_server.scheduler import policy
 from rider_server.scheduler.postgres_repository import (
     _ACTIVE_JOB_STATUSES,
     _CRAWL_JOB_TYPES,
+    _capacity_from_agent_rows,
     PostgresSchedulerRepository,
     _to_lifecycle_status,
     _to_subscription_status,
@@ -94,3 +98,48 @@ def test_repository_active_status_scope_is_pending_claimed_running() -> None:
 
 def test_postgres_repository_has_release_due_target_for_enqueue_failures() -> None:
     assert hasattr(PostgresSchedulerRepository, "release_due_target")
+
+
+def test_capacity_snapshot_counts_only_online_agent_capacity() -> None:
+    now = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+    capacity = _capacity_from_agent_rows(
+        [
+            SimpleNamespace(
+                capacity_json={"max_in_flight": 2, "capabilities": [JOB_TYPE_CRAWL_BAEMIN]},
+                last_heartbeat_at=now - timedelta(seconds=30),
+            ),
+            SimpleNamespace(
+                capacity_json={"max_in_flight": 9, "capabilities": [JOB_TYPE_CRAWL_COUPANG]},
+                last_heartbeat_at=now - timedelta(minutes=5),
+            ),
+            SimpleNamespace(
+                capacity_json={"max_in_flight": 4, "capabilities": ["KAKAO_SEND"]},
+                last_heartbeat_at=None,
+            ),
+        ],
+        aggregate_in_flight=1,
+        now=now,
+    )
+
+    assert capacity.aggregate_capacity == 2
+    assert capacity.aggregate_in_flight == 1
+    assert capacity.capabilities == frozenset({JOB_TYPE_CRAWL_BAEMIN})
+
+
+def test_capacity_snapshot_keeps_exact_two_minute_heartbeat_online() -> None:
+    now = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+    capacity = _capacity_from_agent_rows(
+        [
+            SimpleNamespace(
+                capacity_json={"max_in_flight": 1, "capabilities": [JOB_TYPE_CRAWL_COUPANG]},
+                last_heartbeat_at=now - timedelta(minutes=2),
+            )
+        ],
+        aggregate_in_flight=0,
+        now=now,
+    )
+
+    assert capacity.aggregate_capacity == 1
+    assert capacity.capabilities == frozenset({JOB_TYPE_CRAWL_COUPANG})

@@ -89,9 +89,18 @@ class Job(Base):
     result_json: Mapped[dict | None] = mapped_column(json_variant(), nullable=True)  # complete 결과(JSONB)
 
     # claim 대상 행(status='PENDING', run_after 정렬) 스캔 최소화 — SKIP LOCKED 성능.
-    # naming_convention 의존 없이 명시 이름(결정적). 복합 (status, run_after).
+    # naming_convention 의존 없이 명시 이름(결정적). claim 은 (status, run_after),
+    # stale lease 회수는 partial (status, lease_expires_at) 로 각각 잠근다.
     __table_args__ = (
         Index("ix_jobs_status", "status", "run_after"),
+        Index(
+            "ix_jobs_status_lease_expires_at",
+            "status",
+            "lease_expires_at",
+            postgresql_where=text(
+                "status IN ('CLAIMED', 'RUNNING') AND lease_expires_at IS NOT NULL"
+            ),
+        ),
         CheckConstraint(
             "payload_json IS NULL OR jsonb_typeof(payload_json) = 'object'",
             name="payload_json_object",

@@ -45,7 +45,7 @@ class _Repo(SchedulerRepository):
     async def has_active_crawl_job(self, target_id):
         return False
 
-    async def capacity_snapshot(self):
+    async def capacity_snapshot(self, *, now):
         return policy.CapacityPolicy(
             aggregate_capacity=1,
             aggregate_in_flight=0,
@@ -109,6 +109,31 @@ def test_run_loop_logs_tick_failure_and_keeps_running(monkeypatch, capsys) -> No
     assert "scheduler tick failed" in out
     assert "db temporarily unavailable" in out
     assert '{"enqueued_count": 0, "outcomes": []}' in out
+
+
+def test_run_loop_writes_health_file_via_thread(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[object, tuple, dict]] = []
+
+    async def _to_thread(func, *args, **kwargs):
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler_main.asyncio, "to_thread", _to_thread)
+    health_file = tmp_path / "scheduler.health"
+
+    asyncio.run(
+        scheduler_main.run_loop(
+            interval_seconds=0.01,
+            repo=_Repo(),
+            queue_backend=InMemoryQueueBackend(),
+            max_ticks=1,
+            health_file=str(health_file),
+        )
+    )
+
+    assert calls
+    assert calls[0][0] is scheduler_main._write_health_file
+    assert health_file.exists()
 
 
 def test_compose_defines_scheduler_service() -> None:

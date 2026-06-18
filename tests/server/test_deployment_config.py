@@ -57,6 +57,18 @@ def test_compose_defines_durable_db_and_migration_service() -> None:
     assert "condition: service_completed_successfully" in compose
 
 
+def test_ci_validates_deployment_compose_and_server_image() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "deployment-config:" in workflow
+    assert "docker compose -f deploy/docker-compose.yml config" in workflow
+    assert "docker build -f deploy/Dockerfile.server ." in workflow
+    assert "RIDER_POSTGRES_PASSWORD" in workflow
+    assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in workflow
+    assert "DEPLOYMENT_RESULT" in workflow
+    assert "Deployment config" in workflow
+
+
 def test_compose_backend_host_port_is_configurable() -> None:
     compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
 
@@ -77,11 +89,50 @@ def test_compose_defines_backend_and_scheduler_healthchecks() -> None:
 def test_terraform_defaults_do_not_publicly_expose_app_port() -> None:
     variables = Path("deploy/terraform/variables.tf").read_text(encoding="utf-8")
     security = Path("deploy/terraform/security.tf").read_text(encoding="utf-8")
+    example = Path("deploy/terraform/example.tfvars").read_text(encoding="utf-8")
 
     app_var = variables[variables.index('variable "app_ingress_cidr"') :]
     app_var = app_var[: app_var.index('variable "db_name"')]
     assert 'default     = ""' in app_var
     assert "count             = var.app_ingress_cidr == \"\" ? 0 : 1" in security
+    assert "기본은 0.0.0.0/0" not in example
+    assert "빈 값이면 앱 포트 ingress 규칙이 생성되지 않는다" in example
+
+
+def test_terraform_cloudwatch_covers_runbook_alert_signals() -> None:
+    cloudwatch = Path("deploy/terraform/cloudwatch.tf").read_text(encoding="utf-8")
+
+    for metric_name in (
+        "kakao_queue_lag_seconds",
+        "auth_required_count",
+        "gmail_reauth_required_count",
+        "crawl_error_rate_by_platform_BAEMIN",
+        "crawl_samples_by_platform_BAEMIN",
+        "crawl_error_rate_by_platform_COUPANG",
+        "crawl_samples_by_platform_COUPANG",
+        "telegram_error_count",
+    ):
+        assert metric_name in cloudwatch
+
+    for alert_name in (
+        "queue-lag",
+        "auth-required",
+        "gmail-reauth-required",
+        "api-error-rate-baemin",
+        "api-error-rate-coupang",
+        "telegram-errors",
+    ):
+        assert alert_name in cloudwatch
+
+    assert "crawl_error_min_samples" in cloudwatch
+    assert "crawl_error_rate_alarm_threshold" in cloudwatch
+
+
+def test_terraform_readme_documents_public_https_boundary() -> None:
+    readme = Path("deploy/terraform/README.md").read_text(encoding="utf-8")
+
+    assert "Terraform은 8000 포트 보안그룹까지만 만든다" in readme
+    assert "Telegram webhook 공개 URL에는 HTTPS/TLS 종료 계층이 별도로 필요하다" in readme
 
 
 def test_terraform_secrets_keep_recovery_window() -> None:
@@ -107,9 +158,73 @@ def test_backend_api_env_documents_admin_allowed_origins() -> None:
 def test_telegram_env_documents_default_supported_env_secret_refs() -> None:
     env = Path("deploy/env/telegram-webhook.env").read_text(encoding="utf-8")
 
-    assert "TELEGRAM_WEBHOOK_SECRET_REF=env:RIDER_TELEGRAM_WEBHOOK_SECRET" in env
-    assert "TELEGRAM_BOT_TOKEN_REF=env:RIDER_TELEGRAM_BOT_TOKEN" in env
+    assert "\nTELEGRAM_WEBHOOK_SECRET_REF=env:RIDER_TELEGRAM_WEBHOOK_SECRET" in env
+    assert "\nTELEGRAM_BOT_TOKEN_REF=env:RIDER_TELEGRAM_BOT_TOKEN" in env
+    assert "\n# TELEGRAM_WEBHOOK_SECRET_REF=env:RIDER_TELEGRAM_WEBHOOK_SECRET" not in env
+    assert "\n# TELEGRAM_BOT_TOKEN_REF=env:RIDER_TELEGRAM_BOT_TOKEN" not in env
     assert "vault://telegram" not in env
+
+
+def test_terraform_readme_does_not_claim_app_secrets_autoload() -> None:
+    readme = Path("deploy/terraform/README.md").read_text(encoding="utf-8")
+
+    assert "app-secrets 에 텔레그램 webhook/봇 토큰 값 입력 후 send 게이트 활성화" not in readme
+    assert "Secrets Manager 값은 앱이 자동으로 읽지 않는다" in readme
+    assert "RIDER_TELEGRAM_WEBHOOK_SECRET" in readme
+    assert "RIDER_TELEGRAM_BOT_TOKEN" in readme
+
+
+def test_refactoring_docs_record_intentional_tenant_telegram_plaintext_exception() -> None:
+    work_order = Path("docs/refactoring/detailed_work_order.md").read_text(
+        encoding="utf-8"
+    )
+    direction = Path("docs/refactoring/refactoring_improvement_direction.md").read_text(
+        encoding="utf-8"
+    )
+
+    for doc in (work_order, direction):
+        assert "Tenant Telegram token/webhook secret DB 평문 컬럼 저장은 의도된 예외" in doc
+        assert "audit log에는 값이 아니라 변경 여부만 기록" in doc
+
+
+def test_refactoring_docs_record_intentional_crawl_payload_credential_handoff() -> None:
+    direction = Path("docs/refactoring/refactoring_improvement_direction.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Crawl job payload에는 비밀번호류 필드가 들어갈 수 있다" in direction
+    assert "password, verification_email_app_password" in direction
+    assert "claim 응답/DB payload_json 경계는 secret-bearing surface" in direction
+
+
+def test_refactoring_review_report_is_marked_as_historical() -> None:
+    report = Path("docs/refactoring/refactoring_review_report.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "역사적 검토 기록" in report
+    assert "2026-06-15 당시" in report
+    assert "최신 상태 판단은 현재 코드/테스트/deploy 검증을 기준" in report
+
+
+def test_backup_runbook_documents_current_migration_head() -> None:
+    runbook = Path("docs/runbooks/backup-restore.md").read_text(encoding="utf-8")
+    latest = Path("migrations/versions/0013_jobs_stale_lease_index.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'revision = "0013_jobs_stale_lease_index"' in latest
+    assert "0013_jobs_stale_lease_index" in runbook
+    assert "0005_audit_fields_and_agent_token_revoke" not in runbook
+
+
+def test_test_strategy_matches_test_script_no_pth_rewrite() -> None:
+    doc = Path("docs/qa/test-execution-strategy.md").read_text(encoding="utf-8")
+    script = Path("scripts/test.ps1").read_text(encoding="utf-8")
+
+    assert ".pth` 파일을 UTF-8로 다시 쓴다" not in doc
+    assert "`.pth` 파일을 수정하지 않는다" in doc
+    assert "Set-Content" not in script
 
 
 def test_readme_documents_coupang_peak_dashboard_as_single_primary_url() -> None:

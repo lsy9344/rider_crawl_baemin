@@ -50,10 +50,15 @@ ERROR_TARGET_VALIDATION_FAILURE = "TARGET_VALIDATION_FAILURE"
 ERROR_CRAWL_TIMEOUT = "CRAWL_TIMEOUT"
 ERROR_CRAWL_FAILURE = "CRAWL_FAILURE"
 ERROR_PLAINTEXT_SECRET_NOT_ALLOWED = "PLAINTEXT_SECRET_NOT_ALLOWED"
+ERROR_SECRET_REF_UNRESOLVED = "SECRET_REF_UNRESOLVED"
 
 QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
 _PLAINTEXT_SECRET_KEYS = frozenset[str]()
+
+
+class SecretRefUnresolved(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,12 @@ class CrawlWorker:
             return make_failure_result(
                 ERROR_PROFILE_UNAVAILABLE,
                 "browser profile unavailable",
+                result_json={"target_id": payload.target_id, "platform": payload.platform},
+            )
+        except SecretRefUnresolved:
+            return make_failure_result(
+                ERROR_SECRET_REF_UNRESOLVED,
+                "secret ref could not be resolved",
                 result_json={"target_id": payload.target_id, "platform": payload.platform},
             )
         except TimeoutError:
@@ -318,15 +329,21 @@ def _resolve_credential(
     ref: str,
     secret_resolver: Callable[[str], str | None] | None,
 ) -> str:
-    if plain and secret_resolver is not None:
-        resolved = _safe_resolve(secret_resolver, plain)
+    value = plain or ref
+    if not value:
+        return ""
+    if secret_resolver is not None:
+        resolved = _safe_resolve(secret_resolver, value)
         if resolved:
             return resolved
-    if plain:
-        return plain
-    if not ref or secret_resolver is None:
-        return ref
-    return _safe_resolve(secret_resolver, ref) or ref
+    if _looks_like_secret_ref(value):
+        raise SecretRefUnresolved(value)
+    return value
+
+
+def _looks_like_secret_ref(value: str) -> bool:
+    text = str(value or "").strip().casefold()
+    return "://" in text or text.startswith(("env:", "dpapi:", "vault:"))
 
 
 def _safe_resolve(resolver: Callable[[str], str | None], ref: str) -> str:

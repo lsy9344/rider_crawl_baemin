@@ -123,6 +123,41 @@ class _CompleteRaceBackend:
         return None
 
 
+class _UuidErrorBackend:
+    async def complete(self, **_kwargs):
+        raise ValueError("badly formed hexadecimal UUID string")
+
+    async def in_flight_job(self, **_kwargs):
+        raise ValueError("badly formed hexadecimal UUID string")
+
+    async def claim(self, **_kwargs):
+        return []
+
+    async def enqueue(self, **_kwargs):
+        return "unused"
+
+    async def extend_lease(self, **_kwargs):
+        return False
+
+    async def recover_stale(self, **_kwargs):
+        return 0
+
+    async def emit_event(self, **_kwargs):
+        return None
+
+
+class _CountingRecoverBackend(InMemoryQueueBackend):
+    """recover_stale 호출 수를 세는 route 테스트용 backend."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recover_calls = 0
+
+    async def recover_stale(self, **kwargs):
+        self.recover_calls += 1
+        return await super().recover_stale(**kwargs)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (1) HTTP 라우트 계약
 # ══════════════════════════════════════════════════════════════════════════
@@ -216,6 +251,25 @@ def test_claim_recovers_expired_lease_before_selecting_jobs():
     assert backend.job_status(job_id) == JOB_STATUS_CLAIMED
 
 
+def test_claim_throttles_stale_recovery_between_fast_polls():
+    backend = _CountingRecoverBackend()
+    client = TestClient(_app_with_backend(backend))
+
+    for _ in range(2):
+        r = client.post(
+            "/v1/jobs/claim",
+            json={
+                "agent_id": "agent-1",
+                "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+                "max_jobs": 1,
+            },
+            headers=_BEARER,
+        )
+        assert r.status_code == 200
+
+    assert backend.recover_calls == 1
+
+
 def test_complete_reassigned_or_mismatch_owner_returns_409():
     import asyncio
 
@@ -285,6 +339,22 @@ def test_complete_unknown_job_returns_404():
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_complete_invalid_uuid_from_postgres_backend_returns_422():
+    client = TestClient(
+        _app_with_backend(_UuidErrorBackend()),
+        raise_server_exceptions=False,
+    )
+
+    r = client.post(
+        "/v1/jobs/not-a-uuid/complete",
+        json={"status": "success", "agent_id": "agent-1"},
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "UNPROCESSABLE_ENTITY"
 
 
 def test_complete_unknown_status_returns_422():
