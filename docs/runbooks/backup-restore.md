@@ -23,12 +23,12 @@
 스키마 마이그레이션(`alembic upgrade`)은 **반드시 백업 확인 후** 실행한다(additive 라도).
 
 1. 최신 DLM EBS 스냅샷 시각과 상태를 확인한다(7일 이내 성공 스냅샷 존재).
-2. 마이그레이션 **직전 수동 EBS 스냅샷**을 1건 만든다(라벨: `pre-<revision>` 예 `pre-0005`).
+2. 마이그레이션 **직전 수동 EBS 스냅샷**을 1건 만든다(라벨: `pre-<revision>` 예 `pre-0013`).
 3. 오프라인 SQL 을 먼저 검토한다: `alembic upgrade head --sql` 로 적용될 DDL 을 사람이 읽고
    확인한다(additive 컬럼만인지, 테이블 수 14 유지인지).
 4. 스테이징/리허설 DB 에 `upgrade head` → 검증 → `downgrade` round-trip 을 먼저 통과시킨다.
 5. 운영에 `upgrade head` 적용. 실패 시 즉시 `downgrade <prev>` 또는 스냅샷 복원으로 롤백한다.
-6. 적용 후 head 리비전이 기대값(현재 `0005_audit_fields_and_agent_token_revoke`)인지 확인한다.
+6. 적용 후 head 리비전이 기대값(현재 `0013_jobs_stale_lease_index`)인지 확인한다.
 
 > 게이트 위반(백업 미확인 상태의 운영 마이그레이션)은 금지한다 — 모호하면 실행하지 않는다.
 

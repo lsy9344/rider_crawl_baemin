@@ -11,7 +11,7 @@
 | 현재 PC 역할    | Windows 로컬 에이전트 1호. Chrome 프로필, 배민/쿠팡 로그인 세션, 카카오톡 PC 앱 전송을 담당한다.                                     |
 | 클라우드 역할   | 고객/구독/설정/상태/로그/작업 큐/텔레그램 webhook/관리자 대시보드/secret reference를 담당한다.                                       |
 | 가장 먼저 할 일 | 탭 기반 구조를 customer_id/monitoring_target_id 기반으로 바꾸고, 수집과 전송을 분리한다.                                             |
-| 절대 하지 말 것 | 탭을 100개로 늘리는 방식, 배민 휴대폰 인증 우회 시도, 카카오톡 동시 UI 전송, Gmail token 공유, 평문 secret 저장.                     |
+| 절대 하지 말 것 | 탭을 100개로 늘리는 방식, 배민 휴대폰 인증 우회 시도, 카카오톡 동시 UI 전송, Gmail token 공유, 문서화되지 않은 평문 secret 저장.     |
 
 # **목차**
 
@@ -145,7 +145,9 @@
 - 도메인을 확보하고 api.&lt;domain&gt;, admin.&lt;domain&gt;으로 HTTPS를 적용한다.
 - API/Admin/Scheduler는 Docker 이미지로 빌드되게 한다.
 - DB는 RDS PostgreSQL을 기본 권장한다. 내부 베타 비용 절감이 최우선이면 EC2 내부 Postgres를 임시로 허용하되, 유료 고객 운영 전 RDS로 이전한다.
-- Secret은 서버 코드나 DB에 평문 저장하지 말고 AWS Secrets Manager 또는 로컬 DPAPI 참조값으로 관리한다.
+- Secret은 서버 코드나 설정 파일에 평문 저장하지 말고 AWS Secrets Manager 또는 로컬 DPAPI 참조값으로 관리한다.
+- Tenant Telegram token/webhook secret DB 평문 컬럼 저장은 의도된 예외다. tenant별 Admin 설정값은 `tenants.telegram_bot_token`, `tenants.telegram_webhook_secret`에 저장하고, audit log에는 값이 아니라 변경 여부만 기록한다.
+- PlatformAccount credential DB 평문 컬럼 저장은 2026-06-18 운영자 결정에 따른 의도된 예외다. `platform_accounts.password`, `platform_accounts.verification_email_app_password`는 Admin 입력값을 그대로 저장할 수 있고, audit log에는 값이 아니라 변경 여부만 기록한다.
 - Agent는 서버가 PC로 inbound 접속하지 않는다. Agent가 outbound HTTPS로 poll/heartbeat/report한다.
 
 ## **4.3 고성능 작업 PC/서버 구매 조건**
@@ -496,8 +498,8 @@ request: { status, result_json, error_code, error_message_redacted, metrics }
 
 | **Secret**         | **저장 위치**                                    | **지시**                                                                                    |
 | ------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| Telegram bot token | AWS Secrets Manager                              | DB에는 secret_ref만 저장. token 변경/폐기 절차 제공.                                        |
-| 쿠팡 비밀번호      | 가능하면 AWS Secrets Manager 또는 Agent DPAPI    | Admin 화면에서 평문 재표시 금지. 변경 시 덮어쓰기만 허용.                                   |
+| Telegram bot token | tenants DB 평문 컬럼                             | Tenant Telegram token/webhook secret DB 평문 컬럼 저장은 의도된 예외. audit log에는 값이 아니라 변경 여부만 기록. DB 백업/읽기 권한은 secret 접근 권한으로 취급. |
+| 쿠팡 비밀번호      | platform_accounts DB 평문 컬럼 + Crawl job payload credential handoff | PlatformAccount credential DB 평문 저장은 의도된 예외. Crawl job payload에는 비밀번호류 필드가 들어갈 수 있다. `password`, `verification_email_app_password`는 Agent 로그인/메일 2FA handoff를 위해 허용하되 audit/log/result/error/screenshot에는 원문을 남기지 않는다. |
 | Gmail OAuth token  | MVP: Agent 로컬 DPAPI/Windows Credential Manager | 중앙 서버 저장은 보안 평가/정책 검토 후 진행. 고객/메일함별 분리 필수.                      |
 | Agent token        | Agent 로컬 secure store                          | 분실/탈취 시 서버에서 revoke 가능해야 함.                                                   |
 | Chrome profile     | Agent 로컬 디스크                                | BitLocker 권장. profile 경로는 중앙에 평문 파일시스템 경로 대신 profile_id/ref 위주로 저장. |
@@ -576,7 +578,7 @@ request: { status, result_json, error_code, error_message_redacted, metrics }
 - Kakao는 Agent queue에서 직렬 전송하고 DeliveryLog를 남긴다.
 - 배민 인증 만료 시 AUTH_REQUIRED로 표시되고 운영자가 인증 브라우저를 열 수 있다.
 - 쿠팡 Gmail token은 고객/메일함별로 분리되고, Gmail 재승인 필요 상태를 표시한다.
-- Secret이 DB/로그/설정 파일에 평문으로 저장되지 않는다.
+- Secret이 로그/설정 파일/error/screenshot에 평문으로 저장되지 않는다. DB 평문 저장 예외(Tenant Telegram token/webhook secret, PlatformAccount credential, Crawl job credential handoff)는 문서화된 범위와 redaction/audit 정책을 따른다.
 - 기존 활성 탭 2개 기능을 신규 구조에서 dry-run 및 실제 테스트 발송까지 검증한다.
 
 ## **16.2 금지사항**

@@ -33,6 +33,30 @@ variable "telegram_error_alarm_threshold" {
   default     = 5
 }
 
+variable "queue_lag_alarm_seconds" {
+  description = "kakao_queue_lag_seconds 알람 임계(초). policy.py QUEUE_LAG_ALERT_SECONDS 와 동일한 120초."
+  type        = number
+  default     = 120
+}
+
+variable "auth_required_alarm_threshold" {
+  description = "auth_required_count/gmail_reauth_required_count 알람 임계. policy.py 의 >=1 의미와 동일."
+  type        = number
+  default     = 1
+}
+
+variable "crawl_error_rate_alarm_threshold" {
+  description = "crawl_error_rate_by_platform_* 알람 임계. scheduler breaker threshold 와 동일한 0.30."
+  type        = number
+  default     = 0.30
+}
+
+variable "crawl_error_min_samples" {
+  description = "crawl_error_rate_by_platform_* 알람 표본 가드. scheduler breaker min_samples 와 동일한 5."
+  type        = number
+  default     = 5
+}
+
 # ── SNS 토픽(알람 액션 대상). 구독은 alarm_email 지정 시에만 생성(승인 없는 실 이메일 구독 금지). ──
 resource "aws_sns_topic" "alarms" {
   name = "${var.project}-alarms"
@@ -127,6 +151,147 @@ resource "aws_cloudwatch_metric_alarm" "heartbeat_stale" {
   tags                = { Name = "${var.project}-heartbeat-stale" }
 }
 
+# (e) kakao_queue_lag_seconds > 120초 — Kakao FIFO 적체. WARNING.
+resource "aws_cloudwatch_metric_alarm" "queue_lag" {
+  alarm_name          = "${var.project}-queue-lag"
+  alarm_description   = "Kakao queue lag > ${var.queue_lag_alarm_seconds}s (5분 지속). runbook: queue_lag."
+  namespace           = var.alarm_namespace
+  metric_name         = "kakao_queue_lag_seconds"
+  dimensions          = local.metric_dimensions
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 5
+  threshold           = var.queue_lag_alarm_seconds
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-queue-lag" }
+}
+
+# (f) auth_required_count >= 1 — 사람 개입 재인증 필요. WARNING.
+resource "aws_cloudwatch_metric_alarm" "auth_required" {
+  alarm_name          = "${var.project}-auth-required"
+  alarm_description   = "auth_required_count >= ${var.auth_required_alarm_threshold}. runbook: auth_required."
+  namespace           = var.alarm_namespace
+  metric_name         = "auth_required_count"
+  dimensions          = local.metric_dimensions
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = var.auth_required_alarm_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-auth-required" }
+}
+
+# (g) gmail_reauth_required_count >= 1 — 쿠팡 인증 이메일 재확인 근사. WARNING.
+resource "aws_cloudwatch_metric_alarm" "gmail_reauth_required" {
+  alarm_name          = "${var.project}-gmail-reauth-required"
+  alarm_description   = "gmail_reauth_required_count >= ${var.auth_required_alarm_threshold}. runbook: auth_required."
+  namespace           = var.alarm_namespace
+  metric_name         = "gmail_reauth_required_count"
+  dimensions          = local.metric_dimensions
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = var.auth_required_alarm_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-gmail-reauth-required" }
+}
+
+# (h) platform crawl 실패율 — 표본 가드 후 30% 초과. CRITICAL.
+resource "aws_cloudwatch_metric_alarm" "api_error_rate_baemin" {
+  alarm_name          = "${var.project}-api-error-rate-baemin"
+  alarm_description   = "BAEMIN crawl error rate > ${var.crawl_error_rate_alarm_threshold} with samples >= ${var.crawl_error_min_samples}. runbook: api_error_rate."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  threshold           = var.crawl_error_rate_alarm_threshold
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-api-error-rate-baemin" }
+
+  metric_query {
+    id          = "rate"
+    return_data = false
+    metric {
+      namespace   = var.alarm_namespace
+      metric_name = "crawl_error_rate_by_platform_BAEMIN"
+      dimensions  = local.metric_dimensions
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
+  metric_query {
+    id          = "samples"
+    return_data = false
+    metric {
+      namespace   = var.alarm_namespace
+      metric_name = "crawl_samples_by_platform_BAEMIN"
+      dimensions  = local.metric_dimensions
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
+  metric_query {
+    id          = "guarded"
+    expression  = "IF(FILL(samples, 0) >= ${var.crawl_error_min_samples}, FILL(rate, 0), 0)"
+    label       = "BAEMIN crawl error rate sample guarded"
+    return_data = true
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "api_error_rate_coupang" {
+  alarm_name          = "${var.project}-api-error-rate-coupang"
+  alarm_description   = "COUPANG crawl error rate > ${var.crawl_error_rate_alarm_threshold} with samples >= ${var.crawl_error_min_samples}. runbook: api_error_rate."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  threshold           = var.crawl_error_rate_alarm_threshold
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-api-error-rate-coupang" }
+
+  metric_query {
+    id          = "rate"
+    return_data = false
+    metric {
+      namespace   = var.alarm_namespace
+      metric_name = "crawl_error_rate_by_platform_COUPANG"
+      dimensions  = local.metric_dimensions
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
+  metric_query {
+    id          = "samples"
+    return_data = false
+    metric {
+      namespace   = var.alarm_namespace
+      metric_name = "crawl_samples_by_platform_COUPANG"
+      dimensions  = local.metric_dimensions
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
+  metric_query {
+    id          = "guarded"
+    expression  = "IF(FILL(samples, 0) >= ${var.crawl_error_min_samples}, FILL(rate, 0), 0)"
+    label       = "COUPANG crawl error rate sample guarded"
+    return_data = true
+  }
+}
+
 # ── outputs ──
 output "alarm_sns_topic_arn" {
   description = "알람 SNS 토픽 ARN. 운영자가 이메일/슬랙 등을 직접 구독한다(미구독 시 발신 비용 0)."
@@ -145,5 +310,10 @@ output "cloudwatch_alarm_names" {
     aws_cloudwatch_metric_alarm.targets_critical.alarm_name,
     aws_cloudwatch_metric_alarm.telegram_errors.alarm_name,
     aws_cloudwatch_metric_alarm.heartbeat_stale.alarm_name,
+    aws_cloudwatch_metric_alarm.queue_lag.alarm_name,
+    aws_cloudwatch_metric_alarm.auth_required.alarm_name,
+    aws_cloudwatch_metric_alarm.gmail_reauth_required.alarm_name,
+    aws_cloudwatch_metric_alarm.api_error_rate_baemin.alarm_name,
+    aws_cloudwatch_metric_alarm.api_error_rate_coupang.alarm_name,
   ]
 }

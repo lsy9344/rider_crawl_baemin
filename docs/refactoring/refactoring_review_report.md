@@ -1,5 +1,12 @@
 # 리팩토링 컨셉 검토 보고서
 
+> 상태: 역사적 검토 기록입니다. 이 문서는 2026-06-15 당시 코드와 문서를 기준으로 작성된
+> gap report이며, 이후 반영된 수정 사항을 모두 재기록한 최신 완료 판정서는 아닙니다.
+> 최신 상태 판단은 현재 코드/테스트/deploy 검증을 기준으로 합니다.
+> 2026-06-18 최신화: Agent API, 기본 Agent worker wiring, scheduler compose, 일부 DB guard는
+> 이후 반영됐습니다. 남은 판단은 live dry-run/test-send/Postgres gate와 운영 리스크 승인 여부를
+> 기준으로 합니다.
+
 검토 시점: 2026-06-15 KST
 검토 범위: `docs/refactoring/research.md`, `docs/refactoring/detailed_work_order.md`, `riderbot_detailed_work_order.docx`, `riderbot_architecture_diagrams.pptx`, 현재 `src/`, `tests/`, `deploy/`, `docs/qa/`
 

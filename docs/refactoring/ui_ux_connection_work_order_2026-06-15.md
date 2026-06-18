@@ -3,17 +3,23 @@
 작성일: 2026-06-15
 대상: `rider_server` Admin UI 전면 재구성 이후 기능 연결성
 문서 목적: 개발자가 바로 구현에 들어갈 수 있도록, 끊긴 기능 흐름을 근거와 함께 작업 단위로 정리한다.
-문서 상태: 상세 지시서. 구현 전 기준 문서로 사용한다.
+문서 상태: 역사적 작업지시서. 2026-06-15 당시 연결성 검토와 작업 항목을 보존한다.
+
+> 최신화 메모(2026-06-18): 당시 차단 항목 중 Agent heartbeat lease 연장, snapshot complete
+> atomicity, AUTH_CHECK 기본 runner 배선, Telegram 일반방 unique guard, Agent/channel registration
+> unique guard, HTMX 정적 자산은 현재 코드에서 반영됐다. 최신 배포 판단은
+> [refactoring_improvement_direction.md](./refactoring_improvement_direction.md)의 최신 상태표와
+> release gate를 따른다. 이 문서의 상세 근거 표는 "당시 발견한 문제와 수락 기준"으로 읽는다.
 
 ---
 
 ## 1. 최종 판단
 
-현재 Admin UI 재개편은 큰 방향은 맞다. `/admin` 화면, HTMX fragment, Admin action/CRUD route, Agent register/heartbeat/jobs API는 기본 happy path 기준으로 연결되어 있고, 전체 pytest도 통과한다.
+2026-06-15 당시 Admin UI 재개편은 큰 방향은 맞았다. `/admin` 화면, HTMX fragment, Admin action/CRUD route, Agent register/heartbeat/jobs API는 기본 happy path 기준으로 연결되어 있고, 전체 pytest도 통과했다.
 
-하지만 아직 “릴리즈 가능”으로 보면 안 된다. UI에서 누르는 핵심 조치가 장시간 job, 인증 확인, DB 중복 방어선, 관리 화면 연속 생성 흐름까지 안전하게 이어지는지는 일부 깨져 있다. 특히 아래 항목은 UI 표시 문제가 아니라 실제 운영 상태 불일치나 오발송 방어 실패로 이어질 수 있어 선행 처리해야 한다.
+당시에는 “릴리즈 가능”으로 보면 안 된다고 판단했다. UI에서 누르는 핵심 조치가 장시간 job, 인증 확인, DB 중복 방어선, 관리 화면 연속 생성 흐름까지 안전하게 이어지는지는 일부 깨져 있었다. 특히 아래 항목은 UI 표시 문제가 아니라 실제 운영 상태 불일치나 오발송 방어 실패로 이어질 수 있어 선행 처리해야 했다.
 
-릴리즈 차단 또는 준차단 항목:
+당시 릴리즈 차단 또는 준차단 항목:
 
 1. Agent heartbeat의 `active_jobs`가 서버에서 lease 연장으로 연결되지 않는다.
 2. snapshot result ingest가 queue `complete()`보다 먼저 commit된다.
@@ -22,7 +28,7 @@
 5. Agent registration hash, channel registration code의 DB unique 방어선이 부족하다.
 6. 관리 화면에서 새 계정/채널/업체를 만든 뒤 드롭다운이 즉시 갱신되지 않는다.
 
-다만 UX 정본에서 핵심으로 정한 다음 흐름은 아직 완성되지 않았다.
+2026-06-18 현재에도 UX 정본에서 핵심으로 정한 다음 흐름은 별도 UI 실측과 운영자 승인 기준으로 확인해야 한다.
 
 1. 텔레그램 알림에서 특정 업체 상세로 바로 들어가는 딥링크
 2. 쿠팡 센터명 오류를 버튼 클릭 후 바로 수정하는 흐름
@@ -36,7 +42,7 @@
 
 ---
 
-## 2. 검토 결과 요약
+## 2. 당시 검토 결과 요약
 
 | 구분 | 판단 | 근거 |
 |---|---|---|
@@ -166,7 +172,7 @@
 
 ---
 
-## 5. 현재 구현 근거
+## 5. 당시 구현 근거
 
 | 구현 항목 | 현재 위치 | 확인 내용 |
 |---|---:|---|

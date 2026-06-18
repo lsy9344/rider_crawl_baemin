@@ -1,7 +1,13 @@
 # 리팩토링 개선 방향 상세 실행 문서
 
 작성 시점: 2026-06-15 KST
+최신 갱신: 2026-06-18 KST
 근거 문서: [refactoring_review_report.md](./refactoring_review_report.md), [detailed_work_order.md](./detailed_work_order.md), [research.md](./research.md), [module-architecture.md](../module-architecture.md)
+
+> 최신화 메모(2026-06-18): 이 문서는 최초 개선 방향 문서를 유지하되, 아래 상태표와 최종
+> 권고는 현재 코드/테스트/deploy 검증 기준으로 갱신했다. `RIDER_ADMIN_PUBLIC_ACCESS=1`은
+> 운영자 단일 IP/비공개 URL 전제의 사용자 승인 리스크로 남긴다. 공개 범위가 넓어지면 즉시
+> 인증, IP allowlist, TLS 경계를 다시 닫아야 한다.
 
 ## 1. 문서 목적
 
@@ -11,8 +17,9 @@
 
 - 현재 리팩토링 방향은 맞다.
 - 단위 서비스, 도메인 모델, queue, scheduler, Admin, Agent primitive는 상당히 구현됐다.
-- 그러나 판매형 MVP 완료를 막는 live runtime 연결부가 남아 있다.
-- 개선의 중심은 "새로 크게 만들기"가 아니라 "끊어진 계약과 실행 흐름을 연결하기"다.
+- Agent API, 기본 Agent worker wiring, scheduler process/compose, 주요 DB guard는 현재 코드에서 닫혔다.
+- 남은 중심은 "새로 크게 만들기"가 아니라 "실 운영 증거와 운영 경계"를 닫는 것이다.
+- live dry-run, Telegram/Kakao test-send, secret-bearing surface 운영 통제는 배포 전 마지막 확인 대상이다.
 
 ## 2. 목표 상태
 
@@ -55,7 +62,7 @@ flowchart LR
 7. Telegram은 중앙 서버의 sendMessage로 전송되고 DeliveryLog가 남는다.
 8. Kakao는 Agent의 FIFO queue로 직렬 전송되고 DeliveryLog가 남는다.
 9. 인증 만료, 채널 오류, Agent offline, queue lag가 Admin/metrics/runbook으로 이어진다.
-10. Secret 값은 DB, 로그, 설정 파일, error envelope, screenshot artifact에 평문으로 남지 않는다.
+10. Secret 값은 로그, 설정 파일, error envelope, screenshot artifact에 평문으로 남지 않는다. DB 평문 저장 예외는 아래 3.3의 의도된 범위만 허용한다.
 
 ## 3. 개선 원칙
 
@@ -80,6 +87,15 @@ flowchart LR
 - Telegram bot token, webhook secret, Coupang password, Gmail OAuth token, OTP는 로그와 예외 메시지에 남기지 않는다.
 - 운영 secret resolver가 없을 때는 fail-closed가 맞다. 다만 운영 전에는 실제 resolver를 반드시 붙인다.
 
+의도된 예외:
+
+- Tenant Telegram token/webhook secret DB 평문 컬럼 저장은 의도된 예외다. tenant별 Admin 설정값은 `tenants.telegram_bot_token`, `tenants.telegram_webhook_secret` 컬럼에 저장하고, audit log에는 값이 아니라 변경 여부만 기록한다.
+- 위 예외는 DB 백업/읽기 권한이 secret 접근 권한이라는 뜻이다. 운영자는 DB dump, SQL console, support export를 secret-bearing surface로 다뤄야 한다.
+- PlatformAccount credential DB 평문 컬럼 저장은 2026-06-18 운영자 결정에 따른 의도된 예외다. `platform_accounts.password`, `platform_accounts.verification_email_app_password`는 Admin 입력값을 그대로 저장할 수 있고, audit log에는 값이 아니라 `set`/`cleared`/`unchanged` 같은 변경 여부만 기록한다.
+- 위 예외는 DB, DB 백업, SQL console, support export, 장애 복구 덤프가 쿠팡 로그인 ID/PW/이메일 앱 비밀번호를 포함할 수 있다는 뜻이다. 접근권한과 보관 기간을 secret 접근권한과 동일하게 다룬다.
+- Crawl job payload에는 비밀번호류 필드가 들어갈 수 있다. 특히 `password, verification_email_app_password`는 Agent가 쿠팡 로그인/메일 2FA를 처리하기 위한 handoff 값 또는 resolver 입력으로 사용될 수 있다.
+- claim 응답/DB payload_json 경계는 secret-bearing surface다. payload 원문은 로그, event, error envelope, screenshot, result_json에 남기지 않고 redaction을 통과시킨다.
+
 ### 3.4 상태 전이는 오발송보다 중단을 우선한다
 
 - parser 필수 데이터가 없으면 잘못된 실적 메시지를 보내지 않는다.
@@ -97,20 +113,21 @@ flowchart LR
 4. Telegram/Kakao 전송을 live dispatch로 묶는다.
 5. 운영 dry-run과 release gate를 채운다.
 
-## 4. 현재 갭 요약
+## 4. 최신 상태와 남은 갭 요약
 
-| ID | 갭 | 영향 | 우선순위 | 개선 방향 |
+| ID | 항목 | 최신 상태 | 남은 조치 | 우선순위 |
 | --- | --- | --- | --- | --- |
-| G1 | `/v1/agents/register`, `/v1/agents/heartbeat` 서버 API 없음 | Agent #1 운영 검증 불가 | 최상 | `src/rider_server/api/agents.py` 추가 |
-| G2 | 기본 job executor가 실제 crawl job을 미지원 처리 | CrawlJob이 성공할 수 없음 | 최상 | `src/rider_agent/workers/crawl_worker.py` 구현 |
-| G3 | `jobs.complete(result_json)` 이후 Snapshot/Message/DeliveryLog ingest 없음 | 수집 결과가 운영 데이터로 이어지지 않음 | 최상 | server-side ingest service 구현 |
-| G4 | Scheduler service는 있으나 별도 process/compose 배선 없음 | 자동 job 생성 없음 | 높음 | scheduler entrypoint와 compose service 추가 |
-| G5 | 중앙 Telegram outbound dispatch loop 미연결 | webhook/register만 있고 실제 중앙 발송이 닫히지 않음 | 높음 | dispatch worker와 send adapter 연결 |
-| G6 | Kakao queue primitive와 legacy UI 경로가 분리됨 | DeliveryLog 없는 UI 전송 경로 잔존 | 높음 | KAKAO_SEND job과 결과 보고 연결 |
-| G7 | 운영 secret resolver 없음 | production webhook/send/credential 해석 불가 | 높음 | SecretBackend interface와 resolver 주입 |
-| G8 | live dry-run 기준선이 placeholder | 운영 회귀 검증 근거 부족 | 중간 | 운영 PC에서 실측값 채우기 |
-| G9 | wheel package가 `rider_crawl`만 포함 | wheel 배포 시 server/agent 누락 위험 | 중간 | 배포 방식 결정 후 packaging 정리 |
-| G10 | README 일부가 현재 코드와 불일치 | 운영자 혼선 | 중간 | README와 runbook 정합화 |
+| G1 | Agent register/heartbeat API | 완료. `/v1/agents/register`, `/v1/agents/heartbeat`가 연결되고 heartbeat 기반 lease 연장이 반영됐다. | release smoke에서 실제 Agent 1회 등록/heartbeat 증거 유지 | 완료 |
+| G2 | 기본 Agent executor | 완료. 기본 `python -m rider_agent run` 경로가 auth, crawl, Kakao worker를 합성한다. | 운영 PC에서 배민/쿠팡 live dry-run 증거 확보 | 검증 필요 |
+| G3 | snapshot ingest/complete atomicity | 완료. job complete 경로가 snapshot/message/delivery 결과와 queue 상태를 함께 다룬다. | Postgres release gate와 runtime smoke를 배포 전 반복 | 완료 |
+| G4 | scheduler process/compose | 완료. `python -m rider_server.scheduler`, compose `scheduler` service, health file/check가 연결됐다. | 운영 alarm/healthcheck 확인 | 완료 |
+| G5 | Telegram central send/webhook | 부분 완료. tenant별 token/webhook 설정과 DeliveryLog 중심 경계가 있다. | 실제 test-send, topic/일반방 DeliveryLog 증거 확보 | 높음 |
+| G6 | Kakao queue/worker | 부분 완료. Agent Kakao sender worker와 `KAKAO_SEND` job 경로가 연결됐다. | Kakao test room 실측, 실패 error_code 확인 | 높음 |
+| G7 | secret-bearing surface | 의도된 예외로 문서화됨. DB tenant token, PlatformAccount credential, crawl payload credential handoff는 secret-bearing surface다. | DB/claim payload 접근권한, backup, support export 운영 통제 | 높음 |
+| G8 | live dry-run 기준선 | 미완. `docs/qa/dry-run-baseline-20260613.md`의 운영자 캡처 placeholder가 남아 있다. | 배민/쿠팡/Telegram/Kakao 실측값과 sha256 채우기 | 높음 |
+| G9 | packaging/deploy | 완료에 가까움. Docker/source-copy 배포와 compose smoke가 기준이며 wheel 누락은 단기 배포 차단점이 아니다. | 장기적으로 wheel 배포 정본 결정 | 중간 |
+| G10 | Admin public access | 사용자 승인 리스크. 단일 운영자 IP/비공개 URL 전제로 `RIDER_ADMIN_PUBLIC_ACCESS=1`을 유지한다. | 공개/다중 운영으로 넓어질 때 인증/IP allowlist/TLS 필수 | 승인됨 |
+| G11 | Postgres scheduler gate | 완료. capacity 판단이 scheduler tick 시각을 사용하며 2026-06-18 `scripts/test.ps1 -Stage postgres` 통과. | release CI에서 동일 gate 유지 | 완료 |
 
 ## 5. 전체 실행 순서
 
@@ -143,23 +160,25 @@ flowchart TD
 
 ### 6.2 현재 상태
 
-- Agent registration client는 `/v1/agents/register`를 호출한다.
-- Agent heartbeat client는 `/v1/agents/heartbeat`를 호출한다.
-- 서버는 현재 `/v1/jobs/*`, `/v1/telegram/webhook`만 제공한다.
-- `agents` 테이블에는 `last_heartbeat_at`, `capacity_json`이 있다.
+- Agent registration client는 `/v1/agents/register`를 호출하고, 서버는 `src/rider_server/api/agents.py` router로 이 경로를 제공한다.
+- Agent heartbeat client는 `/v1/agents/heartbeat`를 호출하고, 서버 heartbeat는 bearer token 검증, `agent_id` mismatch 거부, `last_heartbeat_at`/capacity/status 갱신을 수행한다.
+- heartbeat의 `active_jobs`는 서버 `QueueBackend.extend_lease()`로 연결되어 장시간 job lease를 연장한다.
+- `create_app()`은 `agents_router`, `jobs_router`, `telegram_webhook_router`, Admin routers를 함께 등록한다.
+- `agents` 테이블에는 `last_heartbeat_at`, `capacity_json`, `agent_version` 등 운영 관측에 필요한 필드가 있다.
 - `browser_profiles` 테이블은 `agent_id`, `target_id`, `profile_path_ref`, `cdp_port`, `state`를 담을 수 있다.
-- Admin/metrics는 heartbeat 값을 보여줄 수 있는 기반을 갖고 있다.
+- Admin/metrics는 heartbeat 값을 보여줄 수 있는 기반을 갖고 있다. 실제 운영 완료 판단은 Agent #1의 live heartbeat 증거가 필요하다.
 
 ### 6.3 구현 방향
 
-새 파일을 추가한다.
+현재 구현 위치:
 
 - `src/rider_server/api/agents.py`
-- 필요하면 `src/rider_server/services/agent_registration_service.py`
-- 필요하면 `src/rider_server/services/agent_heartbeat_service.py`
-- 필요하면 `src/rider_server/services/agent_repository_postgres.py`
+- `src/rider_server/services/agent_registry.py`
+- `src/rider_server/services/agent_registry_postgres.py`
+- `src/rider_server/services/agent_token_service.py`
+- `src/rider_server/services/agent_token_repository_postgres.py`
 
-`create_app()`에는 새 router를 포함한다.
+`create_app()`에는 router가 포함되어 있다.
 
 ```python
 app.include_router(agents_router)
@@ -256,7 +275,7 @@ Authorization: Bearer <agent_token>
 - token은 body에 넣지 않는다.
 - `agent_id` body 값과 bearer token이 가리키는 agent가 다르면 `403` 또는 `409`로 거부한다.
 - heartbeat 수신 시 `agents.last_heartbeat_at`, `agents.capacity_json`, `agents.status`를 갱신한다.
-- `active_jobs`가 있으면 lease 연장 정책을 붙일 수 있다. 최소 구현은 저장/관측만 하고, lease 연장은 별도 task로 분리해도 된다.
+- `active_jobs`가 있으면 소유 중인 미만료 job에 한해 lease를 연장한다. 소유자가 다르거나 이미 만료된 job은 heartbeat 전체를 실패시키지 않고 무시한다.
 - `browser_profiles`는 raw local path를 저장하지 않는다. `profile_path_ref`나 opaque profile id만 쓴다.
 
 ### 6.5 테스트
@@ -341,7 +360,9 @@ Scheduler가 만드는 job에는 최소한 다음 값이 필요하다.
 
 주의:
 
-- password, OTP, Gmail token, Telegram token은 payload에 넣지 않는다.
+- Crawl job payload에는 비밀번호류 필드가 들어갈 수 있다. `password, verification_email_app_password`는 쿠팡 로그인/메일 2FA handoff를 위해 허용한다.
+- claim 응답/DB payload_json 경계는 secret-bearing surface이므로 payload 원문을 로그, event, error envelope, screenshot, result_json에 남기지 않는다.
+- OTP, Gmail token, Telegram token은 payload에 넣지 않는다.
 - Agent가 로컬에서 필요한 Gmail token은 DPAPI/local secure store ref로 찾는다.
 - profile path는 가능하면 raw path 대신 local opaque ref로 전달한다.
 
@@ -566,20 +587,17 @@ Scheduler가 단순 service가 아니라 실제 process로 실행되어 due targ
 
 - scheduler policy/service는 구현되어 있다.
 - due target, subscription gate, breaker, capacity, idempotent enqueue 기반이 있다.
-- 하지만 `docker-compose.yml`에는 scheduler가 placeholder로 남아 있다.
+- `src/rider_server/scheduler/__main__.py` entrypoint와 `deploy/docker-compose.yml`의 `scheduler` service가 있다.
+- compose healthcheck는 `SCHEDULER_HEALTH_FILE`을 기준으로 backend-api와 분리되어 확인한다.
+- 2026-06-18 기준 Postgres scheduler gate는 통과한다. capacity snapshot은 scheduler tick 시각을 기준으로 Agent online 상태를 판단한다.
+- 남은 운영 보강은 scheduler를 여러 개 띄우는 경우의 leader lock/advisory lock이다.
 
 ### 9.3 구현 방향
 
-새 entrypoint:
+현재 entrypoint:
 
 ```text
 src/rider_server/scheduler/__main__.py
-```
-
-또는:
-
-```text
-src/rider_server/worker_scheduler.py
 ```
 
 권장 CLI:
@@ -632,8 +650,8 @@ scheduler:
 
 주의:
 
-- 현재 Dockerfile.server는 SQLAlchemy/Alembic/asyncpg를 설치하지 않는 것으로 보인다. 서버 runtime이 DB를 실제로 쓰려면 server extra 의존성이 이미지에 포함돼야 한다.
-- Dockerfile이 FastAPI/uvicorn만 설치하는 경량 이미지라면 scheduler는 import 단계에서 실패할 수 있다. Docker build 검증이 필요하다.
+- Docker build와 compose smoke는 release gate로 계속 실행한다.
+- scheduler가 DB 연결 실패로 crash loop하지 않도록 health 파일과 로그를 함께 본다.
 
 ### 9.6 테스트
 
@@ -1014,9 +1032,10 @@ TELEGRAM_WEBHOOK_SECRET_REF=env://TELEGRAM_WEBHOOK_SECRET
 ### 14.2 현재 위험
 
 - Dockerfile.server는 source copy + `PYTHONPATH=/app/src` 방식이다.
-- wheel package 설정은 `src/rider_crawl`만 포함한다.
-- Dockerfile이 DB 관련 server extra 의존성을 모두 설치하는지 확인이 필요하다.
-- compose에는 scheduler가 placeholder다.
+- 현재 배포 정본은 wheel 설치가 아니라 Docker/source-copy 방식이다.
+- compose에는 backend-api, migrate, scheduler healthcheck가 정의되어 있다.
+- wheel package 설정은 장기 배포 전략 관점에서 정리할 대상이지만, 단기 Docker 배포 차단점은 아니다.
+- 배포 전에는 Docker build, compose config, migrate, backend `/health`/`/version`/`/metrics`, scheduler health 파일을 같은 release gate에서 확인한다.
 
 ### 14.3 결정해야 할 것
 
@@ -1445,12 +1464,12 @@ Kakao:
 | 결정 | 선택지 | 권장 |
 | --- | --- | --- |
 | Agent 등록 중복 처리 | reject, rotate, rebind | 기본 reject, 운영자 명시 action으로 rotate |
-| heartbeat 시 lease 연장 | 즉시 구현, 후속 구현 | active_jobs 저장은 즉시, lease 연장은 별도 test와 함께 |
+| heartbeat 시 lease 연장 | 구현됨, 후속 보강 | 현재 `active_jobs` 기반 lease 연장이 구현되어 있다. 후속 보강은 운영 metrics/알람과 장시간 crawl 실측이다. |
 | Scheduler process lock | 없음, advisory lock, row lease | advisory lock |
 | Dispatch worker 위치 | API 내부 background, 별도 process | MVP는 별도 process 권장, 단순화 필요하면 API 내부 임시 |
 | Telegram channel 상태 | 기존 4상태, REGISTERED 추가 | REGISTERED 추가 또는 동등 field |
 | Kakao 불확실 성공 처리 | retry, held, failed final | held/manual 확인 |
-| Secret backend | env only, AWS SM, hybrid | dev env + prod AWS SM |
+| Secret backend | env only, AWS SM, DB 평문 예외, hybrid | 현재 운영 결정은 Tenant Telegram 값과 PlatformAccount credential을 Admin/DB에 저장하는 예외를 허용한다. AWS SM은 DB credential 등 인프라 secret 중심으로 유지한다. |
 | packaging 정본 | Docker source-copy, wheel | 장기 wheel, 단기 Docker 정리 |
 
 ## 22. 금지 사항
@@ -1470,12 +1489,14 @@ Kakao:
 
 ## 23. 최종 권고
 
-가장 먼저 할 일은 API 계약 복구다. `/v1/agents/register`와 `/v1/agents/heartbeat`가 없으면 Agent #1을 운영 검증할 수 없고, 이후 crawl worker, scheduler, dispatch도 실제 흐름으로 확인할 수 없다.
+2026-06-18 기준으로 API 계약, 기본 Agent worker, scheduler process/compose, 주요 Postgres gate는
+배포 가능한 형태에 가깝게 닫혔다. P0로 지적했던 Admin public access는 운영자 단일 IP/비공개 URL
+전제의 사용자 승인 리스크로 유지한다.
 
-두 번째는 실제 crawl worker다. 서버가 아무리 잘 만들어져도 Agent가 `CRAWL_BAEMIN`과 `CRAWL_COUPANG`을 unsupported로 끝내면 MVP는 성립하지 않는다.
+남은 핵심은 운영 실측이다. automated test가 좋아도 로그인된 Chrome, KakaoTalk PC 앱, Telegram
+topic/일반방, Gmail 2FA는 실제 운영 환경에서만 드러나는 문제가 있다. live dry-run과 Telegram/Kakao
+test-send evidence를 채우기 전에는 "테스트 가능한 배포 후보"로 보되, 판매형 운영 완료로 보지는 않는다.
 
-세 번째는 ingest와 DeliveryLog다. 운영 서비스에서는 "수집했다"보다 "무엇을 저장했고 어디로 보내졌으며 왜 실패했는지"가 중요하다. Snapshot, Message, DeliveryLog가 이어져야 고객 문의와 장애 대응이 가능하다.
-
-네 번째는 운영 실측이다. automated test가 좋아도 로그인된 Chrome, KakaoTalk PC 앱, Telegram topic, Gmail 2FA는 실제 운영 환경에서만 드러나는 문제가 있다. live dry-run과 test-send evidence를 채우기 전에는 판매형 운영 완료로 보지 않는 것이 맞다.
-
-이 순서로 진행하면 지금까지 만든 구조를 버리지 않고, 문서의 리팩토링 컨셉을 실제 운영 가능한 MVP로 닫을 수 있다.
+배포 직전 release gate는 `scripts/test.ps1 -Stage full`, `scripts/test.ps1 -Stage docs`,
+`scripts/test.ps1 -Stage postgres`, Docker build, compose smoke, Admin 접근 조건 확인 순서로 반복한다.
+이 gate가 모두 초록이고 운영자 실측 캡처가 채워지면 현재 리팩토링 컨셉은 실제 운영 MVP로 닫을 수 있다.
