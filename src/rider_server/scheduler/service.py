@@ -118,8 +118,11 @@ class SchedulerRepository(abc.ABC):
         """대상에 활성 CrawlJob(PENDING/CLAIMED/RUNNING)이 이미 있는가(멱등성, AC4)."""
 
     @abc.abstractmethod
-    async def capacity_snapshot(self) -> policy.CapacityPolicy:
-        """Agent capacity/affinity 스냅샷(throttle 입력, AC1)."""
+    async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
+        """Agent capacity/affinity 스냅샷(throttle 입력, AC1).
+
+        ``now`` 는 scheduler tick 시각이다. online heartbeat 판단도 같은 시각으로 맞춘다.
+        """
 
     @abc.abstractmethod
     async def claim_due_target(
@@ -191,7 +194,7 @@ class SchedulerService:
                 min_samples=self._breaker_min_samples,
             )
 
-        capacity = await repo.capacity_snapshot()
+        capacity = await repo.capacity_snapshot(now=now)
         in_flight = capacity.aggregate_in_flight
 
         outcomes: list[ScheduleOutcome] = []

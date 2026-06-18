@@ -24,6 +24,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.account import MonitoringTarget, PlatformAccount
+from rider_server.admin.severity import is_agent_online
 from rider_server.db.models.agent import Agent, Job
 from rider_server.db.models.tenancy import Subscription, Tenant
 from rider_server.domain import (
@@ -66,6 +67,29 @@ def _to_lifecycle_status(value: str | None) -> CustomerLifecycleState | None:
         return CustomerLifecycleState(value)
     except ValueError:
         return None
+
+
+def _capacity_from_agent_rows(
+    rows,
+    *,
+    aggregate_in_flight: int,
+    now: datetime,
+) -> policy.CapacityPolicy:
+    """Online Agent rows 만 capacity 로 집계한다."""
+
+    aggregate_capacity = 0
+    capabilities: set[str] = set()
+    for row in rows:
+        if not is_agent_online(row.last_heartbeat_at, now):
+            continue
+        data = row.capacity_json or {}
+        aggregate_capacity += int(data.get("max_in_flight", 0))
+        capabilities.update(data.get("capabilities", []) or [])
+    return policy.CapacityPolicy(
+        aggregate_capacity=aggregate_capacity,
+        aggregate_in_flight=aggregate_in_flight,
+        capabilities=frozenset(capabilities),
+    )
 
 
 class PostgresSchedulerRepository(SchedulerRepository):
@@ -180,15 +204,17 @@ class PostgresSchedulerRepository(SchedulerRepository):
             count = (await session.execute(stmt)).scalar_one()
         return int(count) > 0
 
-    async def capacity_snapshot(self) -> policy.CapacityPolicy:
+    async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
         """``agents.capacity_json`` 집계.
 
         해석(문서화된 계약): ``capacity_json = {"max_in_flight": int, "capabilities": [job_type]}``.
-        ``aggregate_capacity`` = 모든 Agent ``max_in_flight`` 합, ``capabilities`` = 합집합.
+        ``aggregate_capacity`` = online Agent ``max_in_flight`` 합, ``capabilities`` = 합집합.
         ``aggregate_in_flight`` = 현재 활성 CrawlJob 수(scheduler 가 만드는 type 스코프).
         """
         async with self._session_factory() as session:
-            agents = (await session.execute(select(Agent.capacity_json))).scalars().all()
+            agents = (
+                await session.execute(select(Agent.capacity_json, Agent.last_heartbeat_at))
+            ).all()
             in_flight = (
                 await session.execute(
                     select(func.count())
@@ -199,16 +225,10 @@ class PostgresSchedulerRepository(SchedulerRepository):
                     )
                 )
             ).scalar_one()
-        aggregate_capacity = 0
-        capabilities: set[str] = set()
-        for capacity_json in agents:
-            data = capacity_json or {}
-            aggregate_capacity += int(data.get("max_in_flight", 0))
-            capabilities.update(data.get("capabilities", []) or [])
-        return policy.CapacityPolicy(
-            aggregate_capacity=aggregate_capacity,
+        return _capacity_from_agent_rows(
+            agents,
             aggregate_in_flight=int(in_flight),
-            capabilities=frozenset(capabilities),
+            now=now,
         )
 
     async def claim_due_target(

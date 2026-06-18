@@ -95,7 +95,7 @@ async def run_loop(
             now = _iso_utc_now()
             result = await SchedulerService().run_tick(repo, queue_backend, now=now)
             print(json.dumps(_result_payload(result), ensure_ascii=False), flush=True)
-            _write_health_file(health_file, now=now)
+            await asyncio.to_thread(_write_health_file, health_file, now=now)
         except Exception as exc:  # noqa: BLE001 - loop boundary; keep scheduler alive.
             print(
                 redact(f"scheduler tick failed: {exc.__class__.__name__}: {exc}"),

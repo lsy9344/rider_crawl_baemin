@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,6 +27,7 @@ from rider_server.db.models.account import PlatformAccount as PlatformAccountRow
 from rider_server.db.models.audit import AuditLog as AuditLogRow
 from rider_server.db.models.messaging import DeliveryRule as DeliveryRuleRow
 from rider_server.db.models.messaging import MessengerChannel as MessengerChannelRow
+from rider_server.db.models.tenancy import Subscription as SubscriptionRow
 from rider_server.db.models.tenancy import Tenant as TenantRow
 from rider_server.domain import (
     BaeminAuthState,
@@ -39,11 +40,14 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
+    Subscription,
+    SubscriptionStatus,
     Tenant,
 )
 
 from .admin_action_repository_postgres import _audit_values, _target_to_domain
 from .admin_action_service import AuditEntry
+from .admin_entity_service import AdminEntityDeleteBlockedError
 from .admin_entity_service import AdminEntityDuplicateError
 
 
@@ -62,6 +66,17 @@ def _tenant_to_domain(row: TenantRow) -> Tenant:
         telegram_bot_token=row.telegram_bot_token,
         telegram_webhook_secret=row.telegram_webhook_secret,
         sending_enabled=row.sending_enabled,
+    )
+
+
+def _subscription_to_domain(row: SubscriptionRow) -> Subscription:
+    return Subscription(
+        id=str(row.id),
+        tenant_id=str(row.tenant_id),
+        plan=row.plan,
+        status=SubscriptionStatus(row.status),
+        current_period_end=row.current_period_end,
+        quotas=dict(row.quotas or {}),
     )
 
 
@@ -117,6 +132,12 @@ class PostgresAdminEntityRepository:
             row = (await session.execute(stmt)).scalar_one_or_none()
         return None if row is None else _tenant_to_domain(row)
 
+    async def get_subscription(self, subscription_id: str) -> Subscription | None:
+        stmt = select(SubscriptionRow).where(SubscriptionRow.id == subscription_id)
+        async with self._session_factory() as session:
+            row = (await session.execute(stmt)).scalar_one_or_none()
+        return None if row is None else _subscription_to_domain(row)
+
     async def get_platform_account(self, account_id: str) -> PlatformAccount | None:
         stmt = select(PlatformAccountRow).where(PlatformAccountRow.id == account_id)
         async with self._session_factory() as session:
@@ -146,6 +167,14 @@ class PostgresAdminEntityRepository:
         async with self._session_factory() as session:
             rows = (await session.execute(select(TenantRow))).scalars().all()
         return [_tenant_to_domain(r) for r in rows]
+
+    async def list_subscriptions(self, tenant_id: str) -> list[Subscription]:
+        if not tenant_id.strip():
+            return []
+        stmt = select(SubscriptionRow).where(SubscriptionRow.tenant_id == tenant_id)
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return [_subscription_to_domain(r) for r in rows]
 
     async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]:
         if not tenant_id.strip():
@@ -177,6 +206,28 @@ class PostgresAdminEntityRepository:
             rows = (await session.execute(stmt)).scalars().all()
         return [_rule_to_domain(r) for r in rows]
 
+    async def tenant_has_dependencies(self, tenant_id: str) -> bool:
+        tenant_uuid = _uuid(tenant_id)
+        dependency_queries = (
+            select(SubscriptionRow.id)
+            .where(SubscriptionRow.tenant_id == tenant_uuid)
+            .limit(1),
+            select(PlatformAccountRow.id)
+            .where(PlatformAccountRow.tenant_id == tenant_uuid)
+            .limit(1),
+            select(MonitoringTargetRow.id)
+            .where(MonitoringTargetRow.tenant_id == tenant_uuid)
+            .limit(1),
+            select(MessengerChannelRow.id)
+            .where(MessengerChannelRow.tenant_id == tenant_uuid)
+            .limit(1),
+        )
+        async with self._session_factory() as session:
+            for stmt in dependency_queries:
+                if (await session.execute(stmt)).first() is not None:
+                    return True
+        return False
+
     # ── create(신규 INSERT + audit, 동일 트랜잭션) ──────────────────────────────
     async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:
         values = {
@@ -189,6 +240,19 @@ class PostgresAdminEntityRepository:
             "sending_enabled": tenant.sending_enabled,
         }
         await self._insert_with_audit(TenantRow, values, audit)
+
+    async def create_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None:
+        values = {
+            "id": _uuid(subscription.id),
+            "tenant_id": _uuid(subscription.tenant_id),
+            "plan": subscription.plan,
+            "status": subscription.status.value,
+            "current_period_end": subscription.current_period_end,
+            "quotas": subscription.quotas,
+        }
+        await self._insert_with_audit(SubscriptionRow, values, audit)
 
     async def create_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
@@ -284,6 +348,21 @@ class PostgresAdminEntityRepository:
             audit,
         )
 
+    async def save_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None:
+        await self._update_with_audit(
+            SubscriptionRow,
+            subscription.id,
+            {
+                "plan": subscription.plan,
+                "status": subscription.status.value,
+                "current_period_end": subscription.current_period_end,
+                "quotas": subscription.quotas,
+            },
+            audit,
+        )
+
     async def save_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
     ) -> None:
@@ -345,6 +424,20 @@ class PostgresAdminEntityRepository:
             },
             audit,
         )
+
+    # ── delete(물리 DELETE + audit, 동일 트랜잭션) ──────────────────────────────
+    async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None:
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    delete(TenantRow).where(TenantRow.id == _uuid(tenant_id))
+                )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise AdminEntityDeleteBlockedError(
+                "연결 데이터가 있어 고객을 삭제할 수 없습니다"
+            ) from exc
 
     # ── 공통: INSERT/UPDATE + audit INSERT 를 한 세션·한 commit 으로 ─────────────
     async def _insert_with_audit(self, row_cls, values: dict, audit: AuditEntry) -> None:

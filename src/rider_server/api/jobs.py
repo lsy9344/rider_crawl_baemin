@@ -17,7 +17,8 @@ envelope·``/v1/`` 접두 규약을 그대로 계승한다.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from inspect import isawaitable
 from typing import Any, Callable
@@ -44,6 +45,7 @@ from ..services.job_result_ingest_service import JobResultIngestError
 # claim 시 부여하는 lease 기간(초). Agent heartbeat(30~60초)보다 길어 연장 여유를 둔다.
 # heartbeat 라우트 배선·설정화는 후속 — 5.3 은 단일 서버 상수로 둔다.
 DEFAULT_LEASE_SECONDS = 120.0
+DEFAULT_STALE_RECOVERY_INTERVAL_SECONDS = 30.0
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
@@ -128,6 +130,44 @@ def _job_result_ingest_service(request: Request) -> Any:
     return getattr(request.app.state, "job_result_ingest_service", None)
 
 
+def _should_recover_stale(
+    last_recovered_at: datetime | None,
+    now: datetime,
+    *,
+    interval_seconds: float = DEFAULT_STALE_RECOVERY_INTERVAL_SECONDS,
+) -> bool:
+    if last_recovered_at is None:
+        return True
+    return (now - last_recovered_at) >= timedelta(seconds=interval_seconds)
+
+
+def _invalid_job_id_http_error() -> HTTPException:
+    return HTTPException(
+        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+        detail="invalid job id",
+    )
+
+
+async def _recover_stale_if_due(
+    request: Request,
+    backend: QueueBackend,
+    *,
+    now: datetime,
+) -> int:
+    lock = getattr(request.app.state, "stale_recovery_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.stale_recovery_lock = lock
+
+    async with lock:
+        last_recovered_at = getattr(request.app.state, "stale_recovery_last_at", None)
+        if not _should_recover_stale(last_recovered_at, now):
+            return 0
+        recovered = await backend.recover_stale(now=now)
+        request.app.state.stale_recovery_last_at = now
+        return int(recovered or 0)
+
+
 # ── 라우트 ───────────────────────────────────────────────────────────────────────
 
 
@@ -144,7 +184,7 @@ async def claim_jobs(
 
     now = datetime.now(timezone.utc)
     backend = _backend(request)
-    await backend.recover_stale(now=now)
+    await _recover_stale_if_due(request, backend, now=now)
     records = await backend.claim(
         agent_id=body.agent_id,
         capabilities=body.capabilities,
@@ -198,11 +238,14 @@ async def complete_job(
     if ingest_service is not None and target_status == JOB_STATUS_SUCCEEDED:
         expected_target_id = None
         if body.result_json and body.result_json.get("result_type") == "snapshot":
-            in_flight_job = await backend.in_flight_job(
-                job_id=job_id,
-                agent_id=body.agent_id,
-                now=now,
-            )
+            try:
+                in_flight_job = await backend.in_flight_job(
+                    job_id=job_id,
+                    agent_id=body.agent_id,
+                    now=now,
+                )
+            except ValueError as exc:
+                raise _invalid_job_id_http_error() from exc
             if in_flight_job is None:
                 try:
                     outcome = await backend.complete(
@@ -213,6 +256,8 @@ async def complete_job(
                         error_code=body.error_code,
                         now=now,
                     )
+                except ValueError as exc:
+                    raise _invalid_job_id_http_error() from exc
                 except InvalidJobTransition as exc:
                     raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
                 if outcome.result == COMPLETE_NOT_FOUND:
@@ -235,6 +280,8 @@ async def complete_job(
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
+        except ValueError as exc:
+            raise _invalid_job_id_http_error() from exc
     atomic_complete = getattr(ingest_service, "complete_snapshot_job", None)
     if prepared_ingest is not None and atomic_complete is not None:
         try:
@@ -248,6 +295,8 @@ async def complete_job(
             )
             if isawaitable(outcome):
                 outcome = await outcome
+        except ValueError as exc:
+            raise _invalid_job_id_http_error() from exc
         except InvalidJobTransition as exc:
             raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
 
@@ -270,6 +319,8 @@ async def complete_job(
             error_code=body.error_code,
             now=now,
         )
+    except ValueError as exc:
+        raise _invalid_job_id_http_error() from exc
     except InvalidJobTransition as exc:
         # 진행 중이 아닌 job 으로의 전이(미정의) — 충돌로 본다(이미 종료/재할당).
         raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc

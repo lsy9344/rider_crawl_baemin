@@ -41,6 +41,8 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     Platform,
     PlatformAccount,
+    Subscription,
+    SubscriptionStatus,
     Tenant,
 )
 from rider_server.services.admin_action_service import (
@@ -51,11 +53,17 @@ from rider_server.services.admin_action_service import (
     TenantScopeViolation,
     build_diff_redacted,
 )
-from rider_server.services.channel_registration import assert_channel_transition
+from rider_server.services.channel_registration import (
+    assert_channel_transition,
+    assert_unique_kakao_rooms,
+)
 
 # ── audit action 코드(UPPER_SNAKE 기계가독 — 신규 plain-string 상수, enum 아님) ─────────
 ACTION_TENANT_CREATE = "TENANT_CREATE"
 ACTION_TENANT_UPDATE = "TENANT_UPDATE"
+ACTION_TENANT_DELETE = "TENANT_DELETE"
+ACTION_SUBSCRIPTION_CREATE = "SUBSCRIPTION_CREATE"
+ACTION_SUBSCRIPTION_UPDATE = "SUBSCRIPTION_UPDATE"
 ACTION_PLATFORM_ACCOUNT_CREATE = "PLATFORM_ACCOUNT_CREATE"
 ACTION_PLATFORM_ACCOUNT_UPDATE = "PLATFORM_ACCOUNT_UPDATE"
 ACTION_MONITORING_TARGET_CREATE = "MONITORING_TARGET_CREATE"
@@ -71,12 +79,12 @@ ACTION_DELIVERY_RULE_DEACTIVATE = "DELIVERY_RULE_DEACTIVATE"
 
 # ── target_type 코드(audit_logs.target_type) — 5.7 기존 + 5.11 신규 ──────────────────
 TARGET_TYPE_TENANT = "tenant"
+TARGET_TYPE_SUBSCRIPTION = "subscription"
 TARGET_TYPE_PLATFORM_ACCOUNT = "platform_account"
 TARGET_TYPE_DELIVERY_RULE = "delivery_rule"
 
 DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD = "인증번호"
 DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD = "coupang"
-_SECRET_REF_PREFIXES = ("vault://", "local:", "env:")
 
 
 class AdminEntityDuplicateError(ValueError):
@@ -87,6 +95,10 @@ class AdminEntityDuplicateError(ValueError):
             message = f"중복: {message}"
         super().__init__(message)
         self.field = field
+
+
+class AdminEntityDeleteBlockedError(ValueError):
+    """연결 데이터가 있어 tenant 물리 삭제를 차단해야 하는 경우."""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -112,13 +124,8 @@ def _keyword_or_default(value: str | None, default: str) -> str:
     return normalized or default
 
 
-def _secret_ref_or_empty(value: str | None, *, field_name: str) -> str:
-    normalized = (value or "").strip()
-    if not normalized:
-        return ""
-    if normalized.startswith(_SECRET_REF_PREFIXES):
-        return normalized
-    raise ValueError(f"{field_name} must be a secret ref")
+def _credential_or_empty(value: str | None) -> str:
+    return (value or "").strip()
 
 
 def _secret_change_label(old: str, new: str) -> str:
@@ -162,6 +169,8 @@ class AdminEntityRepository(Protocol):
     # ── read(get by id) ─────────────────────────────────────────────────────
     async def get_tenant(self, tenant_id: str) -> Tenant | None: ...
 
+    async def get_subscription(self, subscription_id: str) -> Subscription | None: ...
+
     async def get_platform_account(self, account_id: str) -> PlatformAccount | None: ...
 
     async def get_monitoring_target(self, target_id: str) -> MonitoringTarget | None: ...
@@ -173,6 +182,8 @@ class AdminEntityRepository(Protocol):
     # ── list(조회) ───────────────────────────────────────────────────────────
     async def list_tenants(self) -> list[Tenant]: ...
 
+    async def list_subscriptions(self, tenant_id: str) -> list[Subscription]: ...
+
     async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]: ...
 
     async def list_monitoring_targets(self, tenant_id: str) -> list[MonitoringTarget]: ...
@@ -181,8 +192,14 @@ class AdminEntityRepository(Protocol):
 
     async def list_delivery_rules(self, target_id: str) -> list[DeliveryRule]: ...
 
+    async def tenant_has_dependencies(self, tenant_id: str) -> bool: ...
+
     # ── create(신규 INSERT + audit, 동일 트랜잭션) ──────────────────────────────
     async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
+
+    async def create_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None: ...
 
     async def create_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
@@ -205,6 +222,10 @@ class AdminEntityRepository(Protocol):
     # ── save(UPDATE + audit, 동일 트랜잭션) ─────────────────────────────────────
     async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
 
+    async def save_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None: ...
+
     async def save_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
     ) -> None: ...
@@ -218,6 +239,9 @@ class AdminEntityRepository(Protocol):
     ) -> None: ...
 
     async def save_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None: ...
+
+    # ── delete(물리 DELETE + audit, 동일 트랜잭션) ──────────────────────────────
+    async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None: ...
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -237,6 +261,9 @@ class AdminEntityService:
     # ── 조회(list) — 라우트는 service 만 호출(repo 직접 접근 금지) ─────────────────
     async def list_tenants(self) -> list[Tenant]:
         return await self._repo.list_tenants()
+
+    async def list_subscriptions(self, tenant_id: str) -> list[Subscription]:
+        return await self._repo.list_subscriptions(tenant_id)
 
     async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]:
         return await self._repo.list_platform_accounts(tenant_id)
@@ -299,6 +326,16 @@ class AdminEntityService:
         if tenant.id != tenant_id:
             raise TenantScopeViolation(TARGET_TYPE_TENANT, tenant_id)
         return tenant
+
+    async def _scoped_subscription(
+        self, subscription_id: str, *, tenant_id: str
+    ) -> Subscription:
+        subscription = await self._repo.get_subscription(subscription_id)
+        if subscription is None:
+            raise AdminActionNotFound(TARGET_TYPE_SUBSCRIPTION, subscription_id)
+        if subscription.tenant_id != tenant_id:
+            raise TenantScopeViolation(TARGET_TYPE_SUBSCRIPTION, subscription_id)
+        return subscription
 
     async def _scoped_platform_account(
         self, account_id: str, *, tenant_id: str
@@ -442,8 +479,118 @@ class AdminEntityService:
         await self._repo.save_tenant(updated, audit)
         return updated
 
+    async def delete_tenant(
+        self,
+        tenant_id: str,
+        *,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> Tenant:
+        """고객 물리 삭제 — 연결 데이터가 하나라도 있으면 삭제하지 않는다."""
+
+        existing = await self._scoped_tenant(tenant_id)
+        if await self._repo.tenant_has_dependencies(tenant_id):
+            raise AdminEntityDeleteBlockedError(
+                "연결 데이터가 있어 고객을 삭제할 수 없습니다"
+            )
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_TENANT_DELETE,
+            target_type=TARGET_TYPE_TENANT,
+            target_id=tenant_id,
+            at=at,
+            diff={
+                "op": "delete",
+                "name": existing.name,
+                "from_status": existing.status.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.delete_tenant(tenant_id, audit)
+        return existing
+
     # ══════════════════════════════════════════════════════════════════════
-    # 플랫폼 계정 PlatformAccount — create/update(secret 은 ref 핸들만, AC3)
+    # 구독 Subscription — create/update(status)
+    # ══════════════════════════════════════════════════════════════════════
+    async def create_subscription(
+        self,
+        *,
+        entity_id: str,
+        tenant_id: str,
+        plan: str,
+        status: SubscriptionStatus,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> Subscription:
+        """고객 구독을 생성한다. scheduler 는 이 상태와 tenant lifecycle 을 같이 본다."""
+
+        await self._scoped_tenant(tenant_id)
+        normalized_plan = (plan or "").strip() or "basic"
+        subscription = Subscription(
+            id=entity_id,
+            tenant_id=tenant_id,
+            plan=normalized_plan,
+            status=status,
+        )
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_SUBSCRIPTION_CREATE,
+            target_type=TARGET_TYPE_SUBSCRIPTION,
+            target_id=entity_id,
+            at=at,
+            diff={
+                "op": "create",
+                "tenant_id": tenant_id,
+                "plan": normalized_plan,
+                "to_status": status.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.create_subscription(subscription, audit)
+        return subscription
+
+    async def update_subscription(
+        self,
+        subscription_id: str,
+        *,
+        tenant_id: str,
+        status: SubscriptionStatus,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> Subscription:
+        """구독 실행 게이트 상태를 편집한다."""
+
+        existing = await self._scoped_subscription(subscription_id, tenant_id=tenant_id)
+        updated = replace(existing, status=status)
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_SUBSCRIPTION_UPDATE,
+            target_type=TARGET_TYPE_SUBSCRIPTION,
+            target_id=subscription_id,
+            at=at,
+            diff={
+                "from_status": existing.status.value,
+                "to_status": updated.status.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.save_subscription(updated, audit)
+        return updated
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 플랫폼 계정 PlatformAccount — create/update(password 류는 DB에 직접 저장)
     # ══════════════════════════════════════════════════════════════════════
     async def create_platform_account(
         self,
@@ -463,7 +610,7 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정을 생성한다 — password류 자격증명은 ref 핸들만 저장한다."""
+        """플랫폼 계정을 생성한다 — password류 자격증명은 입력값을 DB에 저장한다."""
 
         await self._scoped_tenant(tenant_id)  # 부모 tenant 존재/scope 확인
         email_subject_keyword = _keyword_or_default(
@@ -480,11 +627,10 @@ class AdminEntityService:
             platform=platform,
             label=label,
             username=username.strip(),
-            password=_secret_ref_or_empty(password, field_name="password"),
+            password=_credential_or_empty(password),
             verification_email_address=verification_email_address.strip(),
-            verification_email_app_password=_secret_ref_or_empty(
-                verification_email_app_password,
-                field_name="verification_email_app_password",
+            verification_email_app_password=_credential_or_empty(
+                verification_email_app_password
             ),
             verification_email_subject_keyword=email_subject_keyword,
             verification_email_sender_keyword=email_sender_keyword,
@@ -527,7 +673,7 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정 라벨/자격증명을 편집한다(password류는 ref 핸들만 저장)."""
+        """플랫폼 계정 라벨/자격증명을 편집한다(password류는 입력값을 DB에 저장)."""
 
         existing = await self._scoped_platform_account(account_id, tenant_id=tenant_id)
         new_label = label if label is not None and label.strip() else existing.label
@@ -535,7 +681,7 @@ class AdminEntityService:
             username.strip() if username is not None and username.strip() else existing.username
         )
         new_password = (
-            _secret_ref_or_empty(password, field_name="password")
+            _credential_or_empty(password)
             if password is not None and password.strip()
             else existing.password
         )
@@ -545,10 +691,7 @@ class AdminEntityService:
             else existing.verification_email_address
         )
         new_email_app_password = (
-            _secret_ref_or_empty(
-                verification_email_app_password,
-                field_name="verification_email_app_password",
-            )
+            _credential_or_empty(verification_email_app_password)
             if verification_email_app_password is not None
             and verification_email_app_password.strip()
             else existing.verification_email_app_password
@@ -588,6 +731,11 @@ class AdminEntityService:
             diff={
                 "from_label": existing.label,
                 "to_label": updated.label,
+                "password_change": _secret_change_label(existing.password, updated.password),
+                "verification_email_app_password_change": _secret_change_label(
+                    existing.verification_email_app_password,
+                    updated.verification_email_app_password,
+                ),
                 "verification_email_subject_keyword": updated.verification_email_subject_keyword,
                 "verification_email_sender_keyword": updated.verification_email_sender_keyword,
                 "reason": reason,
@@ -780,7 +928,7 @@ class AdminEntityService:
         return updated
 
     # ══════════════════════════════════════════════════════════════════════
-    # 메시지 채널 MessengerChannel — create(PENDING)/update(라우팅)/deactivate(INACTIVE)
+    # 메시지 채널 MessengerChannel — create/update(라우팅)/deactivate(INACTIVE)
     # ══════════════════════════════════════════════════════════════════════
     async def create_messenger_channel(
         self,
@@ -797,13 +945,19 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> MessengerChannel:
-        """신규 채널을 ``PENDING`` 으로 사전 생성(pre-provision)한다 — 선택적 등록 코드(라우팅용).
+        """신규 채널을 생성한다.
 
-        register/verify/activate 전이는 5.5 ``ChannelRegistrationService`` 소유다(여기는 생성만).
+        Telegram 은 register/verify/activate 흐름을 거치므로 ``PENDING`` 으로 만들고, Kakao 는 방명이
+        있으면 추가 등록 handshake 가 없어 바로 ``ACTIVE`` 로 만든다.
         ``telegram_chat_id``/``thread_id``/``kakao_room_name`` 은 라우팅 식별자라 secret 아님(ref화 0).
         """
 
         await self._scoped_tenant(tenant_id)
+        initial_state = (
+            MessengerChannelState.ACTIVE
+            if messenger is Messenger.KAKAO and (kakao_room_name or "").strip()
+            else MessengerChannelState.PENDING
+        )
         channel = MessengerChannel(
             id=entity_id,
             tenant_id=tenant_id,
@@ -811,8 +965,15 @@ class AdminEntityService:
             telegram_chat_id=telegram_chat_id or None,
             thread_id=thread_id or None,
             kakao_room_name=kakao_room_name or None,
-            state=MessengerChannelState.PENDING,
+            state=initial_state,
         )
+        if channel.state is MessengerChannelState.ACTIVE and channel.messenger is Messenger.KAKAO:
+            active_channels = [
+                existing
+                for existing in await self._repo.list_messenger_channels(tenant_id)
+                if existing.state is MessengerChannelState.ACTIVE
+            ]
+            assert_unique_kakao_rooms([*active_channels, channel])
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_MESSENGER_CHANNEL_CREATE,
@@ -849,19 +1010,40 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> MessengerChannel:
-        """채널 라우팅 필드(chat_id/thread_id/방명)만 편집한다(상태 전이 아님 — 5.5 소유)."""
+        """채널 라우팅 필드(chat_id/thread_id/방명)를 편집한다.
+
+        PENDING Kakao 채널은 방명이 채워지면 별도 handshake 없이 ACTIVE 로 전환한다.
+        """
 
         existing = await self._scoped_channel(channel_id, tenant_id=tenant_id)
+        next_kakao_room_name = (
+            kakao_room_name if kakao_room_name is not None else existing.kakao_room_name
+        )
+        next_state = (
+            MessengerChannelState.ACTIVE
+            if (
+                existing.messenger is Messenger.KAKAO
+                and existing.state is MessengerChannelState.PENDING
+                and (next_kakao_room_name or "").strip()
+            )
+            else existing.state
+        )
         updated = replace(
             existing,
             telegram_chat_id=(
                 telegram_chat_id if telegram_chat_id is not None else existing.telegram_chat_id
             ),
             thread_id=thread_id if thread_id is not None else existing.thread_id,
-            kakao_room_name=(
-                kakao_room_name if kakao_room_name is not None else existing.kakao_room_name
-            ),
+            kakao_room_name=next_kakao_room_name,
+            state=next_state,
         )
+        if updated.state is MessengerChannelState.ACTIVE and updated.messenger is Messenger.KAKAO:
+            active_channels = [
+                channel
+                for channel in await self._repo.list_messenger_channels(tenant_id)
+                if channel.state is MessengerChannelState.ACTIVE and channel.id != updated.id
+            ]
+            assert_unique_kakao_rooms([*active_channels, updated])
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_MESSENGER_CHANNEL_UPDATE,
@@ -873,6 +1055,8 @@ class AdminEntityService:
                 "telegram_chat_id": updated.telegram_chat_id,
                 "thread_id": updated.thread_id,
                 "kakao_room_name": updated.kakao_room_name,
+                "from_state": existing.state.value,
+                "to_state": updated.state.value,
                 "reason": reason,
             },
             source=source,
@@ -1054,6 +1238,7 @@ class InMemoryAdminEntityRepository:
 
     def __init__(self) -> None:
         self._tenants: dict[str, Tenant] = {}
+        self._subscriptions: dict[str, Subscription] = {}
         self._accounts: dict[str, PlatformAccount] = {}
         self._targets: dict[str, MonitoringTarget] = {}
         self._channels: dict[str, MessengerChannel] = {}
@@ -1064,6 +1249,9 @@ class InMemoryAdminEntityRepository:
     # ── read(get) ───────────────────────────────────────────────────────────
     async def get_tenant(self, tenant_id: str) -> Tenant | None:
         return self._tenants.get(tenant_id)
+
+    async def get_subscription(self, subscription_id: str) -> Subscription | None:
+        return self._subscriptions.get(subscription_id)
 
     async def get_platform_account(self, account_id: str) -> PlatformAccount | None:
         return self._accounts.get(account_id)
@@ -1081,6 +1269,9 @@ class InMemoryAdminEntityRepository:
     async def list_tenants(self) -> list[Tenant]:
         return list(self._tenants.values())
 
+    async def list_subscriptions(self, tenant_id: str) -> list[Subscription]:
+        return [s for s in self._subscriptions.values() if s.tenant_id == tenant_id]
+
     async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]:
         return [a for a in self._accounts.values() if a.tenant_id == tenant_id]
 
@@ -1093,9 +1284,23 @@ class InMemoryAdminEntityRepository:
     async def list_delivery_rules(self, target_id: str) -> list[DeliveryRule]:
         return [r for r in self._rules.values() if r.target_id == target_id]
 
+    async def tenant_has_dependencies(self, tenant_id: str) -> bool:
+        return (
+            any(s.tenant_id == tenant_id for s in self._subscriptions.values())
+            or any(a.tenant_id == tenant_id for a in self._accounts.values())
+            or any(t.tenant_id == tenant_id for t in self._targets.values())
+            or any(c.tenant_id == tenant_id for c in self._channels.values())
+        )
+
     # ── create + audit(같은 트랜잭션 모사) ──────────────────────────────────────
     async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:
         self._tenants[tenant.id] = tenant
+        self.audits.append(audit)
+
+    async def create_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None:
+        self._subscriptions[subscription.id] = subscription
         self.audits.append(audit)
 
     async def create_platform_account(
@@ -1131,6 +1336,12 @@ class InMemoryAdminEntityRepository:
         self._tenants[tenant.id] = tenant
         self.audits.append(audit)
 
+    async def save_subscription(
+        self, subscription: Subscription, audit: AuditEntry
+    ) -> None:
+        self._subscriptions[subscription.id] = subscription
+        self.audits.append(audit)
+
     async def save_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
     ) -> None:
@@ -1153,9 +1364,17 @@ class InMemoryAdminEntityRepository:
         self._rules[rule.id] = rule
         self.audits.append(audit)
 
+    # ── delete + audit(같은 트랜잭션 모사) ─────────────────────────────────────
+    async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None:
+        self._tenants.pop(tenant_id, None)
+        self.audits.append(audit)
+
     # ── seed(테스트 전용) ──────────────────────────────────────────────────────
     def seed_tenant(self, tenant: Tenant) -> None:
         self._tenants[tenant.id] = tenant
+
+    def seed_subscription(self, subscription: Subscription) -> None:
+        self._subscriptions[subscription.id] = subscription
 
     def seed_platform_account(self, account: PlatformAccount) -> None:
         self._accounts[account.id] = account

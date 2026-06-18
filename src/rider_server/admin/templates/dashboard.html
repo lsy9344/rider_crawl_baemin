@@ -233,6 +233,7 @@
     legend { font-weight: 600; font-size: 0.78rem; padding: 0.1rem 0.5rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
     #view-manage label { display: inline-flex; flex-direction: column; gap: 0.3rem; margin: 0 0.7rem 0.75rem 0; vertical-align: bottom; font-size: 0.72rem; font-weight: 500; color: var(--muted-foreground); }
     #view-manage input[type="text"], #view-manage input[type="number"], #view-manage select { font-family: var(--font-mono); font-size: 0.82rem; padding: 0.46rem 0.6rem; min-width: 11rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    #view-manage .field-help { max-width: 13rem; font-size: 0.68rem; line-height: 1.35; color: var(--muted-foreground); }
     #view-manage input:focus, #view-manage select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
     #view-manage input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--primary); }
     #view-manage button { font-family: var(--font-sans); font-weight: 500; font-size: 0.78rem; cursor: pointer; padding: 0.46rem 0.85rem; margin: 0 0.4rem 0.5rem 0; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs); }
@@ -244,7 +245,10 @@
     .action-result.muted { color: var(--muted-foreground); }
     .action-result.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--card)); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
     .action-result.err { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
+    .action-result.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--card)); border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); }
     .action-result.ok::before { content: "✓"; font-weight: 700; } .action-result.err::before { content: "!"; font-weight: 700; }
+    .inline-action-status.action-result { display: inline-flex; width: fit-content; min-height: 2rem; padding: 0.36rem 0.62rem; margin: 0 0 0.5rem 0.15rem; vertical-align: middle; border-radius: 999px; white-space: nowrap; }
+    .inline-action-status:empty { display: none; }
 
     /* ── 업체 상세 드로어 ───────────────────────────────────────────────── */
     .scrim { position: fixed; inset: 0; background: hsl(0 0% 0% / 0.5); z-index: 80; display: none; }
@@ -336,8 +340,8 @@
       </div>
     </div>
     <nav class="modetabs" role="tablist" aria-label="모드">
-      <button class="modetab" role="tab" aria-selected="true" onclick="switchMode('monitor', this)">모니터링 <span class="cnt">{{ tg_total }}</span></button>
-      <button class="modetab" role="tab" aria-selected="false" onclick="switchMode('manage', this)">관리</button>
+      <button class="modetab" role="tab" aria-selected="true" data-mode="monitor" onclick="switchMode('monitor', this)">모니터링 <span class="cnt">{{ tg_total }}</span></button>
+      <button class="modetab" role="tab" aria-selected="false" data-mode="manage" onclick="switchMode('manage', this)">관리</button>
     </nav>
   </header>
 
@@ -445,12 +449,18 @@
       if (b) b.textContent = document.documentElement.classList.contains("dark") ? "◐ 라이트" : "☀ 다크"; }
 
     // ── 모드 전환 ──
-    function switchMode(mode, btn) {
+    function initialMode() {
+      return location.hash === "#manage" || new URLSearchParams(location.search).get("mode") === "manage" ? "manage" : "monitor";
+    }
+    function switchMode(mode, btn, opts) {
       document.querySelectorAll(".modetab").forEach(function (t) { t.setAttribute("aria-selected", "false"); });
-      btn.setAttribute("aria-selected", "true");
+      btn = btn || document.querySelector('.modetab[data-mode="' + mode + '"]');
+      if (btn) btn.setAttribute("aria-selected", "true");
       document.getElementById("view-monitor").hidden = (mode !== "monitor");
       document.getElementById("view-manage").hidden = (mode !== "manage");
-      window.scrollTo({ top: 0 });
+      if (mode === "manage") history.replaceState(null, "", "#manage");
+      else if (location.hash === "#manage") history.replaceState(null, "", location.pathname + location.search);
+      if (!opts || !opts.preserveScroll) window.scrollTo({ top: 0 });
     }
 
     // ── 갱신 시각 stamp + 폴링 실패 표시(라이브 신뢰 보호) ──
@@ -639,7 +649,7 @@
     }
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); trapDrawerFocus(e); });
 
-    syncThemeLabel(); stampUpdated(); openInitialTarget();
+    syncThemeLabel(); stampUpdated(); switchMode(initialMode(), document.querySelector('.modetab[data-mode="' + initialMode() + '"]'), {preserveScroll: true}); openInitialTarget();
   </script>
 </body>
 </html>

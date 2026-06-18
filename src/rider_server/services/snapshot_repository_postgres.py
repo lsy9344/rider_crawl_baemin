@@ -319,26 +319,29 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
     ) -> None:
         if self._telegram_sender is None:
             return
-        log = await _attempt_telegram_delivery(
-            channel=delivery.channel,
-            job=delivery.job,
-            message=delivery.message,
-            log_id=str(delivery.log_id),
-            collected_at=delivery.collected_at,
-            now=now,
-            send=self._telegram_sender,
-        )
-        async with self._session_factory() as session:
-            await session.execute(
-                update(DeliveryLogRow)
-                .where(DeliveryLogRow.id == delivery.log_id)
-                .values(
-                    status=log.status.value,
-                    error_code=log.error_code,
-                    sent_at=log.sent_at,
-                )
+        try:
+            log = await _attempt_telegram_delivery(
+                channel=delivery.channel,
+                job=delivery.job,
+                message=delivery.message,
+                log_id=str(delivery.log_id),
+                collected_at=delivery.collected_at,
+                now=now,
+                send=self._telegram_sender,
             )
-            await session.commit()
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(DeliveryLogRow)
+                    .where(DeliveryLogRow.id == delivery.log_id)
+                    .values(
+                        status=log.status.value,
+                        error_code=log.error_code,
+                        sent_at=log.sent_at,
+                    )
+                )
+                await session.commit()
+        except Exception:
+            return
 
 
 def _record_scoped_to_locked_job(
