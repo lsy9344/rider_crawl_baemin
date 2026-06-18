@@ -76,6 +76,7 @@ TARGET_TYPE_DELIVERY_RULE = "delivery_rule"
 
 DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD = "인증번호"
 DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD = "coupang"
+_SECRET_REF_PREFIXES = ("vault://", "local:", "env:")
 
 
 class AdminEntityDuplicateError(ValueError):
@@ -109,6 +110,15 @@ def is_center_name_risky(platform: Platform, center_name: str) -> bool:
 def _keyword_or_default(value: str | None, default: str) -> str:
     normalized = (value or "").strip()
     return normalized or default
+
+
+def _secret_ref_or_empty(value: str | None, *, field_name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return ""
+    if normalized.startswith(_SECRET_REF_PREFIXES):
+        return normalized
+    raise ValueError(f"{field_name} must be a secret ref")
 
 
 def _secret_change_label(old: str, new: str) -> str:
@@ -433,7 +443,7 @@ class AdminEntityService:
         return updated
 
     # ══════════════════════════════════════════════════════════════════════
-    # 플랫폼 계정 PlatformAccount — create/update(secret 은 *_ref 핸들만, AC3)
+    # 플랫폼 계정 PlatformAccount — create/update(secret 은 ref 핸들만, AC3)
     # ══════════════════════════════════════════════════════════════════════
     async def create_platform_account(
         self,
@@ -453,7 +463,7 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정을 생성한다 — 자격증명은 평문으로 DB에 저장한다."""
+        """플랫폼 계정을 생성한다 — password류 자격증명은 ref 핸들만 저장한다."""
 
         await self._scoped_tenant(tenant_id)  # 부모 tenant 존재/scope 확인
         email_subject_keyword = _keyword_or_default(
@@ -470,9 +480,12 @@ class AdminEntityService:
             platform=platform,
             label=label,
             username=username.strip(),
-            password=password,
+            password=_secret_ref_or_empty(password, field_name="password"),
             verification_email_address=verification_email_address.strip(),
-            verification_email_app_password=verification_email_app_password,
+            verification_email_app_password=_secret_ref_or_empty(
+                verification_email_app_password,
+                field_name="verification_email_app_password",
+            ),
             verification_email_subject_keyword=email_subject_keyword,
             verification_email_sender_keyword=email_sender_keyword,
             auth_state=BaeminAuthState.UNKNOWN,
@@ -514,7 +527,7 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정 라벨/자격증명을 편집한다(평문 DB 저장)."""
+        """플랫폼 계정 라벨/자격증명을 편집한다(password류는 ref 핸들만 저장)."""
 
         existing = await self._scoped_platform_account(account_id, tenant_id=tenant_id)
         new_label = label if label is not None and label.strip() else existing.label
@@ -522,7 +535,9 @@ class AdminEntityService:
             username.strip() if username is not None and username.strip() else existing.username
         )
         new_password = (
-            password if password is not None and password.strip() else existing.password
+            _secret_ref_or_empty(password, field_name="password")
+            if password is not None and password.strip()
+            else existing.password
         )
         new_email_address = (
             verification_email_address.strip()
@@ -530,7 +545,10 @@ class AdminEntityService:
             else existing.verification_email_address
         )
         new_email_app_password = (
-            verification_email_app_password
+            _secret_ref_or_empty(
+                verification_email_app_password,
+                field_name="verification_email_app_password",
+            )
             if verification_email_app_password is not None
             and verification_email_app_password.strip()
             else existing.verification_email_app_password

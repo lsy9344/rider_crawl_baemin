@@ -52,8 +52,26 @@ def test_compose_defines_durable_db_and_migration_service() -> None:
     assert "\n  migrate:\n" in compose
     assert "python -m rider_server.db.migrate upgrade head" in compose
     assert "DATABASE_URL" in compose
+    assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in compose
     assert "condition: service_healthy" in compose
     assert "condition: service_completed_successfully" in compose
+
+
+def test_compose_backend_host_port_is_configurable() -> None:
+    compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "${RIDER_BACKEND_PORT:-8000}:8000" in compose
+
+
+def test_compose_defines_backend_and_scheduler_healthchecks() -> None:
+    compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+
+    backend = compose[compose.index("\n  backend-api:\n") : compose.index("\n  scheduler:\n")]
+    scheduler = compose[compose.index("\n  scheduler:\n") :]
+    assert "healthcheck:" in backend
+    assert "http://127.0.0.1:8000/health" in backend
+    assert "healthcheck:" in scheduler
+    assert "SCHEDULER_HEALTH_FILE" in scheduler
 
 
 def test_terraform_defaults_do_not_publicly_expose_app_port() -> None:
@@ -114,6 +132,22 @@ def test_readme_documents_coupang_peak_dashboard_as_single_primary_url() -> None
     assert "| `PEAK_DASHBOARD_URL` | 쿠팡 피크 대시보드 보조 URL" not in readme
 
 
+def test_readme_local_server_commands_install_server_extra() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert 'pip install -e ".[dev,server]"' in readme
+    server_section = readme[readme.index("## 서버/DB 실행") :]
+    assert "server extra" in server_section
+
+
+def test_readme_documents_migration_backup_confirmation() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    server_section = readme[readme.index("## 서버/DB 실행") :]
+    assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in server_section
+    assert "백업 확인" in server_section
+
+
 def test_wheel_includes_crawl_server_and_agent_without_server_deps_in_base() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
@@ -127,6 +161,66 @@ def test_wheel_includes_crawl_server_and_agent_without_server_deps_in_base() -> 
             dependency.lower().startswith(server_only_dependency)
             for dependency in base_dependencies
         )
+
+
+def test_server_dockerfile_comment_matches_current_packaging() -> None:
+    dockerfile = Path("deploy/Dockerfile.server").read_text(encoding="utf-8")
+
+    assert "패키징하지 않으므로" not in dockerfile
+    assert 'packages=["src/rider_crawl"]' not in dockerfile
+    assert "src/" in dockerfile
+
+
+def test_wheel_contains_migrations_for_installed_migration_cli() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include["migrations"] == "migrations"
+
+
+def test_test_runner_does_not_rewrite_virtualenv_site_packages() -> None:
+    script = Path("scripts/test.ps1").read_text(encoding="utf-8")
+
+    assert "_editable_impl_rider_crawl.pth" not in script
+    assert "Set-Content" not in script
+
+
+def test_create_app_reuses_single_database_engine_for_default_components(
+    monkeypatch,
+) -> None:
+    from rider_server import main as server_main
+
+    class _Engine:
+        pass
+
+    engine = _Engine()
+    session_factory = object()
+    created_urls: list[str] = []
+
+    def _fake_create_engine(database_url: str):
+        created_urls.append(database_url)
+        return engine
+
+    def _fake_create_session_factory(engine_arg):
+        assert engine_arg is engine
+        return session_factory
+
+    monkeypatch.setattr(server_main, "create_engine", _fake_create_engine)
+    monkeypatch.setattr(server_main, "create_session_factory", _fake_create_session_factory)
+
+    settings = Settings(
+        app_env="production",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        database_url="postgresql+asyncpg://user:pass@db:5432/rider",
+    )
+
+    app = server_main.create_app(settings)
+
+    assert created_urls == [settings.database_url]
+    assert app.state.db_engine is engine
+    assert app.state.db_session_factory is session_factory
 
 
 def test_pyinstaller_spec_includes_imap_2fa_runtime_modules() -> None:
@@ -155,7 +249,10 @@ def test_migration_entrypoint_uses_programmatic_utf8_safe_config(monkeypatch) ->
 
     rc = migrate.main(
         ["upgrade", "head"],
-        environ={"DATABASE_URL": "postgresql+asyncpg://user:pass@db:5432/rider"},
+        environ={
+            "DATABASE_URL": "postgresql+asyncpg://user:pass@db:5432/rider",
+            "RIDER_DB_MIGRATION_BACKUP_CONFIRMED": "1",
+        },
     )
 
     assert rc == 0
@@ -163,6 +260,50 @@ def test_migration_entrypoint_uses_programmatic_utf8_safe_config(monkeypatch) ->
     assert captured["sql"] is False
     assert str(captured["script_location"]).endswith("migrations")
     assert captured["url"] == "postgresql+asyncpg://user:pass@db:5432/rider"
+
+
+def test_migration_entrypoint_requires_backup_confirmation_for_online_upgrade(
+    monkeypatch,
+    capsys,
+) -> None:
+    from rider_server.db import migrate
+
+    called = False
+
+    def _fake_upgrade(config, revision, *, sql=False):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(migrate.command, "upgrade", _fake_upgrade)
+
+    rc = migrate.main(
+        ["upgrade", "head"],
+        environ={"DATABASE_URL": "postgresql+asyncpg://user:pass@db:5432/rider"},
+    )
+
+    assert rc == 2
+    assert called is False
+    assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in capsys.readouterr().out
+
+
+def test_migration_sql_render_does_not_require_backup_confirmation(monkeypatch) -> None:
+    from rider_server.db import migrate
+
+    captured: dict[str, object] = {}
+
+    def _fake_upgrade(config, revision, *, sql=False):
+        captured["revision"] = revision
+        captured["sql"] = sql
+
+    monkeypatch.setattr(migrate.command, "upgrade", _fake_upgrade)
+
+    rc = migrate.main(
+        ["upgrade", "head", "--sql"],
+        environ={"DATABASE_URL": "postgresql+asyncpg://user:pass@db:5432/rider"},
+    )
+
+    assert rc == 0
+    assert captured == {"revision": "head", "sql": True}
 
 
 def test_migration_revision_ids_fit_alembic_default_version_column() -> None:

@@ -84,7 +84,31 @@ from .services.tenant_telegram_config import TenantTelegramConfigProvider
 from .settings import Settings
 
 
-def _default_queue_backend(settings: Settings) -> QueueBackend:
+def _build_postgres_runtime(settings: Settings) -> tuple[Any | None, Any | None]:
+    """Create one lazy PostgreSQL engine/session factory for the app process."""
+
+    if not settings.database_url:
+        return None, None
+    engine = create_engine(settings.database_url)
+    return engine, create_session_factory(engine)
+
+
+def _postgres_session_factory(
+    settings: Settings,
+    session_factory: Any | None,
+) -> Any | None:
+    if not settings.database_url:
+        return None
+    if session_factory is not None:
+        return session_factory
+    engine = create_engine(settings.database_url)
+    return create_session_factory(engine)
+
+
+def _default_queue_backend(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> QueueBackend:
     """settings 로 기본 backend 를 고른다 — ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 in-memory.
 
     엔진 생성은 lazy connect 라 import/기동 시 DB 연결을 강제하지 않는다(미설정 환경 안전).
@@ -92,12 +116,14 @@ def _default_queue_backend(settings: Settings) -> QueueBackend:
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresQueueBackend(create_session_factory(engine))
+        return PostgresQueueBackend(_postgres_session_factory(settings, session_factory))
     return InMemoryQueueBackend()
 
 
-def _default_channel_repository(settings: Settings) -> ChannelRepository:
+def _default_channel_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> ChannelRepository:
     """채널 등록/검증/활성 영속 repository 기본값(``_default_queue_backend`` 와 동형 선택).
 
     ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 in-memory(dev/무-DB 안전). 테스트는
@@ -105,12 +131,14 @@ def _default_channel_repository(settings: Settings) -> ChannelRepository:
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresChannelRepository(create_session_factory(engine))
+        return PostgresChannelRepository(_postgres_session_factory(settings, session_factory))
     return InMemoryChannelRepository()
 
 
-def _default_admin_action_repository(settings: Settings) -> AdminActionRepository:
+def _default_admin_action_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> AdminActionRepository:
     """Admin 액션 write+audit repository 기본값(``_default_dashboard_repository`` 와 동형 선택).
 
     ``DATABASE_URL`` 있으면 PostgreSQL(전이 UPDATE + audit INSERT 동일 트랜잭션), 없으면
@@ -119,12 +147,16 @@ def _default_admin_action_repository(settings: Settings) -> AdminActionRepositor
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresAdminActionRepository(create_session_factory(engine))
+        return PostgresAdminActionRepository(
+            _postgres_session_factory(settings, session_factory)
+        )
     return InMemoryAdminActionRepository()
 
 
-def _default_admin_entity_repository(settings: Settings) -> AdminEntityRepository:
+def _default_admin_entity_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> AdminEntityRepository:
     """Admin 엔티티 CRUD write+audit repository 기본값(``_default_admin_action_repository`` 와 동형).
 
     ``DATABASE_URL`` 있으면 PostgreSQL(신규 INSERT/UPDATE + audit INSERT 동일 트랜잭션), 없으면
@@ -133,12 +165,16 @@ def _default_admin_entity_repository(settings: Settings) -> AdminEntityRepositor
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresAdminEntityRepository(create_session_factory(engine))
+        return PostgresAdminEntityRepository(
+            _postgres_session_factory(settings, session_factory)
+        )
     return InMemoryAdminEntityRepository()
 
 
-def _default_agent_token_repository(settings: Settings) -> AgentTokenRepository:
+def _default_agent_token_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> AgentTokenRepository:
     """Agent token revoke/rotate repository 기본값(``_default_admin_action_repository`` 와 동형).
 
     ``DATABASE_URL`` 있으면 PostgreSQL(``agents.token_revoked_at`` UPDATE + audit INSERT 동일
@@ -147,21 +183,28 @@ def _default_agent_token_repository(settings: Settings) -> AgentTokenRepository:
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresAgentTokenRepository(create_session_factory(engine))
+        return PostgresAgentTokenRepository(
+            _postgres_session_factory(settings, session_factory)
+        )
     return InMemoryAgentTokenRepository()
 
 
-def _default_agent_registry(settings: Settings) -> AgentRegistry:
+def _default_agent_registry(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> AgentRegistry:
     """Agent register/heartbeat registry 기본값(``DATABASE_URL`` 있으면 PostgreSQL)."""
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresAgentRegistry(create_session_factory(engine))
+        return PostgresAgentRegistry(_postgres_session_factory(settings, session_factory))
     return InMemoryAgentRegistry()
 
 
-def _default_job_result_ingest_service(settings: Settings) -> JobResultIngestService | None:
+def _default_job_result_ingest_service(
+    settings: Settings,
+    session_factory: Any | None = None,
+    provider: TenantTelegramConfigProvider | None = None,
+) -> JobResultIngestService | None:
     """Agent complete snapshot ingest 기본값.
 
     ``DATABASE_URL`` 이 있으면 complete 성공 결과를 실제 ``snapshots`` 테이블에 저장한다.
@@ -169,16 +212,19 @@ def _default_job_result_ingest_service(settings: Settings) -> JobResultIngestSer
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        provider = _default_tenant_telegram_provider(settings)
+        factory = _postgres_session_factory(settings, session_factory)
+        provider = provider or _default_tenant_telegram_provider(settings, factory)
         return PostgresSnapshotIngestRepository(
-            create_session_factory(engine),
+            factory,
             telegram_sender=_default_telegram_sender(settings, provider),
         )
     return None
 
 
-def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
+def _default_dashboard_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> DashboardRepository:
     """읽기 전용 대시보드 repository 기본값(``_default_queue_backend`` 와 동형 선택).
 
     ``DATABASE_URL`` 있으면 PostgreSQL 파생 집계 구현, 없으면 in-memory(dev/무-DB 안전). 테스트는
@@ -187,12 +233,16 @@ def _default_dashboard_repository(settings: Settings) -> DashboardRepository:
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresDashboardRepository(create_session_factory(engine))
+        return PostgresDashboardRepository(
+            _postgres_session_factory(settings, session_factory)
+        )
     return InMemoryDashboardRepository()
 
 
-def _default_metrics_repository(settings: Settings) -> MetricsRepository:
+def _default_metrics_repository(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> MetricsRepository:
     """읽기 전용 운영 지표 repository 기본값(``_default_dashboard_repository`` 와 동형 선택).
 
     ``DATABASE_URL`` 있으면 PostgreSQL 파생 집계 구현, 없으면 in-memory(dev/무-DB 안전). 테스트는
@@ -201,8 +251,7 @@ def _default_metrics_repository(settings: Settings) -> MetricsRepository:
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return PostgresMetricsRepository(create_session_factory(engine))
+        return PostgresMetricsRepository(_postgres_session_factory(settings, session_factory))
     return InMemoryMetricsRepository()
 
 
@@ -217,7 +266,10 @@ def _resolve_env_secret_ref(ref: str | None) -> str | None:
     return os.environ.get(name) or None
 
 
-def _default_tenant_telegram_provider(settings: Settings) -> TenantTelegramConfigProvider | None:
+def _default_tenant_telegram_provider(
+    settings: Settings,
+    session_factory: Any | None = None,
+) -> TenantTelegramConfigProvider | None:
     """tenant 별 텔레그램 설정 provider 기본값 — ``DATABASE_URL`` 있으면 PostgreSQL, 없으면 None.
 
     None 이면 런타임 경로는 env ref(전역)로만 동작한다(무-DB 개발/테스트 안전). 0012 이후 운영
@@ -225,8 +277,9 @@ def _default_tenant_telegram_provider(settings: Settings) -> TenantTelegramConfi
     """
 
     if settings.database_url:
-        engine = create_engine(settings.database_url)
-        return TenantTelegramConfigProvider(create_session_factory(engine))
+        return TenantTelegramConfigProvider(
+            _postgres_session_factory(settings, session_factory)
+        )
     return None
 
 
@@ -396,18 +449,31 @@ def create_app(
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
     _require_database_for_production(app.state.settings)
+    db_engine, db_session_factory = _build_postgres_runtime(app.state.settings)
+    app.state.db_engine = db_engine
+    app.state.db_session_factory = db_session_factory
+    if db_engine is not None:
+        async def _dispose_db_engine() -> None:
+            await db_engine.dispose()
+
+        app.router.on_shutdown.append(_dispose_db_engine)
     # 프로세스 기동 시점(단조 시계) — /metrics uptime 계산 기준.
     app.state.start_monotonic = time.monotonic()
     # Agent API queue backend(주입 가능 seam) + bearer→agent_id 해석 seam(5.8 이 교체).
-    app.state.queue_backend = queue_backend or _default_queue_backend(app.state.settings)
+    app.state.queue_backend = queue_backend or _default_queue_backend(
+        app.state.settings,
+        db_session_factory,
+    )
     # Story 5.5: 채널 등록/검증/활성 repository + webhook secret 해석 seam(테스트 주입 가능).
     app.state.channel_repository = channel_repository or _default_channel_repository(
-        app.state.settings
+        app.state.settings,
+        db_session_factory,
     )
     # 0012: tenant 별 텔레그램 설정 provider(DB 있으면 PostgreSQL) — 토큰/webhook secret/send
     # 게이트를 tenant 행에서 읽는다. 무-DB(개발/테스트)면 None → env ref 전역으로만 동작.
     app.state.tenant_telegram_provider = _default_tenant_telegram_provider(
-        app.state.settings
+        app.state.settings,
+        db_session_factory,
     )
     app.state.resolve_telegram_secret = _default_resolve_telegram_secret(
         app.state.settings, app.state.tenant_telegram_provider
@@ -417,22 +483,24 @@ def create_app(
     )
     # Story 5.6: 읽기 전용 Admin 대시보드 repository + admin 세션 seam(5.8 이 MFA/4역할으로 교체).
     app.state.dashboard_repository = (
-        dashboard_repository or _default_dashboard_repository(app.state.settings)
+        dashboard_repository
+        or _default_dashboard_repository(app.state.settings, db_session_factory)
     )
     app.state.require_admin_session = _default_require_admin_session
     # Story 5.9: 읽기 전용 운영 지표 repository(7지표 비식별 fleet 집계) — 테스트 주입 가능 seam.
     app.state.metrics_repository = (
-        metrics_repository or _default_metrics_repository(app.state.settings)
+        metrics_repository
+        or _default_metrics_repository(app.state.settings, db_session_factory)
     )
     # Story 5.7: 수동 운영 액션 service(상태 전이/액션 write+audit) + admin actor seam(5.8 교체).
     app.state.admin_action_service = admin_action_service or AdminActionService(
-        _default_admin_action_repository(app.state.settings),
+        _default_admin_action_repository(app.state.settings, db_session_factory),
         app.state.queue_backend,
     )
     app.state.resolve_admin_actor = _default_resolve_admin_actor
     # Story 5.11: 엔티티 CRUD service(생성/편집/비활성화 write+audit 동일 트랜잭션) — 테스트 주입 가능.
     app.state.admin_entity_service = admin_entity_service or AdminEntityService(
-        _default_admin_entity_repository(app.state.settings)
+        _default_admin_entity_repository(app.state.settings, db_session_factory)
     )
     # Story 5.8: Admin 접근 보안 — principal 해석 seam(기본 fail-closed deny) + IP allowlist + MFA
     # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.
@@ -442,14 +510,21 @@ def create_app(
     app.state.admin_mfa_required = app.state.settings.admin_mfa_required
     app.state.sending_enabled = app.state.settings.sending_enabled
     app.state.agent_token_service = agent_token_service or AgentTokenService(
-        _default_agent_token_repository(app.state.settings)
+        _default_agent_token_repository(app.state.settings, db_session_factory)
     )
-    app.state.agent_registry = agent_registry or _default_agent_registry(app.state.settings)
+    app.state.agent_registry = agent_registry or _default_agent_registry(
+        app.state.settings,
+        db_session_factory,
+    )
     app.state.resolve_agent_id = app.state.agent_registry.resolve_agent_id
     app.state.job_result_ingest_service = (
         job_result_ingest_service
         if job_result_ingest_service is not None
-        else _default_job_result_ingest_service(app.state.settings)
+        else _default_job_result_ingest_service(
+            app.state.settings,
+            db_session_factory,
+            app.state.tenant_telegram_provider,
+        )
     )
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------

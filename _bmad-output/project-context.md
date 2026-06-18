@@ -18,12 +18,12 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 ## 기술 스택과 버전
 
 - Python `>=3.10` 기준 프로젝트다. 제품 코드는 3개 패키지로 나뉜다: 공유 크롤러·UI 도메인은 `src/rider_crawl/`, Cloud 도메인·서비스·마이그레이션은 `src/rider_server/`(Epic 2 신설), Windows Local Agent 런타임(`python -m rider_agent`)은 `src/rider_agent/`(Epic 4 신설)에 둔다. 테스트는 `tests/`의 pytest 구조를 따르고, server 코드 테스트는 `tests/server/`, agent 코드 테스트는 `tests/agent/` 하위에 둔다.
-- `src/rider_server/`는 Epic 5에서 **FastAPI + SQLAlchemy 2.x(async) + Alembic + PostgreSQL + Jinja2+HTMX Admin** 비동기 런타임(`python -m rider_server`)으로 자랐다. 단 Epic 2~3의 `domain`/`services`는 여전히 순수(no FastAPI/SQLAlchemy/async)하고, async 런타임은 형제 모듈(`main`/`api`/`db`/`queue`/`scheduler`/`admin`/`security`/`metrics`)에 가산된다. server 의존성(FastAPI·SQLAlchemy·asyncpg·jinja2 등)은 `pyproject.toml` `[project.optional-dependencies]`에만 두고 **메인 9-dep는 불변**이며, DB 스키마는 **14 Required Tables**로 고정한다(신규 의미는 additive 컬럼 또는 plain-string 상수). 서버 설정은 stdlib `Settings.from_env`로 env 에서 읽고(정본 키: `src/rider_server/settings.py`, 배포 예시: `deploy/env/backend-api.env`) 평문 secret 은 설정 객체·커밋 파일에 싣지 않는다.
+- `src/rider_server/`는 Epic 5에서 **FastAPI + SQLAlchemy 2.x(async) + Alembic + PostgreSQL + Jinja2+HTMX Admin** 비동기 런타임(`python -m rider_server`)으로 자랐다. 단 Epic 2~3의 `domain`/`services`는 여전히 순수(no FastAPI/SQLAlchemy/async)하고, async 런타임은 형제 모듈(`main`/`api`/`db`/`queue`/`scheduler`/`admin`/`security`/`metrics`)에 가산된다. server 의존성(FastAPI·SQLAlchemy·asyncpg·jinja2 등)은 `pyproject.toml` `[project.optional-dependencies]`에만 두고 **메인 7-dep는 불변**이며, DB 스키마는 **14 Required Tables**로 고정한다(신규 의미는 additive 컬럼 또는 plain-string 상수). 서버 설정은 stdlib `Settings.from_env`로 env 에서 읽고(정본 키: `src/rider_server/settings.py`, 배포 예시: `deploy/env/backend-api.env`) 평문 secret 은 설정 객체·커밋 파일에 싣지 않는다.
 - `crawl4ai==0.8.7`은 고정 버전이다. 파서/크롤러 동작이 바뀔 수 있으므로 임의로 업그레이드하지 않는다.
 - `playwright==1.60.0`을 사용해 로그인된 Chrome에 CDP로 연결한다. 기본 운영 방식은 자동 로그인이나 새 세션 생성이 아니라, 사용자가 로그인해 둔 Chrome 화면을 읽는 방식이다.
 - UI는 표준 `tkinter` 기반 데스크톱 앱이다. 웹 프론트엔드나 서버 앱 구조를 가정하지 않는다.
 - 텔레그램은 표준 라이브러리 `urllib`로 Bot API를 호출한다. 카카오톡은 Windows PC 앱 UI 자동화(`pyautogui`, `pywinauto`, `pyperclip`) 경로다.
-- 쿠팡 Gmail 2FA는 `google-api-python-client`, `google-auth-oauthlib`, `google-auth-httplib2`를 사용하며, Gmail scope는 읽기 전용 흐름을 기준으로 한다.
+- 쿠팡 Email 2FA는 `IMAPClient` 기반이다. Gmail/Naver 인증 메일함은 IMAP 주소와 앱 비밀번호를 쓰며, Gmail OAuth/token 파일은 현재 정본 경로가 아니다.
 - 배포 파일은 PyInstaller onefile exe(`rider_crawl_onefile.spec`)다. `build/`는 재생성 산출물이고, `dist/`의 exe는 배포 산출물로 취급한다.
 
 ## 중요한 구현 규칙
@@ -53,7 +53,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 - 테스트는 pytest를 사용하며 `pyproject.toml`의 `pythonpath = ["src"]`, `testpaths = ["tests"]` 설정을 따른다.
 - 새 기능은 관련 모듈 옆의 기존 테스트 파일 패턴을 따른다. 예: 설정은 `test_config.py`/`test_ui_settings.py`, 실행 흐름은 `test_app.py`, 플랫폼 registry는 `test_architecture.py`, 쿠팡 파서는 `test_coupang_parser.py`.
-- 외부 브라우저, 텔레그램, 카카오톡, Gmail API를 단위 테스트에서 직접 호출하지 않는다. fake 함수, monkeypatch, fake page, tmp_path를 사용해 재현 가능하게 만든다.
+- 외부 브라우저, 텔레그램, 카카오톡, IMAP 서버를 단위 테스트에서 직접 호출하지 않는다. fake 함수, monkeypatch, fake page, tmp_path를 사용해 재현 가능하게 만든다.
 - `run_once()` 관련 테스트는 `crawl_snapshot`과 `send_message`를 주입해 크롤링/전송 부작용을 끊는다.
 - 상태 파일 테스트는 실제 `runtime/`이나 `logs/`를 쓰지 말고 `tmp_path` 안에서 검증한다.
 - 파서 변경은 정상 케이스와 필수 데이터 누락 케이스를 함께 테스트한다. 누락 시 잘못된 기본 메시지로 진행하지 않고 명확한 예외가 나야 한다.
@@ -62,7 +62,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 
 ### 코드 품질과 스타일 규칙
 
-- 제품 코드는 `src/rider_crawl/`(공유 크롤러·UI), `src/rider_server/`(Cloud 도메인·서비스·마이그레이션, Epic 2 신설), `src/rider_agent/`(Windows Local Agent 런타임, Epic 4 신설) 3개 패키지를 기준으로 본다. 의존 방향은 단방향이다: `rider_server`와 `rider_agent`는 각각 `rider_crawl`을 import해 재사용할 수 있으나, `rider_crawl` → (`rider_server`/`rider_agent`) 역방향 의존은 만들지 않는다. 또한 `rider_agent`는 `rider_server`를 import조차 하지 않는다(필요한 server 측 enum 값은 plain-string 상수로 미러). `rider_agent`는 Cloud의 async와 섞지 않는 **sync 런타임**이고 stdlib만 쓴다(신규 third-party 의존성 추가 금지 — `pyproject.toml` deps 9개 고정). 이 규약들은 `tests/agent/test_agent_package.py`의 AST `rglob` 가드로 강제된다. 반대로 `rider_server`(FastAPI/SQLAlchemy)는 **async가 정본**이다 — async 함수 본문에서 blocking sync(`time.sleep`/`subprocess`/동기 I/O)를 직접 호출하지 않고, 동기 재사용(예: `urllib` 전송)은 `run_in_executor` 등 executor 경계로 보낸다. 이 규약은 `tests/server/test_server_async_boundary.py`의 `rglob` 가드로 강제되며 `rider_agent`의 sync 가드와 분리된다(Epic 5 신설, 회고 A7-carry). `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
+- 제품 코드는 `src/rider_crawl/`(공유 크롤러·UI), `src/rider_server/`(Cloud 도메인·서비스·마이그레이션, Epic 2 신설), `src/rider_agent/`(Windows Local Agent 런타임, Epic 4 신설) 3개 패키지를 기준으로 본다. 의존 방향은 단방향이다: `rider_server`와 `rider_agent`는 각각 `rider_crawl`을 import해 재사용할 수 있으나, `rider_crawl` → (`rider_server`/`rider_agent`) 역방향 의존은 만들지 않는다. 또한 `rider_agent`는 `rider_server`를 import조차 하지 않는다(필요한 server 측 enum 값은 plain-string 상수로 미러). `rider_agent`는 Cloud의 async와 섞지 않는 **sync 런타임**이고 stdlib만 쓴다(신규 third-party 의존성 추가 금지 — `pyproject.toml` deps 7개 고정). 이 규약들은 `tests/agent/test_agent_package.py`의 AST `rglob` 가드로 강제된다. 반대로 `rider_server`(FastAPI/SQLAlchemy)는 **async가 정본**이다 — async 함수 본문에서 blocking sync(`time.sleep`/`subprocess`/동기 I/O)를 직접 호출하지 않고, 동기 재사용(예: `urllib` 전송)은 `run_in_executor` 등 executor 경계로 보낸다. 이 규약은 `tests/server/test_server_async_boundary.py`의 `rglob` 가드로 강제되며 `rider_agent`의 sync 가드와 분리된다(Epic 5 신설, 회고 A7-carry). `.agents/`, `.claude/`, `.codex/`, `_bmad/`는 BMAD/에이전트 도구 코드이므로 제품 기능 구현 대상으로 섞지 않는다.
 - 새 플랫폼별 구현은 플랫폼 폴더 아래에 둔다. 쿠팡 전용 selector, 로그인 복구, parser 로직을 배민 legacy `crawler.py`/`parser.py`에 섞지 않는다.
 - 함수와 변수는 기존 Python snake_case 스타일을 따른다. 클래스와 dataclass는 PascalCase를 쓴다.
 - 공개 경계 이름은 기존 호환을 우선한다. 예를 들어 `coupang_eats_url`이 현재는 플랫폼별 주 URL처럼 쓰여도, 넓은 변경 없이 이름만 바꾸지 않는다.
@@ -87,7 +87,7 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 - 이 프로젝트는 공식 배민/쿠팡 API 연동이 아니다. 로그인된 Chrome 화면을 CDP/Playwright로 읽는 도구이므로, 사이트 구조 변경과 로그인 만료를 정상 운영 위험으로 다룬다.
 - 배민은 휴대폰 인증 때문에 완전 자동 로그인을 전제로 설계하지 않는다. 사용자 조치 필요 상태를 감지하고 잘못된 메시지를 보내지 않는 것이 우선이다.
 - 쿠팡은 기대 센터/상점명 검증이 필수다. 쿠팡 탭에서 `baemin_center_name`은 실제로 기대 센터/상점명으로 재사용되며, 비어 있거나 배민 기본값이면 다른 계정 실적 오발송 위험이 있다.
-- 쿠팡 Gmail 2FA는 인증번호, OAuth token, 쿠팡 비밀번호를 로그나 예외 메시지에 남기면 안 된다. 자동복구 실패 시 반복 인증 요청을 계속 보내지 말고 탭을 중지하는 기존 정책을 유지한다.
+- 쿠팡 Email/IMAP 2FA는 인증번호, 앱 비밀번호, 쿠팡 비밀번호를 로그나 예외 메시지에 남기면 안 된다. 자동복구 실패 시 반복 인증 요청을 계속 보내지 말고 탭을 중지하는 기존 정책을 유지한다.
 - 텔레그램 `getUpdates`는 봇 토큰 하나가 큐 하나를 공유한다. 같은 봇 토큰을 여러 앱 프로세스에서 동시에 polling하는 구조를 만들지 않는다.
 - 활성 텔레그램 탭끼리 같은 `chat_id + topic_id` 조합을 공유하면 안 된다. 오발송/명령 라우팅 혼선 방지가 우선이다.
 - `send_only_on_change`의 마지막 메시지 해시는 플랫폼, URL, 센터, 전송 대상 scope에 묶인다. scope key를 줄이면 다른 탭/계정의 중복 판단이 섞일 수 있다.
@@ -112,4 +112,4 @@ _이 파일은 AI 에이전트가 이 프로젝트에서 코드를 구현할 때
 - 기술 스택, 실행 구조, 보안 정책이 바뀌면 갱신한다.
 - 오래되었거나 더 이상 특별하지 않은 규칙은 주기적으로 제거한다.
 
-마지막 업데이트: 2026-06-14 (Epic 5 회고 반영: `src/rider_server/` FastAPI/SQLAlchemy(async)/Alembic/PostgreSQL/Jinja2+HTMX Admin 런타임, async 경계 가드(`tests/server/test_server_async_boundary.py`, A7-carry), 14표·9-dep lock, server 설정 env 정본)
+마지막 업데이트: 2026-06-18 (리뷰 반영: `src/rider_server/` FastAPI/SQLAlchemy(async)/Alembic/PostgreSQL/Jinja2+HTMX Admin 런타임, async 경계 가드(`tests/server/test_server_async_boundary.py`, A7-carry), 14표·7-dep lock, IMAP 기반 Email 2FA, server 설정 env 정본)

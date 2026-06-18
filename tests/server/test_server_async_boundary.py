@@ -3,7 +3,7 @@
 rider_server 는 async 런타임이라 rider_agent 의 sync 가드(tests/agent/test_agent_package.py)
 를 그대로 쓸 수 없다. 여기서는 rider_server 의 async 핸들러가 알려진 **blocking sync**
 (``time.sleep``/sync subprocess/IO)를 event loop 에서 직접 호출하지 않음을 AST 로 검증하고,
-이 가드가 rider_agent 의 9-dep·sync 가드와 **스코프가 분리**돼 있음을 확인한다.
+이 가드가 rider_agent 의 7-dep·sync 가드와 **스코프가 분리**돼 있음을 확인한다.
 
 부정 가드는 raw grep 이 아니라 AST import/call edge 로 본다(scope 경계 docstring 이
 금지 심볼을 문자열로 명시하므로 raw 매칭은 오탐 — memory/negative-guard-tests-use-ast).

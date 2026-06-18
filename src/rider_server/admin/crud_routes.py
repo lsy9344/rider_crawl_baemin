@@ -11,7 +11,7 @@ URL 충돌 회피: 읽기 전용 대시보드가 ``GET /admin/targets``·``/chan
 ``/messenger-channels``·``/delivery-rules``·``/entities``)로 겹치지 않게 둔다.
 
 변경 라우트는 ``require_role(AdminRole.OPERATOR)``(VIEWER 는 읽기 전용), 조회 fragment 는
-``require_role(AdminRole.VIEWER)``. 폼은 stdlib ``parse_qs``(python-multipart 미사용 — 9-dep lock),
+``require_role(AdminRole.VIEWER)``. 폼은 stdlib ``parse_qs``(python-multipart 미사용 — 7-dep lock),
 신규 ``id``/시각은 라우트에서 ``uuid4``/실 ``now()`` 주입(시각 단언은 service/순수 레이어). 예외는
 ``_raise_for``(NotFound/TenantScopeViolation→404, ValueError→400 — 순서 주의).
 """

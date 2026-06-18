@@ -11,8 +11,10 @@ from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
 from rider_server.queue.memory_queue import InMemoryQueueBackend
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN
 from rider_server.scheduler import policy
+from rider_server.scheduler import __main__ as scheduler_main
 from rider_server.scheduler.__main__ import _result_payload, run_once
 from rider_server.scheduler.service import DueTarget, SchedulerRepository, TenantGate
+from rider_server.scheduler.service import TickResult
 
 _NOW = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
 _ACTIVE_GATE = TenantGate(SubscriptionStatus.PAYMENT_ACTIVE, CustomerLifecycleState.ACTIVE)
@@ -73,6 +75,40 @@ def test_run_once_entrypoint_seam_enqueues_crawl_job() -> None:
     assert job is not None
     assert job.payload_json["primary_url"] == "https://example.invalid/performance"
     assert _result_payload(result)["enqueued_count"] == 1
+
+
+def test_run_loop_logs_tick_failure_and_keeps_running(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    class _FlakyService:
+        async def run_tick(self, repo, queue_backend, *, now):
+            calls.append("tick")
+            if len(calls) == 1:
+                raise RuntimeError("db temporarily unavailable")
+            return TickResult(outcomes=(), enqueued_count=0)
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(scheduler_main, "SchedulerService", _FlakyService)
+
+    asyncio.run(
+        scheduler_main.run_loop(
+            interval_seconds=0.01,
+            repo=_Repo(),
+            queue_backend=InMemoryQueueBackend(),
+            sleep=_sleep,
+            max_ticks=2,
+        )
+    )
+
+    assert calls == ["tick", "tick"]
+    assert sleeps == [0.01]
+    out = capsys.readouterr().out
+    assert "scheduler tick failed" in out
+    assert "db temporarily unavailable" in out
+    assert '{"enqueued_count": 0, "outcomes": []}' in out
 
 
 def test_compose_defines_scheduler_service() -> None:

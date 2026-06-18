@@ -52,6 +52,6 @@ terraform output -raw ssh_command
 1. EC2 에 `deploy/docker-compose.yml` + `deploy/env/` 업로드(또는 git clone).
 2. Secrets Manager 에서 DB `username`/`password`/`dbname`을 받아 `RIDER_POSTGRES_*` 환경변수로 주입하거나, compose의 `DATABASE_URL`을 외부 DB 값으로 override.
 3. 외부 공개가 필요하면 SG `app_ingress_cidr`와 `RIDER_BACKEND_BIND=0.0.0.0`을 함께 명시하고, TLS/reverse proxy/Admin 인증을 먼저 구성.
-4. `docker compose up --build -d` → migrate one-shot → backend-api + scheduler 기동.
+4. 최신 DB 백업 또는 EC2/EBS 스냅샷을 확인한 뒤 `RIDER_DB_MIGRATION_BACKUP_CONFIRMED=1`을 주입하고 `docker compose up --build -d` → migrate one-shot → backend-api + scheduler 기동.
 5. `deploy/cloudwatch/push_metrics.sh`와 `deploy/cloudwatch/rider-metrics.service`를 설치·enable해 custom metric을 적재.
 6. `app-secrets` 에 텔레그램 webhook/봇 토큰 값 입력 후 send 게이트 활성화.

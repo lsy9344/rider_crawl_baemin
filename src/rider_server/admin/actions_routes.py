@@ -103,7 +103,7 @@ async def _form(request: Request) -> dict:
     """urlencoded 폼 본문을 stdlib 로 파싱해 dict 로 읽는다(HTMX 기본 content-type).
 
     Starlette ``request.form()`` 은 urlencoded 에도 ``python-multipart`` 를 요구하지만, 본
-    프로젝트는 신규 deps 0(9-dep lock·server extra 고정)이라 ``urllib.parse.parse_qs``(stdlib)
+    프로젝트는 신규 deps 0(7-dep lock·server extra 고정)이라 ``urllib.parse.parse_qs``(stdlib)
     로 직접 파싱한다 — ``application/x-www-form-urlencoded`` 만 다룬다(multipart 미사용). 같은 키
     중복 시 마지막 값을 취한다. 본문 없음/디코드 실패는 빈 dict(값 검증은 각 라우트가 한다).
     """

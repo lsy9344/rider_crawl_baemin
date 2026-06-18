@@ -208,7 +208,7 @@ def test_browser_profile_links_target() -> None:
     assert profile.target_id == target.id  # 대상 ↔ 프로필 역참조 연결
 
 
-def test_platform_account_credentials_are_plain_strings() -> None:
+def test_platform_account_credentials_are_string_ref_handles() -> None:
     account = PlatformAccount(
         id="acc-1",
         tenant_id="tnt-1",

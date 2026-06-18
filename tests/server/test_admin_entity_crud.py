@@ -180,7 +180,7 @@ def test_create_tenant_persists_and_audits() -> None:
     assert repo.audits[-1].result == "SUCCESS"
 
 
-def test_create_platform_account_with_creds_plaintext() -> None:
+def test_create_platform_account_with_secret_refs() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
@@ -241,27 +241,50 @@ def test_create_platform_account_with_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_create_platform_account_plaintext_now_accepted() -> None:
+def test_create_platform_account_plaintext_password_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    account = _run(
-        svc.create_platform_account(
-            entity_id="pa-plain",
-            tenant_id=_TENANT,
-            platform=Platform.BAEMIN,
-            label="plain",
-            username="myuser",
-            password="mypass",
-            at=_NOW,
-            actor_id=_ACTOR,
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-plain",
+                tenant_id=_TENANT,
+                platform=Platform.BAEMIN,
+                label="plain",
+                username="myuser",
+                password="mypass",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
         )
-    )
 
-    assert account.username == "myuser"
-    assert account.password == "mypass"
-    assert _run(repo.get_platform_account("pa-plain")).username == "myuser"
+    assert _run(repo.get_platform_account("pa-plain")) is None
+
+
+def test_create_platform_account_plaintext_email_app_password_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-mail-plain",
+                tenant_id=_TENANT,
+                platform=Platform.COUPANG,
+                label="mail",
+                username="vault://u",
+                password="vault://p",
+                verification_email_address=_EMAIL_ADDRESS_REF,
+                verification_email_app_password="plain-app-password",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_platform_account("pa-mail-plain")) is None
 
 
 def test_create_monitoring_target_links_account_and_flags_coupang_risk() -> None:
@@ -567,7 +590,7 @@ def test_route_cross_tenant_update_404() -> None:
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
-def test_route_platform_account_plaintext_accepted() -> None:
+def test_route_platform_account_secret_ref_accepted() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -862,22 +885,23 @@ def test_update_platform_account_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_update_platform_account_plaintext_now_accepted() -> None:
-    """G3 — 평문 자격증명을 update 로 주면 그대로 저장된다(SecretRef 제거됨)."""
+def test_update_platform_account_plaintext_password_rejected() -> None:
+    """G3 — 평문 자격증명을 update 로 주면 거부된다."""
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(_account())
     svc = _svc(repo)
 
-    updated = _run(
-        svc.update_platform_account(
-            "pa-1", tenant_id=_TENANT,
-            password="my-new-password",
-            at=_NOW, actor_id=_ACTOR,
+    with pytest.raises(ValueError):
+        _run(
+            svc.update_platform_account(
+                "pa-1", tenant_id=_TENANT,
+                password="my-new-password",
+                at=_NOW, actor_id=_ACTOR,
+            )
         )
-    )
 
-    assert updated.password == "my-new-password"
-    assert repo.audits[-1].action == "PLATFORM_ACCOUNT_UPDATE"
+    assert _run(repo.get_platform_account("pa-1")).password == _ref()
+    assert repo.audits == []
 
 
 def test_update_messenger_channel_routing_fields_no_transition() -> None:
@@ -1069,6 +1093,25 @@ def test_route_create_platform_account_unknown_platform_400() -> None:
     )
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_route_create_platform_account_plaintext_password_400() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/platform-accounts?tenant=tn-1",
+        data={
+            "platform": "BAEMIN",
+            "label": "배민",
+            "username": "vault://u",
+            "password": "plain-password",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_platform_accounts("tn-1")) == []
 
 
 def test_route_create_messenger_channel_pending() -> None:

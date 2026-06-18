@@ -1,7 +1,7 @@
 """rider_server 설정 — Story 5.1.
 
 stdlib ``os.environ`` 기반의 **최소 typed settings**. ``pydantic-settings`` 같은 외부
-패키지는 5.1 범위에서 도입하지 않는다(9-dep lock 보호 / 필요해지면 5.2+에서 결정).
+패키지는 5.1 범위에서 도입하지 않는다(7-dep lock 보호 / 필요해지면 5.2+에서 결정).
 기존 ``AppConfig.from_env`` 패턴을 계승해 frozen dataclass + ``from_env`` 분류자를 쓴다.
 
 향후 Secrets Manager ref(``*_ref``) 로딩은 이 모듈의 책임으로 두되, 5.1에는 와이어링할

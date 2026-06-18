@@ -92,8 +92,8 @@ REQUIRED_FIELDS = {
     },
 }
 
-# 평문 secret 컬럼명 금지(NFR-8) — ``*_ref`` 만 허용(profile_path_ref 등). PlatformAccount 자격증명은 plain text.
-# NOTE: PlatformAccount credential columns(plain storage), browser_profiles.profile_path_ref 는 여전히 ref.
+# 평문 secret 컬럼명 금지(NFR-8) — ``*_ref`` 컬럼명은 신규 secret에 우선한다.
+# NOTE: PlatformAccount 기존 컬럼명은 계약 호환을 위해 유지하지만 password 류 값은 ref 핸들만 담는다.
 FORBIDDEN_PLAINTEXT_COLUMNS = {"token", "secret", "profile_path"}
 
 

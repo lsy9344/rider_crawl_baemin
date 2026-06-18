@@ -154,10 +154,10 @@ server (Epic 5) outbound-only.
   unlike the Cloud async boundary) and adds **no new third-party dependency**:
   HTTPS via stdlib `urllib`, Windows DPAPI via stdlib `ctypes`/crypt32, periodic
   loops via `threading`/`time`, port allocation via `socket`. `pyproject.toml`
-  stays at its frozen 9 dependencies (`playwright==1.60.0`, `crawl4ai==0.8.7`).
+  stays at its frozen 7 dependencies (`playwright==1.60.0`, `crawl4ai==0.8.7`).
 - **One AST guard locks the whole package.** `tests/agent/test_agent_package.py`
   (Story 4.1) `rglob`s `src/rider_agent/**/*.py` and asserts: sync-only, third-party
-  import root is `rider_crawl`, the one-way import edges above, and the 9-dependency
+  import root is `rider_crawl`, the one-way import edges above, and the 7-dependency
   pin. Every later module inherits this guard automatically — new modules need no
   new guard.
 

@@ -143,7 +143,9 @@ async def claim_jobs(
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="agent token mismatch")
 
     now = datetime.now(timezone.utc)
-    records = await _backend(request).claim(
+    backend = _backend(request)
+    await backend.recover_stale(now=now)
+    records = await backend.claim(
         agent_id=body.agent_id,
         capabilities=body.capabilities,
         max_jobs=body.max_jobs,

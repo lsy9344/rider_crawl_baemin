@@ -277,7 +277,7 @@ def test_admin_routes_registered_under_admin_prefix_not_v1() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# (3) 무회귀 lock — jinja2 server extra · 9-dep
+# (3) 무회귀 lock — jinja2 server extra · 7-dep
 # ══════════════════════════════════════════════════════════════════════════
 
 def _pyproject() -> dict:

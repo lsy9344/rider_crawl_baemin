@@ -1,10 +1,10 @@
 # rider_server Cloud 백엔드 이미지 — Story 5.1.
 #
-# wheel build target 이 rider_server 를 패키징하지 않으므로
-# ([tool.hatch.build.targets.wheel] packages=["src/rider_crawl"]), 프로젝트를 설치하지
-# 않고 src/ 를 그대로 복사한 뒤 PYTHONPATH=/app/src 로 import 경로를 맞춘다
+# pyproject wheel target 은 rider_crawl/rider_server/rider_agent 를 모두 패키징한다.
+# 이 이미지는 server extra 만 설치하는 lean runtime 을 유지하기 위해 프로젝트 wheel 대신
+# 필요한 src/ 하위 패키지만 복사하고 PYTHONPATH=/app/src 로 import 경로를 맞춘다
 # (pytest pythonpath=["src"] 미러). rider_crawl.redaction 은 stdlib 만 쓰므로
-# crawl4ai/playwright 등 무거운 base deps 는 이미지에 넣지 않는다(lean server image).
+# crawl4ai/playwright 등 무거운 base deps 는 이미지에 넣지 않는다.
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
@@ -176,6 +176,44 @@ def test_claim_returns_job_with_iso_utc_lease():
     assert jobs[0]["payload"] == {"target_id": "target-1", "platform": "baemin"}
     # ISO 8601 UTC(...Z) 로 통일(epoch 혼용 금지)
     assert jobs[0]["lease_expires_at"].endswith("Z")
+
+
+def test_claim_recovers_expired_lease_before_selecting_jobs():
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    job_id = asyncio.run(
+        backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_BAEMIN,
+            payload_json={"target_id": "target-1", "platform": "baemin"},
+            now=_NOW,
+        )
+    )
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-old",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=1,
+            now=datetime.now(timezone.utc) - timedelta(minutes=10),
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+            "max_jobs": 1,
+        },
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 200
+    jobs = r.json()["jobs"]
+    assert [job["job_id"] for job in jobs] == [job_id]
+    assert backend.job_status(job_id) == JOB_STATUS_CLAIMED
 
 
 def test_complete_reassigned_or_mismatch_owner_returns_409():

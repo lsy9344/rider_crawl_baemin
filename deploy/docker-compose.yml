@@ -31,6 +31,7 @@ services:
       - ./env/backend-api.env
     environment:
       DATABASE_URL: "postgresql+asyncpg://${RIDER_POSTGRES_USER:-rider}:${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}@db:5432/${RIDER_POSTGRES_DB:-rider}"
+      RIDER_DB_MIGRATION_BACKUP_CONFIRMED: "${RIDER_DB_MIGRATION_BACKUP_CONFIRMED:?confirm current DB backup before running migrations}"
     depends_on:
       db:
         condition: service_healthy
@@ -42,7 +43,14 @@ services:
       dockerfile: deploy/Dockerfile.server
     image: rider-server:dev
     ports:
-      - "${RIDER_BACKEND_BIND:-127.0.0.1}:8000:8000"
+      # Host port is configurable so review/staging stacks can run beside an existing local stack.
+      - "${RIDER_BACKEND_BIND:-127.0.0.1}:${RIDER_BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     env_file:
       - ./env/backend-api.env
       # Story 5.5 — Telegram webhook secret/public URL 분리 env(평문 secret 없음, *_ref 만).
@@ -66,7 +74,15 @@ services:
       - ./env/backend-api.env
     environment:
       DATABASE_URL: "postgresql+asyncpg://${RIDER_POSTGRES_USER:-rider}:${RIDER_POSTGRES_PASSWORD:?set RIDER_POSTGRES_PASSWORD}@db:5432/${RIDER_POSTGRES_DB:-rider}"
+      SCHEDULER_HEALTH_FILE: /tmp/rider_scheduler_last_tick
+      SCHEDULER_HEALTH_MAX_AGE_SECONDS: ${SCHEDULER_HEALTH_MAX_AGE_SECONDS:-120}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,pathlib,time; p=pathlib.Path(os.environ.get('SCHEDULER_HEALTH_FILE','/tmp/rider_scheduler_last_tick')); max_age=float(os.environ.get('SCHEDULER_HEALTH_MAX_AGE_SECONDS','120')); assert p.exists() and time.time() - p.stat().st_mtime <= max_age\""]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 40s
     depends_on:
       db:
         condition: service_healthy
