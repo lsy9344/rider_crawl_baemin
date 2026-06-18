@@ -86,11 +86,11 @@
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
-      <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
-      <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
-      <label>external_id <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
-      <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
-      <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
+      <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
+      <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
+      <label>external_id <input type="text" id="tgt-edit-external" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
+      <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
+      <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
       <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
@@ -98,10 +98,49 @@
     <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
   </fieldset>
 
-  {# 보조: 계정·채널·고객 관리(새로 만들 때만) — 접힘 #}
+  {# 보조: 계정·채널·고객·구독 관리(새로 만들 때만) — 접힘 #}
   <details class="aux">
-    <summary>계정 · 채널 · 고객 관리 <span class="tag">새로 만들 때만</span></summary>
+    <summary>계정 · 채널 · 고객 · 구독 관리 <span class="tag">새로 만들 때만</span></summary>
     <div class="aux-body">
+
+      <fieldset id="entity-subscription-form">
+        <legend>구독 관리</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">구독 상태를 PAYMENT_ACTIVE로 두면 결제 완료 고객처럼 처리합니다. 수집 실행은 고객 상태도 ACTIVE 또는 PAYMENT_ACTIVE여야 열립니다.</p>
+        <form hx-post="/admin/subscriptions?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
+          <label>고객
+            <select name="tenant_id"
+                    hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>플랜 <input type="text" name="plan" value="basic"></label>
+          <label>구독 상태
+            <select name="status">
+              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 구독 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE — 결제 유예</option>
+              <option value="SUSPENDED">SUSPENDED — 정지</option>
+              <option value="CANCELLED">CANCELLED — 해지</option>
+            </select>
+          </label>
+          <button type="submit" class="create">구독 생성</button><span class="inline-action-status" aria-live="polite"></span>
+        </form>
+        <div class="edit-row">
+          <label>구독 선택
+            <select id="sub-edit-id"
+                    hx-get="/admin/subscriptions/options?tenant={{ tenant_id | urlencode }}"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>구독 상태
+            <select id="sub-edit-status">
+              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 구독 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE — 결제 유예</option>
+              <option value="SUSPENDED">SUSPENDED — 정지</option>
+              <option value="CANCELLED">CANCELLED — 해지</option>
+            </select>
+          </label>
+          <button type="button" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
+        </div>
+        <div hx-get="/admin/subscriptions?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
 
       <fieldset id="entity-account-form">
         <legend>플랫폼 계정 (DB 직접 저장)</legend>
@@ -140,6 +179,7 @@
 
       <fieldset id="entity-channel-form">
         <legend>메시지 채널 (chat_id/thread_id/방명 = 라우팅 식별자, secret 아님)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">Kakao 는 방명 입력 시 바로 ACTIVE 됩니다. 방명이 비면 PENDING 상태로 생성됩니다. Telegram 은 항상 PENDING 으로 시작합니다.</p>
         <form hx-post="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>메신저
             <select name="messenger" id="channel-messenger" onchange="syncChannelCreateFields()"><option value="TELEGRAM">TELEGRAM</option><option value="KAKAO">KAKAO</option></select>
@@ -148,19 +188,22 @@
           <label>thread_id <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
           <label>kakao_room_name <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
           <label>registration_code <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
-          <button type="submit" class="create">채널 생성(PENDING)</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="submit" class="create">채널 생성</button><span class="inline-action-status" aria-live="polite"></span>
         </form>
         <div class="edit-row">
           <label>채널 선택
             <select id="ch-edit-id"
                     hx-get="/admin/messenger-channels/options?tenant={{ tenant_id | urlencode }}"
-                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                    onchange="populateChannelFields(this)"><option value="">불러오는 중…</option></select>
           </label>
           <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
           <label>thread_id <input type="text" id="ch-edit-thread"></label>
           <label>kakao_room_name <input type="text" id="ch-edit-kakao"></label>
-          <button type="button" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
-          <button type="button" class="danger" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+          <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
+            <button type="button" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" class="danger" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+          </div>
         </div>
         <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -179,7 +222,17 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 고객명 <input type="text" id="cust-edit-name"></label>
-          <button type="button" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <label>고객 상태
+            <select id="cust-edit-status">
+              <option value="">변경 안 함</option>
+              <option value="ACTIVE">ACTIVE — 운영</option>
+              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 결제 활성</option>
+              <option value="SETUP_PENDING">SETUP_PENDING — 세팅 중</option>
+              <option value="SUSPENDED">SUSPENDED — 정지</option>
+              <option value="LEAD">LEAD — 리드</option>
+            </select>
+          </label>
+          <button type="button" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" class="danger" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '/delete', {}, '선택한 고객을 완전히 삭제할까요? 연결 데이터가 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
@@ -246,6 +299,19 @@
     });
   }
   document.addEventListener('DOMContentLoaded', syncChannelCreateFields);
+  function populateChannelFields(select) {
+    var option = select.selectedOptions[0];
+    if (!option || !option.value) { return; }
+    document.getElementById('ch-edit-chat').value = option.dataset.chat || '';
+    document.getElementById('ch-edit-thread').value = option.dataset.thread || '';
+    document.getElementById('ch-edit-kakao').value = option.dataset.kakao || '';
+    var row = select.closest('.edit-row');
+    if (row) {
+      row.querySelectorAll('.inline-action-status').forEach(function(s) {
+        s.className = 'inline-action-status'; s.textContent = '';
+      });
+    }
+  }
   function buttonStatus(button) {
     var next = button ? button.nextElementSibling : null;
     return next && next.classList.contains("inline-action-status") ? next : document.getElementById('entity-result');

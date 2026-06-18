@@ -28,12 +28,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
 from rider_server.security import AdminRole, require_role
 from rider_server.services.admin_action_service import (
     UNAUTHENTICATED_ACTOR,
     AdminActionNotFound,
 )
 from rider_server.services.admin_entity_service import is_center_name_risky  # noqa: F401  (재노출/문서용)
+from rider_server.services.admin_entity_service import AdminEntityDeleteBlockedError
 from rider_server.services.admin_entity_service import AdminEntityDuplicateError
 
 router = APIRouter(prefix="/admin", tags=["admin-crud"])
@@ -82,6 +84,14 @@ def _tenant_id(request: Request) -> str:
     return request.query_params.get("tenant", "").strip()
 
 
+def _missing_tenant_fragment(request: Request) -> HTMLResponse:
+    return _fragment(
+        request,
+        "먼저 고객을 생성하거나 선택하세요. 고객 생성 후 플랫폼 계정을 등록할 수 있습니다.",
+        ok=False,
+    )
+
+
 async def _tenant_rows(request: Request):
     try:
         return await _service(request).list_tenants()
@@ -120,7 +130,37 @@ def _int_or(form: dict, key: str, default: int = 0) -> int:
         return default
 
 
+def _customer_status_or_400(raw: str | None) -> CustomerLifecycleState | None:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return CustomerLifecycleState(raw.strip().upper())
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "알 수 없는 고객 상태") from exc
+
+
+def _subscription_status_or_400(raw: str | None) -> SubscriptionStatus:
+    try:
+        return SubscriptionStatus((raw or "").strip().upper())
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "알 수 없는 구독 상태") from exc
+
+
 ENTITY_OPTIONS_CHANGED = "admin-entity-changed"
+
+
+def _completion_label(message: str, ok: bool) -> str:
+    if not ok:
+        return message
+    if "생성됨" in message:
+        return "생성 완료"
+    if "편집됨" in message or "저장" in message:
+        return "저장 완료"
+    if "복구됨" in message:
+        return "복구 완료"
+    if "비활성화됨" in message:
+        return "비활성화 완료"
+    return "완료"
 
 
 def _fragment(
@@ -131,7 +171,9 @@ def _fragment(
     trigger: str | None = None,
 ) -> HTMLResponse:
     response = templates.TemplateResponse(
-        request, "_action_result.html", {"message": message, "ok": ok}
+        request,
+        "_action_result.html",
+        {"message": message, "display_message": _completion_label(message, ok), "ok": ok},
     )
     if trigger:
         response.headers["HX-Trigger"] = trigger
@@ -154,11 +196,14 @@ def _options(
 
 
 def _channel_label(channel) -> str:
-    """메신저 채널 드롭다운 라벨 — messenger + 라우팅 식별자(비밀 아님). id 노출 최소."""
+    """메신저 채널 드롭다운 라벨 — messenger + 라우팅 식별자(비밀 아님) + 상태. id 노출 최소."""
     routing = getattr(channel, "telegram_chat_id", None) or getattr(
         channel, "kakao_room_name", None
     )
-    return f"{channel.messenger.value} · {routing}" if routing else channel.messenger.value
+    state = getattr(channel, "state", None)
+    state_str = f" [{state.value}]" if state and state.value != "ACTIVE" else ""
+    label = f"{channel.messenger.value} · {routing}" if routing else channel.messenger.value
+    return f"{label}{state_str}"
 
 
 def _rule_label(rule) -> str:
@@ -174,6 +219,10 @@ def _raise_for(exc: Exception) -> None:
         raise HTTPException(HTTPStatus.NOT_FOUND, "대상을 찾을 수 없습니다") from exc
     if isinstance(exc, AdminEntityDuplicateError):
         raise HTTPException(HTTPStatus.CONFLICT, str(exc)) from exc
+    if isinstance(exc, AdminEntityDeleteBlockedError):
+        raise HTTPException(
+            HTTPStatus.CONFLICT, "연결 데이터가 있어 고객을 삭제할 수 없습니다"
+        ) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "허용되지 않은 입력입니다") from exc
     raise exc
@@ -220,6 +269,18 @@ async def list_platform_accounts(
             {"id": a.id, "summary": f"{a.platform.value} · {a.label}", "state": a.auth_state.value}
             for a in rows
         ],
+    )
+
+
+@router.get("/subscriptions", response_class=HTMLResponse)
+async def list_subscriptions(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_subscriptions(_tenant_id(request))
+    return _entities(
+        request,
+        "구독",
+        [{"id": s.id, "summary": s.plan, "state": s.status.value} for s in rows],
     )
 
 
@@ -318,6 +379,18 @@ async def platform_account_options(
     )
 
 
+@router.get("/subscriptions/options", response_class=HTMLResponse)
+async def subscription_options(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_subscriptions(_tenant_id(request))
+    return _options(
+        request,
+        [{"id": s.id, "label": f"{s.plan} · {s.status.value}"} for s in rows],
+        placeholder="구독 선택…",
+    )
+
+
 @router.get("/monitoring-targets/options", response_class=HTMLResponse)
 async def monitoring_target_options(
     request: Request, _principal=Depends(require_viewer)
@@ -335,7 +408,16 @@ async def messenger_channel_options(
     rows = await _service(request).list_messenger_channels(_tenant_id(request))
     return _options(
         request,
-        [{"id": c.id, "label": _channel_label(c)} for c in rows],
+        [{
+            "id": c.id,
+            "label": _channel_label(c),
+            "data": {
+                "chat": c.telegram_chat_id or "",
+                "thread": c.thread_id or "",
+                "kakao": c.kakao_room_name or "",
+                "messenger": c.messenger.value,
+            },
+        } for c in rows],
         placeholder="채널 선택…",
     )
 
@@ -360,9 +442,7 @@ async def create_customer(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    response = _fragment(request, f"고객 생성됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED)
-    response.headers["HX-Redirect"] = f"/admin?tenant={tenant.id}"
-    return response
+    return _fragment(request, f"고객 생성됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED)
 
 
 @router.post("/customers/{tenant_id}", response_class=HTMLResponse)
@@ -371,12 +451,13 @@ async def update_customer(
 ) -> HTMLResponse:
     form = await _form(request)
     # tenant 별 텔레그램 설정(0012). 토큰/secret 은 폼에 키가 없으면 None(유지), 있으면 set/clear.
-    # crudUpdate(filledValues) 는 빈 값을 아예 보내지 않으므로 "비우면 유지" 시맨틱이 자연스럽다.
+    # crudButton(filledValues) 는 빈 값을 아예 보내지 않으므로 "비우면 유지" 시맨틱이 자연스럽다.
     # sending_enabled 는 명시 토글 — "true"/"false" 문자열로 보낸다(없으면 None=유지).
     try:
         tenant = await _service(request).update_tenant(
             tenant_id,
             name=form.get("name"),
+            status=_customer_status_or_400(form.get("status")),
             telegram_bot_token=form.get("telegram_bot_token"),
             telegram_webhook_secret=form.get("telegram_webhook_secret"),
             sending_enabled=_optional_bool(form.get("sending_enabled")),
@@ -389,6 +470,84 @@ async def update_customer(
         _raise_for(exc)
     return _fragment(
         request, f"고객 편집됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED
+    )
+
+
+@router.post("/customers/{tenant_id}/delete", response_class=HTMLResponse)
+async def delete_customer(
+    request: Request, tenant_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    reason = (await _form(request)).get("reason", "")
+    try:
+        tenant = await _service(request).delete_tenant(
+            tenant_id,
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=reason,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request, f"고객 삭제됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 구독 Subscription — create/update(status)
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/subscriptions", response_class=HTMLResponse)
+async def create_subscription(
+    request: Request, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    form = await _form(request)
+    tenant_id = (form.get("tenant_id") or _tenant_id(request)).strip()
+    if not tenant_id:
+        return _missing_tenant_fragment(request)
+    try:
+        subscription = await _service(request).create_subscription(
+            entity_id=_new_id(),
+            tenant_id=tenant_id,
+            plan=form.get("plan", "basic"),
+            status=_subscription_status_or_400(
+                form.get("status") or SubscriptionStatus.PAYMENT_ACTIVE.value
+            ),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=form.get("reason", ""),
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request,
+        f"구독 생성됨 ({subscription.status.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
+
+
+@router.post("/subscriptions/{subscription_id}", response_class=HTMLResponse)
+async def update_subscription(
+    request: Request, subscription_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    form = await _form(request)
+    try:
+        subscription = await _service(request).update_subscription(
+            subscription_id,
+            tenant_id=_tenant_id(request),
+            status=_subscription_status_or_400(form.get("status")),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=form.get("reason", ""),
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request,
+        f"구독 저장됨 ({subscription.status.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
     )
 
 
@@ -411,6 +570,8 @@ async def create_platform_account(
 ) -> HTMLResponse:
     form = await _form(request)
     platform = _platform_or_400(form.get("platform", ""))
+    if not _tenant_id(request):
+        return _missing_tenant_fragment(request)
     try:
         account = await _service(request).create_platform_account(
             entity_id=_new_id(),
@@ -582,7 +743,7 @@ async def reactivate_monitoring_target(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 메시지 채널 MessengerChannel — create(PENDING)/update(라우팅)/deactivate
+# 메시지 채널 MessengerChannel — create(TELEGRAM=PENDING, KAKAO room=ACTIVE)/update/deactivate
 # ══════════════════════════════════════════════════════════════════════════
 
 def _messenger_or_400(raw: str):
