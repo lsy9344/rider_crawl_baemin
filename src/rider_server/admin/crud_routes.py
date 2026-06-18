@@ -793,9 +793,9 @@ async def update_messenger_channel(
         channel = await _service(request).update_messenger_channel(
             channel_id,
             tenant_id=_tenant_id(request),
-            telegram_chat_id=form.get("telegram_chat_id"),
-            thread_id=form.get("thread_id"),
-            kakao_room_name=form.get("kakao_room_name"),
+            telegram_chat_id=form.get("telegram_chat_id", "").strip() or None,
+            thread_id=form.get("thread_id", "").strip() or None,
+            kakao_room_name=form.get("kakao_room_name", "").strip() or None,
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),
