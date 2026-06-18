@@ -28,7 +28,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from ..security.access import enforce_session
-from .dashboard_service import DashboardRepository, DashboardService
+from .dashboard_service import ALL_TENANTS, DashboardRepository, DashboardService
 from . import severity as severity_policy
 from .severity import (
     SEVERITY_AUTH_REQUIRED,
@@ -213,11 +213,16 @@ async def _dashboard_tenants(request: Request):
 
 async def _dashboard_tenant_id(request: Request, *, tenants=None) -> str:
     tenant_id = _tenant_id(request)
+    if tenant_id == ALL_TENANTS:
+        return ALL_TENANTS
     if tenant_id:
         return tenant_id
     if tenants is None:
         tenants = await _dashboard_tenants(request)
-    return tenants[0].id if len(tenants) == 1 else ""
+    if not tenants:
+        return ""
+    active = [t for t in tenants if getattr(t, 'status', '') == 'ACTIVE']
+    return (active or tenants)[0].id
 
 
 async def _target_rows_for_display(
@@ -307,7 +312,9 @@ async def targets_fragment(
     """``GET /admin/targets`` — HTMX 부분 fragment(대상 상태 표)."""
 
     rows = await _target_rows_for_display(_repo(request), tenant_id=_tenant_id(request), now=_now())
-    return templates.TemplateResponse(request, "_targets.html", {"targets": rows})
+    return templates.TemplateResponse(
+        request, "_targets.html", {"targets": rows, "tenant_id": _tenant_id(request)}
+    )
 
 
 @router.get("/agents", response_class=HTMLResponse)
