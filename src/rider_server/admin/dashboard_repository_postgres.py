@@ -52,6 +52,7 @@ from rider_server.queue.states import (
 )
 
 from .dashboard_service import (
+    ALL_TENANTS,
     AgentHealthFacts,
     AuthRequiredRow,
     ChannelHealthRow,
@@ -83,11 +84,18 @@ class PostgresDashboardRepository(DashboardRepository):
     ) -> list[TargetHealthFacts]:
         if not tenant_id.strip():
             return []
+        where_clauses = [
+            PlatformAccount.tenant_id == MonitoringTarget.tenant_id,
+            MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
+        ]
+        if tenant_id != ALL_TENANTS:
+            where_clauses.append(MonitoringTarget.tenant_id == tenant_id)
         # 대상 + 소유 계정(auth_state) + tenant lifecycle 을 tenant scope 로 조인(INACTIVE 제외).
         base_stmt = (
             select(
                 MonitoringTarget.id,
                 MonitoringTarget.tenant_id,
+                Tenant.name.label("customer_name"),
                 MonitoringTarget.name,
                 MonitoringTarget.center_name,
                 PlatformAccount.platform,
@@ -101,11 +109,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 MonitoringTarget.platform_account_id == PlatformAccount.id,
             )
             .join(Tenant, MonitoringTarget.tenant_id == Tenant.id)
-            .where(
-                MonitoringTarget.tenant_id == tenant_id,
-                PlatformAccount.tenant_id == MonitoringTarget.tenant_id,
-                MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
-            )
+            .where(*where_clauses)
         )
         facts: list[TargetHealthFacts] = []
         async with self._session_factory() as session:
@@ -122,6 +126,7 @@ class PostgresDashboardRepository(DashboardRepository):
                     TargetHealthFacts(
                         target_id=target_id,
                         tenant_id=str(row.tenant_id),
+                        customer_name=row.customer_name,
                         name=row.name,
                         center_name=row.center_name,
                         platform=row.platform,
@@ -246,26 +251,28 @@ class PostgresDashboardRepository(DashboardRepository):
     ) -> ChannelHealthRow:
         if not tenant_id.strip():
             return ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=0)
+        kakao_conditions = [
+            Job.type == JOB_TYPE_KAKAO_SEND,
+            Job.status == JOB_STATUS_PENDING,
+        ]
+        telegram_conditions = [
+            DeliveryLog.error_code == FailureCategory.TELEGRAM_FAILURE.value,
+            # sent_at 미기록(전송 실패) 도 최근 오류로 포함, 그 외엔 윈도 내만.
+            (DeliveryLog.sent_at.is_(None)) | (DeliveryLog.sent_at >= now - _TELEGRAM_ERROR_WINDOW),
+        ]
+        if tenant_id != ALL_TENANTS:
+            kakao_conditions.append(MonitoringTarget.tenant_id == tenant_id)
+            telegram_conditions.append(MessengerChannel.tenant_id == tenant_id)
         kakao_stmt = (
             select(func.min(Job.run_after))
             .join(MonitoringTarget, Job.target_id == MonitoringTarget.id)
-            .where(
-                MonitoringTarget.tenant_id == tenant_id,
-                Job.type == JOB_TYPE_KAKAO_SEND,
-                Job.status == JOB_STATUS_PENDING,
-            )
+            .where(*kakao_conditions)
         )
-        since = now - _TELEGRAM_ERROR_WINDOW
         telegram_stmt = (
             select(func.count())
             .select_from(DeliveryLog)
             .join(MessengerChannel, DeliveryLog.channel_id == MessengerChannel.id)
-            .where(
-                MessengerChannel.tenant_id == tenant_id,
-                DeliveryLog.error_code == FailureCategory.TELEGRAM_FAILURE.value,
-                # sent_at 미기록(전송 실패) 도 최근 오류로 포함, 그 외엔 윈도 내만.
-                (DeliveryLog.sent_at.is_(None)) | (DeliveryLog.sent_at >= since),
-            )
+            .where(*telegram_conditions)
         )
         async with self._session_factory() as session:
             oldest_run_after = (await session.execute(kakao_stmt)).scalar_one_or_none()
@@ -281,6 +288,17 @@ class PostgresDashboardRepository(DashboardRepository):
     async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
         if not tenant_id.strip():
             return []
+        account_conditions = [
+            MonitoringTarget.tenant_id == PlatformAccount.tenant_id,
+            PlatformAccount.auth_state == BaeminAuthState.AUTH_REQUIRED.value,
+        ]
+        session_conditions = [
+            AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
+            AuthSession.resolved_at.is_(None),
+        ]
+        if tenant_id != ALL_TENANTS:
+            account_conditions.append(PlatformAccount.tenant_id == tenant_id)
+            session_conditions.append(PlatformAccount.tenant_id == tenant_id)
         # 계정 인증 필요(AUTH_REQUIRED) 대상/프로필을 tenant scope 로 조인(AC4).
         account_stmt = (
             select(
@@ -300,9 +318,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 isouter=True,
             )
             .where(
-                PlatformAccount.tenant_id == tenant_id,
-                MonitoringTarget.tenant_id == PlatformAccount.tenant_id,
-                PlatformAccount.auth_state == BaeminAuthState.AUTH_REQUIRED.value,
+                *account_conditions,
             )
         )
         rows: list[AuthRequiredRow] = []
@@ -325,11 +341,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 )
                 .select_from(AuthSession)
                 .join(PlatformAccount, AuthSession.account_id == PlatformAccount.id)
-                .where(
-                    PlatformAccount.tenant_id == tenant_id,
-                    AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
-                    AuthSession.resolved_at.is_(None),
-                )
+                .where(*session_conditions)
             )
             for row in (await session.execute(session_stmt)).all():
                 rows.append(

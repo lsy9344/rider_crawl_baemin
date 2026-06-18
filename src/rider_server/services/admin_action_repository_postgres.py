@@ -26,6 +26,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
+from rider_server.db.models.account import PlatformAccount as PlatformAccountRow
 from rider_server.db.models.agent import BrowserProfile as BrowserProfileRow
 from rider_server.db.models.agent import Job as JobRow
 from rider_server.db.models.audit import AuditLog as AuditLogRow
@@ -110,6 +111,21 @@ class PostgresAdminActionRepository:
         async with self._session_factory() as session:
             row = (await session.execute(stmt)).scalar_one_or_none()
         return None if row is None else _target_to_domain(row)
+
+    async def get_target_platform(self, target_id: str) -> str | None:
+        stmt = (
+            select(PlatformAccountRow.platform)
+            .select_from(MonitoringTargetRow)
+            .join(
+                PlatformAccountRow,
+                (MonitoringTargetRow.platform_account_id == PlatformAccountRow.id)
+                & (MonitoringTargetRow.tenant_id == PlatformAccountRow.tenant_id),
+            )
+            .where(MonitoringTargetRow.id == target_id)
+        )
+        async with self._session_factory() as session:
+            platform = (await session.execute(stmt)).scalar_one_or_none()
+        return None if platform is None else str(platform)
 
     async def get_job(self, job_id: str) -> JobRef | None:
         # tenant scope 는 job→target→tenant 조인으로 도출(jobs 엔 tenant_id 컬럼 없음).

@@ -455,6 +455,7 @@ def _snapshot_payload(payload: CrawlJobPayload, raw: Any) -> dict[str, Any]:
         "tenant_id": payload.tenant_id,
         "platform_account_id": payload.platform_account_id,
         "platform": payload.platform,
+        "auth_state": AUTH_STATE_ACTIVE,
         "collected_at": _iso_utc(datetime.now(timezone.utc)),
         "parser_version": payload.parser_version,
         "quality_state": QUALITY_OK,

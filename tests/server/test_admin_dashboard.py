@@ -185,6 +185,53 @@ def test_auth_required_rows_are_tenant_scoped() -> None:
     assert all(r.tenant_id == _TENANT for r in rows)
 
 
+def test_in_memory_dashboard_all_tenants_returns_targets_and_aggregates_channels() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        TargetHealthFacts(
+            target_id="t-a",
+            tenant_id=_TENANT,
+            customer_name="고객A",
+            name="가게A",
+            center_name="센터",
+            platform="BAEMIN",
+            interval_minutes=10,
+            last_success_at=None,
+            last_delivery_at=None,
+            last_failure_code=None,
+            account_auth_state="ACTIVE",
+            lifecycle_state="ACTIVE",
+        )
+    )
+    repo.seed_target(
+        TargetHealthFacts(
+            target_id="t-b",
+            tenant_id=_OTHER_TENANT,
+            customer_name="고객B",
+            name="가게B",
+            center_name="센터",
+            platform="BAEMIN",
+            interval_minutes=10,
+            last_success_at=None,
+            last_delivery_at=None,
+            last_failure_code=None,
+            account_auth_state="ACTIVE",
+            lifecycle_state="ACTIVE",
+        )
+    )
+    repo.seed_channel_health(_TENANT, ChannelHealthRow(kakao_queue_lag_seconds=42, telegram_error_count=3))
+    repo.seed_channel_health(_OTHER_TENANT, ChannelHealthRow(kakao_queue_lag_seconds=7, telegram_error_count=4))
+
+    rows = asyncio.run(repo.target_health(tenant_id="all", now=_NOW))
+    health = asyncio.run(repo.channel_health(tenant_id="all", now=_NOW))
+
+    assert {(r.target_id, r.tenant_id, r.customer_name) for r in rows} == {
+        ("t-a", _TENANT, "고객A"),
+        ("t-b", _OTHER_TENANT, "고객B"),
+    }
+    assert health == ChannelHealthRow(kakao_queue_lag_seconds=42, telegram_error_count=7)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (2) HTMX 라우트 — TestClient
 # ══════════════════════════════════════════════════════════════════════════
@@ -710,7 +757,77 @@ def test_dashboard_without_tenant_multiple_known_tenants_renders_switcher() -> N
     assert 'value="tn-1"' in body
     assert 'value="tn-2"' in body
     assert "switchTenant" in body
-    assert 'hx-get="/admin/targets?tenant="' in body
+    assert 'hx-get="/admin/targets?tenant=tn-1"' in body
+
+
+def test_dashboard_all_tenants_renders_option_customer_names_and_safe_action_tenants() -> None:
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객A",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_OTHER_TENANT,
+            name="고객B",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        TargetHealthFacts(
+            target_id="t-a",
+            tenant_id=_TENANT,
+            customer_name="고객A",
+            name="가게A",
+            center_name="센터",
+            platform="BAEMIN",
+            interval_minutes=10,
+            last_success_at=_NOW,
+            last_delivery_at=None,
+            last_failure_code=None,
+            account_auth_state="ACTIVE",
+            lifecycle_state="ACTIVE",
+        )
+    )
+    repo.seed_target(
+        TargetHealthFacts(
+            target_id="t-b",
+            tenant_id=_OTHER_TENANT,
+            customer_name="고객B",
+            name="가게B",
+            center_name="센터",
+            platform="BAEMIN",
+            interval_minutes=10,
+            last_success_at=_NOW,
+            last_delivery_at=None,
+            last_failure_code=None,
+            account_auth_state="ACTIVE",
+            lifecycle_state="ACTIVE",
+        )
+    )
+    app = _allow_viewer(
+        create_app(
+            _FAKE_SETTINGS,
+            dashboard_repository=repo,
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+
+    body = TestClient(app, raise_server_exceptions=False).get("/admin?tenant=all").text
+
+    assert '<option value="all" selected>전체 고객</option>' in body
+    assert 'hx-get="/admin/targets?tenant=all"' in body
+    assert "고객: 고객A" in body and "고객: 고객B" in body
+    assert "/admin/targets/t-a/test-crawl?tenant=tn-1" in body
+    assert "/admin/targets/t-b/test-crawl?tenant=tn-2" in body
+    assert "/admin/targets/t-a/test-crawl?tenant=all" not in body
+    assert "전체 고객 보기에서는 작업 고객을 먼저 선택하세요." in body
 
 
 def test_dashboard_hash_manage_opens_manage_tab() -> None:

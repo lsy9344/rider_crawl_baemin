@@ -329,6 +329,7 @@
         {% if tenant_rows %}
         <select id="tenant-switch" class="tenant-select" aria-label="고객 선택" onchange="switchTenant(this.value)">
           <option value="">고객 선택…</option>
+          <option value="all" {% if tenant_id == 'all' %}selected{% endif %}>전체 고객</option>
           {% for tenant in tenant_rows %}
           <option value="{{ tenant.id }}" {% if tenant.id == tenant_id %}selected{% endif %}>{{ tenant.name }}</option>
           {% endfor %}

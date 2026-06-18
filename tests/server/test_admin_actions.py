@@ -607,6 +607,21 @@ def test_auth_check_enqueues_auth_check_job_and_audit() -> None:
     assert repo.audits[-1].action == "AUTH_CHECK"
 
 
+def test_auth_check_uses_target_platform_account_platform() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_target_platform("mt-1", "COUPANG")
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.auth_check(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json["platform"] == "coupang"
+    assert job.payload_json["parser_version"] == "coupang-v1"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (1-QA) tenant scope — retry/dispose 도 cross-tenant 차단(누출/변경 0)
 # ══════════════════════════════════════════════════════════════════════════

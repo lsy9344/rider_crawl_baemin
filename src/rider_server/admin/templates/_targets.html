@@ -50,6 +50,9 @@
     <span class="sevbar" aria-hidden="true"></span>
     <span class="t-name">
       <span class="nm">{{ t.name }}</span>
+      {% if tenant_id == 'all' and t.customer_name %}
+      <span class="ctr">고객: {{ t.customer_name }}</span>
+      {% endif %}
       <span class="ctr">{% if t.center_name %}센터: {{ t.center_name }}{% else %}<span class="risk">⚠ 센터 미설정</span>{% endif %}</span>
     </span>
     <span class="plat {{ t.platform | platform_class }}">{{ t.platform | platform_label }}</span>

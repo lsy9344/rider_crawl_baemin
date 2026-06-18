@@ -130,6 +130,7 @@ def test_baemin_success_returns_snapshot_payload() -> None:
     assert payload["target_id"] == "target-1"
     assert payload["tenant_id"] == "tenant-1"
     assert payload["platform"] == "baemin"
+    assert payload["auth_state"] == AUTH_STATE_ACTIVE
     assert payload["parser_version"] == "baemin-v1"
     assert payload["quality_state"] == "OK"
     assert payload["normalized_json"]["center_name"] == "배민센터A"
@@ -146,6 +147,7 @@ def test_coupang_success_returns_snapshot_payload() -> None:
     assert result.status == JOB_STATUS_SUCCESS
     payload = result.result_json
     assert payload["platform"] == "coupang"
+    assert payload["auth_state"] == AUTH_STATE_ACTIVE
     assert payload["normalized_json"]["peak_dashboard"]["processed_count"] == 67
     assert payload["normalized_json"]["current_screen"]["center_name"] == "쿠팡상점A"
 

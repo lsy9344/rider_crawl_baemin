@@ -186,6 +186,8 @@ class AdminActionRepository(Protocol):
 
     async def get_target(self, target_id: str) -> MonitoringTarget | None: ...
 
+    async def get_target_platform(self, target_id: str) -> str | None: ...
+
     async def get_job(self, job_id: str) -> JobRef | None: ...
 
     async def get_held_dispatch(self, dispatch_id: str) -> HeldDispatchRef | None: ...
@@ -233,8 +235,12 @@ def _test_crawl_payload(target: MonitoringTarget, job_type: str) -> dict[str, ob
     return _target_job_payload(target, job_type=job_type, platform=platform)
 
 
-def _auth_check_payload(target: MonitoringTarget) -> dict[str, object]:
-    return _target_job_payload(target, job_type=JOB_TYPE_AUTH_CHECK, platform="baemin")
+def _auth_check_payload(target: MonitoringTarget, *, platform: str) -> dict[str, object]:
+    return _target_job_payload(
+        target,
+        job_type=JOB_TYPE_AUTH_CHECK,
+        platform=_platform_registry_key(platform),
+    )
 
 
 def _target_job_payload(
@@ -260,6 +266,13 @@ def _platform_for_crawl_job(job_type: str) -> str:
     if job_type == JOB_TYPE_CRAWL_COUPANG:
         return "coupang"
     raise ValueError(f"unknown crawl job type: {job_type}")
+
+
+def _platform_registry_key(platform: str) -> str:
+    normalized = str(platform or "").strip().casefold()
+    if normalized in {"baemin", "coupang"}:
+        return normalized
+    raise ValueError(f"unknown platform: {platform}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -539,10 +552,11 @@ class AdminActionService:
         """대상에 대해 ``AUTH_CHECK`` job 1건을 트리거한다(인증 상태 재확인)."""
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
+        platform = await self._repo.get_target_platform(target_id)
         job_id = await self._queue.enqueue(
             job_type=JOB_TYPE_AUTH_CHECK,
             target_id=target_id,
-            payload_json=_auth_check_payload(target),
+            payload_json=_auth_check_payload(target, platform=platform or ""),
             now=at,
         )
         audit = self._audit(
@@ -815,6 +829,7 @@ class InMemoryAdminActionRepository:
     def __init__(self) -> None:
         self._subscriptions: dict[str, Subscription] = {}
         self._targets: dict[str, MonitoringTarget] = {}
+        self._target_platforms: dict[str, str] = {}
         self._jobs: dict[str, JobRef] = {}
         self._held: dict[str, HeldDispatchRef] = {}
         self._assignments: dict[str, str] = {}  # target_id → agent_id
@@ -826,6 +841,10 @@ class InMemoryAdminActionRepository:
 
     def seed_target(self, target: MonitoringTarget) -> None:
         self._targets[target.id] = target
+        self._target_platforms.setdefault(target.id, "BAEMIN")
+
+    def seed_target_platform(self, target_id: str, platform: str) -> None:
+        self._target_platforms[target_id] = platform
 
     def seed_job(self, job: JobRef) -> None:
         self._jobs[job.job_id] = job
@@ -842,6 +861,11 @@ class InMemoryAdminActionRepository:
 
     async def get_target(self, target_id: str) -> MonitoringTarget | None:
         return self._targets.get(target_id)
+
+    async def get_target_platform(self, target_id: str) -> str | None:
+        if target_id not in self._targets:
+            return None
+        return self._target_platforms.get(target_id, "BAEMIN")
 
     async def get_job(self, job_id: str) -> JobRef | None:
         return self._jobs.get(job_id)
