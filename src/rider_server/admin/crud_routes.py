@@ -257,6 +257,28 @@ async def list_customers(
     )
 
 
+@router.get("/telegram-settings", response_class=HTMLResponse)
+async def list_telegram_settings(
+    request: Request, _principal=Depends(require_viewer)
+) -> HTMLResponse:
+    rows = await _service(request).list_tenants()
+    return templates.TemplateResponse(
+        request,
+        "_tenant_telegram.html",
+        {
+            "rows": [
+                {
+                    "name": t.name,
+                    "bot_token_label": "설정됨" if (t.telegram_bot_token or "").strip() else "미설정",
+                    "webhook_secret_label": "설정됨" if (t.telegram_webhook_secret or "").strip() else "미설정",
+                    "sending_enabled": t.sending_enabled,
+                }
+                for t in rows
+            ],
+        },
+    )
+
+
 @router.get("/platform-accounts", response_class=HTMLResponse)
 async def list_platform_accounts(
     request: Request, _principal=Depends(require_viewer)
@@ -277,10 +299,18 @@ async def list_subscriptions(
     request: Request, _principal=Depends(require_viewer)
 ) -> HTMLResponse:
     rows = await _service(request).list_subscriptions(_tenant_id(request))
+    tenants = {t.id: t.name for t in await _service(request).list_tenants()}
     return _entities(
         request,
         "구독",
-        [{"id": s.id, "summary": s.plan, "state": s.status.value} for s in rows],
+        [
+            {
+                "id": s.id,
+                "summary": f"{tenants.get(s.tenant_id, s.tenant_id)} · {s.plan}",
+                "state": s.status.value,
+            }
+            for s in rows
+        ],
     )
 
 

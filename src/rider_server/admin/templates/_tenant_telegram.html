@@ -1,0 +1,21 @@
+{# 고객별 텔레그램 설정 테이블 partial — 30초 polling. secret 은 설정 여부만 표시. autoescape 유지. #}
+<div class="table-wrap">
+<table>
+  <caption class="muted">고객별 텔레그램 설정 ({{ rows | length }}건)</caption>
+  <thead>
+    <tr><th>고객명</th><th>봇 토큰</th><th>webhook secret</th><th>실발송</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.name }}</td>
+      <td>{{ row.bot_token_label }}</td>
+      <td>{{ row.webhook_secret_label }}</td>
+      <td><span class="sev-badge {{ 'sev-normal' if row.sending_enabled else 'sev-stopped' }}">{{ 'ON' if row.sending_enabled else 'OFF' }}</span></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">등록된 고객이 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

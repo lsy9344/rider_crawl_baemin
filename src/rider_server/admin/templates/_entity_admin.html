@@ -86,11 +86,11 @@
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
-      <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
-      <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
-      <label>external_id <input type="text" id="tgt-edit-external" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
-      <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
-      <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"><span class="field-help">비우면 유지</span></label>
+      <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
+      <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
+      <label>external_id <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
+      <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
+      <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
       <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
@@ -260,6 +260,7 @@
           </label>
           <button type="button" onclick="crudButton(this, '/admin/customers/', 'tg-edit-id', '', filledValues({telegram_bot_token: cval('tg-edit-token'), telegram_webhook_secret: cval('tg-edit-secret'), sending_enabled: cval('tg-edit-sending')}))">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
+        <div hx-get="/admin/telegram-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
 
     </div>
