@@ -159,9 +159,11 @@ class QueueBackend(abc.ABC):
         severity: str,
         message_redacted: str,
         artifact_refs: Sequence[Any] = (),
+        agent_id: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         """job 진행 이벤트를 best-effort 로 받는다(본문은 이미 redact 통과값).
 
-        14테이블 계약에 events 테이블이 없으므로 PG 구현은 (저장 없이) 통과만 하고, in-memory
-        구현은 테스트 가시성을 위해 기록한다. 저장/로깅 시 secret 평문이 남지 않는다.
+        PG 구현은 작은 구조 이벤트를 ``audit_logs`` 에 남기고, in-memory 구현은 테스트 가시성을
+        위해 기록한다. 저장/로깅 시 secret 평문이 남지 않는다.
         """

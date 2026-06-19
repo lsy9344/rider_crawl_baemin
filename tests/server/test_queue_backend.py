@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rider_server.domain import BaeminAuthState, FailureCategory
+from rider_server.db.models.audit import AuditLog
+from rider_server.domain import AuditResult, BaeminAuthState, FailureCategory
 from rider_server.queue import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_FAILED,
@@ -27,6 +29,7 @@ from rider_server.queue import (
     JOB_STATUS_SUCCEEDED,
     InMemoryQueueBackend,
     InvalidJobTransition,
+    PostgresQueueBackend,
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
@@ -124,6 +127,32 @@ def _make_pg_backend():
                 os.environ["DATABASE_URL"] = prev
 
     return backend, _teardown
+
+
+class _FakeAuditSession:
+    def __init__(self) -> None:
+        self.added: list[object] = []
+        self.committed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    def add(self, obj: object) -> None:
+        self.added.append(obj)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class _FakeAuditSessionFactory:
+    def __init__(self) -> None:
+        self.session = _FakeAuditSession()
+
+    def __call__(self):
+        return self.session
 
 
 _BACKENDS = ["memory", _pg_param]
@@ -243,6 +272,40 @@ def test_kakao_delivery_log_values_map_complete_status() -> None:
 
     assert sent == {"status": "SENT", "error_code": None, "sent_at": _T0}
     assert failed == {"status": "FAILED", "error_code": "KAKAO_FAILURE", "sent_at": None}
+
+
+def test_postgres_emit_event_records_agent_audit_log() -> None:
+    factory = _FakeAuditSessionFactory()
+    backend = PostgresQueueBackend(factory)  # type: ignore[arg-type]
+    job_id = "33333333-3333-3333-3333-333333333333"
+
+    asyncio.run(
+        backend.emit_event(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            event_type="JOB_STARTED",
+            severity="info",
+            message_redacted="started token=raw-secret-123456",
+            artifact_refs=["artifact:agent-event-1"],
+            now=_T0,
+        )
+    )
+
+    assert factory.session.committed is True
+    assert len(factory.session.added) == 1
+    audit = factory.session.added[0]
+    assert isinstance(audit, AuditLog)
+    assert audit.actor_id == uuid.UUID(_AGENT_1)
+    assert audit.action == "JOB_STARTED"
+    assert audit.source == "AGENT"
+    assert audit.target_type == "JOB"
+    assert audit.target_id == uuid.UUID(job_id)
+    assert audit.result == AuditResult.SUCCESS.value
+    assert audit.created_at == _T0
+    blob = json.dumps(audit.diff_redacted, ensure_ascii=False)
+    assert "raw-secret-123456" not in blob
+    assert audit.diff_redacted["severity"] == "info"
+    assert audit.diff_redacted["artifact_refs"] == ["artifact:agent-event-1"]
 
 
 # ── (a) 계약: lease 만료 → recover_stale → 재claim 가능 ───────────────────────────

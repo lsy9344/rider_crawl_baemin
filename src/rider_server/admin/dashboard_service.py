@@ -18,12 +18,16 @@ drift 회피): 수집 성공=``snapshots`` (quality_state=OK), 전송 성공=``d
 from __future__ import annotations
 
 import abc
+import math
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from . import severity
 
 ALL_TENANTS = "all"
+_MAX_KAKAO_STATUS_TEXT_LENGTH = 80
+_MAX_KAKAO_STATUS_INT = 1_000_000
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -59,6 +63,7 @@ class AgentHealthFacts:
     last_heartbeat_at: datetime | None
     current_job_type: str | None  # 활성(CLAIMED/RUNNING) job 의 type
     capabilities: tuple[str, ...]  # capacity_json 의 capability 목록
+    kakao_status: dict[str, Any] | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -93,6 +98,15 @@ class AgentRow:
     online: bool
     current_job_type: str | None
     capabilities: tuple[str, ...]
+    kakao_state: str | None = None
+    kakao_enabled: bool | None = None
+    kakao_queue_depth: int | None = None
+    kakao_queue_lag_seconds: int | None = None
+    kakao_sent: int | None = None
+    kakao_failed: int | None = None
+    kakao_last_success_at: str | None = None
+    kakao_last_error_code: str | None = None
+    kakao_interactive_session_available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +167,34 @@ class DashboardRepository(abc.ABC):
         """tenant 의 인증 필요 고객/대상/프로필 목록(AC4)."""
 
 
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= _MAX_KAKAO_STATUS_INT else None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        integer = int(value)
+        return integer if 0 <= integer <= _MAX_KAKAO_STATUS_INT else None
+    return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _optional_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > _MAX_KAKAO_STATUS_TEXT_LENGTH:
+        return None
+    if any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+        return None
+    return text
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # read-model 조립 서비스(순수 심각도 합성 + async repository I/O)
 # ══════════════════════════════════════════════════════════════════════════
@@ -194,6 +236,11 @@ class DashboardService:
 
     @staticmethod
     def agent_row(facts: AgentHealthFacts, now: datetime) -> AgentRow:
+        kakao = facts.kakao_status if isinstance(facts.kakao_status, dict) else {}
+        state = _optional_str(kakao.get("current_state") or kakao.get("state"))
+        enabled = (
+            kakao.get("enabled") if "enabled" in kakao else kakao.get("worker_enabled")
+        )
         return AgentRow(
             agent_id=facts.agent_id,
             name=facts.name,
@@ -202,6 +249,17 @@ class DashboardService:
             online=severity.is_agent_online(facts.last_heartbeat_at, now),
             current_job_type=facts.current_job_type,
             capabilities=facts.capabilities,
+            kakao_state=state,
+            kakao_enabled=_optional_bool(enabled),
+            kakao_queue_depth=_optional_int(kakao.get("queue_depth")),
+            kakao_queue_lag_seconds=_optional_int(kakao.get("queue_lag_seconds")),
+            kakao_sent=_optional_int(kakao.get("sent")),
+            kakao_failed=_optional_int(kakao.get("failed")),
+            kakao_last_success_at=_optional_str(kakao.get("last_success_at")),
+            kakao_last_error_code=_optional_str(kakao.get("last_error_code")),
+            kakao_interactive_session_available=_optional_bool(
+                kakao.get("interactive_session_available")
+            ),
         )
 
     async def target_rows(

@@ -234,6 +234,10 @@ class PostgresDashboardRepository(DashboardRepository):
                 ).scalar_one_or_none()
                 data = row.capacity_json or {}
                 capabilities = tuple(data.get("capabilities", []) or [])
+                kakao_status_raw = data.get("kakao_status")
+                kakao_status = (
+                    dict(kakao_status_raw) if isinstance(kakao_status_raw, dict) else None
+                )
                 facts.append(
                     AgentHealthFacts(
                         agent_id=str(row.id),
@@ -242,6 +246,7 @@ class PostgresDashboardRepository(DashboardRepository):
                         last_heartbeat_at=row.last_heartbeat_at,
                         current_job_type=current_job_type,
                         capabilities=capabilities,
+                        kakao_status=kakao_status,
                     )
                 )
         return facts

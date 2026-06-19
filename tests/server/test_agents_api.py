@@ -170,6 +170,37 @@ def test_heartbeat_updates_agent_capacity_and_status_without_echoing_token() -> 
     assert saved.capacity_json["browser_profiles"][0]["id"] == "profile-1"
 
 
+def test_heartbeat_preserves_kakao_worker_operational_status() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+    kakao_status = {
+        "enabled": True,
+        "queue_depth": 2,
+        "queue_lag_seconds": 30.0,
+        "sent": 7,
+        "failed": 1,
+        "last_error_code": "KAKAO_FAILURE",
+    }
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["KAKAO_SEND"],
+            "kakao_status": kakao_status,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    saved = registry.agent(_AGENT_ID)
+    assert saved is not None
+    assert saved.capacity_json["kakao_status"] == kakao_status
+
+
 def test_heartbeat_updates_agent_version() -> None:
     registry = InMemoryAgentRegistry()
     registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)

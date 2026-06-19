@@ -120,6 +120,17 @@ def _seeded_repo() -> InMemoryDashboardRepository:
             last_heartbeat_at=_NOW - timedelta(seconds=30),
             current_job_type="CRAWL_BAEMIN",
             capabilities=("CRAWL_BAEMIN", "KAKAO_SEND"),
+            kakao_status={
+                "enabled": True,
+                "state": "idle",
+                "queue_depth": 2,
+                "queue_lag_seconds": 30,
+                "sent": 7,
+                "failed": 1,
+                "last_success_at": "2026-06-14T11:59:00Z",
+                "last_error_code": "KAKAO_FAILURE",
+                "interactive_session_available": True,
+            },
         )
     )
     repo.seed_agent(
@@ -169,7 +180,62 @@ def test_agent_rows_online_offline() -> None:
     by_id = {r.agent_id: r for r in rows}
     assert by_id["a-online"].online is True
     assert by_id["a-online"].current_job_type == "CRAWL_BAEMIN"
+    assert by_id["a-online"].kakao_enabled is True
+    assert by_id["a-online"].kakao_state == "idle"
+    assert by_id["a-online"].kakao_queue_depth == 2
+    assert by_id["a-online"].kakao_queue_lag_seconds == 30
+    assert by_id["a-online"].kakao_sent == 7
+    assert by_id["a-online"].kakao_failed == 1
+    assert by_id["a-online"].kakao_last_success_at == "2026-06-14T11:59:00Z"
+    assert by_id["a-online"].kakao_last_error_code == "KAKAO_FAILURE"
+    assert by_id["a-online"].kakao_interactive_session_available is True
     assert by_id["a-offline"].online is False
+
+
+def test_agents_fragment_renders_kakao_worker_status() -> None:
+    html = _client(_seeded_repo()).get("/admin/agents").text
+
+    assert "Kakao 상태" in html
+    assert "enabled" in html
+    assert "idle" in html
+    assert "대기 2건" in html
+    assert "지연 30초" in html
+    assert "성공 7건" in html
+    assert "실패 1건" in html
+    assert "마지막 성공 2026-06-14T11:59:00Z" in html
+    assert "세션 OK" in html
+    assert "KAKAO_FAILURE" in html
+
+
+def test_agent_row_drops_unsafe_kakao_status_values() -> None:
+    row = DashboardService.agent_row(
+        AgentHealthFacts(
+            agent_id="a-unsafe",
+            name="agent-unsafe",
+            version="1.0.0",
+            last_heartbeat_at=_NOW,
+            current_job_type=None,
+            capabilities=("KAKAO_SEND",),
+            kakao_status={
+                "state": "idle\x7f",
+                "queue_depth": -1,
+                "queue_lag_seconds": 10**20,
+                "sent": float("inf"),
+                "failed": True,
+                "last_success_at": "2026-06-14T11:59:00Z\u0085extra",
+                "last_error_code": "KAKAO_FAILURE\x7fraw details",
+            },
+        ),
+        _NOW,
+    )
+
+    assert row.kakao_state is None
+    assert row.kakao_queue_depth is None
+    assert row.kakao_queue_lag_seconds is None
+    assert row.kakao_sent is None
+    assert row.kakao_failed is None
+    assert row.kakao_last_success_at is None
+    assert row.kakao_last_error_code is None
 
 
 def test_channel_health_separates_kakao_lag_and_telegram_error() -> None:

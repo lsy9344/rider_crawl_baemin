@@ -132,10 +132,14 @@ _BROWSER_PROFILE_KEYS = frozenset({"id", "target_id", "state", "cdp_port", "prof
 _KAKAO_STATUS_KEYS = frozenset(
     {
         "queue_depth",
+        "queue_lag_seconds",
+        "enabled",
         "current_state",
         "state",
         "last_success_at",
         "last_error_code",
+        "sent",
+        "failed",
         "worker_enabled",
         "interactive_session_available",
     }

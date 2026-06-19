@@ -18,16 +18,19 @@ recover_stale: UPDATE jobs SET status='PENDING', agent_id=NULL, lease_expires_at
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from rider_crawl.redaction import redact
+
 from ..db.models.account import PlatformAccount
 from ..db.models.agent import Job
+from ..db.models.audit import AuditLog
 from ..db.models.messaging import DeliveryLog
-from ..domain import BaeminAuthState, DeliveryStatus, FailureCategory
+from ..domain import AuditResult, BaeminAuthState, DeliveryStatus, FailureCategory
 from .backend import (
     COMPLETE_ACCEPTED,
     COMPLETE_LEASE_LOST,
@@ -46,12 +49,50 @@ from .states import (
     assert_transition,
 )
 
+_MAX_EVENT_TEXT_LENGTH = 200
+_MAX_EVENT_MESSAGE_LENGTH = 500
+_MAX_EVENT_ARTIFACTS = 5
+
 
 def _as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
     """문자열/UUID/None 을 UUID 로 강제(중립 입력 → ORM 타입)."""
     if value is None or isinstance(value, uuid.UUID):
         return value
     return uuid.UUID(str(value))
+
+
+def _safe_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
+    try:
+        return _as_uuid(value)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _bounded_event_text(value: Any, *, limit: int = _MAX_EVENT_TEXT_LENGTH) -> str:
+    text = redact(str(value)).strip()
+    text = "".join(" " if ord(ch) < 32 or 127 <= ord(ch) <= 159 else ch for ch in text)
+    return text[:limit]
+
+
+def _agent_event_diff(
+    *,
+    job_id: str,
+    agent_id: str | None,
+    severity: str,
+    message_redacted: str,
+    artifact_refs: Sequence[Any],
+) -> dict[str, Any]:
+    return {
+        "job_id": _bounded_event_text(job_id),
+        "agent_id": _bounded_event_text(agent_id or ""),
+        "severity": _bounded_event_text(severity),
+        "message_redacted": _bounded_event_text(
+            message_redacted, limit=_MAX_EVENT_MESSAGE_LENGTH
+        ),
+        "artifact_refs": [
+            _bounded_event_text(ref) for ref in list(artifact_refs)[:_MAX_EVENT_ARTIFACTS]
+        ],
+    }
 
 
 def kakao_delivery_log_values(
@@ -386,7 +427,28 @@ class PostgresQueueBackend(QueueBackend):
         severity: str,
         message_redacted: str,
         artifact_refs: Sequence[Any] = (),
+        agent_id: str | None = None,
+        now: datetime | None = None,
     ) -> None:
-        # 14테이블 계약에 events 테이블이 없다 — best-effort no-op(라우트가 2xx 반환).
-        # 영속 events 저장/감사는 후속 스토리(audit_logs 연계) 소유.
-        return None
+        created_at = now if now is not None else datetime.now(timezone.utc)
+        diff = _agent_event_diff(
+            job_id=job_id,
+            agent_id=agent_id,
+            severity=severity,
+            message_redacted=message_redacted,
+            artifact_refs=artifact_refs,
+        )
+        audit = AuditLog(
+            actor_id=_safe_uuid(agent_id),
+            action=_bounded_event_text(event_type),
+            target_type="JOB",
+            target_id=_safe_uuid(job_id),
+            diff_redacted=diff,
+            created_at=created_at,
+            source="AGENT",
+            reason=diff["message_redacted"],
+            result=AuditResult.SUCCESS.value,
+        )
+        async with self._session_factory() as session:
+            session.add(audit)
+            await session.commit()

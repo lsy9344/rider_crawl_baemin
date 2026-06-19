@@ -246,17 +246,22 @@ class InMemoryQueueBackend(QueueBackend):
         severity: str,
         message_redacted: str,
         artifact_refs: Sequence[Any] = (),
+        agent_id: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         # 이미 redact 통과값 — 그대로 기록(테스트 가시성). secret 평문 없음.
-        self.events.append(
-            {
-                "job_id": job_id,
-                "event_type": event_type,
-                "severity": severity,
-                "message_redacted": message_redacted,
-                "artifact_refs": list(artifact_refs),
-            }
-        )
+        event = {
+            "job_id": job_id,
+            "event_type": event_type,
+            "severity": severity,
+            "message_redacted": message_redacted,
+            "artifact_refs": list(artifact_refs),
+        }
+        if agent_id is not None:
+            event["agent_id"] = agent_id
+        if now is not None:
+            event["created_at"] = now
+        self.events.append(event)
 
     # ── 테스트 가시성 헬퍼(인터페이스 아님 — in-memory 전용) ──────────────────────
     def job_status(self, job_id: str) -> str | None:

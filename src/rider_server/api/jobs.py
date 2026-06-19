@@ -18,6 +18,7 @@ envelope·``/v1/`` 접두 규약을 그대로 계승한다.
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from inspect import isawaitable
@@ -46,6 +47,12 @@ from ..services.job_result_ingest_service import JobResultIngestError
 # heartbeat 라우트 배선·설정화는 후속 — 5.3 은 단일 서버 상수로 둔다.
 DEFAULT_LEASE_SECONDS = 120.0
 DEFAULT_STALE_RECOVERY_INTERVAL_SECONDS = 30.0
+_COMPLETE_DIAGNOSTIC_METRIC_KEYS = frozenset(
+    {"duration_ms", "kakao_outcome", "auth_reason", "reason", "attempts"}
+)
+_MAX_DIAGNOSTIC_STRING_LENGTH = 120
+_MAX_DIAGNOSTIC_NUMBER = 1_000_000_000
+_MISSING = object()
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
@@ -110,6 +117,84 @@ class EventRequest(BaseModel):
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────────
+
+
+def _bounded_metric_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if 0 <= value <= _MAX_DIAGNOSTIC_NUMBER else _MISSING
+    if isinstance(value, float):
+        if not math.isfinite(value) or not 0 <= value <= _MAX_DIAGNOSTIC_NUMBER:
+            return _MISSING
+        return value
+    if isinstance(value, str):
+        text = redact(value).strip()
+        if not text or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text):
+            return _MISSING
+        return text[:_MAX_DIAGNOSTIC_STRING_LENGTH]
+    return _MISSING
+
+
+def _bounded_metrics(metrics: dict[str, Any]) -> dict[str, Any] | None:
+    bounded: dict[str, Any] = {}
+    for key, value in metrics.items():
+        if key not in _COMPLETE_DIAGNOSTIC_METRIC_KEYS:
+            continue
+        stored = _bounded_metric_value(value)
+        if stored is not _MISSING:
+            bounded[key] = stored
+    return bounded or None
+
+
+def _optional_finite_float(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _complete_diagnostics(body: CompleteRequest) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    if body.error_message_redacted is not None:
+        diagnostics["error_message_redacted"] = redact(body.error_message_redacted)
+    if body.metrics is not None:
+        metrics = _bounded_metrics(body.metrics)
+        if metrics:
+            diagnostics["metrics"] = metrics
+    started_at = _optional_finite_float(body.started_at)
+    if started_at is not None:
+        diagnostics["started_at"] = started_at
+    finished_at = _optional_finite_float(body.finished_at)
+    if finished_at is not None:
+        diagnostics["finished_at"] = finished_at
+    return diagnostics
+
+
+def _complete_diagnostics_key(existing: dict[str, Any]) -> str:
+    for key in ("complete", "server_complete"):
+        if key not in existing:
+            return key
+    suffix = 2
+    while f"server_complete_{suffix}" in existing:
+        suffix += 1
+    return f"server_complete_{suffix}"
+
+
+def _stored_result_json(body: CompleteRequest) -> dict[str, Any] | None:
+    result = redact_mapping(body.result_json) if body.result_json is not None else None
+    diagnostics = _complete_diagnostics(body)
+    if not diagnostics:
+        return result
+    stored = dict(result or {})
+    existing = stored.get("diagnostics")
+    merged: dict[str, Any]
+    if isinstance(existing, dict):
+        merged = dict(existing)
+    elif existing is None:
+        merged = {}
+    else:
+        merged = {"agent": existing}
+    merged[_complete_diagnostics_key(merged)] = diagnostics
+    stored["diagnostics"] = merged
+    return stored
 
 
 def _iso_utc(dt: datetime) -> str:
@@ -231,9 +316,7 @@ async def complete_job(
     now = datetime.now(timezone.utc)
     backend = _backend(request)
     ingest_service = _job_result_ingest_service(request)
-    stored_result_json = (
-        redact_mapping(body.result_json) if body.result_json is not None else None
-    )
+    stored_result_json = _stored_result_json(body)
     prepared_ingest = None
     if ingest_service is not None and target_status == JOB_STATUS_SUCCEEDED:
         expected_target_id = None
@@ -366,9 +449,11 @@ async def emit_event(
 
     await _backend(request).emit_event(
         job_id=job_id,
+        agent_id=agent_id,
         event_type=body.event_type,
         severity=body.severity,
         message_redacted=redact(body.message_redacted),
         artifact_refs=body.artifact_refs,
+        now=datetime.now(timezone.utc),
     )
     return {"status": "accepted"}

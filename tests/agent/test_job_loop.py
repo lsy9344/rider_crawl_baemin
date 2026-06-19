@@ -47,6 +47,7 @@ from rider_agent.secure_store import (
     AgentIdentity,
     save_agent_identity,
 )
+from rider_crawl.redaction import REDACTED
 
 # 매 주기 claim/complete/events 헤더에 실리는 반복 노출 표면이라 누출 단언의 핵심 대상.
 FAKE_TOKEN = "agtok-fake-job-loop-secret"
@@ -743,6 +744,34 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert captured["start_kakao_sender"] is True
     # token 평문 미출력.
     assert FAKE_TOKEN not in out
+
+
+def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypatch, capsys):
+    from rider_agent import __main__ as agent_main
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        kwargs["log"]("agent failed token=raw-secret-123456")
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    monkeypatch.chdir(tmp_path)
+    rc = agent_main._run_agent_loop(
+        [],
+        transport=object(),
+        store=object(),
+        identity_path="cfg",
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert callable(captured["log"])
+    assert callable(captured["session_probe"])
+    log_text = (tmp_path / "logs" / "agent.log").read_text(encoding="utf-8")
+    assert REDACTED in log_text
+    assert "raw-secret-123456" not in log_text
+    assert FAKE_TOKEN not in capsys.readouterr().out
 
 
 def test_run_agent_builds_default_crawl_profile_manager(tmp_path):

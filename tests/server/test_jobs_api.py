@@ -397,6 +397,30 @@ def test_events_accepted_202():
     assert backend.events and backend.events[0]["event_type"] == "JOB_STARTED"
 
 
+def test_events_passes_resolved_agent_id_to_backend() -> None:
+    backend = InMemoryQueueBackend()
+    calls: list[dict[str, object]] = []
+
+    async def _capture_event(**kwargs):
+        calls.append(kwargs)
+
+    backend.emit_event = _capture_event  # type: ignore[method-assign]
+    client = TestClient(_app_with_backend(backend, resolved_agent_id="agent-route-1"))
+    response = client.post(
+        "/v1/jobs/job-route-1/events",
+        json={
+            "event_type": "JOB_STARTED",
+            "severity": "info",
+            "message_redacted": "job started",
+            "artifact_refs": [],
+        },
+        headers={"Authorization": "Bearer route-token"},
+    )
+
+    assert response.status_code == 202
+    assert calls[0]["agent_id"] == "agent-route-1"
+
+
 # ── (QA gap A) events 본문은 서버가 한 번 더 redact 통과시켜 secret 평문이 안 남는다 ──
 
 
@@ -452,7 +476,10 @@ def test_complete_success_returns_200_with_succeeded():
         json={
             "status": "success",
             "agent_id": "agent-1",
-            "result_json": {"ok": True},
+            "result_json": {
+                "ok": True,
+                "diagnostics": {"agent": "kept", "complete": {"agent": "kept"}},
+            },
             "error_code": None,
             "error_message_redacted": None,
             "metrics": {"duration_ms": 12},
@@ -464,6 +491,15 @@ def test_complete_success_returns_200_with_succeeded():
     assert r.status_code == 200
     assert r.json() == {"job_id": job_id, "status": JOB_STATUS_SUCCEEDED}
     assert backend.job_status(job_id) == JOB_STATUS_SUCCEEDED
+    stored = backend.job_snapshot(job_id).result_json
+    assert stored["ok"] is True
+    assert stored["diagnostics"]["agent"] == "kept"
+    assert stored["diagnostics"]["complete"] == {"agent": "kept"}
+    assert stored["diagnostics"]["server_complete"] == {
+        "metrics": {"duration_ms": 12},
+        "started_at": now.timestamp(),
+        "finished_at": now.timestamp() + 1,
+    }
 
 
 def test_complete_redacts_result_json_before_queue_storage():
@@ -508,6 +544,97 @@ def test_complete_redacts_result_json_before_queue_storage():
     assert "mail-app-password" not in blob
     assert "mailbox@example.invalid" not in blob
     assert stored["ok"] is True
+
+
+def test_complete_failed_persists_redacted_diagnostics() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(
+        f"/v1/jobs/{job_id}/complete",
+        json={
+            "status": "failed",
+            "agent_id": "agent-1",
+            "error_code": "KAKAO_FAILURE",
+            "error_message_redacted": "token=raw-secret-123456",
+            "metrics": {"kakao_outcome": "kakao_failure"},
+            "started_at": now.timestamp(),
+            "finished_at": now.timestamp() + 2,
+        },
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 200
+    stored = backend.job_snapshot(job_id).result_json
+    complete_diagnostics = stored["diagnostics"]["complete"]
+    assert complete_diagnostics["metrics"] == {"kakao_outcome": "kakao_failure"}
+    assert complete_diagnostics["started_at"] == now.timestamp()
+    assert complete_diagnostics["finished_at"] == now.timestamp() + 2
+    assert REDACTED in complete_diagnostics["error_message_redacted"]
+    assert "raw-secret-123456" not in json.dumps(stored, ensure_ascii=False)
+
+
+def test_complete_diagnostics_metrics_are_bounded() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+    long_reason = "x" * 200
+
+    payload = {
+        "status": "failed",
+        "agent_id": "agent-1",
+        "metrics": {
+            "duration_ms": 10**100,
+            "kakao_outcome": "kakao_failure",
+            "auth_reason": long_reason,
+            "reason": "bad\x7fcontrol",
+            "attempts": -1,
+            "unknown": "drop-me",
+            "not_finite": float("inf"),
+        },
+        "started_at": float("nan"),
+        "finished_at": float("inf"),
+    }
+    r = client.post(
+        f"/v1/jobs/{job_id}/complete",
+        content=json.dumps(payload),
+        headers={**_BEARER, "Content-Type": "application/json"},
+    )
+
+    assert r.status_code == 200
+    metrics = backend.job_snapshot(job_id).result_json["diagnostics"]["complete"]["metrics"]
+    assert metrics == {
+        "kakao_outcome": "kakao_failure",
+        "auth_reason": "x" * 120,
+    }
+    complete_diagnostics = backend.job_snapshot(job_id).result_json["diagnostics"]["complete"]
+    assert "started_at" not in complete_diagnostics
+    assert "finished_at" not in complete_diagnostics
 
 
 def test_complete_success_commits_snapshot_ingest_when_service_configured():

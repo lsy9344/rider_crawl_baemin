@@ -107,6 +107,7 @@ def test_rider_agent_package_and_seam_import():
 
 def test_python_dash_m_rider_agent_exits_zero_runpy():
     # `python -m rider_agent` 와 동일 경로(패키지 __main__ 실행)를 in-process 로 검증.
+    sys.modules.pop("rider_agent.__main__", None)
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("rider_agent", run_name="__main__")
     assert exc.value.code == 0
