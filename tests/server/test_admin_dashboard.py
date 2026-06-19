@@ -319,6 +319,47 @@ def test_dashboard_full_page_has_htmx_attributes() -> None:
     assert "인증 필요" in body
 
 
+def test_admin_db_failure_returns_operator_html_without_secret() -> None:
+    class _FailingRepo(InMemoryDashboardRepository):
+        async def target_health(self, **kw):  # type: ignore[override]
+            raise RuntimeError("postgresql://user:super-secret@db:5432/rider")
+
+    r = _client(_FailingRepo()).get(f"/admin?tenant={_TENANT}")
+
+    assert r.status_code == 503
+    assert "text/html" in r.headers["content-type"]
+    assert "DB 연결 실패" in r.text
+    assert "DATABASE_URL" in r.text
+    assert "DB 실행 상태" in r.text
+    assert "재시도" in r.text
+    assert "super-secret" not in r.text
+
+
+def test_manage_tab_shows_customer_setup_flow_and_send_gate() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}&mode=manage").text
+
+    assert "새 고객 세팅 시작" in body
+    for label in ("고객", "플랫폼", "계정", "업체/센터", "채널", "테스트", "실제 메시지 보내기"):
+        assert label in body
+    assert "수집 테스트" in body
+    assert "전송 테스트" in body
+    assert "테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다." in body
+    assert 'id="tg-edit-sending"' in body
+    assert "sending_enabled" not in body
+
+
+def test_dashboard_tabs_and_password_inputs_are_accessible_and_readable() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'aria-controls="view-monitor"' in body
+    assert 'aria-controls="view-manage"' in body
+    assert 'id="view-monitor" role="tabpanel"' in body
+    assert 'id="view-manage" role="tabpanel"' in body
+    assert '#view-manage input[type="password"]' in body
+    assert '--font-sans: "Pretendard"' in body
+    assert "body { font-size: 13px;" not in body
+
+
 def test_admin_htmx_static_asset_is_local() -> None:
     r = _client(_seeded_repo()).get("/admin/static/htmx.min.js")
 
@@ -336,6 +377,54 @@ def test_dashboard_fragments_return_html_partials() -> None:
     # 채널 fragment 는 두 지표를 모두 노출(구분 표시).
     channels = c.get(f"/admin/channels?tenant={_TENANT}").text
     assert "KakaoTalk" in channels and "Telegram" in channels
+
+
+def test_targets_fragment_paginates_large_target_sets() -> None:
+    repo = InMemoryDashboardRepository()
+    for idx in range(300):
+        repo.seed_target(
+            _target(
+                target_id=f"target-{idx}",
+                name=f"가게-{idx}",
+                last_success_at=_NOW - timedelta(minutes=1),
+            )
+        )
+    c = _client(repo)
+
+    first = c.get(f"/admin/targets?tenant={_TENANT}&limit=100").text
+
+    assert "가게-0" in first
+    assert "가게-99" in first
+    assert "가게-100" not in first
+    assert "더 보기" in first
+    assert 'data-next-offset="100"' in first
+    assert "offset=100" in first
+
+    second = c.get(f"/admin/targets?tenant={_TENANT}&limit=100&offset=100").text
+    assert "가게-100" in second
+    assert "가게-199" in second
+    assert "가게-200" not in second
+
+
+def test_targets_fragment_passes_limit_and_offset_to_repository() -> None:
+    class _PagingRepo(InMemoryDashboardRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, object]] = []
+
+        async def target_health(self, **kw):  # type: ignore[override]
+            self.calls.append(dict(kw))
+            return await super().target_health(**kw)
+
+    repo = _PagingRepo()
+    for idx in range(3):
+        repo.seed_target(_target(target_id=f"target-{idx}", name=f"가게-{idx}"))
+
+    _client(repo).get(f"/admin/targets?tenant={_TENANT}&limit=2&offset=1")
+
+    assert repo.calls[-1]["tenant_id"] == _TENANT
+    assert repo.calls[-1]["limit"] == 3
+    assert repo.calls[-1]["offset"] == 1
 
 
 def test_auth_required_fragment_lists_only_tenant_rows() -> None:
@@ -750,6 +839,15 @@ def test_dashboard_mobile_actions_keep_touch_target_size() -> None:
     assert ".t-reason { grid-area: reason;" in mobile_css
 
 
+def test_dashboard_mobile_status_text_can_wrap() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+    mobile_css = body[body.index("@media (max-width: 720px)"):]
+
+    assert ".ministatus .seg" in mobile_css
+    assert "white-space: normal" in mobile_css
+    assert "overflow-wrap: anywhere" in mobile_css
+
+
 def test_auth_required_fragment_names_the_target_not_generic_label() -> None:
     body = _client(_seeded_repo()).get(f"/admin/auth-required?tenant={_TENANT}").text
 
@@ -788,8 +886,34 @@ def test_dashboard_without_tenant_uses_single_known_tenant() -> None:
     r = TestClient(app, raise_server_exceptions=False).get("/admin")
 
     assert r.status_code == 200
-    assert "tenant · tn-1" in r.text
+    assert ">고객 · 고객</span>" in r.text
+    assert 'title="tenant · tn-1"' in r.text
     assert 'hx-get="/admin/targets?tenant=tn-1"' in r.text
+
+
+def test_dashboard_header_prefers_customer_name_over_tenant_id() -> None:
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="상호 고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+        )
+    )
+    app = _allow_viewer(
+        create_app(
+            _FAKE_SETTINGS,
+            dashboard_repository=_seeded_repo(),
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+
+    body = TestClient(app, raise_server_exceptions=False).get(f"/admin?tenant={_TENANT}").text
+
+    assert ">고객 · 상호 고객</span>" in body
+    assert 'title="tenant · tn-1"' in body
+    assert ">tenant · tn-1</span>" not in body
 
 
 def test_dashboard_without_tenant_multiple_known_tenants_renders_switcher() -> None:

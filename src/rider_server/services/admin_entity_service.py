@@ -24,11 +24,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime
-from typing import Protocol
 
-from rider_crawl.config import DEFAULT_BAEMIN_CENTER_NAME
 from rider_server.domain import (
     AuditResult,
     BaeminAuthState,
@@ -51,197 +49,48 @@ from rider_server.services.admin_action_service import (
     TARGET_TYPE_CHANNEL,
     TARGET_TYPE_TARGET,
     TenantScopeViolation,
-    build_diff_redacted,
 )
+from rider_server.services.admin_entities.common import (
+    ACTION_DELIVERY_RULE_CREATE,
+    ACTION_DELIVERY_RULE_DEACTIVATE,
+    ACTION_DELIVERY_RULE_UPDATE,
+    ACTION_MESSENGER_CHANNEL_ACTIVATE,
+    ACTION_MESSENGER_CHANNEL_CREATE,
+    ACTION_MESSENGER_CHANNEL_DEACTIVATE,
+    ACTION_MESSENGER_CHANNEL_UPDATE,
+    ACTION_PLATFORM_ACCOUNT_CREATE,
+    ACTION_PLATFORM_ACCOUNT_UPDATE,
+    ACTION_SUBSCRIPTION_CREATE,
+    ACTION_SUBSCRIPTION_UPDATE,
+    AdminEntityDeleteBlockedError,
+    AdminEntityDuplicateError,
+    AdminEntityRepository,
+    DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD,
+    DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD,
+    TARGET_TYPE_DELIVERY_RULE,
+    TARGET_TYPE_PLATFORM_ACCOUNT,
+    TARGET_TYPE_SUBSCRIPTION,
+    TARGET_TYPE_TENANT,
+    TargetWriteResult,
+    _keyword_or_default,
+    _secret_change_label,
+    _secret_ref_or_empty,
+    build_admin_audit,
+    is_center_name_risky,
+    scoped_channel,
+    scoped_platform_account,
+    scoped_rule,
+    scoped_subscription,
+    scoped_target,
+    scoped_tenant,
+)
+from rider_server.services.admin_entities.target_service import TargetAdminEntityService
+from rider_server.services.admin_entities.tenant_service import TenantAdminEntityService
 from rider_server.services.channel_registration import (
     assert_channel_transition,
     assert_unique_kakao_rooms,
+    assert_unique_telegram_topics,
 )
-
-# ── audit action 코드(UPPER_SNAKE 기계가독 — 신규 plain-string 상수, enum 아님) ─────────
-ACTION_TENANT_CREATE = "TENANT_CREATE"
-ACTION_TENANT_UPDATE = "TENANT_UPDATE"
-ACTION_TENANT_DELETE = "TENANT_DELETE"
-ACTION_SUBSCRIPTION_CREATE = "SUBSCRIPTION_CREATE"
-ACTION_SUBSCRIPTION_UPDATE = "SUBSCRIPTION_UPDATE"
-ACTION_PLATFORM_ACCOUNT_CREATE = "PLATFORM_ACCOUNT_CREATE"
-ACTION_PLATFORM_ACCOUNT_UPDATE = "PLATFORM_ACCOUNT_UPDATE"
-ACTION_MONITORING_TARGET_CREATE = "MONITORING_TARGET_CREATE"
-ACTION_MONITORING_TARGET_UPDATE = "MONITORING_TARGET_UPDATE"
-ACTION_MONITORING_TARGET_DEACTIVATE = "MONITORING_TARGET_DEACTIVATE"
-ACTION_MONITORING_TARGET_REACTIVATE = "MONITORING_TARGET_REACTIVATE"
-ACTION_MESSENGER_CHANNEL_CREATE = "MESSENGER_CHANNEL_CREATE"
-ACTION_MESSENGER_CHANNEL_UPDATE = "MESSENGER_CHANNEL_UPDATE"
-ACTION_MESSENGER_CHANNEL_DEACTIVATE = "MESSENGER_CHANNEL_DEACTIVATE"
-ACTION_DELIVERY_RULE_CREATE = "DELIVERY_RULE_CREATE"
-ACTION_DELIVERY_RULE_UPDATE = "DELIVERY_RULE_UPDATE"
-ACTION_DELIVERY_RULE_DEACTIVATE = "DELIVERY_RULE_DEACTIVATE"
-
-# ── target_type 코드(audit_logs.target_type) — 5.7 기존 + 5.11 신규 ──────────────────
-TARGET_TYPE_TENANT = "tenant"
-TARGET_TYPE_SUBSCRIPTION = "subscription"
-TARGET_TYPE_PLATFORM_ACCOUNT = "platform_account"
-TARGET_TYPE_DELIVERY_RULE = "delivery_rule"
-
-DEFAULT_VERIFICATION_EMAIL_SUBJECT_KEYWORD = "인증번호"
-DEFAULT_VERIFICATION_EMAIL_SENDER_KEYWORD = "coupang"
-
-
-class AdminEntityDuplicateError(ValueError):
-    """운영자가 고칠 수 있는 중복 입력/unique violation."""
-
-    def __init__(self, field: str, message: str = "중복된 값입니다") -> None:
-        if "중복" not in message:
-            message = f"중복: {message}"
-        super().__init__(message)
-        self.field = field
-
-
-class AdminEntityDeleteBlockedError(ValueError):
-    """연결 데이터가 있어 tenant 물리 삭제를 차단해야 하는 경우."""
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 순수 helper(always-run — DB/async 의존 0)
-# ══════════════════════════════════════════════════════════════════════════
-
-def is_center_name_risky(platform: Platform, center_name: str) -> bool:
-    """쿠팡(``Platform.COUPANG``) 대상의 ``center_name`` 이 위험(오발송 우려)한가(순수·결정적).
-
-    쿠팡은 기대 센터/상점명 검증이 필수다(FR-20, project-context). ``center_name`` 이 **비었거나
-    배민 기본값**(``DEFAULT_BAEMIN_CENTER_NAME``)이면 다른 계정 실적 오발송 위험이 있어 위험으로
-    판정한다. 배민(``Platform.BAEMIN``)은 검증 대상이 아니라 항상 False(차단 아님 — 경고만, AC3).
-    """
-
-    if platform is not Platform.COUPANG:
-        return False
-    normalized = (center_name or "").strip()
-    return not normalized or normalized == DEFAULT_BAEMIN_CENTER_NAME
-
-
-def _keyword_or_default(value: str | None, default: str) -> str:
-    normalized = (value or "").strip()
-    return normalized or default
-
-
-def _credential_or_empty(value: str | None) -> str:
-    return (value or "").strip()
-
-
-def _secret_change_label(old: str, new: str) -> str:
-    """secret 변경을 audit 에 안전하게 기록 — 값은 절대 싣지 않고 변경 유형만 반환.
-
-    ``unchanged``(동일) / ``set``(빈→값 또는 값→다른 값) / ``cleared``(값→빈). 평문/마스킹
-    secret 이 audit diff 로 새어나가지 않도록 한다(redaction 의존 없이 구조적으로 안전).
-    """
-
-    if old == new:
-        return "unchanged"
-    if not new:
-        return "cleared"
-    return "set"
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# write 결과 값 객체(라우트가 fragment 렌더에 사용)
-# ══════════════════════════════════════════════════════════════════════════
-
-@dataclass(frozen=True)
-class TargetWriteResult:
-    """모니터링 대상 생성/편집 결과 + center_name 위험 경고 플래그(AC3 — 차단 아님)."""
-
-    target: MonitoringTarget
-    center_name_risky: bool
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# repository 포트(읽기 + create/save+audit 동일 트랜잭션)
-# ══════════════════════════════════════════════════════════════════════════
-
-class AdminEntityRepository(Protocol):
-    """Admin 엔티티 CRUD 영속 포트 — create/save 결과 + audit 를 **같은 트랜잭션** 으로 영속한다.
-
-    상태/필드 결정은 :class:`AdminEntityService` 가 하고, 포트는 그 결과를 영속만 한다(전이 판정
-    금지). PG 구현은 :class:`rider_server.services.admin_entity_repository_postgres.
-    PostgresAdminEntityRepository`, 무-DB 기본값/always-run fake 는 :class:`InMemoryAdminEntityRepository`.
-    """
-
-    # ── read(get by id) ─────────────────────────────────────────────────────
-    async def get_tenant(self, tenant_id: str) -> Tenant | None: ...
-
-    async def get_subscription(self, subscription_id: str) -> Subscription | None: ...
-
-    async def get_platform_account(self, account_id: str) -> PlatformAccount | None: ...
-
-    async def get_monitoring_target(self, target_id: str) -> MonitoringTarget | None: ...
-
-    async def get_messenger_channel(self, channel_id: str) -> MessengerChannel | None: ...
-
-    async def get_delivery_rule(self, rule_id: str) -> DeliveryRule | None: ...
-
-    # ── list(조회) ───────────────────────────────────────────────────────────
-    async def list_tenants(self) -> list[Tenant]: ...
-
-    async def list_subscriptions(self, tenant_id: str) -> list[Subscription]: ...
-
-    async def list_platform_accounts(self, tenant_id: str) -> list[PlatformAccount]: ...
-
-    async def list_monitoring_targets(self, tenant_id: str) -> list[MonitoringTarget]: ...
-
-    async def list_messenger_channels(self, tenant_id: str) -> list[MessengerChannel]: ...
-
-    async def list_delivery_rules(self, target_id: str) -> list[DeliveryRule]: ...
-
-    async def tenant_has_dependencies(self, tenant_id: str) -> bool: ...
-
-    # ── create(신규 INSERT + audit, 동일 트랜잭션) ──────────────────────────────
-    async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
-
-    async def create_subscription(
-        self, subscription: Subscription, audit: AuditEntry
-    ) -> None: ...
-
-    async def create_platform_account(
-        self, account: PlatformAccount, audit: AuditEntry
-    ) -> None: ...
-
-    async def create_monitoring_target(
-        self, target: MonitoringTarget, audit: AuditEntry
-    ) -> None: ...
-
-    async def create_messenger_channel(
-        self,
-        channel: MessengerChannel,
-        audit: AuditEntry,
-        *,
-        registration_code: str | None = None,
-    ) -> None: ...
-
-    async def create_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None: ...
-
-    # ── save(UPDATE + audit, 동일 트랜잭션) ─────────────────────────────────────
-    async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
-
-    async def save_subscription(
-        self, subscription: Subscription, audit: AuditEntry
-    ) -> None: ...
-
-    async def save_platform_account(
-        self, account: PlatformAccount, audit: AuditEntry
-    ) -> None: ...
-
-    async def save_monitoring_target(
-        self, target: MonitoringTarget, audit: AuditEntry
-    ) -> None: ...
-
-    async def save_messenger_channel(
-        self, channel: MessengerChannel, audit: AuditEntry
-    ) -> None: ...
-
-    async def save_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None: ...
-
-    # ── delete(물리 DELETE + audit, 동일 트랜잭션) ──────────────────────────────
-    async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None: ...
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -257,6 +106,17 @@ class AdminEntityService:
 
     def __init__(self, repository: AdminEntityRepository) -> None:
         self._repo = repository
+        self._tenant_service = TenantAdminEntityService(
+            repository,
+            self._audit,
+            self._scoped_tenant,
+        )
+        self._target_service = TargetAdminEntityService(
+            repository,
+            self._audit,
+            self._scoped_target,
+            self._scoped_platform_account,
+        )
 
     # ── 조회(list) — 라우트는 service 만 호출(repo 직접 접근 금지) ─────────────────
     async def list_tenants(self) -> list[Tenant]:
@@ -303,76 +163,44 @@ class AdminEntityService:
         reason: str | None = None,
         result: str = AuditResult.SUCCESS.value,
     ) -> AuditEntry:
-        from rider_crawl.redaction import redact
-
-        return AuditEntry(
+        return build_admin_audit(
             actor_id=actor_id,
             action=action,
             target_type=target_type,
             target_id=target_id,
-            diff_redacted=build_diff_redacted(diff),
-            created_at=at,
-            source=redact(source) if source else None,
-            reason=redact(reason) if reason else None,
+            at=at,
+            diff=diff,
+            source=source,
+            reason=reason,
             result=result,
         )
 
     # ── 내부: tenant scope 검증(cross-tenant 누출 차단 — 5.7 _scoped_* 패턴) ─────
     async def _scoped_tenant(self, tenant_id: str) -> Tenant:
-        tenant = await self._repo.get_tenant(tenant_id)
-        if tenant is None:
-            raise AdminActionNotFound(TARGET_TYPE_TENANT, tenant_id)
-        # 고객 자신의 scope key 는 자신의 id 다(루트). 요청 tenant 와 일치해야 한다.
-        if tenant.id != tenant_id:
-            raise TenantScopeViolation(TARGET_TYPE_TENANT, tenant_id)
-        return tenant
+        return await scoped_tenant(self._repo, tenant_id)
 
     async def _scoped_subscription(
         self, subscription_id: str, *, tenant_id: str
     ) -> Subscription:
-        subscription = await self._repo.get_subscription(subscription_id)
-        if subscription is None:
-            raise AdminActionNotFound(TARGET_TYPE_SUBSCRIPTION, subscription_id)
-        if subscription.tenant_id != tenant_id:
-            raise TenantScopeViolation(TARGET_TYPE_SUBSCRIPTION, subscription_id)
-        return subscription
+        return await scoped_subscription(self._repo, subscription_id, tenant_id=tenant_id)
 
     async def _scoped_platform_account(
         self, account_id: str, *, tenant_id: str
     ) -> PlatformAccount:
-        account = await self._repo.get_platform_account(account_id)
-        if account is None:
-            raise AdminActionNotFound(TARGET_TYPE_PLATFORM_ACCOUNT, account_id)
-        if account.tenant_id != tenant_id:
-            raise TenantScopeViolation(TARGET_TYPE_PLATFORM_ACCOUNT, account_id)
-        return account
+        return await scoped_platform_account(self._repo, account_id, tenant_id=tenant_id)
 
     async def _scoped_target(self, target_id: str, *, tenant_id: str) -> MonitoringTarget:
-        target = await self._repo.get_monitoring_target(target_id)
-        if target is None:
-            raise AdminActionNotFound(TARGET_TYPE_TARGET, target_id)
-        if target.tenant_id != tenant_id:
-            raise TenantScopeViolation(TARGET_TYPE_TARGET, target_id)
-        return target
+        return await scoped_target(self._repo, target_id, tenant_id=tenant_id)
 
     async def _scoped_channel(self, channel_id: str, *, tenant_id: str) -> MessengerChannel:
-        channel = await self._repo.get_messenger_channel(channel_id)
-        if channel is None:
-            raise AdminActionNotFound(TARGET_TYPE_CHANNEL, channel_id)
-        if channel.tenant_id != tenant_id:
-            raise TenantScopeViolation(TARGET_TYPE_CHANNEL, channel_id)
-        return channel
+        return await scoped_channel(self._repo, channel_id, tenant_id=tenant_id)
 
     async def _scoped_rule(
         self, rule_id: str, *, tenant_id: str
     ) -> tuple[DeliveryRule, MonitoringTarget]:
         """DeliveryRule 은 직접 ``tenant_id`` 가 없어 ``target_id``→target.tenant_id 로 scope 도출."""
 
-        rule = await self._repo.get_delivery_rule(rule_id)
-        if rule is None:
-            raise AdminActionNotFound(TARGET_TYPE_DELIVERY_RULE, rule_id)
-        target = await self._scoped_target(rule.target_id, tenant_id=tenant_id)
-        return rule, target
+        return await scoped_rule(self._repo, rule_id, tenant_id=tenant_id)
 
     # ══════════════════════════════════════════════════════════════════════
     # 고객 Tenant — create/update(루트, 생성 시 새 tenant_id 발급)
@@ -390,23 +218,15 @@ class AdminEntityService:
     ) -> Tenant:
         """신규 고객을 생성한다 — ``entity_id`` 가 새 tenant_id(루트, scope 검사 없음)."""
 
-        if not (name or "").strip():
-            raise ValueError("고객명(name)이 필요합니다")
-        tenant = Tenant(
-            id=entity_id, name=name, status=status, created_at=at  # created_at 은 호출부 주입
-        )
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_TENANT_CREATE,
-            target_type=TARGET_TYPE_TENANT,
-            target_id=entity_id,
+        return await self._tenant_service.create_tenant(
+            entity_id=entity_id,
+            name=name,
             at=at,
-            diff={"op": "create", "name": name, "to_status": status.value, "reason": reason},
+            actor_id=actor_id,
+            status=status,
             source=source,
             reason=reason,
         )
-        await self._repo.create_tenant(tenant, audit)
-        return tenant
 
     async def update_tenant(
         self,
@@ -429,55 +249,18 @@ class AdminEntityService:
         여부(set/cleared/unchanged)만 기록한다. ``sending_enabled`` 는 ``None`` 이면 유지한다.
         """
 
-        existing = await self._scoped_tenant(tenant_id)
-        new_name = name if name is not None and name.strip() else existing.name
-        new_status = status or existing.status
-        new_token = (
-            telegram_bot_token if telegram_bot_token is not None else existing.telegram_bot_token
-        )
-        new_secret = (
-            telegram_webhook_secret
-            if telegram_webhook_secret is not None
-            else existing.telegram_webhook_secret
-        )
-        new_sending = (
-            sending_enabled if sending_enabled is not None else existing.sending_enabled
-        )
-        updated = replace(
-            existing,
-            name=new_name,
-            status=new_status,
-            telegram_bot_token=new_token,
-            telegram_webhook_secret=new_secret,
-            sending_enabled=new_sending,
-        )
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_TENANT_UPDATE,
-            target_type=TARGET_TYPE_TENANT,
-            target_id=tenant_id,
+        return await self._tenant_service.update_tenant(
+            tenant_id,
+            name=name,
+            status=status,
+            telegram_bot_token=telegram_bot_token,
+            telegram_webhook_secret=telegram_webhook_secret,
+            sending_enabled=sending_enabled,
             at=at,
-            diff={
-                "from_name": existing.name,
-                "to_name": updated.name,
-                "from_status": existing.status.value,
-                "to_status": updated.status.value,
-                # secret 값은 audit 에 싣지 않는다 — 변경 여부만 기록(평문/마스킹 누출 방지).
-                "telegram_bot_token": _secret_change_label(
-                    existing.telegram_bot_token, updated.telegram_bot_token
-                ),
-                "telegram_webhook_secret": _secret_change_label(
-                    existing.telegram_webhook_secret, updated.telegram_webhook_secret
-                ),
-                "from_sending_enabled": existing.sending_enabled,
-                "to_sending_enabled": updated.sending_enabled,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.save_tenant(updated, audit)
-        return updated
 
     async def delete_tenant(
         self,
@@ -490,28 +273,13 @@ class AdminEntityService:
     ) -> Tenant:
         """고객 물리 삭제 — 연결 데이터가 하나라도 있으면 삭제하지 않는다."""
 
-        existing = await self._scoped_tenant(tenant_id)
-        if await self._repo.tenant_has_dependencies(tenant_id):
-            raise AdminEntityDeleteBlockedError(
-                "연결 데이터가 있어 고객을 삭제할 수 없습니다"
-            )
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_TENANT_DELETE,
-            target_type=TARGET_TYPE_TENANT,
-            target_id=tenant_id,
+        return await self._tenant_service.delete_tenant(
+            tenant_id,
             at=at,
-            diff={
-                "op": "delete",
-                "name": existing.name,
-                "from_status": existing.status.value,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.delete_tenant(tenant_id, audit)
-        return existing
 
     # ══════════════════════════════════════════════════════════════════════
     # 구독 Subscription — create/update(status)
@@ -590,7 +358,7 @@ class AdminEntityService:
         return updated
 
     # ══════════════════════════════════════════════════════════════════════
-    # 플랫폼 계정 PlatformAccount — create/update(password 류는 DB에 직접 저장)
+    # 플랫폼 계정 PlatformAccount — create/update(secret성 값은 ref 핸들만 저장)
     # ══════════════════════════════════════════════════════════════════════
     async def create_platform_account(
         self,
@@ -610,7 +378,7 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정을 생성한다 — password류 자격증명은 입력값을 DB에 저장한다."""
+        """플랫폼 계정을 생성한다 — secret성 값은 ref 핸들만 저장한다."""
 
         await self._scoped_tenant(tenant_id)  # 부모 tenant 존재/scope 확인
         email_subject_keyword = _keyword_or_default(
@@ -626,11 +394,14 @@ class AdminEntityService:
             tenant_id=tenant_id,
             platform=platform,
             label=label,
-            username=username.strip(),
-            password=_credential_or_empty(password),
-            verification_email_address=verification_email_address.strip(),
-            verification_email_app_password=_credential_or_empty(
-                verification_email_app_password
+            username=_secret_ref_or_empty(username, "username"),
+            password=_secret_ref_or_empty(password, "password"),
+            verification_email_address=_secret_ref_or_empty(
+                verification_email_address, "verification_email_address"
+            ),
+            verification_email_app_password=_secret_ref_or_empty(
+                verification_email_app_password,
+                "verification_email_app_password",
             ),
             verification_email_subject_keyword=email_subject_keyword,
             verification_email_sender_keyword=email_sender_keyword,
@@ -673,25 +444,32 @@ class AdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> PlatformAccount:
-        """플랫폼 계정 라벨/자격증명을 편집한다(password류는 입력값을 DB에 저장)."""
+        """플랫폼 계정 라벨/자격증명을 편집한다(secret성 값은 ref 핸들만 저장)."""
 
         existing = await self._scoped_platform_account(account_id, tenant_id=tenant_id)
         new_label = label if label is not None and label.strip() else existing.label
         new_username = (
-            username.strip() if username is not None and username.strip() else existing.username
+            _secret_ref_or_empty(username, "username")
+            if username is not None and username.strip()
+            else existing.username
         )
         new_password = (
-            _credential_or_empty(password)
+            _secret_ref_or_empty(password, "password")
             if password is not None and password.strip()
             else existing.password
         )
         new_email_address = (
-            verification_email_address.strip()
+            _secret_ref_or_empty(
+                verification_email_address, "verification_email_address"
+            )
             if verification_email_address is not None and verification_email_address.strip()
             else existing.verification_email_address
         )
         new_email_app_password = (
-            _credential_or_empty(verification_email_app_password)
+            _secret_ref_or_empty(
+                verification_email_app_password,
+                "verification_email_app_password",
+            )
             if verification_email_app_password is not None
             and verification_email_app_password.strip()
             else existing.verification_email_app_password
@@ -767,14 +545,8 @@ class AdminEntityService:
     ) -> TargetWriteResult:
         """모니터링 대상을 생성한다 — 연결 계정의 플랫폼으로 center_name 위험을 경고한다(차단 아님)."""
 
-        if not (name or "").strip():
-            raise ValueError("대상 표시명(name)이 필요합니다")
-        account = await self._scoped_platform_account(
-            platform_account_id, tenant_id=tenant_id
-        )  # FK 무결성 + tenant scope
-        risky = is_center_name_risky(account.platform, center_name)
-        target = MonitoringTarget(
-            id=entity_id,
+        return await self._target_service.create_monitoring_target(
+            entity_id=entity_id,
             tenant_id=tenant_id,
             platform_account_id=platform_account_id,
             name=name,
@@ -782,27 +554,11 @@ class AdminEntityService:
             external_id=external_id,
             url=url,
             interval_minutes=interval_minutes,
-            status=MonitoringTargetStatus.ACTIVE,
-        )
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_MONITORING_TARGET_CREATE,
-            target_type=TARGET_TYPE_TARGET,
-            target_id=entity_id,
             at=at,
-            diff={
-                "op": "create",
-                "platform_account_id": platform_account_id,
-                "name": name,
-                "center_name": center_name,  # 운영 식별자 — build_diff_redacted 가 마스킹
-                "center_name_risky": risky,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.create_monitoring_target(target, audit)
-        return TargetWriteResult(target=target, center_name_risky=risky)
 
     async def update_monitoring_target(
         self,
@@ -821,41 +577,19 @@ class AdminEntityService:
     ) -> TargetWriteResult:
         """모니터링 대상 필드를 편집한다(center_name 변경 시 위험 재판정)."""
 
-        existing = await self._scoped_target(target_id, tenant_id=tenant_id)
-        account = await self._scoped_platform_account(
-            existing.platform_account_id, tenant_id=tenant_id
-        )
-        new_center = center_name if center_name is not None else existing.center_name
-        updated = replace(
-            existing,
-            name=name if name is not None and name.strip() else existing.name,
-            center_name=new_center,
-            external_id=external_id if external_id is not None else existing.external_id,
-            url=url if url is not None else existing.url,
-            interval_minutes=(
-                interval_minutes if interval_minutes is not None else existing.interval_minutes
-            ),
-        )
-        risky = is_center_name_risky(account.platform, updated.center_name)
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_MONITORING_TARGET_UPDATE,
-            target_type=TARGET_TYPE_TARGET,
-            target_id=target_id,
+        return await self._target_service.update_monitoring_target(
+            target_id,
+            tenant_id=tenant_id,
+            name=name,
+            center_name=center_name,
+            external_id=external_id,
+            url=url,
+            interval_minutes=interval_minutes,
             at=at,
-            diff={
-                "from_name": existing.name,
-                "to_name": updated.name,
-                "from_center_name": existing.center_name,
-                "to_center_name": updated.center_name,
-                "center_name_risky": risky,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.save_monitoring_target(updated, audit)
-        return TargetWriteResult(target=updated, center_name_risky=risky)
 
     async def deactivate_monitoring_target(
         self,
@@ -873,26 +607,14 @@ class AdminEntityService:
         면 멱등하게 audit 만 남기지 않고 그대로 반환한다(중복 비활성 no-op).
         """
 
-        existing = await self._scoped_target(target_id, tenant_id=tenant_id)
-        if existing.status is MonitoringTargetStatus.INACTIVE:
-            return existing  # 멱등 no-op(이미 비활성)
-        updated = replace(existing, status=MonitoringTargetStatus.INACTIVE)
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_MONITORING_TARGET_DEACTIVATE,
-            target_type=TARGET_TYPE_TARGET,
-            target_id=target_id,
+        return await self._target_service.deactivate_monitoring_target(
+            target_id,
+            tenant_id=tenant_id,
             at=at,
-            diff={
-                "from_status": existing.status.value,
-                "to_status": updated.status.value,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.save_monitoring_target(updated, audit)
-        return updated
 
     async def reactivate_monitoring_target(
         self,
@@ -906,26 +628,14 @@ class AdminEntityService:
     ) -> MonitoringTarget:
         """INACTIVE soft-delete 상태의 대상을 명시적으로 복구한다."""
 
-        existing = await self._scoped_target(target_id, tenant_id=tenant_id)
-        if existing.status is not MonitoringTargetStatus.INACTIVE:
-            return existing
-        updated = replace(existing, status=MonitoringTargetStatus.ACTIVE)
-        audit = self._audit(
-            actor_id=actor_id,
-            action=ACTION_MONITORING_TARGET_REACTIVATE,
-            target_type=TARGET_TYPE_TARGET,
-            target_id=target_id,
+        return await self._target_service.reactivate_monitoring_target(
+            target_id,
+            tenant_id=tenant_id,
             at=at,
-            diff={
-                "from_status": existing.status.value,
-                "to_status": updated.status.value,
-                "reason": reason,
-            },
+            actor_id=actor_id,
             source=source,
             reason=reason,
         )
-        await self._repo.save_monitoring_target(updated, audit)
-        return updated
 
     # ══════════════════════════════════════════════════════════════════════
     # 메시지 채널 MessengerChannel — create/update(라우팅)/deactivate(INACTIVE)
@@ -1047,6 +757,65 @@ class AdminEntityService:
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_MESSENGER_CHANNEL_UPDATE,
+            target_type=TARGET_TYPE_CHANNEL,
+            target_id=channel_id,
+            at=at,
+            diff={
+                "messenger": existing.messenger.value,
+                "telegram_chat_id": updated.telegram_chat_id,
+                "thread_id": updated.thread_id,
+                "kakao_room_name": updated.kakao_room_name,
+                "from_state": existing.state.value,
+                "to_state": updated.state.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.save_messenger_channel(updated, audit)
+        return updated
+
+    async def activate_messenger_channel_manual(
+        self,
+        channel_id: str,
+        *,
+        tenant_id: str,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> MessengerChannel:
+        """운영자가 라우팅을 확인한 PENDING/VERIFIED 채널을 ACTIVE 로 전환한다."""
+
+        existing = await self._scoped_channel(channel_id, tenant_id=tenant_id)
+        if existing.state not in (
+            MessengerChannelState.PENDING,
+            MessengerChannelState.VERIFIED,
+        ):
+            raise ValueError("PENDING 또는 VERIFIED 채널만 수동 활성화할 수 있습니다")
+        if existing.messenger is Messenger.TELEGRAM and not (
+            existing.telegram_chat_id or ""
+        ).strip():
+            raise ValueError("Telegram 채널 활성화에는 telegram_chat_id가 필요합니다")
+        if existing.messenger is Messenger.KAKAO and not (
+            existing.kakao_room_name or ""
+        ).strip():
+            raise ValueError("Kakao 채널 활성화에는 kakao_room_name이 필요합니다")
+
+        updated = replace(existing, state=MessengerChannelState.ACTIVE)
+        active_channels = [
+            channel
+            for channel in await self._repo.list_messenger_channels(tenant_id)
+            if channel.state is MessengerChannelState.ACTIVE and channel.id != updated.id
+        ]
+        if updated.messenger is Messenger.TELEGRAM:
+            assert_unique_telegram_topics([*active_channels, updated])
+        elif updated.messenger is Messenger.KAKAO:
+            assert_unique_kakao_rooms([*active_channels, updated])
+
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_MESSENGER_CHANNEL_ACTIVATE,
             target_type=TARGET_TYPE_CHANNEL,
             target_id=channel_id,
             at=at,

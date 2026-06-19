@@ -303,61 +303,55 @@ def test_create_platform_account_with_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_create_platform_account_plaintext_password_stored() -> None:
+def test_create_platform_account_plaintext_password_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    account = _run(
-        svc.create_platform_account(
-            entity_id="pa-plain",
-            tenant_id=_TENANT,
-            platform=Platform.BAEMIN,
-            label="plain",
-            username="myuser",
-            password="mypass",
-            at=_NOW,
-            actor_id=_ACTOR,
+    with pytest.raises(ValueError, match="ref"):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-plain",
+                tenant_id=_TENANT,
+                platform=Platform.BAEMIN,
+                label="plain",
+                username="myuser",
+                password="mypass",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
         )
-    )
 
-    assert account.username == "myuser"
-    assert account.password == "mypass"
-    assert _run(repo.get_platform_account("pa-plain")).password == "mypass"
-    assert "password" not in repo.audits[-1].diff_redacted
+    assert _run(repo.get_platform_account("pa-plain")) is None
+    assert repo.audits == []
 
 
-def test_create_platform_account_plaintext_email_app_password_stored() -> None:
+def test_create_platform_account_plaintext_email_secret_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    account = _run(
-        svc.create_platform_account(
-            entity_id="pa-mail-plain",
-            tenant_id=_TENANT,
-            platform=Platform.COUPANG,
-            label="mail",
-            username="coupang-user",
-            password="coupang-password",
-            verification_email_address="mail@example.test",
-            verification_email_app_password="plain-app-password",
-            at=_NOW,
-            actor_id=_ACTOR,
+    with pytest.raises(ValueError, match="ref"):
+        _run(
+            svc.create_platform_account(
+                entity_id="pa-mail-plain",
+                tenant_id=_TENANT,
+                platform=Platform.COUPANG,
+                label="mail",
+                username="vault://coupang/user",
+                password="vault://coupang/password",
+                verification_email_address="mail@example.test",
+                verification_email_app_password="plain-app-password",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
         )
-    )
 
-    assert account.password == "coupang-password"
-    assert account.verification_email_address == "mail@example.test"
-    assert account.verification_email_app_password == "plain-app-password"
-    stored = _run(repo.get_platform_account("pa-mail-plain"))
-    assert stored.verification_email_app_password == "plain-app-password"
-    diff = repo.audits[-1].diff_redacted
-    assert "password" not in diff
-    assert "verification_email_app_password" not in diff
+    assert _run(repo.get_platform_account("pa-mail-plain")) is None
+    assert repo.audits == []
 
 
-def test_create_monitoring_target_links_account_and_flags_coupang_risk() -> None:
+def test_create_monitoring_target_links_account_and_flags_valid_coupang_center() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     repo.seed_platform_account(_account(platform=Platform.COUPANG))
@@ -369,16 +363,39 @@ def test_create_monitoring_target_links_account_and_flags_coupang_risk() -> None
             tenant_id=_TENANT,
             platform_account_id="pa-1",
             name="대상",
-            center_name="",  # 쿠팡 빈 center → 위험
+            center_name="쿠팡센터-강남",
             at=_NOW,
             actor_id=_ACTOR,
         )
     )
 
-    assert result.center_name_risky is True
+    assert result.center_name_risky is False
     assert result.target.status is MonitoringTargetStatus.ACTIVE
     assert _run(repo.get_monitoring_target("mt-new")).name == "대상"
     assert repo.audits[-1].action == "MONITORING_TARGET_CREATE"
+
+
+def test_create_coupang_blank_center_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account(platform=Platform.COUPANG))
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_monitoring_target(
+                entity_id="mt-new",
+                tenant_id=_TENANT,
+                platform_account_id="pa-1",
+                name="대상",
+                center_name="",
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_monitoring_target("mt-new")) is None
+    assert repo.audits == []
 
 
 def test_create_telegram_messenger_channel_is_pending() -> None:
@@ -660,7 +677,7 @@ def test_route_create_target_returns_fragment_and_persists() -> None:
     assert len(_run(repo.list_monitoring_targets("tn-1"))) == 1
 
 
-def test_route_create_coupang_blank_center_warns() -> None:
+def test_route_create_coupang_blank_center_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     repo.seed_platform_account(_account(platform=Platform.COUPANG))
@@ -671,9 +688,26 @@ def test_route_create_coupang_blank_center_warns() -> None:
         data={"platform_account_id": "pa-1", "name": "대상", "center_name": ""},
     )
 
-    assert resp.status_code == HTTPStatus.OK
-    assert "위험" in resp.text  # center_name 위험 경고(차단 아님 — 저장됨)
-    assert len(_run(repo.list_monitoring_targets("tn-1"))) == 1
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_monitoring_targets("tn-1")) == []
+    assert repo.audits == []
+
+
+def test_route_update_coupang_blank_center_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account(platform=Platform.COUPANG))
+    repo.seed_monitoring_target(_target())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/monitoring-targets/mt-1?tenant=tn-1",
+        data={"center_name": ""},
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.get_monitoring_target("mt-1")).center_name == "센터"
+    assert repo.audits == []
 
 
 def test_route_viewer_cannot_create() -> None:
@@ -710,7 +744,7 @@ def test_route_cross_tenant_update_404() -> None:
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
-def test_entity_admin_form_guides_plaintext_db_storage() -> None:
+def test_entity_admin_form_guides_secret_ref_storage() -> None:
     template = Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
         encoding="utf-8"
     )
@@ -719,14 +753,13 @@ def test_entity_admin_form_guides_plaintext_db_storage() -> None:
         template.index('<div hx-get="/admin/platform-accounts?tenant=')
     ]
 
-    assert "DB에 그대로 저장" in account_form
+    assert "SecretRef" in account_form
+    assert "DB에 그대로 저장" not in account_form
     assert "로그인 비밀번호" in account_form
     assert "이메일 앱 비밀번호" in account_form
     assert 'name="password"' in account_form
     assert 'name="verification_email_app_password"' in account_form
-    assert 'type="password"' in account_form
-    assert "secret ref" not in account_form
-    assert "vault://platform-account/" not in account_form
+    assert "vault://platform-account/" in account_form
 
 
 def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
@@ -747,7 +780,7 @@ def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
     assert "document.addEventListener('DOMContentLoaded', syncChannelCreateFields);" in template
 
 
-def test_route_platform_account_plaintext_password_accepted() -> None:
+def test_route_platform_account_plaintext_password_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -762,9 +795,8 @@ def test_route_platform_account_plaintext_password_accepted() -> None:
         },
     )
 
-    assert resp.status_code == HTTPStatus.OK
-    assert "플랫폼 계정 생성됨" in resp.text
-    assert _run(repo.list_platform_accounts("tn-1"))[0].password == "mypass"
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_platform_accounts("tn-1")) == []
 
 
 def test_route_deactivate_channel_soft_delete() -> None:
@@ -894,6 +926,41 @@ def test_entities_form_filters_blank_edit_fields_before_update() -> None:
     assert "function filledValues" in body
     assert "crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({" in body
     assert "crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({" in body
+
+
+def test_entity_admin_has_single_customer_create_form() -> None:
+    template = Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert template.count('hx-post="/admin/customers?tenant=') == 1
+
+
+def test_entity_admin_required_selects_and_inline_error_handler_contract() -> None:
+    template = Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
+        encoding="utf-8"
+    )
+
+    for name in ("platform_account_id", "target_id", "channel_id", "tenant_id"):
+        name_pos = template.index(f'name="{name}"')
+        select_pos = template.rfind("<select", 0, name_pos)
+        select_tag = template[select_pos : template.index(">", name_pos)]
+        assert "required" in select_tag
+
+    assert "function syncEntityFormButtons()" in template
+    assert "data-requires=" in template
+    assert 'document.body.addEventListener("htmx:responseError"' in template
+    assert "inline-action-status" in template
+
+
+def test_action_result_fragment_does_not_create_nested_live_region() -> None:
+    template = Path("src/rider_server/admin/templates/_action_result.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "role=" not in template
+    assert "aria-live" not in template
+    assert "inline-action-status" not in template
 
 
 def test_entities_form_guides_target_edit_fields_keep_existing_values() -> None:
@@ -1075,6 +1142,25 @@ def test_update_tenant_records_before_after() -> None:
     assert diff["from_status"] == "ACTIVE" and diff["to_status"] == "SUSPENDED"
 
 
+def test_update_tenant_rejects_sending_enabled_true_without_readiness_evidence() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.update_tenant(
+                _TENANT,
+                sending_enabled=True,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_tenant(_TENANT)).sending_enabled is False
+    assert repo.audits == []
+
+
 def test_delete_tenant_removes_empty_customer_and_audits() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -1158,31 +1244,26 @@ def test_update_platform_account_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_update_platform_account_plaintext_password_stored() -> None:
-    """G3 — 평문 자격증명을 update 로 주면 DB 필드에 저장된다."""
+def test_update_platform_account_plaintext_password_rejected() -> None:
+    """G3 — 평문 자격증명을 update 로 주면 저장하지 않고 거절한다."""
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(_account())
     svc = _svc(repo)
 
-    updated = _run(
-        svc.update_platform_account(
-            "pa-1", tenant_id=_TENANT,
-            password="my-new-password",
-            verification_email_app_password="my-new-app-password",
-            at=_NOW, actor_id=_ACTOR,
+    with pytest.raises(ValueError, match="ref"):
+        _run(
+            svc.update_platform_account(
+                "pa-1", tenant_id=_TENANT,
+                password="my-new-password",
+                verification_email_app_password="my-new-app-password",
+                at=_NOW, actor_id=_ACTOR,
+            )
         )
-    )
 
-    assert updated.password == "my-new-password"
-    assert updated.verification_email_app_password == "my-new-app-password"
     stored = _run(repo.get_platform_account("pa-1"))
-    assert stored.password == "my-new-password"
-    assert stored.verification_email_app_password == "my-new-app-password"
-    diff = repo.audits[-1].diff_redacted
-    assert "password" not in diff
-    assert "verification_email_app_password" not in diff
-    assert diff["password_change"] == "set"
-    assert diff["verification_email_app_password_change"] == "set"
+    assert stored.password == _REF
+    assert stored.verification_email_app_password == ""
+    assert repo.audits == []
 
 
 def test_update_messenger_channel_routing_fields_no_transition() -> None:
@@ -1374,8 +1455,11 @@ def test_deactivate_delivery_rule_cross_tenant_blocked() -> None:
 
 # ── (라우트) create/update/deactivate happy + 검증 400 — dev 미커버 리소스 ───────────────
 
-def test_route_create_customer_persists() -> None:
-    """G12 — ``POST /admin/customers`` happy(dev 미커버 리소스). fragment + 영속."""
+def test_route_create_customer_redirects_to_new_customer_manage_context(monkeypatch) -> None:
+    """G12 — ``POST /admin/customers`` switches the UI to the newly created tenant."""
+    from rider_server.admin import crud_routes
+
+    monkeypatch.setattr(crud_routes, "_new_id", lambda: "tn-new")
     repo = InMemoryAdminEntityRepository()
     client = TestClient(_app_with(repo))
 
@@ -1383,8 +1467,10 @@ def test_route_create_customer_persists() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert "생성 완료" in resp.text
-    assert "HX-Redirect" not in resp.headers
+    assert resp.headers["HX-Redirect"] == "/admin?tenant=tn-new&mode=manage#manage"
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert len(_run(repo.list_tenants())) == 1
+    assert _run(repo.get_tenant("tn-new")).name == "신규고객"
 
 
 def test_route_create_subscription_returns_fragment_and_persists() -> None:
@@ -1476,6 +1562,43 @@ def test_route_update_customer_returns_fragment() -> None:
     assert _run(repo.get_tenant(_TENANT)).name == "새이름"
 
 
+def test_route_update_customer_rejects_sending_enabled_true() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        f"/admin/customers/{_TENANT}",
+        data={"sending_enabled": "true"},
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.get_tenant(_TENANT)).sending_enabled is False
+    assert repo.audits == []
+
+
+def test_route_update_customer_allows_sending_enabled_false() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+            sending_enabled=True,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        f"/admin/customers/{_TENANT}",
+        data={"sending_enabled": "false"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_tenant(_TENANT)).sending_enabled is False
+
+
 def test_route_delete_customer_removes_empty_tenant() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -1563,7 +1686,7 @@ def test_route_create_platform_account_unknown_platform_400() -> None:
     assert resp.status_code == HTTPStatus.BAD_REQUEST
 
 
-def test_route_create_platform_account_plaintext_password_stored() -> None:
+def test_route_create_platform_account_plaintext_password_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -1579,12 +1702,9 @@ def test_route_create_platform_account_plaintext_password_stored() -> None:
         },
     )
 
-    assert resp.status_code == HTTPStatus.OK
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
     accounts = _run(repo.list_platform_accounts("tn-1"))
-    assert len(accounts) == 1
-    assert accounts[0].username == "coupang-user"
-    assert accounts[0].password == "plain-password"
-    assert accounts[0].verification_email_app_password == "mail-app-password"
+    assert accounts == []
 
 
 def test_route_create_telegram_messenger_channel_pending() -> None:
@@ -1644,6 +1764,56 @@ def test_route_update_pending_kakao_messenger_channel_with_room_active() -> None
     channel = _run(repo.get_messenger_channel("ch-kakao"))
     assert channel.state is MessengerChannelState.ACTIVE
     assert channel.kakao_room_name == "실적공유방"
+
+
+def test_route_activate_messenger_channel_manual_returns_fragment_and_persists() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_messenger_channel(_channel("ch-pending", state=MessengerChannelState.PENDING))
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/messenger-channels/ch-pending/activate?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "메시지 채널 활성화됨" in resp.text
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
+    assert _run(repo.get_messenger_channel("ch-pending")).state is MessengerChannelState.ACTIVE
+    assert repo.audits[-1].action == "MESSENGER_CHANNEL_ACTIVATE"
+
+
+def test_route_activate_messenger_channel_rejects_missing_route() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_messenger_channel(
+        MessengerChannel(
+            id="ch-pending",
+            tenant_id=_TENANT,
+            messenger=Messenger.TELEGRAM,
+            telegram_chat_id=None,
+            state=MessengerChannelState.PENDING,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/messenger-channels/ch-pending/activate?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.get_messenger_channel("ch-pending")).state is MessengerChannelState.PENDING
+    assert repo.audits == []
+
+
+def test_route_activate_messenger_channel_rejects_duplicate_active_topic() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_messenger_channel(_channel("ch-active", state=MessengerChannelState.ACTIVE))
+    repo.seed_messenger_channel(_channel("ch-pending", state=MessengerChannelState.PENDING))
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/messenger-channels/ch-pending/activate?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.get_messenger_channel("ch-pending")).state is MessengerChannelState.PENDING
+    assert repo.audits == []
 
 
 def test_route_create_messenger_channel_unknown_messenger_400() -> None:

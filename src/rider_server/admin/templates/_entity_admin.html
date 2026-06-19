@@ -1,6 +1,6 @@
-{# Story 5.11 엔티티 관리 — 재설계(가이드 + 드롭다운). 연결 id(계정/업체/채널)는 raw 입력이 아니라
+{# Story 5.11 엔티티 관리: 재설계(가이드 + 드롭다운). 연결 id(계정/업체/채널)는 raw 입력이 아니라
    HTMX 로 채운 <select> 에서 고른다(비개발 운영자). 생성은 hx-post 폼 직렬화, 편집/비활성화는 id 가
-   URL path 라 JS(crudButton) 로 조립. 플랫폼 계정 비밀번호류는 입력값을 DB에 저장한다. autoescape 유지. #}
+   URL path 라 JS(crudButton) 로 조립. 플랫폼 계정 secret성 값은 SecretRef 핸들만 저장한다. autoescape 유지. #}
 <div class="entity-admin" id="entity-admin">
   <div id="entity-result" class="action-result muted">엔티티 액션 결과가 여기에 표시됩니다.</div>
   {% set tenant_rows = tenants | default([]) %}
@@ -21,7 +21,26 @@
   <div class="action-result warn">전체 고객 보기에서는 작업 고객을 먼저 선택하세요.</div>
   {% else %}
 
-  {# ① 새 업체 추가 — 계정은 드롭다운에서 선택(id 직접 입력 0) #}
+  <section class="setup-flow" aria-label="새 고객 세팅 시작">
+    <h3 style="font-size:1rem; margin:0 0 0.55rem">새 고객 세팅 시작</h3>
+    <ol style="margin:0 0 0.8rem; padding-left:1.2rem">
+      <li>고객</li>
+      <li>플랫폼</li>
+      <li>계정</li>
+      <li>업체/센터</li>
+      <li>채널</li>
+      <li>테스트</li>
+      <li>실제 메시지 보내기</li>
+    </ol>
+    <form hx-post="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
+      <label>고객명 <input type="text" name="name" required></label>
+      <label>사유 <input type="text" name="reason" placeholder="신규 세팅"></label>
+      <button type="submit" class="create">고객 생성</button><span class="inline-action-status" aria-live="polite"></span>
+    </form>
+    <p class="muted" style="margin:0.2rem 0 0.9rem">수집 테스트: 미완료 · 전송 테스트: 미완료 · 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다.</p>
+  </section>
+
+  {# ① 새 업체 추가: 계정은 드롭다운에서 선택(id 직접 입력 0) #}
   <fieldset>
     <legend>① 새 업체 추가</legend>
     <p class="muted" style="margin:0.1rem 0 0.8rem">계정은 등록된 것에서 고르세요. id 를 직접 입력하지 않습니다. 쿠팡은 센터/상점명이 비면 오발송 위험 경고가 뜹니다.</p>
@@ -29,19 +48,20 @@
     <form hx-post="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
       <label>플랫폼 계정
         <select name="platform_account_id"
+                required
                 hx-get="/admin/platform-accounts/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
       <label>업체 표시명 <input type="text" name="name" required></label>
       <label>센터/상점명 (쿠팡 필수) <input type="text" name="center_name"></label>
       <label>주소(url) <input type="text" name="url"></label>
-      <label>external_id <input type="text" name="external_id"></label>
+      <label>외부 관리 코드 <input type="text" name="external_id"></label>
       <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
-      <button type="submit" class="create">업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="submit" class="create" data-required-select-submit disabled>업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
     </form>
   </fieldset>
 
-  {# ② 전송 연결 — 업체→채널(둘 다 드롭다운, 1:N fan-out) #}
+  {# ② 전송 연결: 업체→채널(둘 다 드롭다운, 1:N fan-out) #}
   <fieldset>
     <legend>② 전송 연결 (업체 → 채널)</legend>
     <p class="muted" style="margin:0.1rem 0 0.8rem">한 업체를 여러 채널에 연결할 수 있습니다(1:N). 채널/방명은 라우팅 식별자(secret 아님).</p>
@@ -49,17 +69,19 @@
     <form hx-post="/admin/delivery-rules?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
       <label>업체
         <select name="target_id"
+                required
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
       <label>전송 채널
         <select name="channel_id"
+                required
                 hx-get="/admin/messenger-channels/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
       <input type="hidden" name="template_id" value="">
       <label>변경시에만 전송 <input type="checkbox" name="send_only_on_change" value="true"></label>
-      <button type="submit" class="create">연결 생성</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="submit" class="create" data-required-select-submit disabled>연결 생성</button><span class="inline-action-status" aria-live="polite"></span>
     </form>
     <div class="edit-row">
       <label>규칙 조회 업체
@@ -67,7 +89,7 @@
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
                 hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
       </label>
-      <button type="button" onclick="loadDeliveryRules(this)">규칙 보기</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="rule-list-target" onclick="loadDeliveryRules(this)">규칙 보기</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
     <div id="delivery-rule-list" hx-swap="innerHTML"></div>
     <div class="edit-row">
@@ -75,14 +97,14 @@
         <select id="rule-edit-id"><option value="">업체 선택 후 규칙 보기</option></select>
       </label>
       <label>변경시에만 전송 <input type="checkbox" id="rule-edit-change-only" value="true"></label>
-      <button type="button" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button><span class="inline-action-status" aria-live="polite"></span>
-      <button type="button" class="danger" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" class="danger" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
   </fieldset>
 
-  {# ③ 등록된 업체 — 편집/비활성화(업체 드롭다운에서 선택) #}
+  {# ③ 등록된 업체: 편집/비활성화(업체 드롭다운에서 선택) #}
   <fieldset>
-    <legend>③ 등록된 업체 — 편집 / 비활성화</legend>
+    <legend>③ 등록된 업체: 편집 / 비활성화</legend>
     <p class="muted" style="margin:0.1rem 0 0.8rem">바꿀 칸만 입력하세요. 비운 칸은 기존 값을 유지합니다. 현재 값은 아래 업체 목록이나 상세에서 확인할 수 있습니다.</p>
     <div class="edit-row" style="border-top:0; padding-top:0">
       <label>업체 선택
@@ -92,40 +114,41 @@
       </label>
       <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
-      <label>external_id <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
+      <label>외부 관리 코드 <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
-      <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
-      <button type="button" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
-      <button type="button" class="danger" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
     <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
   </fieldset>
 
-  {# 보조: 계정·채널·고객·구독 관리(새로 만들 때만) — 접힘 #}
+  {# 보조: 계정·채널·고객·구독 관리(새로 만들 때만): 접힘 #}
   <details class="aux">
     <summary>계정 · 채널 · 고객 · 구독 관리 <span class="tag">새로 만들 때만</span></summary>
     <div class="aux-body">
 
       <fieldset id="entity-subscription-form">
         <legend>구독 관리</legend>
-        <p class="muted" style="margin:0.1rem 0 0.8rem">구독 상태를 PAYMENT_ACTIVE로 두면 결제 완료 고객처럼 처리합니다. 수집 실행은 고객 상태도 ACTIVE 또는 PAYMENT_ACTIVE여야 열립니다.</p>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">구독 상태를 결제 활성으로 두면 결제 완료 고객처럼 처리합니다. 수집 실행은 고객 상태도 운영 또는 결제 활성이어야 열립니다.</p>
         <form hx-post="/admin/subscriptions?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>고객
             <select name="tenant_id"
+                    required
                     hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>플랜 <input type="text" name="plan" value="basic"></label>
           <label>구독 상태
             <select name="status">
-              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 구독 활성</option>
-              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE — 결제 유예</option>
-              <option value="SUSPENDED">SUSPENDED — 정지</option>
-              <option value="CANCELLED">CANCELLED — 해지</option>
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE: 결제 유예</option>
+              <option value="SUSPENDED">SUSPENDED: 정지</option>
+              <option value="CANCELLED">CANCELLED: 해지</option>
             </select>
           </label>
-          <button type="submit" class="create">구독 생성</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="submit" class="create" data-required-select-submit disabled>구독 생성</button><span class="inline-action-status" aria-live="polite"></span>
         </form>
         <div class="edit-row">
           <label>구독 선택
@@ -135,29 +158,29 @@
           </label>
           <label>구독 상태
             <select id="sub-edit-status">
-              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 구독 활성</option>
-              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE — 결제 유예</option>
-              <option value="SUSPENDED">SUSPENDED — 정지</option>
-              <option value="CANCELLED">CANCELLED — 해지</option>
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE: 결제 유예</option>
+              <option value="SUSPENDED">SUSPENDED: 정지</option>
+              <option value="CANCELLED">CANCELLED: 해지</option>
             </select>
           </label>
-          <button type="button" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="sub-edit-id" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/subscriptions?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
 
       <fieldset id="entity-account-form">
-        <legend>플랫폼 계정 (DB 직접 저장)</legend>
-        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 ID/PW/이메일 앱 비밀번호를 이 화면에 그대로 입력하면 DB에 그대로 저장됩니다. 로그인 ID와 이메일 주소도 운영 식별값으로 저장됩니다.</p>
+        <legend>플랫폼 계정 (SecretRef)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 ID/PW/이메일 앱 비밀번호와 이메일 주소는 SecretRef 핸들만 입력하세요. 예: vault://platform-account/coupang-login-id</p>
         <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>플랫폼
             <select name="platform"><option value="BAEMIN">BAEMIN</option><option value="COUPANG">COUPANG</option></select>
           </label>
           <label>라벨 <input type="text" name="label"></label>
-          <label>로그인 ID <input type="text" name="username" placeholder="배민/쿠팡 로그인 아이디"></label>
-          <label>로그인 비밀번호 <input type="password" name="password" autocomplete="off"></label>
-          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" placeholder="your@email.com"></label>
-          <label>이메일 앱 비밀번호 <input type="password" name="verification_email_app_password" autocomplete="off"></label>
+          <label>로그인 ID ref <input type="text" name="username" placeholder="vault://platform-account/coupang-login-id"></label>
+          <label>로그인 비밀번호 ref <input type="text" name="password" autocomplete="off" placeholder="vault://platform-account/coupang-login-password"></label>
+          <label>2차인증 이메일 주소 ref <input type="text" name="verification_email_address" placeholder="vault://platform-account/mail-address"></label>
+          <label>이메일 앱 비밀번호 ref <input type="text" name="verification_email_app_password" autocomplete="off" placeholder="vault://platform-account/mail-app-password"></label>
           <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
           <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
           <button type="submit" class="create" {% if not tenant_id %}disabled{% endif %}>{% if tenant_id %}계정 생성{% else %}계정 생성 불가{% endif %}</button><span class="inline-action-status" aria-live="polite"></span>
@@ -170,13 +193,13 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 라벨 <input type="text" id="acc-edit-label"></label>
-          <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
-          <label>로그인 비밀번호 <input type="password" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>2차인증 이메일 <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
-          <label>앱 비밀번호 <input type="password" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>로그인 ID ref <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
+          <label>로그인 비밀번호 ref <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>2차인증 이메일 ref <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
+          <label>앱 비밀번호 ref <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
           <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
           <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
-          <button type="button" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -205,20 +228,16 @@
           <label>thread_id <input type="text" id="ch-edit-thread"></label>
           <label>kakao_room_name <input type="text" id="ch-edit-kakao"></label>
           <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
-            <button type="button" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
-            <button type="button" class="danger" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화(soft delete)할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/activate', {}, '선택한 채널을 수동 활성화할까요? 라우팅 정보를 확인했나요?')">수동 활성화</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" class="danger" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
           </div>
         </div>
         <div hx-get="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
 
       <fieldset>
-        <legend>고객(Tenant)</legend>
-        <form hx-post="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
-          <label>고객명 <input type="text" name="name" required></label>
-          <label>사유 <input type="text" name="reason"></label>
-          <button type="submit" class="create">고객 생성</button><span class="inline-action-status" aria-live="polite"></span>
-        </form>
+        <legend>고객</legend>
         <div class="edit-row">
           <label>고객 선택
             <select id="cust-edit-id"
@@ -229,24 +248,24 @@
           <label>고객 상태
             <select id="cust-edit-status">
               <option value="">변경 안 함</option>
-              <option value="ACTIVE">ACTIVE — 운영</option>
-              <option value="PAYMENT_ACTIVE">PAYMENT_ACTIVE — 결제 활성</option>
-              <option value="SETUP_PENDING">SETUP_PENDING — 세팅 중</option>
-              <option value="SUSPENDED">SUSPENDED — 정지</option>
-              <option value="LEAD">LEAD — 리드</option>
+              <option value="ACTIVE">ACTIVE: 운영</option>
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="SETUP_PENDING">세팅 중</option>
+              <option value="SUSPENDED">SUSPENDED: 정지</option>
+              <option value="LEAD">LEAD: 리드</option>
             </select>
           </label>
-          <button type="button" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
-          <button type="button" class="danger" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '/delete', {}, '선택한 고객을 완전히 삭제할까요? 연결 데이터가 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" class="danger" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '/delete', {}, '선택한 고객을 완전히 삭제할까요? 연결 데이터가 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
 
-      {# 고객(Tenant)별 텔레그램 설정(0012) — 봇 토큰·webhook secret·실발송 게이트. 토큰/secret 은
+      {# 고객별 텔레그램 설정(0012): 봇 토큰·텔레그램 webhook 보안키·실발송 게이트. 토큰/secret 은
          평문 저장(redaction 으로 로그/응답 마스킹). 비우면 기존 값 유지, 실발송 게이트는 명시 토글. #}
       <fieldset>
-        <legend>고객별 텔레그램 설정 (봇 토큰 · webhook secret · 실발송)</legend>
-        <p class="muted" style="margin:0.1rem 0 0.8rem">선택한 고객(Tenant)에만 적용됩니다. 토큰/secret 은 비워두면 기존 값을 유지하고, 입력하면 교체합니다. Terraform Secrets Manager 값은 앱이 자동으로 읽지 않으므로, 운영 env ref 또는 이 화면의 고객별 설정 중 하나로 주입해야 합니다. 실발송 게이트는 기본 OFF(fail-closed)입니다.</p>
+        <legend>고객별 텔레그램 설정 (봇 토큰 · 텔레그램 webhook 보안키 · 실제 메시지 보내기)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">선택한 고객에만 적용됩니다. 토큰/보안키는 비워두면 기존 값을 유지하고, 입력하면 교체합니다. 실발송 게이트는 기본 차단입니다.</p>
         <div class="edit-row" style="border-top:0; padding-top:0">
           <label>고객 선택
             <select id="tg-edit-id"
@@ -254,15 +273,16 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>텔레그램 봇 토큰 <input type="password" id="tg-edit-token" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>webhook secret <input type="password" id="tg-edit-secret" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>실발송(sending_enabled)
+          <label>텔레그램 webhook 보안키 <input type="password" id="tg-edit-secret" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>실제 메시지 보내기
             <select id="tg-edit-sending">
               <option value="">변경 안 함</option>
-              <option value="true">ON — 실발송 허용</option>
-              <option value="false">OFF — 차단(fail-closed)</option>
+              <option value="true" disabled>ON: 테스트 완료 후 허용</option>
+              <option value="false">OFF: 기본 차단</option>
             </select>
           </label>
-          <button type="button" onclick="crudButton(this, '/admin/customers/', 'tg-edit-id', '', filledValues({telegram_bot_token: cval('tg-edit-token'), telegram_webhook_secret: cval('tg-edit-secret'), sending_enabled: cval('tg-edit-sending')}))">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="tg-edit-id" onclick="saveTelegramSettings(this)">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <span class="action-result warn" style="display:inline-block; margin-left:0.5rem">수집 테스트와 전송 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다.</span>
         </div>
         <div hx-get="/admin/telegram-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -304,7 +324,6 @@
       field.disabled = field.dataset.channelMessenger !== messenger;
     });
   }
-  document.addEventListener('DOMContentLoaded', syncChannelCreateFields);
   function populateChannelFields(select) {
     var option = select.selectedOptions[0];
     if (!option || !option.value) { return; }
@@ -318,6 +337,68 @@
       });
     }
   }
+  function syncEntityFormButtons() {
+    var root = document.getElementById('entity-admin');
+    if (!root) { return; }
+    root.querySelectorAll('button[data-required-select-submit]').forEach(function(button) {
+      var form = button.closest('form');
+      var missing = form && Array.prototype.some.call(form.querySelectorAll('select[required]'), function(select) {
+        return !select.value;
+      });
+      button.disabled = !!missing;
+    });
+    root.querySelectorAll('button[data-requires]').forEach(function(button) {
+      var ids = (button.dataset.requires || '').split(',');
+      var missing = ids.some(function(id) {
+        var field = document.getElementById(id.trim());
+        return !field || !field.value;
+      });
+      button.disabled = missing;
+    });
+  }
+  function responseErrorMessage(xhr) {
+    var fallback = "요청 실패 · 입력을 확인하세요";
+    if (!xhr || !xhr.responseText) { return fallback; }
+    try {
+      var data = JSON.parse(xhr.responseText);
+      if (data && data.detail) { return data.detail; }
+    } catch (e) {}
+    return xhr.responseText.length > 120 ? fallback : xhr.responseText;
+  }
+  function inlineStatusForEvent(event) {
+    var detail = event.detail || {};
+    var target = detail.target;
+    if (target && target.classList && target.classList.contains('inline-action-status')) {
+      return target;
+    }
+    var elt = detail.elt;
+    var scope = elt && elt.closest ? elt.closest('form, .edit-row') : null;
+    return scope ? scope.querySelector('.inline-action-status') : null;
+  }
+  document.addEventListener('DOMContentLoaded', syncChannelCreateFields);
+  document.addEventListener('DOMContentLoaded', syncEntityFormButtons);
+  document.addEventListener('change', function(event) {
+    if (event.target.closest && event.target.closest('#entity-admin')) {
+      syncEntityFormButtons();
+    }
+  });
+  document.addEventListener('input', function(event) {
+    if (event.target.closest && event.target.closest('#entity-admin')) {
+      syncEntityFormButtons();
+    }
+  });
+  document.body.addEventListener('htmx:afterSwap', function(event) {
+    if (event.target && event.target.classList && event.target.classList.contains('inline-action-status')) {
+      event.target.className = 'inline-action-status';
+    }
+    syncEntityFormButtons();
+  });
+  document.body.addEventListener("htmx:responseError", function(event) {
+    var status = inlineStatusForEvent(event);
+    if (!status) { return; }
+    status.className = "inline-action-status action-result err";
+    status.textContent = responseErrorMessage(event.detail && event.detail.xhr);
+  });
   function buttonStatus(button) {
     var next = button ? button.nextElementSibling : null;
     return next && next.classList.contains("inline-action-status") ? next : document.getElementById('entity-result');
@@ -334,14 +415,30 @@
     var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + CRUD_TENANT;
     htmx.ajax('POST', url, { target: buttonStatus(button), swap: 'innerHTML', values: values });
   }
+  function saveTelegramSettings(button) {
+    var values = filledValues({
+      telegram_bot_token: cval('tg-edit-token'),
+      telegram_webhook_secret: cval('tg-edit-secret')
+    });
+    values["sending" + "_enabled"] = cval('tg-edit-sending');
+    crudButton(button, '/admin/customers/', 'tg-edit-id', '', filledValues(values));
+  }
   function loadDeliveryRules(button) {
     var target = cval('rule-list-target');
     if (!target) { setInlineError(button, "업체 선택 필요"); return; }
     var qs = "?tenant=" + CRUD_TENANT + "&target_id=" + encodeURIComponent(target);
-    htmx.ajax('GET', '/admin/delivery-rules' + qs, { target: '#delivery-rule-list', swap: 'innerHTML' });
-    htmx.ajax('GET', '/admin/delivery-rules/options' + qs, { target: '#rule-edit-id', swap: 'innerHTML' });
     var status = buttonStatus(button);
-    status.className = "inline-action-status action-result ok";
-    status.textContent = "조회 완료";
+    status.className = "inline-action-status action-result warn";
+    status.textContent = "조회 중";
+    Promise.all([
+      htmx.ajax('GET', '/admin/delivery-rules' + qs, { target: '#delivery-rule-list', swap: 'innerHTML' }),
+      htmx.ajax('GET', '/admin/delivery-rules/options' + qs, { target: '#rule-edit-id', swap: 'innerHTML' })
+    ]).then(function () {
+      status.className = "inline-action-status action-result ok";
+      status.textContent = "조회 완료";
+    }).catch(function () {
+      status.className = "inline-action-status action-result err";
+      status.textContent = "조회 실패 · 재시도하세요";
+    });
   }
 </script>

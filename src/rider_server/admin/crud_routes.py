@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -472,7 +472,11 @@ async def create_customer(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
-    return _fragment(request, f"고객 생성됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED)
+    response = _fragment(request, f"고객 생성됨 ({tenant.name})", trigger=ENTITY_OPTIONS_CHANGED)
+    response.headers["HX-Redirect"] = (
+        f"/admin?tenant={quote(tenant.id, safe='')}&mode=manage#manage"
+    )
+    return response
 
 
 @router.post("/customers/{tenant_id}", response_class=HTMLResponse)
@@ -836,6 +840,29 @@ async def update_messenger_channel(
     return _fragment(
         request,
         f"메시지 채널 라우팅 편집됨 ({channel.messenger.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
+
+
+@router.post("/messenger-channels/{channel_id}/activate", response_class=HTMLResponse)
+async def activate_messenger_channel(
+    request: Request, channel_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    reason = (await _form(request)).get("reason", "")
+    try:
+        channel = await _service(request).activate_messenger_channel_manual(
+            channel_id,
+            tenant_id=_tenant_id(request),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=reason,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request,
+        f"메시지 채널 활성화됨 (상태: {channel.state.value})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
