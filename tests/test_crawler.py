@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import sys
 import types
 
@@ -7,6 +8,29 @@ import pytest
 from rider_crawl.config import AppConfig
 from rider_crawl import crawler
 from rider_crawl.crawler import crawl_current_screen
+from rider_crawl.models import CurrentScreenSnapshot
+
+
+_MINIMAL_SNAPSHOT = CurrentScreenSnapshot(
+    center_name="배민 배달현황",
+    date_label="",
+    shift_label="배달현황",
+    shift_time_range="",
+    shift_status="",
+    updated_at="14:02",
+    available_current=0,
+    available_total=0,
+    waiting_count=0,
+    online_riders=0,
+    rejected_ignored_count=0,
+    cancelled_count=0,
+    completed_count=0,
+    sequence_violation_count=0,
+    lunch_peak_count=0,
+    dinner_peak_count=0,
+    non_peak_count=0,
+    active_riders=0,
+)
 
 
 def test_crawl_current_screen_parses_html_from_injected_fetcher(tmp_path):
@@ -93,6 +117,69 @@ def test_crawl_current_screen_parses_achievement_report_text_from_injected_fetch
     assert snapshot.reject_rate == 11.82
 
 
+def test_crawl_current_screen_merges_cancel_rate_from_history(tmp_path):
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+        ]
+    )
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+    history = dataclasses.replace(_MINIMAL_SNAPSHOT, reject_rate=4.7, cancel_rate=1.2, cancelled_count=2)
+
+    snapshot = crawl_current_screen(
+        config,
+        fetch_html=lambda _config: text,
+        fetch_cancel_summary=lambda _config: history,
+    )
+
+    assert snapshot.lunch_peak_count == 323
+    assert snapshot.cancel_rate == 4.7
+
+
+def test_crawl_current_screen_keeps_report_when_cancel_summary_unavailable(tmp_path):
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+        ]
+    )
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준서울마포B이츠앤홀딩스3",
+        baemin_center_id="DP2605181318",
+    )
+
+    snapshot = crawl_current_screen(
+        config,
+        fetch_html=lambda _config: text,
+        fetch_cancel_summary=lambda _config: None,
+    )
+
+    assert snapshot.lunch_peak_count == 323
+    assert snapshot.cancel_rate is None
+
+
 def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
     config = _config(tmp_path, browser_mode="cdp")
 
@@ -147,6 +234,24 @@ def test_fetch_page_html_rejects_missing_baemin_center_evidence_in_cdp_mode(tmp_
 
     with pytest.raises(RuntimeError, match="센터 정보를 확인하지 못했습니다"):
         crawler.fetch_page_html(config)
+
+
+def test_crawl_baemin_cancel_summary_parses_history_like_imap_without_center_validation(tmp_path, monkeypatch):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="강남센터",
+        baemin_center_id="DP123",
+    )
+    html = _baemin_delivery_history_html(
+        '<select name="center"><option selected value="DP999">송파센터</option></select>'
+    )
+    monkeypatch.setattr(crawler, "fetch_baemin_delivery_history_html", lambda _config: html)
+
+    snapshot = crawler.crawl_baemin_cancel_summary(config)
+
+    assert snapshot is not None
+    assert snapshot.completed_count == 1
 
 
 def test_crawl_current_screen_rejects_mismatched_selected_baemin_center_id(tmp_path):

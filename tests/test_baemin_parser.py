@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from rider_crawl.parser import (
     BAEMIN_DELIVERY_COLUMNS,
@@ -40,6 +41,29 @@ def test_parse_baemin_delivery_history_html_keeps_mapping_when_columns_move():
     assert table.riders[0]["이름"] == "김배민"
     assert table.riders[0]["완료"] == "9"
     assert table.riders[0]["아이디"] == "rider01"
+
+
+def test_parse_baemin_delivery_history_html_skips_malformed_rows_with_debug_signal(caplog):
+    html = """
+    <table>
+      <thead><tr>
+        <th>아이디</th><th>완료</th><th>메모</th><th>이름</th><th>운행상태</th><th>거절</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>broken01</td><td>4</td><td>구조변형</td><td></td><td>운행중</td><td>1</td></tr>
+        <tr><td>rider01</td><td>9</td><td></td><td>김배민</td><td>운행중</td><td>1</td><td>초과셀</td></tr>
+        <tr><td>rider02</td><td>3</td><td></td><td>이배민</td><td>대기</td></tr>
+      </tbody>
+    </table>
+    """
+    caplog.set_level(logging.DEBUG, logger="rider_crawl.parser")
+
+    table = parse_baemin_delivery_history_html(html)
+
+    assert [row["이름"] for row in table.riders] == ["김배민", "이배민"]
+    assert table.riders[0]["완료"] == "9"
+    assert table.riders[1]["거절"] == ""
+    assert "malformed Baemin delivery rows" in caplog.text
 
 
 def test_parse_baemin_delivery_history_html_accepts_live_thead_summary_row():
@@ -155,3 +179,57 @@ def test_baemin_delivery_history_rejects_invalid_required_numeric_value():
         assert "완료" in str(exc)
     else:
         raise AssertionError("expected MissingPerformanceDataError")
+
+
+_BAEMIN_HISTORY_COLSPAN_HTML = """
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">이름</th><th rowspan="2">운행상태</th><th rowspan="2">휴대폰번호</th>
+      <th colspan="4">완료</th><th>거절</th>
+      <th rowspan="2">배차취소</th><th rowspan="2">배달취소(라이더귀책)</th>
+      <th rowspan="2">아침점심피크</th><th rowspan="2">오후논피크</th>
+      <th rowspan="2">저녁피크</th><th rowspan="2">심야논피크</th><th rowspan="2">아이디</th>
+    </tr>
+    <tr><th>푸드</th><th>비마트</th><th>배민스토어</th><th>합계</th><th>푸드</th></tr>
+    <tr>
+      <th>합계</th><th>-</th><th>-</th>
+      <th>49</th><th>0</th><th>0</th><th>49</th><th>1</th><th>1</th><th>0</th>
+      <th>31</th><th>18</th><th>0</th><th>0</th><th>-</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>강민기</td><td>운행 종료</td><td>010-1111-2222</td>
+      <td>29</td><td>0</td><td>0</td><td>29</td><td>1</td><td>1</td><td>0</td>
+      <td>20</td><td>9</td><td>0</td><td>0</td><td>rider01</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
+
+def test_parse_baemin_delivery_history_html_aligns_columns_under_colspan_header():
+    table = parse_baemin_delivery_history_html(_BAEMIN_HISTORY_COLSPAN_HTML)
+
+    assert table.summary is not None
+    assert table.summary["완료"] == "49"
+    assert table.summary["거절"] == "1"
+    assert table.summary["배차취소"] == "1"
+    assert table.summary["배달취소(라이더귀책)"] == "0"
+    assert len(table.riders) == 1
+    rider = table.riders[0]
+    assert rider["이름"] == "강민기"
+    assert rider["완료"] == "29"
+    assert rider["배달취소(라이더귀책)"] == "0"
+
+
+def test_baemin_delivery_history_to_snapshot_computes_cancel_rate_under_colspan_header():
+    table = parse_baemin_delivery_history_html(_BAEMIN_HISTORY_COLSPAN_HTML)
+
+    snapshot = baemin_delivery_history_to_snapshot(table)
+
+    assert snapshot.completed_count == 49
+    assert snapshot.cancelled_count == 1
+    assert snapshot.cancel_rate == 2.0
+    assert snapshot.reject_rate == 3.9

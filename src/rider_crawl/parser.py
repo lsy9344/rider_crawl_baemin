@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from .models import CurrentScreenSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class MissingPerformanceDataError(ValueError):
@@ -133,11 +136,12 @@ class _HtmlTableParser(HTMLParser):
         super().__init__()
         self.tables: list[list[list[str]]] = []
         self._table_depth = 0
-        self._current_table: list[list[str]] | None = None
-        self._current_row: list[str] | None = None
+        self._current_table: list[list[tuple[str, int, int]]] | None = None
+        self._current_row: list[tuple[str, int, int]] | None = None
         self._current_cell: list[str] | None = None
+        self._current_span: tuple[int, int] = (1, 1)
 
-    def handle_starttag(self, tag: str, _attrs) -> None:
+    def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
         if tag == "table":
             self._table_depth += 1
@@ -147,6 +151,8 @@ class _HtmlTableParser(HTMLParser):
             self._current_row = []
         elif self._table_depth and tag in {"th", "td"}:
             self._current_cell = []
+            attrs_dict = {name.lower(): (value or "") for name, value in attrs}
+            self._current_span = (_span_value(attrs_dict.get("colspan")), _span_value(attrs_dict.get("rowspan")))
 
     def handle_data(self, data: str) -> None:
         if self._current_cell is not None:
@@ -156,17 +162,60 @@ class _HtmlTableParser(HTMLParser):
         tag = tag.lower()
         if tag in {"th", "td"} and self._current_cell is not None:
             if self._current_row is not None:
-                self._current_row.append(_normalize_cell_text("".join(self._current_cell)))
+                text = _normalize_cell_text("".join(self._current_cell))
+                colspan, rowspan = self._current_span
+                self._current_row.append((text, colspan, rowspan))
             self._current_cell = None
         elif tag == "tr" and self._current_row is not None:
-            if self._current_table is not None and any(cell for cell in self._current_row):
+            if self._current_table is not None:
                 self._current_table.append(self._current_row)
             self._current_row = None
         elif tag == "table" and self._table_depth:
             if self._table_depth == 1 and self._current_table is not None:
-                self.tables.append(self._current_table)
+                self.tables.append(_expand_table_grid(self._current_table))
                 self._current_table = None
             self._table_depth -= 1
+
+
+def _span_value(raw: str | None) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+def _expand_table_grid(raw_rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:
+    grid: list[list[str]] = []
+    active: dict[int, list] = {}
+    for raw in raw_rows:
+        out: list[str] = []
+        col = 0
+        i = 0
+        n = len(raw)
+        while i < n or any(remaining > 0 and c >= col for c, (_text, remaining) in active.items()):
+            if col in active and active[col][1] > 0:
+                text, remaining = active[col]
+                out.append(text)
+                remaining -= 1
+                if remaining > 0:
+                    active[col][1] = remaining
+                else:
+                    del active[col]
+                col += 1
+                continue
+            if i < n:
+                text, colspan, rowspan = raw[i]
+                i += 1
+                for _ in range(colspan):
+                    out.append(text)
+                    if rowspan > 1:
+                        active[col] = [text, rowspan - 1]
+                    col += 1
+            else:
+                col += 1
+        grid.append(out)
+    return [row for row in grid if any(cell for cell in row)]
 
 
 def html_to_text(html: str) -> str:
@@ -521,15 +570,22 @@ def _parse_baemin_table(table: list[list[str]]) -> BaeminDeliveryHistoryTable | 
         headers = row
         summary: dict[str, str] | None = None
         riders: list[dict[str, str]] = []
+        skipped_malformed_rows = 0
         for data_row in table[index + 1 :]:
             mapped = _map_row_by_headers(headers, data_row)
             name = mapped.get("이름", "").strip()
             if not name:
+                if any(cell.strip() for cell in data_row):
+                    skipped_malformed_rows += 1
+                continue
+            if name in {"이름", "운행상태", "수행상태"}:
                 continue
             if name == "합계":
                 summary = mapped
             else:
                 riders.append(mapped)
+        if skipped_malformed_rows:
+            logger.debug("skipped %s malformed Baemin delivery rows", skipped_malformed_rows)
         return BaeminDeliveryHistoryTable(headers=headers, summary=summary, riders=riders)
     return None
 
