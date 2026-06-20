@@ -429,11 +429,12 @@ def test_delivery_log_field_set_and_defaults_match_contract() -> None:
 def test_delivery_status_has_exactly_five_members_str_enum() -> None:
     # Story 3.6 계약 반영 갱신: 3.5의 dedup 결과 2개(SENT/DUPLICATE_BLOCKED)에 FR-26의 채널별
     # 운영 상태 3개(FAILED/RETRYING/HELD)가 additive로 더해져 5멤버. (str, Enum)·멤버명==대문자값.
-    expected = {"SENT", "DUPLICATE_BLOCKED", "FAILED", "RETRYING", "HELD"}
+    expected = {"SENT", "DUPLICATE_BLOCKED", "SENDING", "FAILED", "RETRYING", "HELD"}
     assert {s.value for s in DeliveryStatus} == expected
     assert {s.name for s in DeliveryStatus} == expected
     assert DeliveryStatus.SENT == "SENT"  # str enum — json 직렬화 시 "SENT"
     assert DeliveryStatus.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"
+    assert DeliveryStatus.SENDING == "SENDING"
     assert DeliveryStatus.FAILED == "FAILED"
     assert DeliveryStatus.RETRYING == "RETRYING"
     assert DeliveryStatus.HELD == "HELD"

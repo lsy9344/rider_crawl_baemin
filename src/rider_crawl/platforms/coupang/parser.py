@@ -233,7 +233,9 @@ def _required_number_after(label: str, text: str) -> str:
 def _required_peak_period(label: str, text: str) -> PeakPeriodSnapshot:
     peak_text = _peak_time_section(text)
     match = re.search(
-        rf"{re.escape(label)}\n.*?목표/완료\n(?P<pair>-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?)",
+        rf"{re.escape(label)}\n.*?목표\s*/\s*완료\n"
+        r"(?P<pair>-?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:건|명)?\s*/\s*"
+        r"-?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:건|명)?)",
         peak_text,
         flags=re.DOTALL,
     )

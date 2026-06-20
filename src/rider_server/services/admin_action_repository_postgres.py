@@ -39,6 +39,8 @@ from rider_server.domain import (
 )
 
 from .admin_action_service import AuditEntry, HeldDispatchRef, JobRef
+from .admin_action_service import AdminActionNotFound
+from rider_server.queue.states import JOB_STATUS_CLAIMED, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 
 
 def _sub_to_domain(row: SubscriptionRow) -> Subscription:
@@ -156,11 +158,13 @@ class PostgresAdminActionRepository:
         self, subscription: Subscription, audit: AuditEntry
     ) -> None:
         async with self._session_factory() as session:
-            await session.execute(
+            result = await session.execute(
                 update(SubscriptionRow)
                 .where(SubscriptionRow.id == subscription.id)
                 .values(status=subscription.status.value)
             )
+            if result.rowcount == 0:
+                raise AdminActionNotFound("subscription", subscription.id)
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
 
@@ -168,11 +172,13 @@ class PostgresAdminActionRepository:
         self, target: MonitoringTarget, audit: AuditEntry
     ) -> None:
         async with self._session_factory() as session:
-            await session.execute(
+            result = await session.execute(
                 update(MonitoringTargetRow)
                 .where(MonitoringTargetRow.id == target.id)
                 .values(status=target.status.value)
             )
+            if result.rowcount == 0:
+                raise AdminActionNotFound("monitoring_target", target.id)
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
 
@@ -180,9 +186,11 @@ class PostgresAdminActionRepository:
         self, job_id: str, *, status: str, audit: AuditEntry
     ) -> None:
         async with self._session_factory() as session:
-            await session.execute(
+            result = await session.execute(
                 update(JobRow).where(JobRow.id == job_id).values(status=status)
             )
+            if result.rowcount == 0:
+                raise AdminActionNotFound("job", job_id)
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
 
@@ -199,11 +207,13 @@ class PostgresAdminActionRepository:
     ) -> None:
         # 보수적 affinity: 기존 browser_profile 의 agent_id 를 재바인딩(신규 행/ref 생성 0).
         async with self._session_factory() as session:
-            await session.execute(
+            result = await session.execute(
                 update(BrowserProfileRow)
                 .where(BrowserProfileRow.target_id == target_id)
                 .values(agent_id=agent_id)
             )
+            if result.rowcount == 0:
+                raise AdminActionNotFound("browser_profile", target_id)
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
 
@@ -211,3 +221,47 @@ class PostgresAdminActionRepository:
         async with self._session_factory() as session:
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
+
+    async def enqueue_manual_job(
+        self,
+        *,
+        job_id: str,
+        job_type: str,
+        target_id: str,
+        payload_json: dict,
+        audit: AuditEntry,
+        now,
+    ) -> str:
+        active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+        job_uuid = uuid.UUID(str(job_id))
+        target_uuid = uuid.UUID(str(target_id))
+        async with self._session_factory() as session:
+            existing = (
+                await session.execute(
+                    select(JobRow.id)
+                    .where(
+                        JobRow.target_id == target_uuid,
+                        JobRow.type == job_type,
+                        JobRow.status.in_(active_statuses),
+                    )
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                raise ValueError("active manual job already exists")
+            session.add(
+                JobRow(
+                    id=job_uuid,
+                    type=job_type,
+                    target_id=target_uuid,
+                    payload_json=payload_json,
+                    agent_id=None,
+                    status=JOB_STATUS_PENDING,
+                    run_after=None,
+                    attempts=0,
+                )
+            )
+            await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+            await session.commit()
+        return str(job_uuid)

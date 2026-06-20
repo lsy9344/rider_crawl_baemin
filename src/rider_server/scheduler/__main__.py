@@ -51,7 +51,11 @@ def _write_health_file(path: str | None, *, now: datetime) -> None:
 def _build_postgres_components(settings: Settings) -> tuple[SchedulerRepository, QueueBackend]:
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for scheduler")
-    engine = create_engine(settings.database_url)
+    engine = create_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     session_factory = create_session_factory(engine)
     return PostgresSchedulerRepository(session_factory), PostgresQueueBackend(session_factory)
 
@@ -66,7 +70,9 @@ async def run_once(
     settings = settings or Settings.from_env()
     if repo is None or queue_backend is None:
         repo, queue_backend = _build_postgres_components(settings)
-    return await SchedulerService().run_tick(
+    return await SchedulerService(
+        due_batch_size=settings.scheduler_due_batch_size
+    ).run_tick(
         repo,
         queue_backend,
         now=now or _iso_utc_now(),
@@ -93,7 +99,9 @@ async def run_loop(
         ticks += 1
         try:
             now = _iso_utc_now()
-            result = await SchedulerService().run_tick(repo, queue_backend, now=now)
+            result = await SchedulerService(
+                due_batch_size=settings.scheduler_due_batch_size
+            ).run_tick(repo, queue_backend, now=now)
             print(json.dumps(_result_payload(result), ensure_ascii=False), flush=True)
             await asyncio.to_thread(_write_health_file, health_file, now=now)
         except Exception as exc:  # noqa: BLE001 - loop boundary; keep scheduler alive.

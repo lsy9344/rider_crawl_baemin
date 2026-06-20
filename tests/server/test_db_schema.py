@@ -75,9 +75,10 @@ REQUIRED_FIELDS = {
     "snapshots": {
         "id", "target_id", "collected_at", "normalized_json", "parser_version", "quality_state",
     },
-    "messages": {"id", "snapshot_id", "template_version", "text_hash", "text_redacted_preview"},
+    "messages": {"id", "snapshot_id", "template_version", "text", "text_hash", "text_redacted_preview"},
     "delivery_logs": {
         "id", "message_id", "channel_id", "status", "dedup_key", "error_code", "sent_at",
+        "available_at", "attempt_count", "locked_at", "locked_by",
     },
     "agents": {
         "id", "name", "machine_id", "version", "os", "status", "last_heartbeat_at", "capacity_json",
@@ -180,6 +181,45 @@ def test_delivery_logs_dedup_unique_constraint():
     assert uniques["uq_delivery_logs_dedup_key"] == {"dedup_key"}
 
 
+def test_delivery_logs_have_dispatch_claim_columns_and_index():
+    table = Base.metadata.tables["delivery_logs"]
+
+    assert table.c.available_at.type.timezone is True
+    assert table.c.available_at.nullable is True
+    assert table.c.send_attempted_at.type.timezone is True
+    assert table.c.send_attempted_at.nullable is True
+    assert table.c.last_failed_at.type.timezone is True
+    assert table.c.last_failed_at.nullable is True
+    assert table.c.attempt_count.nullable is False
+    assert table.c.locked_at.type.timezone is True
+    assert table.c.locked_at.nullable is True
+    assert table.c.locked_by.nullable is True
+
+    indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in table.indexes
+    }
+    assert indexes["ix_delivery_logs_dispatch_claim"] == (
+        "status",
+        "available_at",
+        "locked_at",
+    )
+
+
+def test_snapshot_latest_message_query_indexes_exist():
+    snapshots = Base.metadata.tables["snapshots"]
+    messages = Base.metadata.tables["messages"]
+    delivery_logs = Base.metadata.tables["delivery_logs"]
+    indexes = {
+        table.name: {index.name for index in table.indexes}
+        for table in (snapshots, messages, delivery_logs)
+    }
+
+    assert "ix_snapshots_target_collected_at_id" in indexes["snapshots"]
+    assert "ix_messages_snapshot_template_version" in indexes["messages"]
+    assert "ix_delivery_logs_channel_message" in indexes["delivery_logs"]
+
+
 def test_jobs_have_stale_lease_recovery_index():
     indexes = {
         index.name: tuple(column.name for column in index.columns)
@@ -188,6 +228,49 @@ def test_jobs_have_stale_lease_recovery_index():
 
     assert indexes["ix_jobs_status"] == ("status", "run_after")
     assert indexes["ix_jobs_status_lease_expires_at"] == ("status", "lease_expires_at")
+    assert indexes["ix_jobs_pending_claim"] == (
+        "status",
+        "type",
+        "assigned_agent_id",
+        "run_after",
+        "id",
+    )
+
+
+def test_active_crawl_job_guard_index_exists():
+    indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in Base.metadata.tables["jobs"].indexes
+    }
+
+    assert indexes["ix_jobs_active_crawl_target_type"] == ("target_id", "type", "status")
+
+
+def test_browser_profile_and_kakao_active_room_unique_indexes():
+    browser_indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in Base.metadata.tables["browser_profiles"].indexes
+    }
+    channel_indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in Base.metadata.tables["messenger_channels"].indexes
+    }
+
+    assert browser_indexes["uq_browser_profiles_agent_target"] == ("agent_id", "target_id")
+    assert browser_indexes["uq_browser_profiles_agent_cdp_port"] == ("agent_id", "cdp_port")
+    assert channel_indexes["uq_messenger_channels_active_kakao_room"] == (
+        "tenant_id",
+        "kakao_room_name",
+    )
+
+
+def test_jobs_have_completion_metadata_columns():
+    jobs = Base.metadata.tables["jobs"]
+
+    assert isinstance(jobs.c.completed_at.type, sa.DateTime)
+    assert jobs.c.completed_at.type.timezone is True
+    assert isinstance(jobs.c.duration_ms.type, sa.Integer)
+    assert isinstance(jobs.c.result_schema_version.type, sa.String)
 
 
 def test_cross_tenant_integrity_constraints_are_db_level():
@@ -321,6 +404,14 @@ def test_offline_upgrade_emits_jobs_stale_lease_index():
     assert "WHERE status IN ('CLAIMED', 'RUNNING') AND lease_expires_at IS NOT NULL" in sql
 
 
+def test_offline_upgrade_emits_jobs_completion_metadata_columns():
+    sql = _offline_sql("upgrade")
+
+    assert "ALTER TABLE jobs ADD COLUMN completed_at" in sql
+    assert "ALTER TABLE jobs ADD COLUMN duration_ms INTEGER" in sql
+    assert "ALTER TABLE jobs ADD COLUMN result_schema_version" in sql
+
+
 def test_verification_email_migration_drops_backfill_server_defaults():
     source = (
         MIGRATIONS_DIR / "versions" / "0008_platform_account_verification_email_refs.py"
@@ -372,6 +463,7 @@ EXPECTED_FOREIGN_KEYS = {
     },
     "jobs": {
         ("target_id", "monitoring_targets", "id"),
+        ("assigned_agent_id", "agents", "id"),
         ("agent_id", "agents", "id"),
     },
     "messages": {("snapshot_id", "snapshots", "id")},
@@ -569,8 +661,36 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0013: stale lease recovery 인덱스 추가가 single head 를 0013 으로 이동.
-    assert heads[0] == "0013_jobs_stale_lease_index"
+    # 0020: fleet claim affinity/idempotency and scale indexes on top of profile/channel uniqueness.
+    assert heads[0] == "0020_fleet_claim_scale"
+    assert (
+        script.get_revision("0020_fleet_claim_scale").down_revision
+        == "0019_profile_channel_uniqueness"
+    )
+    assert (
+        script.get_revision("0019_profile_channel_uniqueness").down_revision
+        == "0018_jobs_claim_index"
+    )
+    assert (
+        script.get_revision("0018_jobs_claim_index").down_revision
+        == "0017_delivery_attempt_timestamps"
+    )
+    assert (
+        script.get_revision("0017_delivery_attempt_timestamps").down_revision
+        == "0016_jobs_last_failed_at"
+    )
+    assert (
+        script.get_revision("0016_jobs_last_failed_at").down_revision
+        == "0015_delivery_outbox"
+    )
+    assert (
+        script.get_revision("0015_delivery_outbox").down_revision
+        == "0014_jobs_completion_metadata"
+    )
+    assert (
+        script.get_revision("0014_jobs_completion_metadata").down_revision
+        == "0013_jobs_stale_lease_index"
+    )
     assert (
         script.get_revision("0013_jobs_stale_lease_index").down_revision
         == "0012_tenant_telegram_config"
@@ -697,7 +817,8 @@ def test_postgres_upgrade_creates_14_tables_and_dedup_blocks_duplicate():
                                    parser_version="v1", quality_state="OK"))
                     await s.flush()
                     s.add(Message(id=ids["message"], snapshot_id=ids["snapshot"],
-                                  template_version="v1", text_hash="h", text_redacted_preview="p"))
+                                  template_version="v1", text="p", text_hash="h",
+                                  text_redacted_preview="p"))
                     await s.commit()
 
                 async with Session() as s:

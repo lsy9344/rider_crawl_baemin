@@ -1,0 +1,5 @@
+services:
+  backend-api:
+    env_file:
+      - ./env/backend-api.env
+      - ./env/backend-api.dev-public-admin.env

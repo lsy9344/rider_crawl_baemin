@@ -1,24 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen as default_urlopen
 
-from .config import AppConfig
+from .config import AppConfig, app_state_root
 from .log_rotation import rotate_if_needed
+from .lock import RunLock
 
 KAKAO_SEND_VERIFY_TIMEOUT_SECONDS = 2.0
 KAKAO_SEND_VERIFY_INTERVAL_SECONDS = 0.1
 KAKAO_TRUNCATED_PREFIX_MIN_CHARS = 40
 KAKAO_ORDERED_MATCH_MIN_LINES = 5
+TELEGRAM_LOCAL_MIN_SEND_INTERVAL_SECONDS = 1.0
 _LAST_KAKAO_CHAT_HANDLE_BY_CHAT: dict[str, int] = {}
 _KAKAO_DIAGNOSTICS: list[str] = []
+_LAST_TELEGRAM_SEND_AT_BY_ROUTE: dict[tuple[str, str, str], float] = {}
 
 
 class KakaoSendError(RuntimeError):
@@ -86,10 +91,12 @@ def send_telegram_text(
     timeout_seconds: int = 10,
     retry_attempts: int = 3,
     sleep: Callable[[float], object] = time.sleep,
+    local_rate_limit_seconds: float | None = None,
 ) -> None:
-    _required_telegram_bot_token(config)
+    token = _required_telegram_bot_token(config)
+    chat_id = _required_telegram_chat_id(config)
     payload: dict[str, object] = {
-        "chat_id": _required_telegram_chat_id(config),
+        "chat_id": chat_id,
         "text": message,
         "disable_web_page_preview": "true",
     }
@@ -98,10 +105,18 @@ def send_telegram_text(
         target_thread_id = _optional_telegram_message_thread_id(config)
     if target_thread_id is not None:
         payload["message_thread_id"] = target_thread_id
+    rate_limit_seconds = _telegram_local_rate_limit_seconds(urlopen, local_rate_limit_seconds)
 
     attempts = max(1, retry_attempts)
     for attempt in range(attempts):
         try:
+            _wait_for_telegram_local_rate_limit(
+                token,
+                chat_id,
+                target_thread_id,
+                rate_limit_seconds=rate_limit_seconds,
+                sleep=sleep,
+            )
             _telegram_api_request(
                 config,
                 "sendMessage",
@@ -109,6 +124,7 @@ def send_telegram_text(
                 urlopen=urlopen,
                 timeout_seconds=timeout_seconds,
             )
+            _record_telegram_local_send(token, chat_id, target_thread_id, rate_limit_seconds=rate_limit_seconds)
             return
         except TelegramSendError as exc:
             if attempt >= attempts - 1 or not _should_retry_telegram_send(exc):
@@ -285,6 +301,49 @@ def _telegram_retry_delay(exc: TelegramSendError, attempt: int) -> float:
     return float(attempt + 1)
 
 
+def _telegram_local_rate_limit_seconds(urlopen: UrlOpen, requested: float | None) -> float:
+    if requested is not None:
+        return max(0.0, requested)
+    if urlopen is default_urlopen:
+        return TELEGRAM_LOCAL_MIN_SEND_INTERVAL_SECONDS
+    return 0.0
+
+
+def _wait_for_telegram_local_rate_limit(
+    token: str,
+    chat_id: str,
+    thread_id: int | None,
+    *,
+    rate_limit_seconds: float,
+    sleep: Callable[[float], object],
+) -> None:
+    if rate_limit_seconds <= 0:
+        return
+    previous = _LAST_TELEGRAM_SEND_AT_BY_ROUTE.get(_telegram_local_rate_limit_key(token, chat_id, thread_id))
+    if previous is None:
+        return
+    remaining = rate_limit_seconds - (time.monotonic() - previous)
+    if remaining > 0:
+        sleep(remaining)
+
+
+def _record_telegram_local_send(
+    token: str,
+    chat_id: str,
+    thread_id: int | None,
+    *,
+    rate_limit_seconds: float,
+) -> None:
+    if rate_limit_seconds <= 0:
+        return
+    _LAST_TELEGRAM_SEND_AT_BY_ROUTE[_telegram_local_rate_limit_key(token, chat_id, thread_id)] = time.monotonic()
+
+
+def _telegram_local_rate_limit_key(token: str, chat_id: str, thread_id: int | None) -> tuple[str, str, str]:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return (token_hash, chat_id, "" if thread_id is None else str(thread_id))
+
+
 def _required_telegram_bot_token(config: AppConfig) -> str:
     token = config.telegram_bot_token.strip()
     if not token:
@@ -310,6 +369,16 @@ def _optional_telegram_message_thread_id(config: AppConfig) -> int | None:
 
 
 def send_kakao_text(
+    config: AppConfig,
+    message: str,
+    *,
+    platform_name: str | None = None,
+) -> None:
+    with RunLock(_kakao_os_automation_lock_path(), stale_timeout_seconds=config.run_lock_timeout_seconds):
+        _send_kakao_text_locked(config, message, platform_name=platform_name)
+
+
+def _send_kakao_text_locked(
     config: AppConfig,
     message: str,
     *,
@@ -365,6 +434,10 @@ def send_kakao_text(
             _error_with_kakao_diagnostics(exc, config),
             ambiguous=getattr(exc, "ambiguous", False),
         ) from exc
+
+
+def _kakao_os_automation_lock_path() -> Path:
+    return app_state_root() / "runtime" / "state" / "kakao_locks" / "kakao.os_automation.lock"
 
 
 def _clear_message_input(control: object, pyautogui: object) -> None:

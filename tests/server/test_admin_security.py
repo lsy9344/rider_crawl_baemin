@@ -45,10 +45,15 @@ _FAKE_SETTINGS = Settings(app_env="test", app_version="9.9.9", build_sha=None, b
 _TENANT = "tn-1"
 _ACTOR = "11111111-1111-1111-1111-111111111111"
 _SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
+_CONFIRM = {"confirm_action": "confirmed"}
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _confirmed() -> dict:
+    return dict(_CONFIRM)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -118,6 +123,17 @@ def _app(principal: AdminPrincipal | None, *, ip_allowlist=(), mfa_required=True
     return app, repo
 
 
+def _app_with_trusted_proxy(
+    principal: AdminPrincipal | None,
+    *,
+    ip_allowlist=(),
+    trusted_proxy_cidrs=(),
+):
+    app, repo = _app(principal, ip_allowlist=ip_allowlist)
+    app.state.trusted_proxy_cidrs = trusted_proxy_cidrs
+    return app, repo
+
+
 def _principal(role: AdminRole, *, mfa=True, source="ADMIN_UI") -> AdminPrincipal:
     return AdminPrincipal(actor_id=_ACTOR, role=role, mfa_verified=mfa, source=source)
 
@@ -133,6 +149,7 @@ def test_operator_passes_action_gate() -> None:
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     )
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED
@@ -146,6 +163,7 @@ def test_admin_post_same_origin_header_is_allowed() -> None:
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     )
 
     assert resp.status_code == HTTPStatus.OK
@@ -157,6 +175,7 @@ def test_admin_post_same_origin_referer_is_allowed_when_origin_missing() -> None
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers={"Referer": "http://testserver/admin?tenant=tn-1"},
+        data=_confirmed(),
     )
 
     assert resp.status_code == HTTPStatus.OK
@@ -196,6 +215,7 @@ def test_admin_post_configured_origin_allows_https_proxy_origin() -> None:
     resp = TestClient(app, base_url="http://admin.example").post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers={"Origin": "https://admin.example"},
+        data=_confirmed(),
     )
 
     assert resp.status_code == HTTPStatus.OK
@@ -230,6 +250,7 @@ def test_secret_admin_satisfies_operator_gate() -> None:
     assert TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     ).status_code == HTTPStatus.OK
 
 
@@ -262,14 +283,15 @@ def test_mfa_toggle_off_allows_unverified() -> None:
     assert TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     ).status_code == HTTPStatus.OK
 
 
 def test_ip_not_in_allowlist_is_denied_and_audited() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("10.0.0.0/8",))
-    resp = TestClient(app).post(
+    resp = TestClient(app, client=("192.168.1.1", 12345)).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
-        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "192.168.1.1"},
+        headers=_SAME_ORIGIN_HEADERS,
     )
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert repo.audits[-1].result == "DENIED"
@@ -277,10 +299,40 @@ def test_ip_not_in_allowlist_is_denied_and_audited() -> None:
 
 def test_ip_in_allowlist_passes() -> None:
     app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("10.0.0.0/8",))
-    resp = TestClient(app).post(
+    resp = TestClient(app, client=("10.1.2.3", 12345)).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
-        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "10.1.2.3"},
+        headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     )
+    assert resp.status_code == HTTPStatus.OK
+
+
+def test_admin_allowlist_does_not_trust_xff_without_trusted_proxy() -> None:
+    app, repo = _app(_principal(AdminRole.OPERATOR), ip_allowlist=("203.0.113.10",))
+
+    resp = TestClient(app, client=("198.51.100.20", 12345)).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "203.0.113.10"},
+        data=_confirmed(),
+    )
+
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+    assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
+
+
+def test_admin_allowlist_trusts_xff_from_trusted_proxy() -> None:
+    app, repo = _app_with_trusted_proxy(
+        _principal(AdminRole.OPERATOR),
+        ip_allowlist=("203.0.113.10",),
+        trusted_proxy_cidrs=("198.51.100.0/24",),
+    )
+
+    resp = TestClient(app, client=("198.51.100.20", 12345)).post(
+        "/admin/targets/mt-1/pause?tenant=tn-1",
+        headers={**_SAME_ORIGIN_HEADERS, "X-Forwarded-For": "203.0.113.10"},
+        data=_confirmed(),
+    )
+
     assert resp.status_code == HTTPStatus.OK
 
 
@@ -289,6 +341,7 @@ def test_break_glass_override_passes_and_strongly_audited() -> None:
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     )
     assert resp.status_code == HTTPStatus.OK
     # break-glass 사용이 강제 audit(action·result·source).
@@ -315,6 +368,20 @@ def test_admin_public_access_setting_allows_dashboard_without_external_principal
     app = create_app(settings)
 
     assert TestClient(app).get("/admin?tenant=tn-1").status_code == HTTPStatus.OK
+
+
+def test_public_admin_access_rejected_in_production() -> None:
+    settings = Settings(
+        app_env="production",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        database_url="postgresql+asyncpg://user:pass@db:5432/rider",
+        admin_public_access=True,
+    )
+
+    with pytest.raises(RuntimeError, match="RIDER_ADMIN_PUBLIC_ACCESS"):
+        create_app(settings)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -375,6 +442,7 @@ def test_async_resolve_admin_principal_seam_supported() -> None:
     resp = TestClient(app).post(
         "/admin/targets/mt-1/pause?tenant=tn-1",
         headers=_SAME_ORIGIN_HEADERS,
+        data=_confirmed(),
     )
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_target("mt-1")).status is MonitoringTargetStatus.PAUSED

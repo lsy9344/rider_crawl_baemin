@@ -2,7 +2,7 @@
 name: rider_server 운영 대시보드 (Darkmatter Ops)
 description: 비개발 운영자가 업체 ~100곳의 크롤링·전송 건강을 지키는 다크 우선 운영 콘솔. tweakcn darkmatter 토큰을 정본으로 계승하고, 대규모 트리아지·반응형·접근성을 위해 확장한다.
 status: final
-updated: 2026-06-15
+updated: 2026-06-20
 sources:
   - src/rider_server/admin/templates/dashboard.html   # darkmatter 인라인 토큰 정본
   - _bmad-output/project-context.md
@@ -128,7 +128,8 @@ components:
     sevbar-ok: '{colors.ok}'
     sevbar-stop: '{colors.neutral}'
     hover: 'color-mix(in srgb, {colors.accent} 50%, transparent)'
-    note: '심각도 좌측 바 + 이름/센터 + 플랫폼배지 + 심각도배지 + 사유/상대시간 + 상황맞춤 액션.'
+    interval-color: '{colors.muted-foreground}'
+    note: '심각도 좌측 바 + 이름/센터 + 플랫폼배지 + 심각도배지 + 사유+신선도 줄 + 상황맞춤 액션. 신선도 줄 = 수집 시각 · 전송 시각(둘 다 신선도색+텍스트) · 주기(무채, 의미색 금지).'
   severity-badge:
     ok: '{colors.ok}'
     warn: '{colors.warn}'
@@ -150,6 +151,15 @@ components:
     border: 'color-mix(in srgb, {colors.crit} 38%, {colors.border})'
     radius: '{rounded.sm}'
     note: '비활성/폐기/중지. 항상 이름 박은 확인 동반.'
+  inline-action-ghost:
+    color: '{colors.muted-foreground}'
+    background: 'transparent'
+    radius: '{rounded.sm}'
+    note: '저강도 액션(상세 보기 등). 무채·투명. 1차/위험과 구분.'
+  inline-help:
+    color: '{colors.muted-foreground}'
+    invalid-color: '{colors.crit}'
+    note: '입력 출처 안내(외부 식별자·secret ref) + 형식 검증 피드백. 안내=muted 작은 글씨, 실패=crit 텍스트+보더. 신규 색 0.'
   target-drawer:
     background: '{colors.card}'
     border-left: '{colors.border}'
@@ -159,7 +169,14 @@ components:
   guided-form:
     step-num-bg: 'color-mix(in srgb, {colors.primary} 16%, {colors.card})'
     radius: '{rounded.DEFAULT}'
-    note: '새 업체 추가 단일 폼. 모든 연결 id = 드롭다운(직접 입력 0).'
+    note: '새 업체 추가 한 화면 2-섹션(① 업체 만들기 → ② 채널 연결). 모든 연결 id = 드롭다운(직접 입력 0).'
+  guided-step-badge:
+    idle-border: '{colors.border}'
+    idle-foreground: '{colors.muted-foreground}'
+    current-ring: '{colors.ring}'
+    done-bg: '{colors.ok}'
+    radius: '{rounded.full}'
+    note: '가이드 폼 단계 번호 배지. 미완료=무채 / 현재=골든 ring(kpi-filter-chip aria-pressed 패턴 재사용) / 완료=ok 체크. 신규 색 0(기존 토큰만). 색 단독 금지(번호+색+체크).'
   status-banner:
     bar-ok: '{colors.ok}'
     bar-warn: '{colors.warn}'
@@ -204,7 +221,7 @@ darkmatter 는 **다크가 기본**이고 라이트는 토글 대안이다. 두 
 **모노 타이포가 정체성**이다. `font-sans`(Geist Mono)가 본문/라벨/버튼을, `font-mono`(JetBrains Mono)가 **데이터 토큰**(수치·id·시각·상대시간·KPI/메트릭 값)을 맡는다. 한글은 시스템 고딕으로 자연 폴백한다.
 
 - `kpi-value`/`metric-value` — 모노, 큰 수치. 한눈 스캔용.
-- `relative-time` — 모노 0.7rem. "47분 전" 같은 신선도 텍스트(색과 함께 의미 전달, 색 단독 금지).
+- `relative-time` — 모노 0.7rem. "47분 전" 같은 신선도 텍스트(색과 함께 의미 전달, 색 단독 금지). 행 신선도 줄에서 **수집 시각·전송 시각** 두 값에 쓰고, 그 옆 **주기**는 같은 크기·무채(신선도색 아님).
 - `table-head` — 0.68rem UPPERCASE, muted. 표 헤더는 조용히.
 - `badge` — 0.7rem 600. 심각도/상태 라벨.
 
@@ -231,12 +248,14 @@ darkmatter 는 **다크가 기본**이고 라이트는 토글 대안이다. 두 
 
 - **mode-tab** — 상단 [모니터링][관리]. 활성 = `{colors.primary}` 하단 보더 + `{colors.foreground}`. 모니터링 탭엔 대상 총수(100) 카운트.
 - **kpi-filter-chip** — KPI 숫자칩이자 **필터 버튼**. 점(ok/warn/crit/stop) + 큰 모노 수치 + 라벨. `aria-pressed` 시 `{colors.ring}` 링. "위험 3" 클릭 → 목록이 위험만.
-- **target-row** — 앱의 심장. `심각도 바 │ 이름+센터 │ 플랫폼 배지 │ 심각도 배지 │ 사유+상대시간 │ 상황맞춤 액션`. hover 시 accent 틴트. 행 전체가 클릭 타깃(→ 드로어).
+- **target-row** — 앱의 심장. `심각도 바 │ 이름+센터 │ 플랫폼 배지 │ 심각도 배지 │ 사유+신선도 줄 │ 상황맞춤 액션`. 신선도 줄 = `수집 47분 전 · 전송 1시간 전 · 주기 5분` — 수집/전송 시각은 신선도색+텍스트(색 단독 금지), **주기는 무채(`{colors.muted-foreground}`)로 조용히**(맥락 정보라 상태색 절대 금지). hover 시 accent 틴트. 행 전체가 클릭 타깃(→ 드로어).
 - **severity-badge** — 색 14~16% 틴트 배경 + 점 + 한글 라벨. **색만으로 구분 금지**(점+텍스트 동반).
 - **platform-badge** — 배민=`{colors.info}`, 쿠팡=`{colors.violet}`, 알약, 모노.
 - **inline-action (primary/danger/ghost)** — primary=골든(1차 조치), danger=레드(이름 박은 확인 필수), ghost=투명(상세 보기 등 저강도).
 - **target-drawer** — 데스크톱 우측 슬라이드(440px), 모바일 전체폭. 탭 `상세`/`편집`. 본문 순서 = **왜(설명 배너) → 핵심 사실(dl) → 최근 이력(타임라인) → 조치 버튼 → 딥링크**. 모니터링·관리가 같은 드로어 재사용.
-- **guided-form** — 새 업체 추가 단일 폼. 번호 스텝(계정→정보→채널). **모든 연결 id = 드롭다운**.
+- **guided-form** — 새 업체 추가 **한 화면 번호 2-섹션**(① 업체 만들기 → ② 채널 연결, 위저드 아님). **모든 연결 id = 드롭다운**(목록에 없으면 "＋ 만들기" sentinel → 인라인 미니폼). ① 성공 시 만든 업체를 ②에 자동 주입.
+- **guided-step-badge** — 단계 번호 배지. 미완료 = 무채(`{colors.border}`/`{colors.muted-foreground}`), 현재 = 골든 `{colors.ring}`(kpi-filter-chip aria-pressed 재사용), 완료 = `{colors.ok}` 체크. 신규 색 도입 0 — 기존 토큰만. **색 단독 금지**(번호+색+체크 3중).
+- **inline-help / field-validation** — 입력란 출처 안내(외부 식별자·secret ref)와 형식 검증 피드백. 안내문 = `{colors.muted-foreground}` 작은 글씨(`relative-time` 크기대). 검증 실패 = `{colors.crit}` 텍스트 + 입력 보더, 성공/중립은 무채. 신규 색 0. raw 타이핑이 불가피한 곳에서 "어디서 얻는지 + 형식 맞는지"를 조용히 돕는다.
 - **status-banner / 미니 상태** — 좌측 4px 심각도 바 + orb(crit 펄스), 미니 상태(Agent·Kakao·Telegram).
 
 ## Do's and Don'ts

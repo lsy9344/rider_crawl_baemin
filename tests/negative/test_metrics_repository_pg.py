@@ -104,12 +104,21 @@ async def _seed(session_factory) -> None:
         session.add(_snap("53333333-3333-3333-3333-333333333333", _T_B1, _T0 - timedelta(minutes=50), "OK"))
         await session.flush()
         # messages on existing snapshots
-        session.add(Message(id=uuid.UUID("61111111-1111-1111-1111-111111111111"), snapshot_id=uuid.UUID("51111111-1111-1111-1111-111111111111"), template_version="v1", text_hash="h", text_redacted_preview="p"))
-        session.add(Message(id=uuid.UUID("62222222-2222-2222-2222-222222222222"), snapshot_id=uuid.UUID("53333333-3333-3333-3333-333333333333"), template_version="v1", text_hash="h", text_redacted_preview="p"))
+        session.add(Message(id=uuid.UUID("61111111-1111-1111-1111-111111111111"), snapshot_id=uuid.UUID("51111111-1111-1111-1111-111111111111"), template_version="v1", text="p", text_hash="h", text_redacted_preview="p"))
+        session.add(Message(id=uuid.UUID("62222222-2222-2222-2222-222222222222"), snapshot_id=uuid.UUID("53333333-3333-3333-3333-333333333333"), template_version="v1", text="p", text_hash="h", text_redacted_preview="p"))
         await session.flush()
 
-        def _dlog(did, mid, chan, status, sent_at, error_code, dedup):
-            return DeliveryLog(id=uuid.UUID(did), message_id=uuid.UUID(mid), channel_id=uuid.UUID(chan), status=status, dedup_key=dedup, error_code=error_code, sent_at=sent_at)
+        def _dlog(did, mid, chan, status, last_failed_at, error_code, dedup):
+            return DeliveryLog(
+                id=uuid.UUID(did),
+                message_id=uuid.UUID(mid),
+                channel_id=uuid.UUID(chan),
+                status=status,
+                dedup_key=dedup,
+                error_code=error_code,
+                sent_at=None,
+                last_failed_at=last_failed_at,
+            )
 
         # telegram 오류: A -2min(윈도내), B -1min(윈도내), A -20min(윈도밖 제외).
         session.add(_dlog("71111111-1111-1111-1111-111111111111", "61111111-1111-1111-1111-111111111111", _CHAN_A, "FAILED", _T0 - timedelta(minutes=2), "TELEGRAM_FAILURE", "k1"))

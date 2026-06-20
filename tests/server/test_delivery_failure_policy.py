@@ -178,10 +178,11 @@ def test_failure_category_matches_nfr15_canon() -> None:
 
 
 def test_delivery_status_expresses_fr26_four_states_plus_dedup() -> None:
-    # FR-26 "성공·실패·재시도·보류"(+dedup) = 5멤버.
+    # FR-26 "성공·실패·재시도·보류"(+dedup) + outbox send-start 중간 상태.
     assert {s.value for s in DeliveryStatus} == {
         "SENT",
         "DUPLICATE_BLOCKED",
+        "SENDING",
         "FAILED",
         "RETRYING",
         "HELD",

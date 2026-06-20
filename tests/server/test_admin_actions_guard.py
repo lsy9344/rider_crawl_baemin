@@ -139,6 +139,6 @@ def test_entity_service_is_the_write_owner() -> None:
     source = ENTITY_SERVICE.read_text(encoding="utf-8")
     assert "build_diff_redacted" in source
     assert "assert_channel_transition" in source
-    assert "_credential_or_empty" in source
+    assert "_secret_ref_or_empty" in source
     assert '"password_change": _secret_change_label' in source
     assert '"verification_email_app_password_change": _secret_change_label' in source

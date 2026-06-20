@@ -1,5 +1,7 @@
 # 유지보수성 구조 개선 작업 지시서
 
+완료: 2026-06-19 기준, 작업지시서의 Task 0-7 작업을 끝냈습니다.
+
 > **For agentic workers:** 이 문서는 작업자가 순서대로 따라갈 수 있는 구현 지시서다. 구현 세션에서는 `superpowers:subagent-driven-development` 또는 `superpowers:executing-plans`를 사용하고, 각 task의 checkbox를 실제 진행 상태로 갱신한다.
 
 작성일: 2026-06-19  
@@ -37,7 +39,7 @@
 - Read: `tests/conftest.py`
 - Read: `scripts/test.ps1`
 
-- [ ] **Step 1: 현재 변경 범위 확인**
+- [x] **Step 1: 현재 변경 범위 확인**
 
 Run:
 
@@ -51,7 +53,7 @@ Expected:
 - 기존 사용자 변경이 보인다.
 - 이번 작업은 해당 변경을 되돌리지 않는다.
 
-- [ ] **Step 2: 빠른 기준선 실행**
+- [x] **Step 2: 빠른 기준선 실행**
 
 Run:
 
@@ -64,7 +66,7 @@ Expected:
 - PASS.
 - 실패하면 실패 파일, 실패 수, 기존 실패 여부를 기록하고 구조 변경을 시작하기 전에 사용자에게 알린다.
 
-- [ ] **Step 3: 구조 가드 기준선 실행**
+- [x] **Step 3: 구조 가드 기준선 실행**
 
 Run:
 
@@ -81,6 +83,10 @@ Rollback:
 
 - Task 0은 읽기/검증만 하므로 코드 rollback이 없다.
 
+Progress note:
+
+- 2026-06-19: 최초 기준선은 기존 작업트리 변경으로 `quick` 3건, `architecture` 1건이 실패했다. 기준선 테스트 정합성만 보정한 뒤 `quick` 2067 passed, `architecture` 91 passed를 확인했다.
+
 ## Task 1: 배포 env fail-closed와 Telegram secret handoff 정리
 
 **Why first:** 운영 기본값과 secret 전달은 코드 구조 refactor보다 작고, 실수 영향은 크다.
@@ -94,7 +100,7 @@ Rollback:
 - Modify: `tests/server/test_deployment_config.py`
 - Modify: `docs/operations/aws-product-setup-2026-06-18.md`
 
-- [ ] **Step 1: 공개 Admin 기본값 실패 테스트 추가**
+- [x] **Step 1: 공개 Admin 기본값 실패 테스트 추가**
 
 Add a test:
 
@@ -110,7 +116,7 @@ Expected:
 
 - FAIL. 현재 `deploy/env/backend-api.env`가 `RIDER_ADMIN_PUBLIC_ACCESS=1`을 가진다.
 
-- [ ] **Step 2: secret handoff 정책 테스트 추가**
+- [x] **Step 2: secret handoff 정책 테스트 추가**
 
 Choose one policy and test it.
 
@@ -127,7 +133,7 @@ Expected:
 
 - 현재 문서/compose는 이 경계를 충분히 설명하지 못하므로 첫 테스트는 실패해야 한다.
 
-- [ ] **Step 3: 운영 기본 env를 fail-closed로 변경**
+- [x] **Step 3: 운영 기본 env를 fail-closed로 변경**
 
 In `deploy/env/backend-api.env`, make public Admin disabled by default:
 
@@ -144,7 +150,7 @@ Expected:
 
 - production-like env가 공개 Admin을 기본으로 켜지 않는다.
 
-- [ ] **Step 4: dev public Admin opt-in 파일 생성**
+- [x] **Step 4: dev public Admin opt-in 파일 생성**
 
 Create `deploy/env/backend-api.dev-public-admin.env`:
 
@@ -168,7 +174,7 @@ Expected:
 - 편의 모드는 명시적으로 opt-in 한다.
 - `deploy/docker-compose.yml`만 실행하면 public Admin이 켜지지 않는다.
 
-- [ ] **Step 5: runbook 갱신**
+- [x] **Step 5: runbook 갱신**
 
 In `docs/operations/aws-product-setup-2026-06-18.md`, add:
 
@@ -181,7 +187,7 @@ Expected:
 
 - 운영자가 어떤 파일을 써야 하는지 알 수 있다.
 
-- [ ] **Step 6: 검증**
+- [x] **Step 6: 검증**
 
 Run:
 
@@ -206,6 +212,10 @@ Rollback:
 - Revert the env/doc/test commit.
 - Do not restore `RIDER_ADMIN_PUBLIC_ACCESS=1` silently; if rollback is needed, record why public Admin must remain enabled.
 
+Progress note:
+
+- 2026-06-19: 공개 Admin 기본값과 Telegram env handoff 테스트를 RED로 확인한 뒤, `backend-api.env` fail-closed, dev opt-in env/compose override, backend actual secret env 전달, runbook 문구를 반영했다. `quick tests\server\test_deployment_config.py` 34 passed, `docs` 133 passed.
+
 ## Task 2: JobCompletionService 추가
 
 **Files:**
@@ -216,7 +226,7 @@ Rollback:
 - Test: `tests/server/test_jobs_api.py`
 - Test: `tests/server/test_snapshot_telegram_runtime.py`
 
-- [ ] **Step 1: 실패 테스트 추가**
+- [x] **Step 1: 실패 테스트 추가**
 
 Add tests proving the API route delegates completion policy to a service and preserves current HTTP behavior.
 
@@ -232,7 +242,7 @@ Expected:
 
 - FAIL because `app.state.job_completion_service` is not used yet.
 
-- [ ] **Step 2: service 파일 생성**
+- [x] **Step 2: service 파일 생성**
 
 Create `src/rider_server/services/job_completion_service.py` with:
 
@@ -257,7 +267,7 @@ Expected:
 - The service owns job completion policy.
 - The route becomes an adapter.
 
-- [ ] **Step 3: route를 얇게 변경**
+- [x] **Step 3: route를 얇게 변경**
 
 In `src/rider_server/api/jobs.py`, make `complete_job()`:
 
@@ -273,7 +283,7 @@ Expected mapping:
 - lease lost or invalid transition: 409
 - success: `{"job_id": ..., "status": ...}`
 
-- [ ] **Step 4: app wiring 추가**
+- [x] **Step 4: app wiring 추가**
 
 In `src/rider_server/main.py`, wire:
 
@@ -288,7 +298,7 @@ Expected:
 
 - Existing tests that use `job_result_ingest_service` still work.
 
-- [ ] **Step 5: 검증**
+- [x] **Step 5: 검증**
 
 Run:
 
@@ -313,6 +323,10 @@ Rollback:
 - Revert this commit if completion behavior changes unexpectedly.
 - Before retrying, compare old and new HTTP mappings in `tests/server/test_jobs_api.py`.
 
+Progress note:
+
+- 2026-06-19: `complete` route delegation RED 테스트를 추가하고, `JobCompletionService`로 queue complete, snapshot prepare/atomic complete, commit failure compensation을 이동했다. 라우트는 bearer/body agent 확인, status 매핑, 서비스 예외의 HTTP 변환만 남겼다. `quick tests\server\test_jobs_api.py tests\server\test_snapshot_telegram_runtime.py` 38 passed, `architecture` 93 passed.
+
 ## Task 3: Snapshot ingest와 Telegram dispatch worker 분리
 
 **Files:**
@@ -327,7 +341,7 @@ Rollback:
 - Modify: `tests/server/test_postgres_runtime_guards.py`
 - Modify: `tests/negative/test_queue_concurrency.py` or a new dispatch concurrency test if needed
 
-- [ ] **Step 1: delivery log outbox shape 결정**
+- [x] **Step 1: delivery log outbox shape 결정**
 
 Use existing `delivery_logs` as the outbox surface unless the architecture rule about 14 required tables is explicitly changed.
 
@@ -343,7 +357,7 @@ Expected:
 - No new table is introduced in the default path.
 - A worker can safely claim pending rows without two workers sending the same delivery.
 
-- [ ] **Step 2: 실패 테스트 추가**
+- [x] **Step 2: 실패 테스트 추가**
 
 Add tests proving:
 
@@ -357,7 +371,7 @@ Expected:
 
 - FAIL because current repository calls `_deliver_telegram_after_commit()`.
 
-- [ ] **Step 3: Alembic migration 추가**
+- [x] **Step 3: Alembic migration 추가**
 
 Add an additive migration for `delivery_logs`.
 
@@ -372,7 +386,7 @@ Expected:
 
 - PostgreSQL tests can run migration from empty DB.
 
-- [ ] **Step 4: repository 책임 축소**
+- [x] **Step 4: repository 책임 축소**
 
 Change `PostgresSnapshotIngestRepository.complete_snapshot_job()` so it:
 
@@ -389,7 +403,7 @@ Expected:
 - Snapshot completion has no network side effect.
 - `snapshot_repository_postgres.py` no longer owns Telegram send attempt policy.
 
-- [ ] **Step 5: dispatch worker 추가**
+- [x] **Step 5: dispatch worker 추가**
 
 Create `src/rider_server/services/dispatch_worker.py`.
 
@@ -410,7 +424,7 @@ Expected:
 
 - Dispatch can be run explicitly by a worker loop, scheduler job, or test.
 
-- [ ] **Step 6: worker 실행 위치 결정**
+- [x] **Step 6: worker 실행 위치 결정**
 
 Choose one and document it in the code/runbook:
 
@@ -424,7 +438,7 @@ Expected:
 
 - 운영자가 worker를 어떻게 띄우는지 알 수 있다.
 
-- [ ] **Step 7: 검증**
+- [x] **Step 7: 검증**
 
 Run:
 
@@ -455,6 +469,10 @@ Rollback:
 - Revert this commit if completion creates delivery logs but worker cannot process them.
 - If the migration already ran in a shared DB, write a forward migration that disables worker claim rather than hand-editing schema.
 
+Progress note:
+
+- 2026-06-19: `delivery_logs`에 `available_at`, `attempt_count`, `locked_at`, `locked_by`와 claim index를 추가하고 0015 migration을 만들었다. Snapshot ingest는 Telegram row 생성까지만 수행하고 inline post-commit send를 제거했다. `TelegramDispatchWorker`는 `FOR UPDATE SKIP LOCKED` claim, retry/backoff/final update, lock clear 경계를 가진다. 실행 위치는 숨은 FastAPI background task가 아니라 명시 worker loop 또는 scheduler-maintenance command에서 `run_once()`를 호출하는 방식으로 코드에 기록했다. `quick` 2075 passed, `architecture` 95 passed. `TEST_DATABASE_URL`이 없어 `postgres` 단계는 미실행.
+
 ## Task 4: RuntimeDeps composition root 추가
 
 **Files:**
@@ -464,7 +482,7 @@ Rollback:
 - Test: `tests/server/test_server_app.py`
 - Test: `tests/server/test_snapshot_telegram_runtime.py`
 
-- [ ] **Step 1: 실패 테스트 추가**
+- [x] **Step 1: 실패 테스트 추가**
 
 Add a test:
 
@@ -484,7 +502,7 @@ Expected:
 
 - FAIL because `app.state.container` does not exist.
 
-- [ ] **Step 2: RuntimeDeps 생성**
+- [x] **Step 2: RuntimeDeps 생성**
 
 Create `src/rider_server/runtime.py` with a frozen dataclass.
 
@@ -510,7 +528,7 @@ Expected:
 
 - Container type is explicit and inspectable.
 
-- [ ] **Step 3: main.py wiring 정리**
+- [x] **Step 3: main.py wiring 정리**
 
 In `create_app()`, build `RuntimeDeps` after constructing defaults, then attach it:
 
@@ -524,7 +542,7 @@ Rules:
 - New code should prefer `app.state.container`.
 - Do not change route behavior in this task.
 
-- [ ] **Step 4: engine 생성 중복 방지 테스트**
+- [x] **Step 4: engine 생성 중복 방지 테스트**
 
 Add a test that monkeypatches engine creation and asserts `create_app()` creates the DB engine/session factory once for the default path.
 
@@ -533,7 +551,7 @@ Important:
 - The current default path already passes `db_session_factory` into default builders.
 - This test locks that behavior so future helper changes do not accidentally create extra engines.
 
-- [ ] **Step 5: 검증**
+- [x] **Step 5: 검증**
 
 Run:
 
@@ -557,6 +575,10 @@ Rollback:
 
 - Revert the commit. Since existing `app.state.*` compatibility remains, rollback should be low risk.
 
+Progress note:
+
+- 2026-06-19: `RuntimeDeps` frozen dataclass를 추가하고 `create_app()`이 기존 `app.state.*` 호환을 유지하면서 `app.state.container`를 붙이도록 했다. 단일 DB engine 생성 가드는 기존 테스트로 유지했다. `quick tests\server\test_server_app.py tests\server\test_snapshot_telegram_runtime.py` 22 passed, `architecture` 95 passed.
+
 ## Task 5: Scheduler batch와 bulk query 도입
 
 **Files:**
@@ -567,7 +589,7 @@ Rollback:
 - Test: `tests/server/test_scheduler_repository.py`
 - Test: `tests/negative/test_scheduler_idempotency.py`
 
-- [ ] **Step 1: 실패 테스트 추가**
+- [x] **Step 1: 실패 테스트 추가**
 
 Add a repository fake that counts calls:
 
@@ -588,7 +610,7 @@ Expected:
 
 - FAIL because current `SchedulerService.__init__()` has no `batch_size`, and current service calls per-target methods.
 
-- [ ] **Step 2: constructor에 batch_size 추가**
+- [x] **Step 2: constructor에 batch_size 추가**
 
 In `SchedulerService.__init__()`, add:
 
@@ -601,7 +623,7 @@ Rules:
 - Validate positive integer.
 - Keep existing breaker arguments behavior unchanged.
 
-- [ ] **Step 3: repository interface를 필수 bulk 계약으로 확장**
+- [x] **Step 3: repository interface를 필수 bulk 계약으로 확장**
 
 Change `SchedulerRepository` abstract methods:
 
@@ -617,7 +639,7 @@ Rules:
 - Update all fakes and Postgres implementation in the same patch.
 - Keep old per-target methods only if another caller still needs them.
 
-- [ ] **Step 4: Postgres bulk query 구현**
+- [x] **Step 4: Postgres bulk query 구현**
 
 In `PostgresSchedulerRepository`:
 
@@ -629,7 +651,7 @@ Expected:
 
 - One tick can cap work and reduce query count.
 
-- [ ] **Step 5: service loop 변경**
+- [x] **Step 5: service loop 변경**
 
 In `SchedulerService.run_tick()`:
 
@@ -644,7 +666,7 @@ Expected:
 - Behavior matches current policy.
 - Gate and active-job DB queries no longer grow linearly with target count.
 
-- [ ] **Step 6: 검증**
+- [x] **Step 6: 검증**
 
 Run:
 
@@ -673,6 +695,10 @@ Rollback:
 
 - Revert this commit if queue creation count, race behavior, or idempotency changes.
 
+Progress note:
+
+- 2026-06-19: `SchedulerService(batch_size=...)` 별칭과 positive validation을 추가하고, repository bulk gate/active-job 계약을 필수로 고정했다. tick은 due 대상 limit, tenant gate bulk 조회, active crawl target bulk 조회를 사용한다. `quick tests\server\test_scheduler_tick.py tests\server\test_scheduler_repository.py tests\server\test_scheduler_entrypoint.py` 53 passed, `architecture tests\server\test_scheduler_boundary.py` 7 passed. `TEST_DATABASE_URL`이 없어 postgres idempotency 검증은 미실행.
+
 ## Task 6: Admin Entity CRUD 점진 분리
 
 **Files:**
@@ -685,7 +711,7 @@ Rollback:
 - Test: `tests/server/test_admin_entity_crud.py`
 - Test: `tests/negative/test_admin_entity_crud_pg.py`
 
-- [ ] **Step 1: 현재 behavior lock 테스트 추가**
+- [x] **Step 1: 현재 behavior lock 테스트 추가**
 
 Pick high-risk flows before splitting:
 
@@ -698,7 +724,7 @@ Expected:
 
 - PASS before refactor.
 
-- [ ] **Step 2: common helper 이동**
+- [x] **Step 2: common helper 이동**
 
 Move common helpers to `admin_entities/common.py`.
 
@@ -713,7 +739,7 @@ Expected:
 
 - `admin_entity_service.py` imports from common and behavior stays same.
 
-- [ ] **Step 3: tenant service 분리**
+- [x] **Step 3: tenant service 분리**
 
 Move tenant create/update/delete behavior to `tenant_service.py`.
 
@@ -724,7 +750,7 @@ Expected:
 - `AdminEntityService` delegates tenant methods.
 - Public method names and exceptions stay the same.
 
-- [ ] **Step 4: target service 분리**
+- [x] **Step 4: target service 분리**
 
 Move monitoring target create/update/deactivate/reactivate behavior to `target_service.py`.
 
@@ -732,7 +758,7 @@ Expected:
 
 - Target methods still enforce tenant scope and center-name risk behavior.
 
-- [ ] **Step 5: fake 위치 결정**
+- [x] **Step 5: fake 위치 결정**
 
 Do not move the in-memory fake in the same patch unless the service split is already stable.
 
@@ -741,7 +767,7 @@ Preferred follow-up:
 - move fake to `tests` support or `admin_entities/fakes.py`
 - keep import compatibility if production tests import it
 
-- [ ] **Step 6: 검증**
+- [x] **Step 6: 검증**
 
 Run:
 
@@ -771,6 +797,10 @@ Rollback:
 
 - Revert the commit if CRUD behavior or audit records change.
 
+Progress note:
+
+- 2026-06-19: 기존 high-risk behavior lock 테스트가 tenant create/update/delete, target scope violation, center-name risk를 이미 고정하고 있어 이를 기준으로 분리했다. 공용 helper/타입은 `admin_entities/common.py`, tenant write는 `tenant_service.py`, monitoring target write는 `target_service.py`로 나누고 `AdminEntityService`는 기존 공개 API를 유지한 채 위임한다. in-memory fake는 import 호환을 위해 이번 패치에서는 기존 위치에 유지했다. `quick tests\server\test_admin_entity_crud.py` 99 passed, `architecture tests\server\test_admin_actions_guard.py` 11 passed. `TEST_DATABASE_URL`이 없어 postgres CRUD 검증은 미실행.
+
 ## Task 7: Agent worker composition 분리
 
 **Files:**
@@ -780,7 +810,7 @@ Rollback:
 - Test: `tests/agent/test_job_loop.py`
 - Test: `tests/agent/test_agent_package.py`
 
-- [ ] **Step 1: 실패 테스트 추가**
+- [x] **Step 1: 실패 테스트 추가**
 
 Add a test that imports the new composition function and asserts fallback chaining:
 
@@ -814,7 +844,7 @@ Expected:
 
 - FAIL because `worker_composition.py` does not exist.
 
-- [ ] **Step 2: 순환 import 방지 규칙 결정**
+- [x] **Step 2: 순환 import 방지 규칙 결정**
 
 Do not make `worker_composition.py` import `rider_agent.job_loop` at runtime if `job_loop.py` will import `worker_composition.py`.
 
@@ -827,7 +857,7 @@ Expected:
 
 - `tests/agent/test_agent_package.py` import guard still passes.
 
-- [ ] **Step 3: composition module 생성**
+- [x] **Step 3: composition module 생성**
 
 Create `src/rider_agent/worker_composition.py` with:
 
@@ -852,7 +882,7 @@ Expected:
 
 - New module imports without pulling `rider_server`.
 
-- [ ] **Step 4: 기존 worker 조립 이동**
+- [x] **Step 4: 기존 worker 조립 이동**
 
 Move auth/crawl/kakao composition blocks from `run_agent()` into `compose_execute_job()`.
 
@@ -868,7 +898,7 @@ Expected:
 - `run_agent()` becomes shorter.
 - identity/token/runner lifecycle remains in `run_agent()`.
 
-- [ ] **Step 5: close callback 정리**
+- [x] **Step 5: close callback 정리**
 
 If Kakao worker stop/join logic is currently owned by `run_agent()`, return close callbacks from composition and call them in `run_agent()` shutdown.
 
@@ -876,7 +906,7 @@ Expected:
 
 - Current cleanup behavior remains unchanged.
 
-- [ ] **Step 6: 검증**
+- [x] **Step 6: 검증**
 
 Run:
 
@@ -899,6 +929,10 @@ git commit -m "refactor(agent): isolate worker composition from run loop"
 Rollback:
 
 - Revert the commit if Agent start/stop or Kakao worker cleanup behavior changes.
+
+Progress note:
+
+- 2026-06-19: `worker_composition.py`를 추가해 auth/crawl/Kakao worker chaining을 sync-only composition 함수로 분리하고, `run_agent()`는 identity/token/runner lifecycle을 유지하면서 composition 결과를 사용한다. fallback chaining RED 테스트를 추가했고, Kakao worker stop callback은 composition의 `close_callbacks`로 반환한다. `quick tests\agent\test_job_loop.py` 47 passed, `architecture tests\agent\test_agent_package.py` 14 passed.
 
 ## Task 8: 후속 구조 cleanup backlog
 

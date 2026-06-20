@@ -17,7 +17,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .states import JOB_STATUS_CLAIMED
 
@@ -60,6 +60,16 @@ class CompleteOutcome:
         return self.result == COMPLETE_ACCEPTED
 
 
+@dataclass(frozen=True)
+class QueueRetryDecision:
+    """Queue complete 경로에서 쓸 retry 결정."""
+
+    run_after: datetime
+
+
+RetryDecider = Callable[[str | None, int, datetime], QueueRetryDecision | None]
+
+
 class QueueBackend(abc.ABC):
     """job queue backend 추상 인터페이스(AC1).
 
@@ -76,6 +86,7 @@ class QueueBackend(abc.ABC):
         job_type: str,
         target_id: str | None = None,
         payload_json: dict[str, Any] | None = None,
+        assigned_agent_id: str | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -122,6 +133,10 @@ class QueueBackend(abc.ABC):
         status: str,
         result_json: dict[str, Any] | None = None,
         error_code: str | None = None,
+        duration_ms: int | None = None,
+        result_schema_version: str | None = None,
+        completion_id: str | None = None,
+        completion_payload_hash: str | None = None,
         now: datetime,
     ) -> CompleteOutcome:
         """job 을 완료 처리한다(lease 소유 검증 포함).
@@ -144,7 +159,18 @@ class QueueBackend(abc.ABC):
         """heartbeat 연장 입력 — 소유 + 미만료면 lease 를 ``now+lease`` 로 연장(True)."""
 
     @abc.abstractmethod
-    async def recover_stale(self, *, now: datetime) -> int:
+    async def extend_leases(
+        self,
+        *,
+        job_ids: Sequence[str],
+        agent_id: str,
+        lease_seconds: float,
+        now: datetime,
+    ) -> set[str]:
+        """heartbeat bulk 연장 입력 — 소유 + 미만료인 job id 집합만 돌려준다."""
+
+    @abc.abstractmethod
+    async def recover_stale(self, *, now: datetime, batch_size: int | None = None) -> int:
         """만료 lease(CLAIMED/RUNNING & lease_expires_at<=now)를 ``PENDING`` 재진입시킨다.
 
         회수한 job 수를 돌려준다. 회수된 job 은 다른 Agent 에 재할당 가능(AC2).
@@ -166,4 +192,38 @@ class QueueBackend(abc.ABC):
 
         PG 구현은 작은 구조 이벤트를 ``audit_logs`` 에 남기고, in-memory 구현은 테스트 가시성을
         위해 기록한다. 저장/로깅 시 secret 평문이 남지 않는다.
+        """
+
+    async def count_in_flight(
+        self,
+        *,
+        agent_id: str,
+        job_types: Sequence[str] = (),
+        now: datetime | None = None,
+    ) -> int:
+        """현재 Agent 가 소유한 진행 중 job 수를 돌려준다.
+
+        기본 구현은 구형/테스트 fake 호환용이다. 실제 backend 는 override 해서 서버 claim
+        capacity clamp 에 쓰인다.
+        """
+
+        return 0
+
+    @abc.abstractmethod
+    async def emit_event_for_in_flight_job(
+        self,
+        *,
+        job_id: str,
+        event_type: str,
+        severity: str,
+        message_redacted: str,
+        artifact_refs: Sequence[Any] = (),
+        agent_id: str,
+        now: datetime,
+    ) -> bool:
+        """소유 + 미만료 진행 job 이벤트만 기록한다.
+
+        현재 ``agent_id`` 가 job lease 를 소유하고 있고 job 이 아직 CLAIMED/RUNNING 이면 이벤트를
+        쓰고 True 를 돌려준다. 미존재/재할당/만료/종료 상태면 False 를 돌려주며 이벤트를 쓰지
+        않는다.
         """

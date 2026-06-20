@@ -45,6 +45,7 @@ _ACTOR = "11111111-1111-1111-1111-111111111111"
 _SECRET_ADMIN = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.SECRET_ADMIN, mfa_verified=True,
                                source="ADMIN_UI/secret-admin")
 _OPERATOR = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True, source="x")
+_CONFIRM = {"confirm_action": "confirmed"}
 
 
 def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
@@ -55,6 +56,10 @@ def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors import
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _confirmed(data: dict | None = None) -> dict:
+    return {**(data or {}), **_CONFIRM}
 
 
 def _svc() -> tuple[AgentTokenService, InMemoryAgentTokenRepository]:
@@ -166,7 +171,10 @@ def _app(principal: AdminPrincipal):
 
 def test_route_secret_admin_can_revoke() -> None:
     app, token_repo, _ = _app(_SECRET_ADMIN)
-    resp = TestClient(app).post("/admin/agents/agent-1/token/revoke?tenant=tn-1", data={"reason": "유출"})
+    resp = TestClient(app).post(
+        "/admin/agents/agent-1/token/revoke?tenant=tn-1",
+        data=_confirmed({"reason": "유출"}),
+    )
     assert resp.status_code == HTTPStatus.OK
     assert "agent-1" in token_repo.revoked_ids
 
@@ -183,7 +191,8 @@ def test_route_operator_cannot_revoke_token() -> None:
 def test_route_channel_token_rotate_rejects_plaintext() -> None:
     app, _, _ = _app(_SECRET_ADMIN)
     resp = TestClient(app).post(
-        "/admin/channels/ch-1/token/rotate?tenant=tn-1", data={"new_secret_ref": "111:AAFAKEplain"}
+        "/admin/channels/ch-1/token/rotate?tenant=tn-1",
+        data=_confirmed({"new_secret_ref": "111:AAFAKEplain"}),
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST  # 평문 fail-closed
 
@@ -202,9 +211,33 @@ def test_revoke_then_claim_is_401() -> None:
     assert before.status_code == HTTPStatus.OK
 
     # revoke.
-    assert client.post("/admin/agents/agent-1/token/revoke?tenant=tn-1").status_code == HTTPStatus.OK
+    assert client.post(
+        "/admin/agents/agent-1/token/revoke?tenant=tn-1",
+        data=_confirmed(),
+    ).status_code == HTTPStatus.OK
 
     # revoke 후: 같은 bearer claim 401(resolver→None).
+    after = client.post("/v1/jobs/claim", json={"agent_id": "agent-1"}, headers=headers)
+    assert after.status_code == HTTPStatus.UNAUTHORIZED
+
+
+def test_rotated_agent_token_cannot_claim_jobs() -> None:
+    app, token_repo, _ = _app(_SECRET_ADMIN)
+    app.state.resolve_agent_id = revocation_aware_resolver(
+        lambda token: "agent-1" if token else None,
+        lambda aid: aid in token_repo.revoked_ids,
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer tok-agent-1"}
+
+    before = client.post("/v1/jobs/claim", json={"agent_id": "agent-1"}, headers=headers)
+    assert before.status_code == HTTPStatus.OK
+
+    assert client.post(
+        "/admin/agents/agent-1/token/rotate?tenant=tn-1",
+        data=_confirmed(),
+    ).status_code == HTTPStatus.OK
+
     after = client.post("/v1/jobs/claim", json={"agent_id": "agent-1"}, headers=headers)
     assert after.status_code == HTTPStatus.UNAUTHORIZED
 
@@ -221,7 +254,8 @@ def test_revoke_then_claim_is_401() -> None:
 def test_route_secret_admin_can_rotate_agent_token() -> None:
     app, token_repo, _ = _app(_SECRET_ADMIN)
     resp = TestClient(app).post(
-        "/admin/agents/agent-1/token/rotate?tenant=tn-1", data={"reason": "정기"}
+        "/admin/agents/agent-1/token/rotate?tenant=tn-1",
+        data=_confirmed({"reason": "정기"}),
     )
     assert resp.status_code == HTTPStatus.OK
     assert token_repo.rotated_at("agent-1") is not None  # rotate 시각 마킹
@@ -242,7 +276,7 @@ def test_route_channel_token_rotate_accepts_ref() -> None:
     app, token_repo, _ = _app(_SECRET_ADMIN)
     resp = TestClient(app).post(
         "/admin/channels/ch-1/token/rotate?tenant=tn-1",
-        data={"new_secret_ref": "vault://telegram/bot2", "reason": "회전"},
+        data=_confirmed({"new_secret_ref": "vault://telegram/bot2", "reason": "회전"}),
     )
     assert resp.status_code == HTTPStatus.OK
     entry = token_repo.audits[-1]

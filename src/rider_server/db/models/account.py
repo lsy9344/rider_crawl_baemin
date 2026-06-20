@@ -1,7 +1,6 @@
 """platform_accounts·monitoring_targets·auth_sessions ORM 모델 — Story 5.2 (AC1·AC2).
 
-``username`` 과 ``verification_email_address`` 는 운영 식별값이다.
-``password``/``verification_email_app_password`` 는 웹 관리자 입력값을 DB에 직접 저장한다.
+``username``/``password``/``verification_email_*`` 는 호환 컬럼명이며 값은 SecretRef 핸들이다.
 ``monitoring_targets.center_name`` 은 domain 공개 경계 필드라
 보존한다(FR-20 기대 센터/상점명 검증 정본). ``auth_sessions`` 는 domain
 dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하며, **계약 필드명
@@ -28,10 +27,10 @@ class PlatformAccount(Base):
     tenant_id: Mapped[uuid.UUID] = fk("tenants.id")
     platform: Mapped[str] = mapped_column(String, nullable=False)  # Platform 값
     label: Mapped[str] = mapped_column(String, nullable=False)
-    username: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 ID
-    password: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 비밀번호(DB 직접 저장)
-    verification_email_address: Mapped[str] = mapped_column(String, nullable=False, default="")  # 2차인증 이메일 주소
-    verification_email_app_password: Mapped[str] = mapped_column(String, nullable=False, default="")  # IMAP 앱 비밀번호(DB 직접 저장)
+    username: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 ID ref
+    password: Mapped[str] = mapped_column(String, nullable=False, default="")  # 배민/쿠팡 로그인 비밀번호 ref
+    verification_email_address: Mapped[str] = mapped_column(String, nullable=False, default="")  # 2차인증 이메일 주소 ref
+    verification_email_app_password: Mapped[str] = mapped_column(String, nullable=False, default="")  # IMAP 앱 비밀번호 ref
     verification_email_subject_keyword: Mapped[str] = mapped_column(String, nullable=False, default="인증번호")
     verification_email_sender_keyword: Mapped[str] = mapped_column(String, nullable=False, default="coupang")
     auth_state: Mapped[str] = mapped_column(String, nullable=False)  # BaeminAuthState 값

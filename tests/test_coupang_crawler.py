@@ -131,7 +131,7 @@ def test_coupang_crawl_performance_snapshot_uses_injected_peak_without_current_s
 
     snapshot = crawl_performance_snapshot(
         config,
-        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_CENTER,
     )
 
     assert snapshot.current_screen is None
@@ -156,7 +156,7 @@ def test_coupang_crawl_performance_snapshot_fetches_current_screen_and_peak_dash
     """
     html_by_url = {
         config.coupang_eats_url: current_html,
-        config.peak_dashboard_url: _PEAK_DASHBOARD_HTML,
+        config.peak_dashboard_url: _PEAK_DASHBOARD_HTML_WITH_CENTER,
     }
     requested_urls: list[str | None] = []
 
@@ -246,9 +246,20 @@ def test_coupang_crawl_performance_snapshot_skips_current_screen_when_rider_tab_
     assert snapshot.peak_dashboard.updated_at == "20:38"
 
 
-def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_heading(tmp_path):
-    # 피크 HTML에 센터 헤딩(h1)이 없으면 센터 검증은 건너뛴다(기존 동작 유지).
+def test_coupang_peak_dashboard_requires_center_confirmation_when_expected_center_set(tmp_path):
+    # 기대 센터가 있으면 피크 HTML에서 센터를 명시적으로 확인하지 못할 때 fail-closed한다.
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    with pytest.raises(RuntimeError, match="화면에서 센터명을 확인하지 못했습니다"):
+        crawl_performance_snapshot(
+            config,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML,
+        )
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_heading_when_no_expected_center(tmp_path):
+    # 기대 센터가 비어 있는 legacy/manual 경로에서는 센터 검증을 건너뛴다.
+    config = _config(tmp_path, baemin_center_name="")
 
     snapshot = crawl_performance_snapshot(
         config,
@@ -261,12 +272,30 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_html_without_center_hea
 def test_coupang_crawl_performance_snapshot_accepts_peak_section_headings_without_center(tmp_path):
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
-    snapshot = crawl_performance_snapshot(
-        config,
-        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY,
+    with pytest.raises(RuntimeError, match="화면에서 센터명을 확인하지 못했습니다"):
+        crawl_performance_snapshot(
+            config,
+            fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY,
+        )
+
+
+def test_coupang_center_mismatch_is_not_swallowed_by_screen_detection(tmp_path, monkeypatch):
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+    rider_url = crawler._rider_performance_url(config)
+    other_center_html = Path("tests/fixtures/coupang_current_screen.html").read_text(encoding="utf-8").replace(
+        "제이앤에이치플러스 의정부남부",
+        "서초센터",
     )
 
-    assert snapshot.peak_dashboard.updated_at == "20:38"
+    def fake_fetch_page_html(_config, *, target_url=None, force_new_tab=False):
+        if target_url == rider_url:
+            return other_center_html
+        return _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+    monkeypatch.setattr(crawler, "fetch_page_html", fake_fetch_page_html)
+
+    with pytest.raises(RuntimeError, match="쿠팡 센터 검증 실패"):
+        crawl_performance_snapshot(config)
 
 
 def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_matches(tmp_path):

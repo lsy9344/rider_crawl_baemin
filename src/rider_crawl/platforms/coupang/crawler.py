@@ -16,6 +16,10 @@ from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 from .parser import MissingPerformanceDataError, parse_current_screen_html, parse_peak_dashboard_html
 
 
+class CoupangCenterValidationError(RuntimeError):
+    """Raised when a Coupang page cannot be proven to match the expected center."""
+
+
 def crawl_current_screen(
     config: AppConfig,
     *,
@@ -50,7 +54,7 @@ def crawl_performance_snapshot(
                 current_screen_html = fetch_page_html(config, target_url=rider_url, force_new_tab=True)
                 current_screen = parse_current_screen_html(current_screen_html)
             _validate_coupang_center(config, current_screen)
-        except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
+        except (BrowserActionRequiredError, MissingPerformanceDataError):
             current_screen = None
 
     peak_dashboard_html = (
@@ -117,13 +121,13 @@ def _validate_coupang_center(config: AppConfig, snapshot: CurrentScreenSnapshot)
     actual_raw = snapshot.center_name.strip()
     actual = _normalize_coupang_center(actual_raw)
     if not actual:
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 화면에서 센터명을 확인하지 못했습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}"
         )
 
     if actual not in expected_aliases:
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 설정한 센터와 화면에서 확인된 센터가 다릅니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}\n"
             f"화면 센터명: {actual_raw}"
@@ -148,10 +152,13 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
 
     heading_centers = _coupang_peak_heading_centers(peak_html)
     if not heading_centers:
-        return
+        raise CoupangCenterValidationError(
+            "쿠팡 센터 검증 실패: 피크 대시보드 화면에서 센터명을 확인하지 못했습니다.\n"
+            f"설정 센터명: {config.baemin_center_name.strip()}"
+        )
 
     if not (heading_centers & expected_aliases):
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 설정한 센터가 피크 대시보드 화면 헤딩과 일치하지 않습니다. "
             "다른 계정이거나 오래된 피크 탭이 열려 있을 수 있습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}\n"

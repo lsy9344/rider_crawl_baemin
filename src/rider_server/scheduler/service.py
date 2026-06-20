@@ -100,12 +100,16 @@ class SchedulerRepository(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def due_targets(self, *, now: datetime) -> list[DueTarget]:
-        """``next_run_at <= now``(또는 NULL) & 활성 status 대상을 돌려준다(AC1·AC4)."""
+    async def due_targets(self, *, now: datetime, limit: int) -> list[DueTarget]:
+        """``next_run_at <= now``(또는 NULL) & 활성 status 대상을 최대 ``limit``건 돌려준다."""
 
     @abc.abstractmethod
     async def tenant_gate(self, tenant_id: str) -> TenantGate:
         """tenant 의 구독 상태 + lifecycle 상태(게이트 합성 입력). 미매핑은 ``None``."""
+
+    @abc.abstractmethod
+    async def tenant_gates(self, tenant_ids: list[str]) -> dict[str, TenantGate]:
+        """여러 tenant 의 게이트를 bulk 조회한다."""
 
     @abc.abstractmethod
     async def platform_failure_window(
@@ -116,6 +120,10 @@ class SchedulerRepository(abc.ABC):
     @abc.abstractmethod
     async def has_active_crawl_job(self, target_id: str) -> bool:
         """대상에 활성 CrawlJob(PENDING/CLAIMED/RUNNING)이 이미 있는가(멱등성, AC4)."""
+
+    @abc.abstractmethod
+    async def active_crawl_job_target_ids(self, target_ids: list[str]) -> set[str]:
+        """여러 target 중 활성 CrawlJob 이 있는 target id 집합을 bulk 조회한다."""
 
     @abc.abstractmethod
     async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
@@ -146,6 +154,43 @@ class SchedulerRepository(abc.ABC):
     ) -> bool:
         """enqueue 실패 시 선점 전 ``next_run_at`` 으로 되돌린다."""
 
+    async def claim_due_target_and_enqueue(
+        self,
+        queue_backend: QueueBackend,
+        target: DueTarget,
+        *,
+        job_type: str,
+        payload_json: dict[str, object],
+        now: datetime,
+        next_run_at: datetime,
+    ) -> str | None:
+        """대상을 선점하고 job 을 만든다.
+
+        기본 구현은 backend 중립 fallback 이다. PostgreSQL 구현은 이 메서드를 override 해
+        target advance 와 job insert 를 같은 DB transaction 안에서 처리한다.
+        """
+
+        won = await self.claim_due_target(
+            target.target_id, now=now, next_run_at=next_run_at
+        )
+        if not won:
+            return None
+        try:
+            return await queue_backend.enqueue(
+                job_type=job_type,
+                target_id=target.target_id,
+                payload_json=payload_json,
+                run_after=now,
+                now=now,
+            )
+        except Exception:
+            await self.release_due_target(
+                target.target_id,
+                claimed_next_run_at=next_run_at,
+                restore_next_run_at=target.next_run_at,
+            )
+            raise
+
 
 class SchedulerService:
     """scheduler tick 오케스트레이터(정책↔포트↔queue 조립)."""
@@ -156,10 +201,20 @@ class SchedulerService:
         breaker_threshold: float = policy.DEFAULT_BREAKER_THRESHOLD,
         breaker_min_samples: int = policy.DEFAULT_BREAKER_MIN_SAMPLES,
         breaker_window: timedelta = DEFAULT_BREAKER_WINDOW,
+        due_batch_size: int | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self._breaker_threshold = breaker_threshold
         self._breaker_min_samples = breaker_min_samples
         self._breaker_window = breaker_window
+        if due_batch_size is not None and batch_size is not None and due_batch_size != batch_size:
+            raise ValueError("due_batch_size and batch_size must match when both are set")
+        resolved_batch_size = batch_size if batch_size is not None else due_batch_size
+        if resolved_batch_size is None:
+            resolved_batch_size = 100
+        if resolved_batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self._due_batch_size = resolved_batch_size
 
     async def run_tick(
         self,
@@ -178,7 +233,13 @@ class SchedulerService:
         (멱등 전진이 conditional 이라 중복 없음, AC4).
         """
 
-        due = await repo.due_targets(now=now)
+        due = await repo.due_targets(now=now, limit=self._due_batch_size)
+        tenant_gates = await repo.tenant_gates(
+            list(dict.fromkeys(target.tenant_id for target in due))
+        )
+        active_target_ids = await repo.active_crawl_job_target_ids(
+            [target.target_id for target in due]
+        )
 
         # ── 플랫폼별 breaker 를 tick 당 1회만 평가(대상별 중복 집계 회피, AC3) ──
         since = now - self._breaker_window
@@ -202,7 +263,7 @@ class SchedulerService:
 
         for target in due:
             # ② 구독 게이트 + lifecycle 합성 필터.
-            gate = await repo.tenant_gate(target.tenant_id)
+            gate = tenant_gates.get(target.tenant_id, TenantGate(None, None))
             decision = policy.decide_schedule(
                 gate.subscription_status, gate.lifecycle_status
             )
@@ -235,7 +296,7 @@ class SchedulerService:
                 continue
 
             # ⑤-a 멱등성: 활성 CrawlJob 이 있으면 두 번째를 만들지 않는다(전진도 안 함 — 재진입 차단).
-            if await repo.has_active_crawl_job(target.target_id):
+            if target.target_id in active_target_ids:
                 outcomes.append(
                     ScheduleOutcome(
                         target.target_id, False, REASON_ACTIVE_JOB_EXISTS,
@@ -255,14 +316,19 @@ class SchedulerService:
                 )
                 continue
 
-            # ⑥ 멱등 선점: conditional advance(next_run_at<=now 일 때만 한 tick 이 전진).
+            # ⑥ 멱등 선점 + enqueue. PostgreSQL 구현은 둘을 한 transaction 으로 묶는다.
             interval_seconds = target.interval_minutes * 60
             jitter = policy.compute_jitter(target.target_id, interval_seconds)
             advanced_next = policy.next_run_at(now, interval_seconds, jitter)
-            won = await repo.claim_due_target(
-                target.target_id, now=now, next_run_at=advanced_next
+            job_id = await repo.claim_due_target_and_enqueue(
+                queue_backend,
+                target,
+                job_type=job_type,
+                payload_json=_crawl_job_payload(target, job_type),
+                now=now,
+                next_run_at=advanced_next,
             )
-            if not won:
+            if job_id is None:
                 # 동시 tick 이 이미 선점/전진 → 중복 due 작업 차단(AC4).
                 outcomes.append(
                     ScheduleOutcome(
@@ -272,22 +338,6 @@ class SchedulerService:
                 )
                 continue
 
-            # ⑤-b enqueue(5.3 QueueBackend.enqueue 그대로 — run_after=now: 즉시 claim 가능).
-            try:
-                job_id = await queue_backend.enqueue(
-                    job_type=job_type,
-                    target_id=target.target_id,
-                    payload_json=_crawl_job_payload(target, job_type),
-                    run_after=now,
-                    now=now,
-                )
-            except Exception:
-                await repo.release_due_target(
-                    target.target_id,
-                    claimed_next_run_at=advanced_next,
-                    restore_next_run_at=target.next_run_at,
-                )
-                raise
             in_flight += 1
             enqueued_count += 1
             outcomes.append(
@@ -317,10 +367,10 @@ def _crawl_job_payload(target: DueTarget, job_type: str) -> dict[str, object]:
     if platform == "coupang":
         payload.update(
             {
-                "username": target.username,
-                "password": target.password,
-                "verification_email_address": target.verification_email_address,
-                "verification_email_app_password": target.verification_email_app_password,
+                "coupang_login_id_ref": target.username,
+                "coupang_login_password_ref": target.password,
+                "verification_email_address_ref": target.verification_email_address,
+                "verification_email_app_password_ref": target.verification_email_app_password,
                 "verification_email_subject_keyword": target.verification_email_subject_keyword,
                 "verification_email_sender_keyword": target.verification_email_sender_keyword,
                 "coupang_auto_email_2fa_enabled": bool(

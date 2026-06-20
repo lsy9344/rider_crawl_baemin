@@ -15,6 +15,7 @@ from rider_server.scheduler import __main__ as scheduler_main
 from rider_server.scheduler.__main__ import _result_payload, run_once
 from rider_server.scheduler.service import DueTarget, SchedulerRepository, TenantGate
 from rider_server.scheduler.service import TickResult
+from rider_server.settings import Settings
 
 _NOW = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
 _ACTIVE_GATE = TenantGate(SubscriptionStatus.PAYMENT_ACTIVE, CustomerLifecycleState.ACTIVE)
@@ -33,17 +34,24 @@ class _Repo(SchedulerRepository):
             expected_display_name="센터A",
         )
 
-    async def due_targets(self, *, now):
-        return [self.target] if policy.is_due(self.target.next_run_at, now) else []
+    async def due_targets(self, *, now, limit):
+        due = [self.target] if policy.is_due(self.target.next_run_at, now) else []
+        return due[:limit]
 
     async def tenant_gate(self, tenant_id):
         return _ACTIVE_GATE
+
+    async def tenant_gates(self, tenant_ids):
+        return {tenant_id: _ACTIVE_GATE for tenant_id in tenant_ids}
 
     async def platform_failure_window(self, platform, *, since, now):
         return (0, 0)
 
     async def has_active_crawl_job(self, target_id):
         return False
+
+    async def active_crawl_job_target_ids(self, target_ids):
+        return set()
 
     async def capacity_snapshot(self, *, now):
         return policy.CapacityPolicy(
@@ -80,8 +88,12 @@ def test_run_once_entrypoint_seam_enqueues_crawl_job() -> None:
 def test_run_loop_logs_tick_failure_and_keeps_running(monkeypatch, capsys) -> None:
     calls: list[str] = []
     sleeps: list[float] = []
+    batch_sizes: list[int] = []
 
     class _FlakyService:
+        def __init__(self, *, due_batch_size: int = 100) -> None:
+            batch_sizes.append(due_batch_size)
+
         async def run_tick(self, repo, queue_backend, *, now):
             calls.append("tick")
             if len(calls) == 1:
@@ -96,6 +108,13 @@ def test_run_loop_logs_tick_failure_and_keeps_running(monkeypatch, capsys) -> No
     asyncio.run(
         scheduler_main.run_loop(
             interval_seconds=0.01,
+            settings=Settings(
+                app_env="test",
+                app_version="9.9.9",
+                build_sha=None,
+                build_time=None,
+                scheduler_due_batch_size=3,
+            ),
             repo=_Repo(),
             queue_backend=InMemoryQueueBackend(),
             sleep=_sleep,
@@ -104,6 +123,7 @@ def test_run_loop_logs_tick_failure_and_keeps_running(monkeypatch, capsys) -> No
     )
 
     assert calls == ["tick", "tick"]
+    assert batch_sizes == [3, 3]
     assert sleeps == [0.01]
     out = capsys.readouterr().out
     assert "scheduler tick failed" in out

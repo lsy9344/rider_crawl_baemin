@@ -108,6 +108,17 @@ def test_registered_routes_have_no_v1_operational_paths():
         assert f"/v1/{name}" not in paths
 
 
+def test_create_app_attaches_typed_runtime_container():
+    app = create_app(_FAKE_SETTINGS)
+
+    container = app.state.container
+
+    assert container.settings is app.state.settings
+    assert container.queue_backend is app.state.queue_backend
+    assert container.channel_repository is app.state.channel_repository
+    assert container.job_completion_service is app.state.job_completion_service
+
+
 # ── AC3 — async 핸들러 ────────────────────────────────────────────────────
 
 def test_operational_handlers_are_async():

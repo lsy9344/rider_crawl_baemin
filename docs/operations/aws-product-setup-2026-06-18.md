@@ -86,6 +86,8 @@ Local source-of-truth note:
 
 - Follow-up review decision: local code is the latest source of truth for the next deploy.
 - Before the next EC2 redeploy, create a clean commit/tag from the local workspace and deploy that artifact. Do not treat the remote dirty working tree as the canonical release source.
+- 2026-06-19 follow-up local change: Telegram delivery now needs the separate `telegram-dispatch` compose service (`python -m rider_server.dispatch`) in addition to `backend-api`, `scheduler`, and `queue-recovery`.
+- 2026-06-19 follow-up local change: legacy migration maps supported credential fields to secret refs only. Do not rely on legacy plaintext values being copied into new `PlatformAccount` mappings.
 
 ## Product Code Changes Deployed
 
@@ -158,8 +160,10 @@ Recorded on 2026-06-18:
 4. Admin access:
    - No IP allowlist.
    - No external identity provider or reverse proxy auth for now.
-   - `/admin` public access mode is enabled through `RIDER_ADMIN_PUBLIC_ACCESS=1`.
-   - Plain meaning: anyone who finds the public Admin URL can try to open it. "Only I know the address" is not a strong security control.
+   - The default `deploy/env/backend-api.env` keeps `/admin` public access disabled with `RIDER_ADMIN_PUBLIC_ACCESS=0`.
+   - Temporary public Admin access must be an explicit opt-in using `deploy/env/backend-api.dev-public-admin.env` and `deploy/docker-compose.dev-public-admin.yml`.
+   - Before production opt-in, check the replacement auth plan, IP restriction, and an approval record.
+   - Plain meaning: if public Admin mode is enabled, anyone who finds the public Admin URL can try to open it. "Only I know the address" is not a strong security control.
 5. Alarm receiver:
    - `progression.two@gmail.com`
 6. Agent rollout:
@@ -169,8 +173,10 @@ Recorded on 2026-06-18:
 ## Remaining User Actions
 
 - Enter Telegram bot/channel values in the web app.
+- If Telegram webhook/send env refs are used, pass `RIDER_TELEGRAM_WEBHOOK_SECRET` and `RIDER_TELEGRAM_BOT_TOKEN` into the backend container environment. The compose file now fails closed when those host env values are missing.
+- If tenant DB values are the production source of truth instead, record that decision before disabling the env fallback.
 - Enter each 업체's Coupang login ID, login password, verification email address, and email app password in the Admin web app.
-- Keep the Admin URL private if public access mode remains enabled.
+- Keep the Admin URL private if public access mode is explicitly enabled.
 
 ## Current Alarm Note
 

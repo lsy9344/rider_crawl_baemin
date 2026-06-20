@@ -47,6 +47,8 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 _service = DashboardService()
+DEFAULT_TARGET_FRAGMENT_LIMIT = 100
+MAX_TARGET_FRAGMENT_LIMIT = 300
 
 # 심각도 코드값 → UI 한글 라벨/CSS class(템플릿 표현 — 어휘 자체는 plain-string 상수).
 _SEVERITY_LABELS: dict[str, str] = {
@@ -77,6 +79,15 @@ def _severity_label(code: str) -> str:
 
 def _severity_class(code: str) -> str:
     return _SEVERITY_CLASSES.get(code, "sev-normal")
+
+
+def _db_failure_fragment(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "_db_failure_fragment.html",
+        {},
+        status_code=503,
+    )
 
 
 templates.env.filters["severity_label"] = _severity_label
@@ -201,6 +212,16 @@ def _tenant_id(request: Request) -> str:
     return request.query_params.get("tenant", "").strip()
 
 
+def _bounded_int(raw: str | None, *, default: int, maximum: int) -> int:
+    try:
+        value = int((raw or "").strip())
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return min(value, maximum)
+
+
 async def _dashboard_tenants(request: Request):
     service = getattr(request.app.state, "admin_entity_service", None)
     if service is None:
@@ -226,15 +247,47 @@ async def _dashboard_tenant_id(request: Request, *, tenants=None) -> str:
 
 
 async def _target_rows_for_display(
-    repo: DashboardRepository, *, tenant_id: str, now: datetime
+    repo: DashboardRepository,
+    *,
+    tenant_id: str,
+    now: datetime,
+    limit: int | None = None,
+    offset: int = 0,
+    prefetch_high_severity: bool = False,
 ):
-    facts_rows = await repo.target_health(tenant_id=tenant_id, now=now)
-    rows = []
-    for facts in facts_rows:
-        row = _service.target_row(facts, now)
-        rows.append(replace(row, severity=_display_severity(row.severity, facts)))
+    facts_rows = await repo.target_health(
+        tenant_id=tenant_id,
+        now=now,
+        limit=limit,
+        offset=offset,
+    )
+    rows = [_target_row_for_display(facts, now) for facts in facts_rows]
+    if prefetch_high_severity and limit is not None and offset == 0:
+        seen = {row.target_id for row in rows}
+        all_facts = await repo.target_health(
+            tenant_id=tenant_id,
+            now=now,
+            limit=None,
+            offset=0,
+        )
+        for facts in all_facts:
+            if facts.target_id in seen:
+                continue
+            row = _target_row_for_display(facts, now)
+            if severity_policy.severity_rank(row.severity) >= severity_policy.severity_rank(
+                SEVERITY_CRITICAL
+            ):
+                rows.append(row)
+                seen = seen | {row.target_id}
     rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
+    if prefetch_high_severity and limit is not None and offset == 0:
+        rows = rows[:limit]
     return rows
+
+
+def _target_row_for_display(facts, now: datetime):
+    row = _service.target_row(facts, now)
+    return replace(row, severity=_display_severity(row.severity, facts))
 
 
 def _display_severity(code: str, facts) -> str:
@@ -282,12 +335,25 @@ async def target_deeplink(
 async def _dashboard_response(request: Request, *, initial_target_id: str) -> HTMLResponse:
     now = _now()
     repo = _repo(request)
-    tenants = await _dashboard_tenants(request)
-    tenant_id = await _dashboard_tenant_id(request, tenants=tenants)
-    targets = await _target_rows_for_display(repo, tenant_id=tenant_id, now=now)
-    agents = await _service.agent_rows(repo, now=now)
-    channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
-    auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
+    try:
+        tenants = await _dashboard_tenants(request)
+        tenant_id = await _dashboard_tenant_id(request, tenants=tenants)
+        targets = await _target_rows_for_display(
+            repo,
+            tenant_id=tenant_id,
+            now=now,
+            limit=DEFAULT_TARGET_FRAGMENT_LIMIT,
+        )
+        agents = await _service.agent_rows(repo, now=now)
+        channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
+        auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
+    except Exception:  # noqa: BLE001 - Admin UI returns operator-safe HTML instead of JSON 500.
+        return templates.TemplateResponse(
+            request,
+            "_db_failure.html",
+            {},
+            status_code=503,
+        )
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -311,9 +377,37 @@ async def targets_fragment(
 ) -> HTMLResponse:
     """``GET /admin/targets`` — HTMX 부분 fragment(대상 상태 표)."""
 
-    rows = await _target_rows_for_display(_repo(request), tenant_id=_tenant_id(request), now=_now())
+    limit = _bounded_int(
+        request.query_params.get("limit"),
+        default=DEFAULT_TARGET_FRAGMENT_LIMIT,
+        maximum=MAX_TARGET_FRAGMENT_LIMIT,
+    )
+    offset = _bounded_int(request.query_params.get("offset"), default=0, maximum=10_000)
+    try:
+        fetched_rows = await _target_rows_for_display(
+            _repo(request),
+            tenant_id=_tenant_id(request),
+            now=_now(),
+            limit=limit + 1,
+            offset=offset,
+            prefetch_high_severity=True,
+        )
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
+    rows = fetched_rows[:limit]
+    next_offset = offset + limit
+    has_more = len(fetched_rows) > limit
     return templates.TemplateResponse(
-        request, "_targets.html", {"targets": rows, "tenant_id": _tenant_id(request)}
+        request,
+        "_targets.html",
+        {
+            "targets": rows,
+            "tenant_id": _tenant_id(request),
+            "limit": limit,
+            "offset": offset,
+            "next_offset": next_offset,
+            "has_more": has_more,
+        },
     )
 
 
@@ -324,7 +418,10 @@ async def agents_fragment(
 ) -> HTMLResponse:
     """``GET /admin/agents`` — HTMX 부분 fragment(Agent fleet 상태)."""
 
-    rows = await _service.agent_rows(_repo(request), now=_now())
+    try:
+        rows = await _service.agent_rows(_repo(request), now=_now())
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
     return templates.TemplateResponse(request, "_agents.html", {"agents": rows})
 
 
@@ -335,9 +432,12 @@ async def channels_fragment(
 ) -> HTMLResponse:
     """``GET /admin/channels`` — HTMX 부분 fragment(Kakao lag / Telegram 오류 구분)."""
 
-    health = await _service.channel_health(
-        _repo(request), tenant_id=_tenant_id(request), now=_now()
-    )
+    try:
+        health = await _service.channel_health(
+            _repo(request), tenant_id=_tenant_id(request), now=_now()
+        )
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
     return templates.TemplateResponse(request, "_channels.html", {"channels": health})
 
 
@@ -348,5 +448,8 @@ async def auth_required_fragment(
 ) -> HTMLResponse:
     """``GET /admin/auth-required`` — AC4 인증 필요 대상 필터 fragment."""
 
-    rows = await _service.auth_required_rows(_repo(request), tenant_id=_tenant_id(request), now=_now())
+    try:
+        rows = await _service.auth_required_rows(_repo(request), tenant_id=_tenant_id(request), now=_now())
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
     return templates.TemplateResponse(request, "_auth_required.html", {"auth_required": rows})

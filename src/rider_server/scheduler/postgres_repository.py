@@ -18,6 +18,7 @@ PG-gated 테스트에서만 실행되고, always-run in-memory 테스트가 brea
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import func, select, update
@@ -32,6 +33,7 @@ from rider_server.domain import (
     MonitoringTargetStatus,
     SubscriptionStatus,
 )
+from rider_server.queue.backend import QueueBackend
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_PENDING,
@@ -73,22 +75,32 @@ def _capacity_from_agent_rows(
     rows,
     *,
     aggregate_in_flight: int,
+    in_flight_by_job_type: dict[str, int] | None = None,
     now: datetime,
 ) -> policy.CapacityPolicy:
     """Online Agent rows 만 capacity 로 집계한다."""
 
     aggregate_capacity = 0
+    capacity_by_job_type: dict[str, int] = {}
     capabilities: set[str] = set()
     for row in rows:
         if not is_agent_online(row.last_heartbeat_at, now):
             continue
         data = row.capacity_json or {}
-        aggregate_capacity += int(data.get("max_in_flight", 0))
-        capabilities.update(data.get("capabilities", []) or [])
+        max_in_flight = int(data.get("max_in_flight", 0))
+        aggregate_capacity += max_in_flight
+        row_capabilities = data.get("capabilities", []) or []
+        capabilities.update(row_capabilities)
+        for job_type in row_capabilities:
+            capacity_by_job_type[str(job_type)] = (
+                capacity_by_job_type.get(str(job_type), 0) + max_in_flight
+            )
     return policy.CapacityPolicy(
         aggregate_capacity=aggregate_capacity,
         aggregate_in_flight=aggregate_in_flight,
         capabilities=frozenset(capabilities),
+        capacity_by_job_type=capacity_by_job_type,
+        in_flight_by_job_type=dict(in_flight_by_job_type or {}),
     )
 
 
@@ -98,7 +110,9 @@ class PostgresSchedulerRepository(SchedulerRepository):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def due_targets(self, *, now: datetime) -> list[DueTarget]:
+    async def due_targets(self, *, now: datetime, limit: int) -> list[DueTarget]:
+        if limit <= 0:
+            return []
         stmt = (
             select(
                 MonitoringTarget.id,
@@ -126,6 +140,11 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 (MonitoringTarget.next_run_at.is_(None))
                 | (MonitoringTarget.next_run_at <= now),
             )
+            .order_by(
+                MonitoringTarget.next_run_at.asc().nullsfirst(),
+                MonitoringTarget.id.asc(),
+            )
+            .limit(limit)
         )
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).all()
@@ -168,6 +187,41 @@ class PostgresSchedulerRepository(SchedulerRepository):
             lifecycle_status=_to_lifecycle_status(lifecycle_value),
         )
 
+    async def tenant_gates(self, tenant_ids: list[str]) -> dict[str, TenantGate]:
+        unique_ids = list(dict.fromkeys(tid for tid in tenant_ids if tid))
+        if not unique_ids:
+            return {}
+
+        async with self._session_factory() as session:
+            tenant_rows = (
+                await session.execute(
+                    select(Tenant.id, Tenant.status).where(Tenant.id.in_(unique_ids))
+                )
+            ).all()
+            subscription_rows = (
+                await session.execute(
+                    select(Subscription.tenant_id, Subscription.status).where(
+                        Subscription.tenant_id.in_(unique_ids)
+                    )
+                )
+            ).all()
+
+        lifecycle_by_tenant = {
+            str(row.id): _to_lifecycle_status(row.status) for row in tenant_rows
+        }
+        subscription_by_tenant: dict[str, SubscriptionStatus | None] = {}
+        for row in subscription_rows:
+            subscription_by_tenant.setdefault(
+                str(row.tenant_id), _to_subscription_status(row.status)
+            )
+        return {
+            tenant_id: TenantGate(
+                subscription_status=subscription_by_tenant.get(tenant_id),
+                lifecycle_status=lifecycle_by_tenant.get(tenant_id),
+            )
+            for tenant_id in unique_ids
+        }
+
     async def platform_failure_window(
         self, platform: str, *, since: datetime, now: datetime
     ) -> tuple[int, int]:
@@ -204,6 +258,23 @@ class PostgresSchedulerRepository(SchedulerRepository):
             count = (await session.execute(stmt)).scalar_one()
         return int(count) > 0
 
+    async def active_crawl_job_target_ids(self, target_ids: list[str]) -> set[str]:
+        unique_ids = list(dict.fromkeys(tid for tid in target_ids if tid))
+        if not unique_ids:
+            return set()
+        stmt = (
+            select(Job.target_id)
+            .where(
+                Job.target_id.in_(unique_ids),
+                Job.type.in_(_CRAWL_JOB_TYPES),
+                Job.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+            .distinct()
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return {str(target_id) for target_id in rows}
+
     async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
         """``agents.capacity_json`` 집계.
 
@@ -225,9 +296,21 @@ class PostgresSchedulerRepository(SchedulerRepository):
                     )
                 )
             ).scalar_one()
+            in_flight_rows = (
+                await session.execute(
+                    select(Job.type, func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.type.in_(_CRAWL_JOB_TYPES),
+                        Job.status.in_(_ACTIVE_JOB_STATUSES),
+                    )
+                    .group_by(Job.type)
+                )
+            ).all()
         return _capacity_from_agent_rows(
             agents,
             aggregate_in_flight=int(in_flight),
+            in_flight_by_job_type={str(row[0]): int(row[1]) for row in in_flight_rows},
             now=now,
         )
 
@@ -248,6 +331,48 @@ class PostgresSchedulerRepository(SchedulerRepository):
             result = await session.execute(stmt)
             await session.commit()
         return (result.rowcount or 0) == 1
+
+    async def claim_due_target_and_enqueue(
+        self,
+        queue_backend: QueueBackend,
+        target: DueTarget,
+        *,
+        job_type: str,
+        payload_json: dict[str, object],
+        now: datetime,
+        next_run_at: datetime,
+    ) -> str | None:
+        del queue_backend
+        job_id = uuid.uuid4()
+        stmt = (
+            update(MonitoringTarget)
+            .where(
+                MonitoringTarget.id == target.target_id,
+                MonitoringTarget.status == MonitoringTargetStatus.ACTIVE.value,
+                (MonitoringTarget.next_run_at.is_(None))
+                | (MonitoringTarget.next_run_at <= now),
+            )
+            .values(next_run_at=next_run_at, last_enqueued_at=now)
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(stmt)
+                if (result.rowcount or 0) != 1:
+                    return None
+                session.add(
+                    Job(
+                        id=job_id,
+                        type=job_type,
+                        target_id=uuid.UUID(target.target_id),
+                        agent_id=None,
+                        status=JOB_STATUS_PENDING,
+                        run_after=now,
+                        attempts=0,
+                        error_code=None,
+                        payload_json=payload_json,
+                    )
+                )
+        return str(job_id)
 
     async def release_due_target(
         self,

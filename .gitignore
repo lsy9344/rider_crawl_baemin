@@ -22,3 +22,8 @@ backups/
 .claude/
 .codex/
 .agents/
+
+# 로컬 디버그/런타임 산출물 (커밋 금지)
+deploy/docker-compose.dev-admin-view.yml
+agent-run.lock
+.playwright-cli/

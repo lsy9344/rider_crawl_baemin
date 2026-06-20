@@ -154,11 +154,12 @@ server (Epic 5) outbound-only.
   unlike the Cloud async boundary) and adds **no new third-party dependency**:
   HTTPS via stdlib `urllib`, Windows DPAPI via stdlib `ctypes`/crypt32, periodic
   loops via `threading`/`time`, port allocation via `socket`. `pyproject.toml`
-  stays at its frozen 7 dependencies (`playwright==1.60.0`, `crawl4ai==0.8.7`).
+  keeps a deliberately small pinned runtime dependency set; the exact pins are
+  locked by tests instead of prose.
 - **One AST guard locks the whole package.** `tests/agent/test_agent_package.py`
   (Story 4.1) `rglob`s `src/rider_agent/**/*.py` and asserts: sync-only, third-party
-  import root is `rider_crawl`, the one-way import edges above, and the 7-dependency
-  pin. Every later module inherits this guard automatically — new modules need no
+  import root is `rider_crawl`, the one-way import edges above, and the dependency
+  pins. Every later module inherits this guard automatically — new modules need no
   new guard.
 
 The runtime is composed of additive primitives, each delivered by one story:
@@ -268,16 +269,29 @@ by zero-line import.
   that carries aggregate numbers only (no operational identifiers). Thresholds are
   identity-locked to the scheduler/severity originals so they cannot drift.
 
-**Important — control plane, not yet an autonomous runtime.** Epic 5 delivers
-observability, control, security and recovery, but the collect → render → dispatch
-loop does **not** run by itself yet. `workers/crawl_worker.py` and the central
-dispatch loop (`migration/cutover.py`) are not coded; the only live send chokepoint
-is the operator-driven `AdminActionService.test_send`, gated by
-`effective_send_enabled` with `sending_enabled` defaulting **OFF**
-(`RIDER_SENDING_ENABLED`). When the central loop is added it must compose the same
-kill-switch gate (and gate `channel_registration.verify_channel`'s real test send).
-100-target scheduling smoke and a negative-safety traceability matrix (Story 5.10)
-prove scale and fail-closed behaviour without that loop existing.
+**Cloud runtime services.** `deploy/docker-compose.yml` is the source of truth for
+the deployed server process list:
+
+- `backend-api`: FastAPI API, Admin routes, Agent HTTP endpoints, health checks,
+  and Telegram webhook intake.
+- `scheduler`: scans due monitoring targets and enqueues crawl jobs without
+  performing browser work itself.
+- `queue-recovery`: recovers stale leases and stuck queue rows so failed workers
+  can be retried.
+- `telegram-dispatch`: drains dispatch jobs and sends Telegram messages through
+  the central send-only adapter.
+
+The operating path for many targets is server/Agent based: scheduler creates
+collect jobs, a Windows Local Agent claims a job and runs the real Baemin/Coupang
+browser work through `rider_crawl`, the server stores the normalized snapshot and
+rendered dispatch job, then `telegram-dispatch` sends it. The legacy Tkinter UI
+and CLI `--once` path still call `rider_crawl.app.run_once` and send directly via
+`rider_crawl.messengers`/`sender.py`; keep that local direct-send path for manual,
+small-scale operation and development checks. Local Telegram direct send applies
+an in-process minimum interval per bot token/chat/topic, while server dispatch
+relies on the queue worker and delivery policy. Both paths keep the same renderer
+and fail-closed policy, but the server dispatch path is the default for long-running
+multi-target operation.
 
 ## Compatibility Notes
 

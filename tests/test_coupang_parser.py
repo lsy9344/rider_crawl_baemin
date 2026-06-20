@@ -281,3 +281,79 @@ def test_parse_coupang_peak_dashboard_text_extracts_format_metrics():
     assert snapshot.dinner_peak.total == 120
     assert snapshot.dinner_non_peak.done == 0
     assert snapshot.dinner_non_peak.total == 78
+
+
+def test_coupang_parser_accepts_goal_done_label_variants():
+    snapshot = parse_peak_dashboard_text(
+        "\n".join(
+            [
+                "20:38 업데이트",
+                "배정 물량",
+                "1건",
+                "처리 물량",
+                "1건",
+                "거절률",
+                "0%",
+                "피크타임별 현황",
+                "아침",
+                "목표 / 완료",
+                "9 / 1",
+                "점심 피크",
+                "목표 / 완료",
+                "45 / 2",
+                "점심 논피크",
+                "목표 / 완료",
+                "57 / 3",
+                "저녁 피크",
+                "목표 / 완료",
+                "120 / 4",
+                "저녁 논피크",
+                "목표 / 완료",
+                "78 / 5",
+                "시간대별 기록",
+            ]
+        )
+    )
+
+    assert snapshot.morning.total == 9
+    assert snapshot.morning.done == 1
+    assert snapshot.dinner_non_peak.done == 5
+
+
+def test_coupang_parser_accepts_comma_and_unit_numbers_in_peak_pairs():
+    snapshot = parse_peak_dashboard_text(
+        "\n".join(
+            [
+                "20:38 업데이트",
+                "배정 물량",
+                "1,234건",
+                "처리 물량",
+                "1,111건",
+                "거절률",
+                "0%",
+                "피크타임별 현황",
+                "아침",
+                "목표/완료",
+                "1,000건 / 999건",
+                "점심 피크",
+                "목표/완료",
+                "2,000건 / 1,999건",
+                "점심 논피크",
+                "목표/완료",
+                "3,000건 / 2,999건",
+                "저녁 피크",
+                "목표/완료",
+                "4,000건 / 3,999건",
+                "저녁 논피크",
+                "목표/완료",
+                "5,000건 / 4,999건",
+                "시간대별 기록",
+            ]
+        )
+    )
+
+    assert snapshot.assigned_count == 1234
+    assert snapshot.morning.total == 1000
+    assert snapshot.morning.done == 999
+    assert snapshot.dinner_non_peak.total == 5000
+    assert snapshot.dinner_non_peak.done == 4999

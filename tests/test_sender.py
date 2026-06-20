@@ -621,6 +621,57 @@ def test_send_kakao_text_reasserts_focus_before_each_destructive_step(monkeypatc
     assert message_input.click_count == 3
 
 
+def test_send_kakao_text_uses_global_lock_for_clipboard_and_hotkeys(monkeypatch, tmp_path):
+    events: list[str] = []
+    config = _config(tmp_path, chat_name="실적봇_A")
+    message_input = _ScriptedMessageInput(["", "hello", ""])
+    _patch_kakao_send_window(monkeypatch, message_input)
+    monkeypatch.setattr(sender_module, "platform", _FakePlatform("Windows"))
+
+    class FakeLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            events.append("lock-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+            return False
+
+    pyautogui = _RecordingPyAutoGui()
+    original_hotkey = pyautogui.hotkey
+    original_press = pyautogui.press
+
+    def hotkey(*args):
+        events.append(f"hotkey:{'+'.join(args)}")
+        original_hotkey(*args)
+
+    def press(*args):
+        events.append(f"press:{'+'.join(args)}")
+        original_press(*args)
+
+    pyautogui.hotkey = hotkey
+    pyautogui.press = press
+
+    class RecordingPyperclip:
+        def copy(self, value) -> None:
+            events.append(f"copy:{value}")
+
+    monkeypatch.setattr(sender_module, "RunLock", FakeLock)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", RecordingPyperclip())
+
+    send_kakao_text(config, "hello")
+
+    assert events[0] == "lock-enter"
+    assert events[-1] == "lock-exit"
+    assert "copy:hello" in events[1:-1]
+    assert "hotkey:ctrl+v" in events[1:-1]
+    assert "press:enter" in events[1:-1]
+
+
 def test_send_kakao_text_aborts_when_focus_cannot_be_determined(monkeypatch, tmp_path):
     config = _config(tmp_path, chat_name="실적봇_A")
     # Focus state is unknown (no has_keyboard_focus, no resolvable handle): a safety

@@ -198,6 +198,20 @@ def test_startup_cmd_contains_run_command_no_secret(tmp_path):
     assert FAKE_TOKEN not in text
 
 
+def test_startup_cmd_changes_to_registration_cwd(tmp_path, monkeypatch):
+    writer = _FakeWriter()
+    install_dir = tmp_path / "Rider Bot Install"
+    install_dir.mkdir()
+    monkeypatch.chdir(install_dir)
+    cmd = build_agent_launch_command(executable="py-fake", frozen=False)
+
+    register_autostart(command=cmd, startup_dir=tmp_path, writer=writer)
+
+    text = (tmp_path / STARTUP_FILENAME).read_text(encoding="utf-8")
+    assert f'cd /d "{install_dir}"' in text
+    assert text.index("cd /d") < text.index("py-fake")
+
+
 def test_default_startup_dir_uses_injected_environ(tmp_path):
     d = default_startup_dir(environ={"APPDATA": str(tmp_path)})
     assert d == (

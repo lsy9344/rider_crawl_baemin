@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,28 @@ class FakeRunCommand:
     def __call__(self, command, check):
         self.calls.append((list(command), check))
         return None
+
+
+class FakeProcess:
+    """Minimal process-like object for release cleanup tests."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self.killed = False
+        self.waits: list[float | None] = []
+
+    def poll(self):
+        return None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return 0
 
 
 def _windows_prepare(config, *, run_command=None, cdp_probe=None):
@@ -246,6 +269,135 @@ def test_same_target_reuses_assignment_without_reallocation(tmp_path):
     assert len(prepare.calls) == 1  # 두번째 호출은 prepare 재실행 안 함
 
 
+def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path):
+    times = iter([100.0, 200.0, 500.0, 501.0])
+    manager = _manager(
+        tmp_path,
+        allocate_port=_fixed_ports([9301, 9301]),
+        now=lambda: next(times),
+    )
+
+    a = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    a2 = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert a is a2
+    assert a2.last_used_at == 200.0
+
+    released = manager.cleanup_idle_profiles(max_idle_seconds=299)
+
+    assert released == ["t1:alpha"]
+    assert manager.browser_profiles() == []
+    b = manager.ensure_profile("t1", "beta", build_config=make_build_config())
+    assert b.cdp_port == 9301
+    assert {p["id"] for p in manager.browser_profiles()} == {"t1:beta"}
+
+
+def test_max_profiles_releases_least_recent_assignment(tmp_path):
+    times = iter([100.0, 200.0, 201.0])
+    manager = _manager(
+        tmp_path,
+        allocate_port=_fixed_ports([9301, 9302]),
+        now=lambda: next(times),
+        max_profiles=1,
+    )
+
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    beta = manager.ensure_profile("t1", "beta", build_config=make_build_config())
+
+    assert beta.cdp_port == 9302
+    assert {p["id"] for p in manager.browser_profiles()} == {"t1:beta"}
+
+
+def test_concurrent_same_target_launch_uses_single_reservation(tmp_path):
+    entered_prepare = threading.Event()
+    allow_prepare = threading.Event()
+    second_prepare_started = threading.Event()
+    lock = threading.Lock()
+    prepare_calls = 0
+    results: list[ProfileAssignment] = []
+    errors: list[BaseException] = []
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        nonlocal prepare_calls
+        with lock:
+            prepare_calls += 1
+            if prepare_calls > 1:
+                second_prepare_started.set()
+        entered_prepare.set()
+        allow_prepare.wait(timeout=1)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        allocate_port=_fixed_ports([9301, 9302]),
+    )
+
+    def ensure():
+        try:
+            results.append(
+                manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+            )
+        except BaseException as exc:  # noqa: BLE001 - surfaced below for thread assertions.
+            errors.append(exc)
+
+    first = threading.Thread(target=ensure)
+    second = threading.Thread(target=ensure)
+    first.start()
+    assert entered_prepare.wait(timeout=1)
+    second.start()
+
+    assert not second_prepare_started.wait(timeout=0.2)
+    allow_prepare.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert errors == []
+    assert prepare_calls == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
+    assert {p["id"] for p in manager.browser_profiles()} == {"t1:alpha"}
+
+
+def test_concurrent_launch_counts_reservations_against_max_profiles(tmp_path):
+    entered_prepare = threading.Event()
+    allow_prepare = threading.Event()
+    prepare_calls = 0
+    errors: list[BaseException] = []
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        entered_prepare.set()
+        allow_prepare.wait(timeout=1)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        allocate_port=_fixed_ports([9301, 9302]),
+        max_profiles=1,
+    )
+
+    def ensure_first():
+        try:
+            manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+        except BaseException as exc:  # noqa: BLE001 - surfaced below for thread assertions.
+            errors.append(exc)
+
+    first = threading.Thread(target=ensure_first)
+    first.start()
+    assert entered_prepare.wait(timeout=1)
+
+    with pytest.raises(BrowserLaunchError):
+        manager.ensure_profile("t1", "beta", build_config=make_build_config())
+
+    allow_prepare.set()
+    first.join(timeout=1)
+
+    assert prepare_calls == 1
+    assert errors == []
+    assert {p["id"] for p in manager.browser_profiles()} == {"t1:alpha"}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC1.2 / AC1.3 / AC3 — 중복 거부(fail-closed) + 약화 금지
 # ══════════════════════════════════════════════════════════════════════════
@@ -308,6 +460,55 @@ def test_release_reclaims_port_and_profile(tmp_path):
     b = manager.ensure_profile("t1", "beta", build_config=make_build_config())
     assert b.cdp_port == 9301
     assert {p["id"] for p in manager.browser_profiles()} == {"t1:beta"}
+
+
+def test_release_terminates_tracked_browser_process(tmp_path):
+    process = FakeProcess()
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        assert run_command is not None
+        run_command(["chrome-fake"], False)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        run_command=lambda command, check: process,
+    )
+
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    manager.release("t1", "alpha")
+
+    assert process.terminated is True
+    assert process.killed is False
+    assert process.waits == [5.0]
+
+
+def test_close_all_releases_assignments_and_terminates_tracked_processes(tmp_path):
+    all_processes = [FakeProcess(), FakeProcess(), FakeProcess()]
+    pending_processes = list(all_processes)
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        assert run_command is not None
+        run_command(["chrome-fake"], False)
+
+    def run_command(command, check):
+        return pending_processes.pop(0)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        run_command=run_command,
+        allocate_port=_fixed_ports([9301, 9302, 9301]),
+    )
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    manager.ensure_profile("t1", "beta", build_config=make_build_config())
+
+    manager.close_all()
+
+    assert manager.browser_profiles() == []
+    assert [process.terminated for process in all_processes[:2]] == [True, True]
+    gamma = manager.ensure_profile("t1", "gamma", build_config=make_build_config())
+    assert gamma.cdp_port == 9301
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -401,6 +602,29 @@ def test_recover_restarts_on_cdp_unavailable_then_ready(tmp_path):
     assert recovered.state == STATE_READY
     assert prepare.calls == 3  # ensure 1 + 재시작 2(실패→성공)
     assert sleeps == [1.0]  # 첫 실패 후 backoff 1회(주입 sleep)
+
+
+def test_recover_profile_tracks_restarted_browser_process(tmp_path):
+    first = FakeProcess()
+    recovered = FakeProcess()
+    pending = [first, recovered]
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        assert run_command is not None
+        run_command(["chrome-fake"], False)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        run_command=lambda command, check: pending.pop(0),
+    )
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    manager.recover_profile("t1", "alpha", build_config=make_build_config())
+    manager.close_all()
+
+    assert first.terminated is True
+    assert recovered.terminated is True
 
 
 def test_recover_transitions_to_auth_required_without_infinite_retry(tmp_path):

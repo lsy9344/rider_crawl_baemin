@@ -63,6 +63,10 @@ _PHONE_RE = re.compile(
     r"(?![\w])"
 )
 
+# Telegram rider lookup command: ``!홍길동1234``. The name and last 4 phone
+# digits are personal data, so mask the whole command token.
+_RIDER_LOOKUP_COMMAND_RE = re.compile(r"!\s*[^\s!]{1,80}?\d{4}(?!\d)")
+
 # OTP/인증번호: 문맥 키에 인접한 4–8자리 코드만 마스킹(임의 숫자 오탐 방지).
 _OTP_RE = re.compile(
     r"(?P<label>otp|code|인증\s*번호|인증\s*코드|verification\s*code|auth\s*code)"
@@ -146,6 +150,7 @@ def redact(text: str, *, mask_operational_ids: bool = False) -> str:
     # 순서: email → 토큰 형태 → phone → Authorization 헤더 → key=value → OTP 문맥.
     text = _EMAIL_RE.sub(REDACTED, text)
     text = _TOKEN_SHAPE_RE.sub(REDACTED, text)
+    text = _RIDER_LOOKUP_COMMAND_RE.sub(REDACTED, text)
     text = _PHONE_RE.sub(REDACTED, text)
     text = _AUTH_HEADER_RE.sub(_mask_auth_header, text)
     text = _KEY_VALUE_RE.sub(_mask_kv, text)

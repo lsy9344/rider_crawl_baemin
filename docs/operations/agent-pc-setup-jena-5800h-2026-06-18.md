@@ -10,9 +10,11 @@
 - Agent UUID: `b781de75-1386-4d91-be00-67381ecca828`
 - Agent name: `jena-5800h`
 - Current server status: `PENDING_REGISTRATION`
-- Registration code: `agreg_FVeX8BulB1IPFsLyIhh6dRgC`
+- Registration code: `<AGENT_REGISTRATION_CODE>`
 
 등록 코드는 일회용 값입니다. 등록이 끝나면 같은 코드로 다시 등록할 수 없을 수 있습니다.
+
+> 운영 주의: registration code는 일회성 비밀값이다. 실제 값을 문서에 저장하지 않는다. 노출되면 서버에서 즉시 revoke/rotate한 뒤 새 값을 안전한 채널로 전달한다.
 
 ## 전제 조건
 
@@ -102,7 +104,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "http://54.116.103.149:8000/health"
 
 ```powershell
 $env:RIDER_AGENT_SERVER_URL="http://54.116.103.149:8000"
-.venv\Scripts\python.exe -m rider_agent register --code "agreg_FVeX8BulB1IPFsLyIhh6dRgC"
+.venv\Scripts\python.exe -m rider_agent register --code "<AGENT_REGISTRATION_CODE>"
 ```
 
 성공 예시는 아래와 비슷합니다.
@@ -168,7 +170,7 @@ agent already-registered: agent_id=b781de75-1386-4d91-be00-67381ecca828 config_v
 ```powershell
 echo $env:RIDER_AGENT_SERVER_URL
 Invoke-WebRequest -UseBasicParsing -Uri "http://54.116.103.149:8000/health"
-.venv\Scripts\python.exe -m rider_agent register --code "agreg_FVeX8BulB1IPFsLyIhh6dRgC"
+.venv\Scripts\python.exe -m rider_agent register --code "<AGENT_REGISTRATION_CODE>"
 .venv\Scripts\python.exe -m rider_agent run --server-url "http://54.116.103.149:8000"
 ```
 

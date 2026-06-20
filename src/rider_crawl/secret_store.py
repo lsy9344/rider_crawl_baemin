@@ -9,10 +9,15 @@
 
 from __future__ import annotations
 
+import base64
+import ctypes
+import ctypes.wintypes
 import hashlib
 import json
+import os
+import sys
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 
 # secret 저장 위치 분류(NFR-8, 3분류). enum은 Story 2.5 소유라 만들지 않고 단순 문자열 3종을
@@ -97,3 +102,127 @@ class LocalFileSecretStore:
         from .ui_settings import _atomic_write_text
 
         _atomic_write_text(self.path, json.dumps(data, ensure_ascii=False, indent=2))
+
+
+class WindowsDpapiSecretStore:
+    """Windows DPAPI로 값을 보호해 파일에 저장하는 로컬 secret store."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+
+    def put(self, value: str, *, ref: str = "") -> str:
+        if not ref:
+            ref = "local:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        data = self._load()
+        current = data.get(ref)
+        if isinstance(current, dict) and self._entry_to_plaintext(current) == value:
+            return ref
+        data[ref] = {
+            "protected_by": "dpapi",
+            "value": self._protect(value),
+        }
+        self._save(data)
+        return ref
+
+    def resolve(self, ref: str) -> str | None:
+        if not ref:
+            return None
+        data = self._load()
+        entry = data.get(ref)
+        value = self._entry_to_plaintext(entry)
+        if value is not None and isinstance(entry, str):
+            self.put(value, ref=ref)
+        return value
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+
+    def _save(self, data: dict[str, Any]) -> None:
+        from .ui_settings import _atomic_write_text
+
+        _atomic_write_text(self.path, json.dumps(data, ensure_ascii=False, indent=2))
+
+    def _entry_to_plaintext(self, entry: object) -> str | None:
+        if isinstance(entry, str):
+            return entry
+        if not isinstance(entry, dict) or entry.get("protected_by") != "dpapi":
+            return None
+        protected = entry.get("value")
+        if not isinstance(protected, str):
+            return None
+        return self._unprotect(protected)
+
+    @staticmethod
+    def _protect(value: str) -> str:
+        if sys.platform != "win32":
+            raise RuntimeError("Windows DPAPI secret store is only available on Windows")
+        blob, _buffer = _bytes_to_blob(value.encode("utf-8"))
+        out = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out),
+        ):
+            raise ctypes.WinError()
+        try:
+            protected = ctypes.string_at(out.pbData, out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+        return base64.b64encode(protected).decode("ascii")
+
+    @staticmethod
+    def _unprotect(value: str) -> str | None:
+        if sys.platform != "win32":
+            return None
+        try:
+            protected = base64.b64decode(value.encode("ascii"))
+        except ValueError:
+            return None
+        blob, _buffer = _bytes_to_blob(protected)
+        out = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out),
+        ):
+            return None
+        try:
+            plaintext = ctypes.string_at(out.pbData, out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+        return plaintext.decode("utf-8")
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+    ]
+
+
+def _bytes_to_blob(value: bytes) -> tuple[_DATA_BLOB, ctypes.Array[ctypes.c_char]]:
+    buffer = ctypes.create_string_buffer(value)
+    return (
+        _DATA_BLOB(len(value), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))),
+        buffer,
+    )
+
+
+def default_secret_store(path: Path) -> SecretStore:
+    mode = os.getenv("RIDER_CRAWL_SECRET_STORE", "").strip().casefold()
+    if mode in {"local_file", "file", "plaintext"}:
+        return LocalFileSecretStore(path)
+    if sys.platform == "win32":
+        return WindowsDpapiSecretStore(path)
+    return LocalFileSecretStore(path)

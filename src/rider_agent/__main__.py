@@ -109,14 +109,34 @@ def _parse_run_args(run_argv: list[str]) -> argparse.Namespace:
         default=None,
         help="서버 base URL(미지정 시 RIDER_AGENT_SERVER_URL env 또는 기본값)",
     )
+    parser.add_argument(
+        "--max-jobs",
+        type=int,
+        default=int(os.getenv("RIDER_AGENT_MAX_JOBS", "1")),
+        help="동시 claim 수(기본 1; 1보다 크게 설정하려면 로컬 CPU/RAM과 프로필 정리 정책 확인 필요)",
+    )
+    parser.add_argument(
+        "--profile-idle-ttl-seconds",
+        type=float,
+        default=float(os.getenv("RIDER_AGENT_PROFILE_IDLE_TTL_SECONDS", "3600")),
+        help="브라우저 프로필 idle release 기준 초(기본 3600)",
+    )
+    parser.add_argument(
+        "--max-profiles",
+        type=int,
+        default=int(os.getenv("RIDER_AGENT_MAX_PROFILES", "20")),
+        help="Agent가 보유할 최대 브라우저 프로필 수(0 이하면 제한 없음)",
+    )
     return parser.parse_args(run_argv)
 
 
 def _append_agent_log(message: str, *, log_path: object | None = None) -> None:
+    from rider_crawl.config import app_state_root
+
     path = Path(
         log_path
         or os.getenv("RIDER_AGENT_LOG_PATH")
-        or (Path("logs") / "agent.log")
+        or (app_state_root() / "logs" / "agent.log")
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = (
@@ -149,6 +169,7 @@ def _run_agent_loop(
     from rider_agent.job_loop import run_agent
     from rider_agent.registration import HttpTransport
     from rider_agent.autostart import is_interactive_session
+    from rider_crawl.config import app_state_root
     from rider_agent.secure_store import (
         DpapiSecretStore,
         default_identity_path,
@@ -164,17 +185,35 @@ def _run_agent_loop(
     if transport is None:
         transport = HttpTransport(op_label="agent jobs")
 
-    summary = runner(
-        transport=transport,
-        store=store,
-        identity_path=identity_path,
-        base_url=args.server_url,
-        start_auth_worker=True,
-        start_crawl_worker=True,
-        start_kakao_sender=True,
-        session_probe=is_interactive_session,
-        log=_append_agent_log,
-    )
+    from rider_agent.locking import agent_state_lock
+
+    run_lock = agent_state_lock(Path(identity_path).parent, "agent-run.lock")
+    if not run_lock.acquire(blocking=False):
+        print(redact("agent loop already running: another rider_agent run instance is active"))
+        return 1
+
+    try:
+        try:
+            summary = runner(
+                transport=transport,
+                store=store,
+                identity_path=identity_path,
+                base_url=args.server_url,
+                max_jobs=max(1, args.max_jobs),
+                profile_idle_ttl_seconds=max(0.0, args.profile_idle_ttl_seconds),
+                max_profiles=args.max_profiles if args.max_profiles > 0 else None,
+                start_auth_worker=True,
+                start_crawl_worker=True,
+                start_kakao_sender=True,
+                session_probe=is_interactive_session,
+                log=_append_agent_log,
+                complete_outbox_path=app_state_root() / "runtime" / "agent-complete-outbox.json",
+            )
+        except ValueError as exc:
+            print(redact(f"agent loop not started: {exc}"))
+            return 1
+    finally:
+        run_lock.release()
 
     if not getattr(summary, "started", False):
         print(

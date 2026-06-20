@@ -310,7 +310,7 @@ def test_delivery_status_members_include_dedup_vocabulary():
     # 3.6이 FAILED/RETRYING/HELD 를 더해 총 5멤버다.
     names = {s.name for s in DeliveryStatus}
     assert {"SENT", "DUPLICATE_BLOCKED"} <= names  # 3.5 어휘 보존
-    assert names == {"SENT", "DUPLICATE_BLOCKED", "FAILED", "RETRYING", "HELD"}
+    assert names == {"SENT", "DUPLICATE_BLOCKED", "SENDING", "FAILED", "RETRYING", "HELD"}
     assert DeliveryStatus.SENT == "SENT"  # (str, Enum)
     assert DeliveryStatus.DUPLICATE_BLOCKED == "DUPLICATE_BLOCKED"
 

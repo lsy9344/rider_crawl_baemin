@@ -65,18 +65,37 @@ class FakeSchedulerRepo(SchedulerRepository):
         self._capacity = capacity
         self.claim_wins: list[str] = []
         self.release_calls: list[tuple[str, datetime, datetime | None]] = []
+        self.tenant_gate_calls = 0
+        self.bulk_tenant_gate_calls = 0
+        self.has_active_crawl_job_calls = 0
+        self.bulk_active_job_calls = 0
 
-    async def due_targets(self, *, now):
-        return [t for t in self._targets.values() if policy.is_due(t.next_run_at, now)]
+    async def due_targets(self, *, now, limit):
+        return [
+            t for t in self._targets.values() if policy.is_due(t.next_run_at, now)
+        ][:limit]
 
     async def tenant_gate(self, tenant_id):
+        self.tenant_gate_calls += 1
         return self._gates.get(tenant_id, TenantGate(None, None))
+
+    async def tenant_gates(self, tenant_ids):
+        self.bulk_tenant_gate_calls += 1
+        return {
+            tenant_id: self._gates.get(tenant_id, TenantGate(None, None))
+            for tenant_id in tenant_ids
+        }
 
     async def platform_failure_window(self, platform, *, since, now):
         return self._failure_windows.get(platform, (0, 0))
 
     async def has_active_crawl_job(self, target_id):
+        self.has_active_crawl_job_calls += 1
         return target_id in self._active_jobs
+
+    async def active_crawl_job_target_ids(self, target_ids):
+        self.bulk_active_job_calls += 1
+        return {target_id for target_id in target_ids if target_id in self._active_jobs}
 
     async def capacity_snapshot(self, *, now):
         return self._capacity
@@ -204,7 +223,7 @@ def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
     }
 
 
-def test_scheduler_enqueues_coupang_secret_refs_needed_for_email_2fa() -> None:
+def test_scheduler_enqueues_coupang_secret_refs_without_plaintext_values() -> None:
     target = _target(
         "t-coupang",
         platform="COUPANG",
@@ -227,13 +246,19 @@ def test_scheduler_enqueues_coupang_secret_refs_needed_for_email_2fa() -> None:
     job = backend.job_snapshot(result.outcomes[0].job_id)
     assert job is not None
     assert job.payload_json["job_type"] == JOB_TYPE_CRAWL_COUPANG
-    assert job.payload_json["username"] == "vault://coupang/login-id"
-    assert job.payload_json["password"] == "vault://coupang/login-password"
-    assert job.payload_json["verification_email_address"] == "vault://mail/address"
-    assert job.payload_json["verification_email_app_password"] == "vault://mail/app-password"
+    assert job.payload_json["coupang_login_id_ref"] == "vault://coupang/login-id"
+    assert job.payload_json["coupang_login_password_ref"] == "vault://coupang/login-password"
+    assert job.payload_json["verification_email_address_ref"] == "vault://mail/address"
+    assert job.payload_json["verification_email_app_password_ref"] == "vault://mail/app-password"
     assert job.payload_json["verification_email_subject_keyword"] == "보안코드"
     assert job.payload_json["verification_email_sender_keyword"] == "wing"
     assert job.payload_json["coupang_auto_email_2fa_enabled"] is True
+    assert "username" not in job.payload_json
+    assert "password" not in job.payload_json
+    assert "coupang_login_id" not in job.payload_json
+    assert "coupang_login_password" not in job.payload_json
+    assert "verification_email_address" not in job.payload_json
+    assert "verification_email_app_password" not in job.payload_json
 
 
 # ── AC2: 중지/비활성 고객 제외 ────────────────────────────────────────────────
@@ -419,6 +444,63 @@ def test_hundred_targets_capacity_bound_prevents_storm() -> None:
     backend = InMemoryQueueBackend()
     result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
     assert result.enqueued_count == 10
+
+
+def test_scheduler_tick_respects_due_batch_limit() -> None:
+    targets = [_target(f"target-{i}") for i in range(25)]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        capacity=_capacity(n=25),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(
+        SchedulerService(due_batch_size=10).run_tick(repo, backend, now=_NOW)
+    )
+
+    assert len(result.outcomes) == 10
+    assert result.enqueued_count == 10
+    assert result.enqueued_target_ids == tuple(f"target-{i}" for i in range(10))
+
+
+def test_scheduler_service_accepts_batch_size_alias() -> None:
+    targets = [_target(f"target-{i}") for i in range(25)]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        capacity=_capacity(n=25),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(
+        SchedulerService(batch_size=10).run_tick(repo, backend, now=_NOW)
+    )
+
+    assert len(result.outcomes) == 10
+    assert result.enqueued_count == 10
+    assert result.enqueued_target_ids == tuple(f"target-{i}" for i in range(10))
+
+
+def test_scheduler_tick_uses_bulk_gate_and_active_job_lookups() -> None:
+    targets = [_target(f"target-{i}") for i in range(3)]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        active_jobs={"target-1"},
+        capacity=_capacity(n=3),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert {o.target_id: o.reason for o in result.outcomes}["target-1"] == (
+        REASON_ACTIVE_JOB_EXISTS
+    )
+    assert repo.tenant_gate_calls == 0
+    assert repo.bulk_tenant_gate_calls == 1
+    assert repo.has_active_crawl_job_calls == 0
+    assert repo.bulk_active_job_calls == 1
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -643,6 +725,52 @@ def test_enqueue_failure_restores_due_claim_before_reraising() -> None:
 
     assert repo.next_run_at_of("t-a") == original_next
     assert len(repo.release_calls) == 1
+
+
+def test_scheduler_uses_repository_atomic_claim_enqueue_hook() -> None:
+    class QueueThatMustNotBeCalled(InMemoryQueueBackend):
+        async def enqueue(self, **_kwargs):
+            raise AssertionError("scheduler should delegate claim+enqueue to repository")
+
+    class AtomicRepo(FakeSchedulerRepo):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.atomic_calls = []
+
+        async def claim_due_target_and_enqueue(
+            self,
+            queue_backend,
+            target,
+            *,
+            job_type,
+            payload_json,
+            now,
+            next_run_at,
+        ):
+            self.atomic_calls.append(
+                (queue_backend, target.target_id, job_type, payload_json, next_run_at)
+            )
+            won = await self.claim_due_target(
+                target.target_id, now=now, next_run_at=next_run_at
+            )
+            return "job-atomic" if won else None
+
+    target = _target("t-a")
+    repo = AtomicRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+
+    result = asyncio.run(
+        SchedulerService().run_tick(repo, QueueThatMustNotBeCalled(), now=_NOW)
+    )
+
+    assert result.enqueued_count == 1
+    assert result.outcomes[0].job_id == "job-atomic"
+    assert len(repo.atomic_calls) == 1
+    _queue, target_id, job_type, payload_json, _next_run_at = repo.atomic_calls[0]
+    assert target_id == "t-a"
+    assert job_type == JOB_TYPE_CRAWL_BAEMIN
+    assert payload_json["target_id"] == "t-a"
 
 
 # ── 일반: due 대상이 없으면 tick 은 no-op ─────────────────────────────────────

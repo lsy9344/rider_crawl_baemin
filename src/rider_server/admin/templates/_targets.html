@@ -1,4 +1,4 @@
-{# 대상 상태 fragment(HTMX swap 대상) — 재설계 행 구조.
+{# 대상 상태 fragment(HTMX swap 대상): 재설계 행 구조.
    행 = 심각도 바 + 이름/센터 + 플랫폼 배지 + 심각도 배지 + 사유/상대시간 + 상황맞춤 액션.
    심각도 class(severity_class) 는 행과 배지에 공유해 좌측 바·배지 색을 결정한다(고정폭 트랙으로 정렬 일치).
    data-* 속성은 클릭 시 업체 상세 드로어를 서버 왕복 없이 채우는 데 쓴다. autoescape 유지. #}
@@ -39,7 +39,7 @@
        data-severity-class="{{ t.severity | severity_class }}"
        data-interval="{{ t.interval_minutes }}"
        data-failcode="{{ t.last_failure_code or '' }}"
-       data-reason="{% if t.last_failure_code %}{{ t.last_failure_code | reason_text }}{% elif is_auth_required %}로그인 만료 · 인증 확인 필요{% elif is_target_validation %}센터/상점명 불일치 — 오발송 위험{% elif is_operator_stopped %}운영자가 비활성한 대상입니다 — 필요 시 활성화하세요.{% endif %}"
+       data-reason="{% if t.last_failure_code %}{{ t.last_failure_code | reason_text }}{% elif is_auth_required %}로그인 만료 · 인증 확인 필요{% elif is_target_validation %}센터/상점명 불일치: 오발송 위험{% elif is_operator_stopped %}운영자가 비활성한 대상입니다: 필요 시 활성화하세요.{% endif %}"
        data-success="{{ t.last_success_at | relative_time }}"
        data-delivery="{{ t.last_delivery_at | relative_time }}"
        data-target="{{ t.target_id }}"
@@ -61,7 +61,7 @@
       <span class="rs">
         {%- if t.last_failure_code %}{{ t.last_failure_code | reason_text }}
         {%- elif is_auth_required %}로그인 만료 · 인증 확인 필요
-        {%- elif is_target_validation %}센터/상점명 불일치 — 오발송 위험
+        {%- elif is_target_validation %}센터/상점명 불일치: 오발송 위험
         {%- elif is_operator_stopped %}운영 중지
         {%- elif t.severity == 'NORMAL' %}정상
         {%- else %}관찰 중{% endif -%}
@@ -76,17 +76,19 @@
       {%- if is_auth_required %}
       <button type="button" class="btn primary" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
+              hx-vals='{"confirm_action": "confirmed"}'
               hx-target="#target-result-{{ t.target_id }}">인증 확인</button>
       {%- elif is_target_validation %}
       <button type="button" class="btn primary" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this); focusCenterNameEdit()">센터명 설정</button>
       {%- elif is_operator_stopped %}
       <button type="button" class="btn" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
+              hx-vals='{"confirm_action": "confirmed"}'
               hx-target="#target-result-{{ t.target_id }}" hx-confirm="대상 '{{ t.name }}'을(를) 활성화할까요?">활성화</button>
       {%- elif t.severity in ('WARNING', 'CRITICAL') %}
       <button type="button" class="btn{% if t.severity == 'CRITICAL' %} primary{% endif %}" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
-              hx-vals='{"platform": "{{ t.platform }}"}' hx-target="#target-result-{{ t.target_id }}">지금 수집</button>
+              hx-vals='{"platform": "{{ t.platform }}", "confirm_action": "confirmed"}' hx-target="#target-result-{{ t.target_id }}">지금 수집</button>
       {%- endif %}
       <button type="button" class="btn ghost" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this)" aria-label="{{ t.name }} 상세 열기">상세</button>
     </span>
@@ -95,4 +97,12 @@
   {% else %}
   <div class="allgood">표시할 대상이 없습니다.</div>
   {% endfor %}
+  {% if has_more %}
+  <button type="button"
+          class="btn ghost more-targets"
+          hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}&limit={{ limit }}&offset={{ next_offset }}"
+          hx-target="#targets"
+          hx-swap="innerHTML"
+          data-next-offset="{{ next_offset }}">더 보기</button>
+  {% endif %}
 </div>

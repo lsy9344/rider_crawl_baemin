@@ -335,6 +335,19 @@ def test_admin_db_failure_returns_operator_html_without_secret() -> None:
     assert "super-secret" not in r.text
 
 
+def test_targets_fragment_db_failure_returns_safe_partial() -> None:
+    class _FailingRepo(InMemoryDashboardRepository):
+        async def target_health(self, **kw):  # type: ignore[override]
+            raise RuntimeError("postgresql://user:super-secret@db:5432/rider")
+
+    r = _client(_FailingRepo()).get(f"/admin/targets?tenant={_TENANT}")
+
+    assert r.status_code == 503
+    assert "text/html" in r.headers["content-type"]
+    assert "DB 연결 실패" in r.text
+    assert "super-secret" not in r.text
+
+
 def test_manage_tab_shows_customer_setup_flow_and_send_gate() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}&mode=manage").text
 
@@ -404,6 +417,33 @@ def test_targets_fragment_paginates_large_target_sets() -> None:
     assert "가게-100" in second
     assert "가게-199" in second
     assert "가게-200" not in second
+
+
+def test_targets_fragment_prefetches_high_severity_before_first_page() -> None:
+    repo = InMemoryDashboardRepository()
+    fresh = datetime.now(timezone.utc)
+    for idx in range(150):
+        repo.seed_target(
+            _target(
+                target_id=f"target-{idx}",
+                name=f"가게-{idx}",
+                last_success_at=fresh,
+            )
+        )
+    repo.seed_target(
+        _target(
+            target_id="target-critical",
+            name="위험-업체",
+            interval_minutes=5,
+            last_success_at=fresh - timedelta(hours=1),
+        )
+    )
+    c = _client(repo)
+
+    first = c.get(f"/admin/targets?tenant={_TENANT}&limit=100").text
+
+    assert "target-critical" in first
+    assert "위험-업체" in first
 
 
 def test_targets_fragment_passes_limit_and_offset_to_repository() -> None:

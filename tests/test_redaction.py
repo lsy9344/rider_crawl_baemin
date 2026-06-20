@@ -222,6 +222,15 @@ def test_ac1_phone_variants_are_masked(phone):
     assert "발송" in out
 
 
+def test_redaction_masks_rider_lookup_command_name_and_phone_suffix():
+    out = redact("텔레그램 명령 수신: !홍길동1234")
+
+    assert "!홍길동1234" not in out
+    assert "홍길동" not in out
+    assert "1234" not in out
+    assert REDACTED in out
+
+
 # --- AC1: OTP/인증번호 문맥 라벨 변형 ----------------------------------------
 # regex 는 code/verification code/auth code/인증 코드 라벨을 지원하지만
 # 기존 테스트는 "인증번호"·"otp=" 만 덮었다.

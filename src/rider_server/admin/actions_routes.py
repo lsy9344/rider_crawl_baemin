@@ -45,6 +45,8 @@ router = APIRouter(prefix="/admin", tags=["admin-actions"])
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+_CONFIRM_ACTION_FIELD = "confirm_action"
+_CONFIRM_ACTION_VALUE = "confirmed"
 
 # ── 역할 게이트(5.8) — 운영 액션=OPERATOR↑, secret/token=SECRET_ADMIN↑(Task 4) ──────
 # 게이트는 security 레이어에서 강제한다(fail-closed + audit-on-deny). 라우트는 직접 ORM write
@@ -140,13 +142,20 @@ def _raise_for(exc: Exception) -> None:
     raise exc
 
 
+def _require_confirmation(form: dict) -> None:
+    if str(form.get(_CONFIRM_ACTION_FIELD) or "").strip() != _CONFIRM_ACTION_VALUE:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "서버 확인값이 필요합니다")
+
+
 # ── 대상 활성/비활성(AC1) ─────────────────────────────────────────────────────────
 
 @router.post("/targets/{target_id}/activate", response_class=HTMLResponse)
 async def activate_target(
     request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     try:
         target = await _service(request).set_target_status(
             target_id,
@@ -166,7 +175,9 @@ async def activate_target(
 async def pause_target(
     request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     try:
         target = await _service(request).set_target_status(
             target_id,
@@ -188,7 +199,9 @@ async def pause_target(
 async def test_crawl(
     request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    platform = (await _form(request)).get("platform", "BAEMIN").strip().upper()
+    form = await _form(request)
+    _require_confirmation(form)
+    platform = form.get("platform", "BAEMIN").strip().upper()
     job_type = JOB_TYPE_CRAWL_COUPANG if platform == "COUPANG" else JOB_TYPE_CRAWL_BAEMIN
     try:
         job_id = await _service(request).test_crawl(
@@ -208,6 +221,7 @@ async def test_crawl(
 async def auth_check(
     request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
+    _require_confirmation(await _form(request))
     try:
         job_id = await _service(request).auth_check(
             target_id=target_id,
@@ -266,7 +280,9 @@ async def test_send(
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "test send 채널이 설정되지 않았습니다(fail-closed)"
         )
-    channel_id = (await _form(request)).get("channel_id", "").strip()
+    form = await _form(request)
+    _require_confirmation(form)
+    channel_id = form.get("channel_id", "").strip()
     if not channel_id:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "테스트 채널 channel_id 가 필요합니다")
     # 전역 dispatch kill switch(5.10/AC3): 복구/신규 환경(``sending_enabled`` 기본 OFF)에서는
@@ -313,7 +329,9 @@ async def test_send(
 async def retry_job(
     request: Request, job_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     try:
         status = await _service(request).retry_job(
             job_id,
@@ -335,6 +353,7 @@ async def assign_agent(
     request: Request, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
+    _require_confirmation(form)
     target_id = form.get("target_id", "").strip()
     agent_id = form.get("agent_id", "").strip()
     if not target_id or not agent_id:
@@ -360,7 +379,9 @@ async def assign_agent(
 async def suspend_subscription(
     request: Request, subscription_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     try:
         sub = await _service(request).suspend_subscription(
             subscription_id,
@@ -380,6 +401,7 @@ async def resume_subscription(
     request: Request, subscription_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
+    _require_confirmation(form)
     reason = form.get("reason", "")
     to_status_raw = form.get("to_status", "").strip()
     kwargs = {}
@@ -415,6 +437,7 @@ async def dispose_held_dispatch(
     request: Request, dispatch_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
+    _require_confirmation(form)
     disposition_raw = form.get("disposition", "").strip().upper()
     try:
         disposition = HeldDisposition(disposition_raw)
@@ -449,7 +472,9 @@ async def revoke_agent_token(
     write+audit 는 ``AgentTokenService`` 가 동일 트랜잭션으로 수행한다(라우트 직접 write 0).
     """
 
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     await _token_service(request).revoke(
         agent_id,
         at=_now(),
@@ -466,7 +491,9 @@ async def rotate_agent_token(
 ) -> HTMLResponse:
     """``POST /admin/agents/{id}/token/rotate`` — 기존 token 무효화 + 재발급 경로 개방(audit)."""
 
-    reason = (await _form(request)).get("reason", "")
+    form = await _form(request)
+    _require_confirmation(form)
+    reason = form.get("reason", "")
     await _token_service(request).rotate(
         agent_id,
         at=_now(),
@@ -488,6 +515,7 @@ async def rotate_channel_token(
     """
 
     form = await _form(request)
+    _require_confirmation(form)
     new_secret_ref = form.get("new_secret_ref", "").strip()
     if not new_secret_ref:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "new_secret_ref(핸들)가 필요합니다")

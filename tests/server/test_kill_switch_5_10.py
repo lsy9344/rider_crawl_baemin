@@ -53,6 +53,7 @@ _SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 _OPERATOR = AdminPrincipal(
     actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True, source="ADMIN_UI/operator"
 )
+_CONFIRM = {"confirm_action": "confirmed"}
 
 
 def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
@@ -63,6 +64,10 @@ def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors import
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _confirmed(data: dict | None = None) -> dict:
+    return {**(data or {}), **_CONFIRM}
 
 
 def _service(repo, queue=None) -> AdminActionService:
@@ -237,7 +242,10 @@ def test_route_test_send_blocked_when_sending_disabled_does_not_call_seam() -> N
     _wire_seam(app, sends)
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-send?tenant=tn-1",
+        data=_confirmed({"channel_id": "ch-test"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK  # HTMX fragment(차단 안내) — 미발송.
     assert "SENT" not in resp.text
@@ -254,7 +262,10 @@ def test_route_test_send_sends_when_sending_enabled() -> None:
     _wire_seam(app, sends)
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-send?tenant=tn-1",
+        data=_confirmed({"channel_id": "ch-test"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK
     assert "SENT" in resp.text
@@ -364,7 +375,10 @@ def test_route_test_send_fail_closed_when_sending_enabled_attr_unset() -> None:
     _wire_seam(app, sends)
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-send?tenant=tn-1",
+        data=_confirmed({"channel_id": "ch-test"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK  # 차단 안내 fragment(미발송).
     assert "SENT" not in resp.text

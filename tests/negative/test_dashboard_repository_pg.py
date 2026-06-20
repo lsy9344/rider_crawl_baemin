@@ -107,7 +107,7 @@ async def _seed(session_factory) -> None:
         await session.flush()
         # ── messages + delivery_logs(T1): SENT -4/-2min, FAILED TELEGRAM -1min ──
         def _msg(mid, snap_id):
-            return Message(id=uuid.UUID(mid), snapshot_id=uuid.UUID(snap_id), template_version="v1", text_hash="h", text_redacted_preview="p")
+            return Message(id=uuid.UUID(mid), snapshot_id=uuid.UUID(snap_id), template_version="v1", text="p", text_hash="h", text_redacted_preview="p")
         session.add(_msg("11111111-aaaa-1111-1111-111111111111", "51111111-1111-1111-1111-111111111111"))
         session.add(_msg("22222222-aaaa-2222-2222-222222222222", "52222222-2222-2222-2222-222222222222"))
         await session.flush()

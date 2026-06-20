@@ -151,6 +151,43 @@ def test_prepare_chrome_launches_when_profile_not_already_running(tmp_path, monk
     assert "Chrome 실행 요청 완료" in message
 
 
+def test_prepare_chrome_wraps_probe_profile_launch_wait_in_resource_lock(tmp_path, monkeypatch):
+    events: list[str] = []
+    calls = []
+    config = _config(tmp_path)
+    monkeypatch.setattr(browser_launcher, "_chrome_running_for_profile", lambda _profile: events.append("profile") or False)
+
+    class FakeRunLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            events.append("lock-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+            return False
+
+    monkeypatch.setattr(browser_launcher, "RunLock", FakeRunLock)
+
+    def probe(_cdp_url):
+        events.append("probe")
+        if not calls:
+            raise OSError("not ready")
+
+    prepare_chrome(
+        config,
+        platform_name="Windows",
+        run_command=lambda command, check: events.append("launch") or calls.append((command, check)),
+        cdp_probe=probe,
+    )
+
+    assert events[0] == "lock-enter"
+    assert events[-1] == "lock-exit"
+    assert events[1:-1] == ["probe", "profile", "launch", "probe"]
+
+
 def test_prepare_chrome_rejects_when_cdp_endpoint_does_not_become_ready(tmp_path):
     config = _config(tmp_path)
 

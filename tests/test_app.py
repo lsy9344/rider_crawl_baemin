@@ -313,6 +313,28 @@ def test_run_lock_path_is_browser_scoped_independent_of_state_subdir(tmp_path):
     assert "targets" not in lock_parts and "id-a" not in lock_parts
 
 
+def test_run_lock_path_is_independent_from_log_dir_for_same_cdp_profile(tmp_path, monkeypatch):
+    from rider_crawl import app
+
+    monkeypatch.setenv("RIDER_CRAWL_STATE_ROOT", str(tmp_path / "state-root"))
+    first = replace(
+        _config(tmp_path),
+        log_dir=tmp_path / "acct-a" / "logs",
+        cdp_url="http://localhost:9222",
+        browser_user_data_dir=tmp_path / "shared-profile",
+    )
+    second = replace(
+        _config(tmp_path),
+        log_dir=tmp_path / "acct-b" / "logs",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "shared-profile",
+    )
+
+    assert app._run_lock_path(first) == app._run_lock_path(second)
+    assert tmp_path / "acct-a" not in app._run_lock_path(first).parents
+    assert tmp_path / "acct-b" not in app._run_lock_path(second).parents
+
+
 def _config(
     tmp_path,
     *,

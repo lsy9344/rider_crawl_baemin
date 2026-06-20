@@ -107,7 +107,11 @@ class PostgresAgentRegistry:
             row = (
                 await session.execute(select(AgentRow).where(AgentRow.token_hash == token_hash))
             ).scalar_one_or_none()
-            if row is None or row.token_revoked_at is not None:
+            if (
+                row is None
+                or row.token_revoked_at is not None
+                or row.token_rotated_at is not None
+            ):
                 raise InvalidAgentToken("invalid agent token")
             if str(row.id) != request.agent_id:
                 raise AgentTokenMismatch("agent token does not match body agent_id")
@@ -134,11 +138,30 @@ class PostgresAgentRegistry:
         async with self._session_factory() as session:
             row = (
                 await session.execute(
-                    select(AgentRow.id, AgentRow.token_revoked_at).where(
+                    select(
+                        AgentRow.id,
+                        AgentRow.token_revoked_at,
+                        AgentRow.token_rotated_at,
+                    ).where(
                         AgentRow.token_hash == token_hash
                     )
                 )
             ).one_or_none()
-        if row is None or row.token_revoked_at is not None:
+        if (
+            row is None
+            or row.token_revoked_at is not None
+            or row.token_rotated_at is not None
+        ):
             return None
         return str(row.id)
+
+    async def capacity_for_agent(self, agent_id: str) -> dict | None:
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(AgentRow.capacity_json).where(AgentRow.id == agent_id)
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        return dict(row.capacity_json or {})

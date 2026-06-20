@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -71,6 +72,7 @@ MISMATCH_CENTER_MISMATCH = "CENTER_MISMATCH"
 # CDP 미응답 재시작 한도(무한 재시도 금지, NFR-4) + backoff 기본값.
 DEFAULT_MAX_RESTART_ATTEMPTS = 3
 DEFAULT_RESTART_BACKOFF_SECONDS = 1.0
+DEFAULT_BROWSER_PROCESS_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class ProfileAssignment:
     cdp_port: int
     cdp_url: str
     state: str = STATE_UNKNOWN
+    last_used_at: float = 0.0
 
 
 class TargetValidationError(RuntimeError):
@@ -193,6 +196,7 @@ class BrowserProfileManager:
         run_command: Any = None,
         cdp_probe: Any = None,
         restart_backoff_seconds: float = DEFAULT_RESTART_BACKOFF_SECONDS,
+        max_profiles: int | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self._profiles_root = Path(profiles_root)
@@ -204,6 +208,7 @@ class BrowserProfileManager:
         self._run_command = run_command
         self._cdp_probe = cdp_probe
         self._restart_backoff_seconds = restart_backoff_seconds
+        self._max_profiles = max_profiles if max_profiles is None or max_profiles > 0 else None
         self._log = log
         self._lock = threading.Lock()
         #: (tenant_id, target_id) → ProfileAssignment.
@@ -211,6 +216,10 @@ class BrowserProfileManager:
         #: 할당된 포트/프로필-키 → 소유 대상(중복 거부용 역인덱스).
         self._ports: dict[int, tuple[str, str]] = {}
         self._profile_keys: dict[str, tuple[str, str]] = {}
+        self._processes: dict[tuple[str, str], Any] = {}
+        self._reservations: dict[tuple[str, str], threading.Event] = {}
+        self._reserved_ports: dict[int, tuple[str, str]] = {}
+        self._reserved_profile_keys: dict[str, tuple[str, str]] = {}
 
     # ── 프로필 경로 정책 ──────────────────────────────────────────────────────
 
@@ -241,49 +250,67 @@ class BrowserProfileManager:
         """
 
         key = (str(tenant_id), str(target_id))
+        last_used_at = self._now()
 
-        with self._lock:
-            existing = self._registry.get(key)
-        if existing is not None:
-            # 이미 할당된 대상은 그 할당을 재사용한다 — 다른 대상에 재배정하지 않는다(AC1.2).
-            return existing
+        while True:
+            with self._lock:
+                existing = self._registry.get(key)
+                if existing is not None:
+                    # 이미 할당된 대상은 그 할당을 재사용한다 — 다른 대상에 재배정하지 않는다(AC1.2).
+                    object.__setattr__(existing, "last_used_at", last_used_at)
+                    return existing
+                reservation = self._reservations.get(key)
+                if reservation is not None:
+                    wait_for_reservation = reservation
+                else:
+                    processes_to_close = self._enforce_max_profiles_locked()
+                    profile_dir = self._profile_dir_for(*key)
+                    profile_key = _profile_key(profile_dir)
+                    port = int(self._allocate_port())
+                    self._reserve_launch_locked(key, port, profile_key)
+                    reservation = self._reservations[key]
+                    break
+            wait_for_reservation.wait()
+        for process in processes_to_close:
+            self._close_process(process)
 
-        profile_dir = self._profile_dir_for(*key)
-        profile_key = _profile_key(profile_dir)
-        port = int(self._allocate_port())
+        launched_processes: list[Any] = []
 
-        # 중복 거부(fail-closed) — 다른 대상이 같은 포트/프로필을 쓰면 시작하지 않는다(AC1.2/1.3·AC3).
-        with self._lock:
-            owner = self._ports.get(port)
-            if owner is not None and owner != key:
-                raise BrowserLaunchError(
-                    "CDP 포트 중복: 이미 다른 대상에 할당된 포트라 이 대상은 시작하지 않습니다."
-                )
-            owner = self._profile_keys.get(profile_key)
-            if owner is not None and owner != key:
-                raise BrowserLaunchError(
-                    "프로필 중복: 이미 다른 대상에 할당된 프로필이라 이 대상은 시작하지 않습니다."
-                )
+        try:
+            cdp_url = f"http://127.0.0.1:{port}"
+            config = build_config(
+                tenant_id=key[0],
+                target_id=key[1],
+                cdp_url=cdp_url,
+                user_data_dir=profile_dir,
+            )
 
-        cdp_url = f"http://127.0.0.1:{port}"
-        config = build_config(
-            tenant_id=key[0],
-            target_id=key[1],
-            cdp_url=cdp_url,
-            user_data_dir=profile_dir,
-        )
+            # 대상 검증: 쿠팡 기대 센터/상점명이 비었/배민기본값(위험)이면 작업을 진행하지 않는다(AC2).
+            is_risky, reason = classify_target_risk(
+                getattr(config, "platform_name", ""),
+                getattr(config, "baemin_center_name", ""),
+            )
+            if is_risky:
+                raise TargetValidationError(reason)
 
-        # 대상 검증: 쿠팡 기대 센터/상점명이 비었/배민기본값(위험)이면 작업을 진행하지 않는다(AC2).
-        is_risky, reason = classify_target_risk(
-            getattr(config, "platform_name", ""),
-            getattr(config, "baemin_center_name", ""),
-        )
-        if is_risky:
-            raise TargetValidationError(reason)
+            # 원격 CDP 차단 + 격리 가드(CDP-unused·profile-free·CDP 대기)를 prepare_chrome 으로 재사용.
+            ensure_local_cdp_address(getattr(config, "cdp_url", cdp_url))
 
-        # 원격 CDP 차단 + 격리 가드(CDP-unused·profile-free·CDP 대기)를 prepare_chrome 으로 재사용.
-        ensure_local_cdp_address(getattr(config, "cdp_url", cdp_url))
-        self._prepare(config, run_command=self._run_command, cdp_probe=self._cdp_probe)
+            def run_command(command: list[str], check: bool) -> Any:
+                runner = self._run_command or _default_run_command
+                result = runner(command, check)
+                if _is_process_handle(result):
+                    launched_processes.append(result)
+                return result
+
+            self._prepare(config, run_command=run_command, cdp_probe=self._cdp_probe)
+        except Exception:
+            for process in launched_processes:
+                self._close_process(process)
+            with self._lock:
+                self._clear_reservation_locked(key, port, profile_key)
+                reservation.set()
+            raise
 
         assignment = ProfileAssignment(
             id=_profile_id(*key),
@@ -294,11 +321,17 @@ class BrowserProfileManager:
             cdp_port=port,
             cdp_url=cdp_url,
             state=STATE_READY,
+            last_used_at=last_used_at,
         )
         with self._lock:
+            self._clear_reservation_locked(key, port, profile_key)
             self._registry[key] = assignment
             self._ports[port] = key
             self._profile_keys[profile_key] = key
+            process = launched_processes[-1] if launched_processes else None
+            if process is not None:
+                self._processes[key] = process
+            reservation.set()
         return assignment
 
     def release(self, tenant_id: str, target_id: str) -> None:
@@ -306,11 +339,49 @@ class BrowserProfileManager:
 
         key = (str(tenant_id), str(target_id))
         with self._lock:
-            assignment = self._registry.pop(key, None)
-            if assignment is None:
-                return
-            self._ports.pop(assignment.cdp_port, None)
-            self._profile_keys.pop(_profile_key(assignment.profile_dir), None)
+            _assignment, process = self._release_key_locked(key)
+        if process is not None:
+            self._close_process(process)
+
+    def cleanup_idle_profiles(self, *, max_idle_seconds: float) -> list[str]:
+        """Release assignments idle longer than ``max_idle_seconds`` and return released ids."""
+
+        now = self._now()
+        released: list[str] = []
+        processes: list[Any] = []
+        with self._lock:
+            idle_keys = [
+                key
+                for key, assignment in self._registry.items()
+                if now - assignment.last_used_at > max_idle_seconds
+            ]
+            for key in idle_keys:
+                assignment, process = self._release_key_locked(key)
+                if assignment is not None:
+                    released.append(assignment.id)
+                if process is not None:
+                    processes.append(process)
+        for process in processes:
+            self._close_process(process)
+        return released
+
+    def close_all(self) -> None:
+        """Release every assignment and terminate all tracked browser processes."""
+
+        with self._lock:
+            processes = list(self._processes.values())
+            reservations = list(self._reservations.values())
+            self._registry.clear()
+            self._ports.clear()
+            self._profile_keys.clear()
+            self._processes.clear()
+            self._reservations.clear()
+            self._reserved_ports.clear()
+            self._reserved_profile_keys.clear()
+        for reservation in reservations:
+            reservation.set()
+        for process in processes:
+            self._close_process(process)
 
     # ── 건강 점검 / 복구(재시작 bounded + AUTH_REQUIRED 전이) ─────────────────
 
@@ -366,22 +437,43 @@ class BrowserProfileManager:
         last_error: BaseException | None = None
         while attempts < max_attempts:
             attempts += 1
+            launched_processes: list[Any] = []
+
+            def run_command(command: list[str], check: bool) -> Any:
+                runner = self._run_command or _default_run_command
+                result = runner(command, check)
+                if _is_process_handle(result):
+                    launched_processes.append(result)
+                return result
+
             try:
                 self._prepare(
-                    config, run_command=self._run_command, cdp_probe=self._cdp_probe
+                    config, run_command=run_command, cdp_probe=self._cdp_probe
                 )
             except BrowserActionRequiredError:
+                for process in launched_processes:
+                    self._close_process(process)
                 # 로그인 필요 → AUTH_REQUIRED 전이(무한 재시도 금지).
                 self._set_state_obj(key, STATE_AUTH_REQUIRED)
                 with self._lock:
                     return self._registry[key]
             except CdpUnavailableError as exc:
+                for process in launched_processes:
+                    self._close_process(process)
                 last_error = exc
                 if attempts < max_attempts:
                     self._sleep(self._restart_backoff_seconds * attempts)
                 continue
             else:
                 self._set_state_obj(key, STATE_READY)
+                process = launched_processes[-1] if launched_processes else None
+                old_process = None
+                if process is not None:
+                    with self._lock:
+                        old_process = self._processes.get(key)
+                        self._processes[key] = process
+                if old_process is not None and old_process is not process:
+                    self._close_process(old_process)
                 with self._lock:
                     return self._registry[key]
 
@@ -425,3 +517,100 @@ class BrowserProfileManager:
             if assignment is None:
                 return
             self._registry[key] = replace(assignment, state=state)
+
+    def _release_key_locked(self, key: tuple[str, str]) -> tuple[ProfileAssignment | None, Any | None]:
+        assignment = self._registry.pop(key, None)
+        if assignment is None:
+            return None, None
+        self._ports.pop(assignment.cdp_port, None)
+        self._profile_keys.pop(_profile_key(assignment.profile_dir), None)
+        process = self._processes.pop(key, None)
+        return assignment, process
+
+    def _enforce_max_profiles_locked(self) -> list[Any]:
+        processes: list[Any] = []
+        if self._max_profiles is None:
+            return processes
+        while self._reserved_profile_count_locked() >= self._max_profiles and self._registry:
+            oldest_key = min(
+                self._registry,
+                key=lambda key: self._registry[key].last_used_at,
+            )
+            _assignment, process = self._release_key_locked(oldest_key)
+            if process is not None:
+                processes.append(process)
+        if self._reserved_profile_count_locked() >= self._max_profiles:
+            raise BrowserLaunchError(
+                "프로필 최대 개수 초과: 예약된 프로필이 한도에 도달해 이 대상은 시작하지 않습니다."
+            )
+        return processes
+
+    def _reserved_profile_count_locked(self) -> int:
+        return len(self._registry) + len(self._reservations)
+
+    def _reserve_launch_locked(
+        self, key: tuple[str, str], port: int, profile_key: str
+    ) -> None:
+        owner = self._ports.get(port) or self._reserved_ports.get(port)
+        if owner is not None and owner != key:
+            raise BrowserLaunchError(
+                "CDP 포트 중복: 이미 다른 대상에 할당된 포트라 이 대상은 시작하지 않습니다."
+            )
+        owner = self._profile_keys.get(profile_key) or self._reserved_profile_keys.get(
+            profile_key
+        )
+        if owner is not None and owner != key:
+            raise BrowserLaunchError(
+                "프로필 중복: 이미 다른 대상에 할당된 프로필이라 이 대상은 시작하지 않습니다."
+            )
+        self._reservations[key] = threading.Event()
+        self._reserved_ports[port] = key
+        self._reserved_profile_keys[profile_key] = key
+
+    def _clear_reservation_locked(
+        self, key: tuple[str, str], port: int, profile_key: str
+    ) -> None:
+        self._reservations.pop(key, None)
+        if self._reserved_ports.get(port) == key:
+            self._reserved_ports.pop(port, None)
+        if self._reserved_profile_keys.get(profile_key) == key:
+            self._reserved_profile_keys.pop(profile_key, None)
+
+    def _close_process(self, process: Any) -> None:
+        try:
+            poll = getattr(process, "poll", None)
+            if callable(poll) and poll() is not None:
+                return
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                terminate()
+            wait = getattr(process, "wait", None)
+            if callable(wait):
+                wait(timeout=DEFAULT_BROWSER_PROCESS_CLOSE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self._kill_process(process)
+        except Exception:  # noqa: BLE001 - cleanup must not break agent loop.
+            if self._log is not None:
+                self._log(redact("browser process cleanup failed"))
+
+    def _kill_process(self, process: Any) -> None:
+        try:
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                kill()
+            wait = getattr(process, "wait", None)
+            if callable(wait):
+                wait(timeout=DEFAULT_BROWSER_PROCESS_CLOSE_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 - cleanup must not break agent loop.
+            if self._log is not None:
+                self._log(redact("browser process kill failed"))
+
+
+def _default_run_command(command: list[str], check: bool) -> Any:
+    if check:
+        return subprocess.run(command, check=True)
+    return subprocess.Popen(command)
+
+
+def _is_process_handle(value: Any) -> bool:
+    return any(callable(getattr(value, name, None)) for name in ("terminate", "kill", "poll"))

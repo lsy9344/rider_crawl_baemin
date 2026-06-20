@@ -148,6 +148,37 @@ def test_ui_settings_save_all_and_load_all_round_trip(tmp_path):
     assert loaded[1].browser_user_data_dir == Path("runtime/browser-profile-2")
 
 
+def test_save_all_preserves_settings_beyond_rendered_tabs(tmp_path):
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    crawlings = []
+    for index in range(1, 11):
+        crawlings.append(
+            {
+                "performance_url": f"https://example.test/{index}",
+                "monitoring_target_id": f"mt-{index}",
+                "customer_id": f"cust-{index}",
+                "platform_account_id": f"pa-{index}",
+                "legacy_alias": f"크롤링{index}",
+                "telegram_bot_token_ref": f"local:mt-{index}/telegram_bot_token",
+            }
+        )
+    path.write_text(json.dumps({"crawlings": crawlings}, ensure_ascii=False), encoding="utf-8")
+    backend.put("tok-10", ref="local:mt-10/telegram_bot_token")
+    store = UiSettingsStore(path, backend)
+
+    rendered_tabs = store.load_all(max_tabs=9)
+    rendered_tabs[0].telegram_chat_id = "-100999"
+    store.save_all(rendered_tabs)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert len(saved["crawlings"]) == 10
+    assert saved["crawlings"][0]["telegram_chat_id"] == "-100999"
+    assert saved["crawlings"][9]["performance_url"] == "https://example.test/10"
+    assert saved["crawlings"][9]["telegram_bot_token_ref"] == "local:mt-10/telegram_bot_token"
+    assert backend.resolve("local:mt-10/telegram_bot_token") == "tok-10"
+
+
 def test_ui_settings_load_keeps_legacy_minute_interval(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(
@@ -1025,6 +1056,25 @@ def test_verification_email_app_password_is_ref_only_in_settings_json(tmp_path):
     assert "imap-pw-fake" not in text
     assert "verification_email_app_password_ref" in text
     assert backend.resolve(settings.verification_email_app_password_ref) == "imap-pw-fake"
+
+
+def test_verification_email_address_is_migrated_to_secret_ref(tmp_path):
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"performance_url": "https://example.test/x", "monitoring_target_id": "mt-1",'
+        ' "verification_email_address": "rider@naver.com"}',
+        encoding="utf-8",
+    )
+    store = UiSettingsStore(path, backend)
+
+    loaded = store.load()
+
+    assert loaded.verification_email_address == "rider@naver.com"
+    text = path.read_text(encoding="utf-8")
+    assert "rider@naver.com" not in text
+    assert "verification_email_address_ref" in text
+    assert backend.resolve(loaded.verification_email_address_ref) == "rider@naver.com"
 
 
 def test_round_trip_does_not_reissue_ref_when_already_migrated(tmp_path):

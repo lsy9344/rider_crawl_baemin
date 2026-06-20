@@ -38,11 +38,14 @@ from .backend import (
     ClaimedJobRecord,
     CompleteOutcome,
     QueueBackend,
+    RetryDecider,
 )
+from .retry import default_retry_decider
 from .states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
     JOB_TYPE_KAKAO_SEND,
@@ -52,6 +55,7 @@ from .states import (
 _MAX_EVENT_TEXT_LENGTH = 200
 _MAX_EVENT_MESSAGE_LENGTH = 500
 _MAX_EVENT_ARTIFACTS = 5
+STALE_LEASE_ERROR_CODE = "CRAWL_TIMEOUT"
 
 
 def _as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
@@ -154,8 +158,14 @@ def _platform_account_auth_update(
 class PostgresQueueBackend(QueueBackend):
     """``jobs`` 테이블 기반 ``QueueBackend``(``FOR UPDATE SKIP LOCKED`` 정본)."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        retry_decider: RetryDecider | None = default_retry_decider,
+    ) -> None:
         self._session_factory = session_factory
+        self._retry_decider = retry_decider
 
     async def enqueue(
         self,
@@ -163,6 +173,7 @@ class PostgresQueueBackend(QueueBackend):
         job_type: str,
         target_id: str | None = None,
         payload_json: dict[str, Any] | None = None,
+        assigned_agent_id: str | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -173,6 +184,7 @@ class PostgresQueueBackend(QueueBackend):
                     id=job_id,
                     type=job_type,
                     target_id=_as_uuid(target_id),
+                    assigned_agent_id=_as_uuid(assigned_agent_id),
                     payload_json=payload_json,
                     agent_id=None,
                     status=JOB_STATUS_PENDING,
@@ -204,6 +216,8 @@ class PostgresQueueBackend(QueueBackend):
                     Job.status == JOB_STATUS_PENDING,
                     (Job.run_after.is_(None)) | (Job.run_after <= now),
                     Job.type.in_(caps),
+                    (Job.assigned_agent_id.is_(None))
+                    | (Job.assigned_agent_id == _as_uuid(agent_id)),
                 )
                 .order_by(Job.run_after.asc().nullsfirst())
                 .limit(max_jobs)
@@ -238,6 +252,10 @@ class PostgresQueueBackend(QueueBackend):
         status: str,
         result_json: dict[str, Any] | None = None,
         error_code: str | None = None,
+        duration_ms: int | None = None,
+        result_schema_version: str | None = None,
+        completion_id: str | None = None,
+        completion_payload_hash: str | None = None,
         now: datetime,
     ) -> CompleteOutcome:
         async with self._session_factory() as session:
@@ -248,17 +266,54 @@ class PostgresQueueBackend(QueueBackend):
             job = (await session.execute(stmt)).scalar_one_or_none()
             if job is None:
                 return CompleteOutcome(COMPLETE_NOT_FOUND, job_id)
+            if completion_id and job.completion_id == completion_id:
+                if (
+                    job.agent_id == _as_uuid(agent_id)
+                    and job.completion_payload_hash == completion_payload_hash
+                    and job.status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED)
+                ):
+                    await session.rollback()
+                    return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=job.status)
+                await session.rollback()
+                return CompleteOutcome(COMPLETE_LEASE_LOST, job_id)
             owner_mismatch = job.agent_id != _as_uuid(agent_id)
             not_in_flight = job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
             expired = job.lease_expires_at is None or now >= job.lease_expires_at
             if owner_mismatch or not_in_flight or expired:
                 await session.rollback()
                 return CompleteOutcome(COMPLETE_LEASE_LOST, job_id)
+            next_attempt = job.attempts + 1
+            retry_decision = (
+                self._retry_decider(error_code, next_attempt, now)
+                if status == JOB_STATUS_FAILED and self._retry_decider is not None
+                else None
+            )
+            if retry_decision is not None:
+                assert_transition(job.status, JOB_STATUS_RETRY)
+                assert_transition(JOB_STATUS_RETRY, JOB_STATUS_PENDING)
+                job.status = JOB_STATUS_PENDING
+                job.attempts = next_attempt
+                job.run_after = retry_decision.run_after
+                job.agent_id = None
+                job.lease_expires_at = None
+                job.claimed_at = None
+                job.result_json = result_json
+                job.error_code = error_code
+                job.last_failed_at = now
+                await session.commit()
+                return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=JOB_STATUS_PENDING)
             assert_transition(job.status, status)
             job.status = status
             job.result_json = result_json
             job.error_code = error_code
             job.lease_expires_at = None
+            job.completed_at = now
+            if status == JOB_STATUS_FAILED:
+                job.last_failed_at = now
+            job.duration_ms = duration_ms
+            job.result_schema_version = result_schema_version
+            job.completion_id = completion_id
+            job.completion_payload_hash = completion_payload_hash
             await self._mark_auth_required_account(
                 session,
                 job=job,
@@ -273,6 +328,33 @@ class PostgresQueueBackend(QueueBackend):
             )
             await session.commit()
             return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=status)
+
+    async def count_in_flight(
+        self,
+        *,
+        agent_id: str,
+        job_types: Sequence[str] = (),
+        now: datetime | None = None,
+    ) -> int:
+        from sqlalchemy import func
+
+        agent_uuid = _safe_uuid(agent_id)
+        if agent_uuid is None:
+            return 0
+        stmt = (
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.agent_id == agent_uuid,
+                Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
+            )
+        )
+        if job_types:
+            stmt = stmt.where(Job.type.in_(list(job_types)))
+        if now is not None:
+            stmt = stmt.where(Job.lease_expires_at.is_not(None), Job.lease_expires_at > now)
+        async with self._session_factory() as session:
+            return int((await session.execute(stmt)).scalar_one() or 0)
 
     async def _mark_auth_required_account(
         self,
@@ -354,43 +436,83 @@ class PostgresQueueBackend(QueueBackend):
         lease_seconds: float,
         now: datetime,
     ) -> bool:
-        async with self._session_factory() as session:
-            stmt = (
-                select(Job).where(Job.id == _as_uuid(job_id)).with_for_update()
-            )
-            job = (await session.execute(stmt)).scalar_one_or_none()
-            if (
-                job is None
-                or job.agent_id != _as_uuid(agent_id)
-                or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
-                or job.lease_expires_at is None
-                or now >= job.lease_expires_at
-            ):
-                await session.rollback()
-                return False
-            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
-            await session.commit()
-            return True
+        extended = await self.extend_leases(
+            job_ids=[job_id],
+            agent_id=agent_id,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
+        return job_id in extended
 
-    async def recover_stale(self, *, now: datetime) -> int:
+    async def extend_leases(
+        self,
+        *,
+        job_ids: Sequence[str],
+        agent_id: str,
+        lease_seconds: float,
+        now: datetime,
+    ) -> set[str]:
+        unique_job_ids = list(dict.fromkeys(job_ids))
+        job_uuids = [job_id for job_id in (_safe_uuid(value) for value in unique_job_ids) if job_id]
+        agent_uuid = _safe_uuid(agent_id)
+        if not job_uuids or agent_uuid is None:
+            return set()
         async with self._session_factory() as session:
             stmt = (
                 update(Job)
+                .where(
+                    Job.id.in_(job_uuids),
+                    Job.agent_id == agent_uuid,
+                    Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
+                    Job.lease_expires_at.is_not(None),
+                    Job.lease_expires_at > now,
+                )
+                .values(lease_expires_at=now + timedelta(seconds=lease_seconds))
+                .returning(Job.id)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return {str(job_id) for job_id in result.scalars().all()}
+
+    async def recover_stale(self, *, now: datetime, batch_size: int | None = None) -> int:
+        async with self._session_factory() as session:
+            stmt = (
+                select(Job)
                 .where(
                     Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
                     Job.lease_expires_at.is_not(None),
                     Job.lease_expires_at <= now,
                 )
-                .values(
-                    status=JOB_STATUS_PENDING,
-                    agent_id=None,
-                    lease_expires_at=None,
-                    claimed_at=None,
-                )
+                .order_by(Job.lease_expires_at.asc(), Job.id.asc())
+                .with_for_update(skip_locked=True)
             )
-            result = await session.execute(stmt)
+            if batch_size is not None and batch_size > 0:
+                stmt = stmt.limit(batch_size)
+            rows = (await session.execute(stmt)).scalars().all()
+            for job in rows:
+                next_attempt = int(job.attempts or 0) + 1
+                retry_decision = (
+                    self._retry_decider(STALE_LEASE_ERROR_CODE, next_attempt, now)
+                    if self._retry_decider is not None
+                    else None
+                )
+                if retry_decision is not None:
+                    assert_transition(job.status, JOB_STATUS_PENDING)
+                    job.status = JOB_STATUS_PENDING
+                    job.run_after = retry_decision.run_after
+                else:
+                    assert_transition(job.status, JOB_STATUS_FAILED)
+                    job.status = JOB_STATUS_FAILED
+                    job.run_after = None
+                    job.completed_at = now
+                job.attempts = next_attempt
+                job.agent_id = None
+                job.lease_expires_at = None
+                job.claimed_at = None
+                job.error_code = STALE_LEASE_ERROR_CODE
+                job.last_failed_at = now
             await session.commit()
-            return int(result.rowcount or 0)
+            return len(rows)
 
     async def restore_claimed_after_snapshot_failure(
         self,
@@ -452,3 +574,58 @@ class PostgresQueueBackend(QueueBackend):
         async with self._session_factory() as session:
             session.add(audit)
             await session.commit()
+
+    async def emit_event_for_in_flight_job(
+        self,
+        *,
+        job_id: str,
+        event_type: str,
+        severity: str,
+        message_redacted: str,
+        artifact_refs: Sequence[Any] = (),
+        agent_id: str,
+        now: datetime,
+    ) -> bool:
+        job_uuid = _safe_uuid(job_id)
+        agent_uuid = _safe_uuid(agent_id)
+        if job_uuid is None or agent_uuid is None:
+            return False
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(Job)
+                .where(
+                    Job.id == job_uuid,
+                    Job.agent_id == agent_uuid,
+                    Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
+                    Job.lease_expires_at.is_not(None),
+                    Job.lease_expires_at > now,
+                )
+                .with_for_update()
+            )
+            job = (await session.execute(stmt)).scalar_one_or_none()
+            if job is None:
+                await session.rollback()
+                return False
+            diff = _agent_event_diff(
+                job_id=job_id,
+                agent_id=agent_id,
+                severity=severity,
+                message_redacted=message_redacted,
+                artifact_refs=artifact_refs,
+            )
+            session.add(
+                AuditLog(
+                    actor_id=agent_uuid,
+                    action=_bounded_event_text(event_type),
+                    target_type="JOB",
+                    target_id=job_uuid,
+                    diff_redacted=diff,
+                    created_at=now,
+                    source="AGENT",
+                    reason=diff["message_redacted"],
+                    result=AuditResult.SUCCESS.value,
+                )
+            )
+            await session.commit()
+            return True

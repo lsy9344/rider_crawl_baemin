@@ -148,7 +148,12 @@ class DashboardRepository(abc.ABC):
 
     @abc.abstractmethod
     async def target_health(
-        self, *, tenant_id: str, now: datetime
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[TargetHealthFacts]:
         """tenant 의 대상별 파생 집계 facts(AC1·AC2·AC3 입력)."""
 
@@ -337,11 +342,21 @@ class InMemoryDashboardRepository(DashboardRepository):
 
     # ── read 포트(런타임 경로) ────────────────────────────────────────────────
     async def target_health(
-        self, *, tenant_id: str, now: datetime
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[TargetHealthFacts]:
         if tenant_id == ALL_TENANTS:
-            return [row for rows in self._targets.values() for row in rows]
-        return list(self._targets.get(tenant_id, []))
+            rows = [row for values in self._targets.values() for row in values]
+        else:
+            rows = list(self._targets.get(tenant_id, []))
+        rows = rows[max(0, offset):]
+        if limit is not None:
+            rows = rows[: max(0, limit)]
+        return rows
 
     async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
         return list(self._agents)

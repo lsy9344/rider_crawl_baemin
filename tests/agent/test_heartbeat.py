@@ -214,6 +214,31 @@ def test_send_heartbeat_parses_response():
     assert result.commands == [{"type": "noop"}]
 
 
+def test_agent_surfaces_lease_extension_degraded() -> None:
+    response = {
+        **CANNED_RESPONSE,
+        "lease_extension": {
+            "status": "degraded",
+            "extended_job_ids": ["job-ok"],
+            "failed_job_ids": ["job-lost"],
+        },
+    }
+    logs: list[str] = []
+    reporter = HeartbeatReporter(
+        _IDENTITY,
+        transport=FakeTransport(response=response),
+        log=logs.append,
+    )
+
+    result = reporter.report_once()
+
+    assert result is not None
+    assert result.lease_extension["failed_job_ids"] == ["job-lost"]
+    assert reporter.last_error_event is not None
+    assert reporter.last_error_event["code"] == "AGENT_HEARTBEAT_LEASE_EXTENSION_DEGRADED"
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
 def test_send_heartbeat_missing_fields_parse_to_safe_defaults():
     result = send_heartbeat(_IDENTITY, transport=FakeTransport(response={}))
 

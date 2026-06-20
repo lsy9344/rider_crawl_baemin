@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DB 연결 실패</title>
+  <style>
+    body { margin: 0; font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #111; color: #f4f4f5; }
+    main { max-width: 680px; margin: 12vh auto; padding: 24px; }
+    h1 { font-size: 32px; margin: 0 0 12px; }
+    p, li { font-size: 16px; line-height: 1.65; color: #d4d4d8; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #fbbf24; }
+    a, button { font: inherit; }
+    button { min-height: 40px; padding: 8px 14px; border: 1px solid #555; border-radius: 6px; background: #27272a; color: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DB 연결 실패</h1>
+    <p>운영 데이터베이스에 연결하지 못해 관리자 화면을 열 수 없습니다.</p>
+    <ul>
+      <li><code>DATABASE_URL</code> 설정이 있는지 확인하세요.</li>
+      <li>DB 실행 상태와 네트워크 연결을 확인하세요.</li>
+      <li>문제가 해결된 뒤 아래 버튼으로 재시도하세요.</li>
+    </ul>
+    <button type="button" onclick="location.reload()">재시도</button>
+  </main>
+</body>
+</html>

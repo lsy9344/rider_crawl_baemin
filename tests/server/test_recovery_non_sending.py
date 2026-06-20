@@ -79,7 +79,17 @@ def test_admin_mfa_required_defaults_true() -> None:
     assert Settings.from_env({"RIDER_ADMIN_MFA_REQUIRED": "false"}).admin_mfa_required is False
 
 
+def test_malformed_admin_mfa_required_fails_closed() -> None:
+    with pytest.raises(ValueError, match="RIDER_ADMIN_MFA_REQUIRED"):
+        Settings.from_env({"RIDER_ADMIN_MFA_REQUIRED": "ture"})
+
+
 def test_admin_public_access_defaults_off_and_parses_truthy() -> None:
     assert Settings.from_env({}).admin_public_access is False
     assert Settings.from_env({"RIDER_ADMIN_PUBLIC_ACCESS": "1"}).admin_public_access is True
     assert Settings.from_env({"RIDER_ADMIN_PUBLIC_ACCESS": "false"}).admin_public_access is False
+
+
+def test_malformed_public_access_fails_closed() -> None:
+    with pytest.raises(ValueError, match="RIDER_ADMIN_PUBLIC_ACCESS"):
+        Settings.from_env({"RIDER_ADMIN_PUBLIC_ACCESS": "treu"})

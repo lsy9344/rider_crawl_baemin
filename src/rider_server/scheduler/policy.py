@@ -18,7 +18,7 @@ job type 상수는 :mod:`rider_server.queue.states` 미러 6종에서 쓴다(``r
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from rider_server.domain import (
@@ -279,6 +279,8 @@ class CapacityPolicy:
     aggregate_capacity: int
     aggregate_in_flight: int
     capabilities: frozenset[str]
+    capacity_by_job_type: dict[str, int] = field(default_factory=dict)
+    in_flight_by_job_type: dict[str, int] = field(default_factory=dict)
 
 
 def can_admit(capacity: CapacityPolicy, job_type: str) -> bool:
@@ -291,4 +293,8 @@ def can_admit(capacity: CapacityPolicy, job_type: str) -> bool:
 
     if job_type not in capacity.capabilities:
         return False
+    if capacity.capacity_by_job_type or capacity.in_flight_by_job_type:
+        job_capacity = capacity.capacity_by_job_type.get(job_type, 0)
+        job_in_flight = capacity.in_flight_by_job_type.get(job_type, 0)
+        return job_in_flight < job_capacity
     return capacity.aggregate_in_flight < capacity.aggregate_capacity

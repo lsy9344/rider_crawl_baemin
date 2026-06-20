@@ -53,6 +53,7 @@ from .metrics.service import (
 from .queue.backend import QueueBackend
 from .queue.memory_queue import InMemoryQueueBackend
 from .queue.postgres_queue import PostgresQueueBackend
+from .runtime import RuntimeDeps
 from .security.access import _default_resolve_admin_principal
 from .security.principal import AdminPrincipal, AdminRole
 from .services.admin_action_repository_postgres import PostgresAdminActionRepository
@@ -78,6 +79,8 @@ from .services.admin_entity_service import (
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
 from .services.channel_repository_postgres import PostgresChannelRepository
 from .services.dispatch_fanout_service import DispatchJob
+from .services.dispatch_worker import TelegramDispatchWorker
+from .services.job_completion_service import JobCompletionService
 from .services.job_result_ingest_service import JobResultIngestService
 from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .services.telegram_central_dispatch import CentralTelegramSender
@@ -90,7 +93,11 @@ def _build_postgres_runtime(settings: Settings) -> tuple[Any | None, Any | None]
 
     if not settings.database_url:
         return None, None
-    engine = create_engine(settings.database_url)
+    engine = create_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     return engine, create_session_factory(engine)
 
 
@@ -102,7 +109,11 @@ def _postgres_session_factory(
         return None
     if session_factory is not None:
         return session_factory
-    engine = create_engine(settings.database_url)
+    engine = create_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     return create_session_factory(engine)
 
 
@@ -214,11 +225,7 @@ def _default_job_result_ingest_service(
 
     if settings.database_url:
         factory = _postgres_session_factory(settings, session_factory)
-        provider = provider or _default_tenant_telegram_provider(settings, factory)
-        return PostgresSnapshotIngestRepository(
-            factory,
-            telegram_sender=_default_telegram_sender(settings, provider),
-        )
+        return PostgresSnapshotIngestRepository(factory)
     return None
 
 
@@ -389,6 +396,32 @@ def _default_telegram_sender(
     return send
 
 
+def _default_dispatch_worker_factory(
+    settings: Settings,
+    session_factory: Any | None = None,
+    provider: TenantTelegramConfigProvider | None = None,
+):
+    """Return an explicit Telegram dispatch worker factory for CLI/process owners."""
+
+    if not settings.database_url:
+        return None
+    factory = _postgres_session_factory(settings, session_factory)
+
+    def build() -> TelegramDispatchWorker:
+        sender = _default_telegram_sender(settings, provider)
+        if sender is None:
+            raise RuntimeError("telegram sender is not configured")
+        return TelegramDispatchWorker(
+            telegram_sender=sender,
+            session_factory=factory,
+            batch_size=settings.dispatch_batch_size,
+            max_attempts=settings.dispatch_max_attempts,
+            lock_timeout_seconds=settings.dispatch_lock_timeout_seconds,
+        )
+
+    return build
+
+
 def _iso_utc_now() -> str:
     """현재 시각을 ISO 8601 UTC(``...Z``) 문자열로 — epoch 정수 혼용 금지(ADD-13)."""
     return (
@@ -404,6 +437,13 @@ def _require_database_for_production(settings: Settings) -> None:
 
     if settings.app_env.strip().lower() == "production" and not settings.database_url:
         raise RuntimeError("DATABASE_URL is required when APP_ENV=production")
+
+
+def _require_secure_admin_for_production(settings: Settings) -> None:
+    """운영 환경에서 principal 없는 public admin 모드를 막는다."""
+
+    if settings.app_env.strip().lower() == "production" and settings.admin_public_access:
+        raise RuntimeError("RIDER_ADMIN_PUBLIC_ACCESS must be disabled when APP_ENV=production")
 
 
 def _resolve_public_admin_principal(request: Request) -> AdminPrincipal:
@@ -459,6 +499,7 @@ def create_app(
     app = FastAPI(title="rider_server", version="0.1.0")
     app.state.settings = settings or Settings.from_env()
     _require_database_for_production(app.state.settings)
+    _require_secure_admin_for_production(app.state.settings)
     db_engine, db_session_factory = _build_postgres_runtime(app.state.settings)
     app.state.db_engine = db_engine
     app.state.db_session_factory = db_session_factory
@@ -521,6 +562,7 @@ def create_app(
     )
     app.state.admin_ip_allowlist = app.state.settings.admin_ip_allowlist
     app.state.admin_allowed_origins = app.state.settings.admin_allowed_origins
+    app.state.trusted_proxy_cidrs = app.state.settings.admin_trusted_proxy_cidrs
     app.state.admin_mfa_required = app.state.settings.admin_mfa_required
     app.state.sending_enabled = app.state.settings.sending_enabled
     app.state.agent_token_service = agent_token_service or AgentTokenService(
@@ -539,6 +581,32 @@ def create_app(
             db_session_factory,
             app.state.tenant_telegram_provider,
         )
+    )
+    app.state.job_completion_service = JobCompletionService(
+        queue_backend=app.state.queue_backend,
+        ingest_service=app.state.job_result_ingest_service,
+    )
+    app.state.dispatch_worker_factory = _default_dispatch_worker_factory(
+        app.state.settings,
+        db_session_factory,
+        app.state.tenant_telegram_provider,
+    )
+    app.state.container = RuntimeDeps(
+        settings=app.state.settings,
+        db_engine=app.state.db_engine,
+        db_session_factory=app.state.db_session_factory,
+        queue_backend=app.state.queue_backend,
+        channel_repository=app.state.channel_repository,
+        tenant_telegram_provider=app.state.tenant_telegram_provider,
+        dashboard_repository=app.state.dashboard_repository,
+        metrics_repository=app.state.metrics_repository,
+        admin_action_service=app.state.admin_action_service,
+        admin_entity_service=app.state.admin_entity_service,
+        agent_token_service=app.state.agent_token_service,
+        agent_registry=app.state.agent_registry,
+        job_result_ingest_service=app.state.job_result_ingest_service,
+        job_completion_service=app.state.job_completion_service,
+        dispatch_worker_factory=app.state.dispatch_worker_factory,
     )
 
     # --- 운영 엔드포인트 (root-level, no /v1/) -----------------------------

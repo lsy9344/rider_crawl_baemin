@@ -624,3 +624,7 @@ curl http://SERVER/metrics
 - Do not claim "hundreds of concurrent crawls" until real browser/process load tests prove it.
 - The safe claim after these tasks should be: "hundreds of targets/jobs are managed safely; actual concurrent crawls are bounded by reported Agent capacity."
 - Keep `max_jobs=1` as the default until profile cleanup and hard timeout/process isolation are proven.
+
+## 작업 완료
+
+작업지시서의 구현 항목과 검증 명령 실행을 끝냈습니다.

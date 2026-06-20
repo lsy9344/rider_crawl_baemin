@@ -248,10 +248,22 @@ def map_active_tab(settings: UiSettings, *, created_at: datetime) -> TargetMappi
         tenant_id=settings.customer_id,
         platform=_platform_from_name(settings.platform_name),
         label=settings.legacy_alias,
-        username=settings.coupang_login_id or settings.coupang_login_id_ref or "",
-        password=settings.coupang_login_password or settings.coupang_login_password_ref or "",
+        username=_secret_ref_only(
+            settings,
+            plaintext_attr="coupang_login_id",
+            ref_attr="coupang_login_id_ref",
+        ),
+        password=_secret_ref_only(
+            settings,
+            plaintext_attr="coupang_login_password",
+            ref_attr="coupang_login_password_ref",
+        ),
         verification_email_address=settings.verification_email_address,
-        verification_email_app_password=settings.verification_email_app_password,
+        verification_email_app_password=_secret_ref_only(
+            settings,
+            plaintext_attr="verification_email_app_password",
+            ref_attr="verification_email_app_password_ref",
+        ),
         verification_email_subject_keyword=settings.verification_email_subject_keyword,
         verification_email_sender_keyword=settings.verification_email_sender_keyword,
         auth_state=BaeminAuthState.UNKNOWN,
@@ -272,6 +284,16 @@ def map_active_tab(settings: UiSettings, *, created_at: datetime) -> TargetMappi
         platform_account=platform_account,
         monitoring_target=monitoring_target,
     )
+
+
+def _secret_ref_only(settings: UiSettings, *, plaintext_attr: str, ref_attr: str) -> str:
+    ref = str(getattr(settings, ref_attr, "") or "").strip()
+    if ref:
+        return ref
+    plaintext = str(getattr(settings, plaintext_attr, "") or "").strip()
+    if plaintext:
+        raise ValueError(f"migration secret ref missing for {plaintext_attr}")
+    return ""
 
 
 def _platform_from_name(platform_name: str) -> Platform:

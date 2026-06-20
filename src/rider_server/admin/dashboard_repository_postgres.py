@@ -80,7 +80,12 @@ class PostgresDashboardRepository(DashboardRepository):
         self._session_factory = session_factory
 
     async def target_health(
-        self, *, tenant_id: str, now: datetime
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[TargetHealthFacts]:
         if not tenant_id.strip():
             return []
@@ -110,18 +115,30 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             .join(Tenant, MonitoringTarget.tenant_id == Tenant.id)
             .where(*where_clauses)
+            .order_by(Tenant.name.asc(), MonitoringTarget.name.asc(), MonitoringTarget.id.asc())
+            .offset(max(0, offset))
         )
+        if limit is not None:
+            base_stmt = base_stmt.limit(max(0, limit))
         facts: list[TargetHealthFacts] = []
         async with self._session_factory() as session:
             rows = (await session.execute(base_stmt)).all()
+            target_ids = [str(row.id) for row in rows]
+            account_ids = [str(row.account_id) for row in rows]
+            last_success_by_target = await self._last_collect_successes(
+                session, target_ids
+            )
+            last_delivery_by_target = await self._last_delivery_successes(
+                session, target_ids
+            )
+            latest_failure_by_target = await self._latest_failure_codes(
+                session, target_ids
+            )
+            pending_account_ids = await self._auth_session_pending_account_ids(
+                session, account_ids
+            )
             for row in rows:
                 target_id = str(row.id)
-                last_success_at = await self._last_collect_success(session, target_id)
-                last_delivery_at = await self._last_delivery_success(session, target_id)
-                last_failure_code = await self._latest_failure_code(session, target_id)
-                auth_pending = await self._auth_session_pending(
-                    session, str(row.account_id)
-                )
                 facts.append(
                     TargetHealthFacts(
                         target_id=target_id,
@@ -131,15 +148,98 @@ class PostgresDashboardRepository(DashboardRepository):
                         center_name=row.center_name,
                         platform=row.platform,
                         interval_minutes=row.interval_minutes,
-                        last_success_at=last_success_at,
-                        last_delivery_at=last_delivery_at,
-                        last_failure_code=last_failure_code,
+                        last_success_at=last_success_by_target.get(target_id),
+                        last_delivery_at=last_delivery_by_target.get(target_id),
+                        last_failure_code=latest_failure_by_target.get(target_id),
                         account_auth_state=row.auth_state,
                         lifecycle_state=row.lifecycle_state,
-                        auth_session_pending=auth_pending,
+                        auth_session_pending=str(row.account_id) in pending_account_ids,
                     )
                 )
         return facts
+
+    async def _last_collect_successes(
+        self, session: AsyncSession, target_ids: list[str]
+    ) -> dict[str, datetime]:
+        if not target_ids:
+            return {}
+        stmt = (
+            select(Snapshot.target_id, func.max(Snapshot.collected_at))
+            .where(
+                Snapshot.target_id.in_(target_ids),
+                Snapshot.quality_state == SnapshotQualityState.OK.value,
+            )
+            .group_by(Snapshot.target_id)
+        )
+        return {
+            str(target_id): collected_at
+            for target_id, collected_at in (await session.execute(stmt)).all()
+        }
+
+    async def _last_delivery_successes(
+        self, session: AsyncSession, target_ids: list[str]
+    ) -> dict[str, datetime]:
+        if not target_ids:
+            return {}
+        stmt = (
+            select(Snapshot.target_id, func.max(DeliveryLog.sent_at))
+            .join(Message, DeliveryLog.message_id == Message.id)
+            .join(Snapshot, Message.snapshot_id == Snapshot.id)
+            .where(
+                Snapshot.target_id.in_(target_ids),
+                DeliveryLog.status == DeliveryStatus.SENT.value,
+            )
+            .group_by(Snapshot.target_id)
+        )
+        return {
+            str(target_id): sent_at
+            for target_id, sent_at in (await session.execute(stmt)).all()
+        }
+
+    async def _latest_failure_codes(
+        self, session: AsyncSession, target_ids: list[str]
+    ) -> dict[str, str]:
+        if not target_ids:
+            return {}
+        job_stmt = (
+            select(
+                Job.target_id,
+                Job.error_code,
+                func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
+            )
+            .where(Job.target_id.in_(target_ids), Job.error_code.is_not(None))
+        )
+        delivery_stmt = (
+            select(Snapshot.target_id, DeliveryLog.error_code, DeliveryLog.sent_at.label("ts"))
+            .join(Message, DeliveryLog.message_id == Message.id)
+            .join(Snapshot, Message.snapshot_id == Snapshot.id)
+            .where(
+                Snapshot.target_id.in_(target_ids),
+                DeliveryLog.error_code.is_not(None),
+            )
+        )
+        latest: dict[str, tuple[str, datetime | None]] = {}
+        for target_id, error_code, ts in (await session.execute(job_stmt)).all():
+            _set_latest(latest, str(target_id), error_code, ts)
+        for target_id, error_code, ts in (await session.execute(delivery_stmt)).all():
+            _set_latest(latest, str(target_id), error_code, ts)
+        return {target_id: code for target_id, (code, _ts) in latest.items()}
+
+    async def _auth_session_pending_account_ids(
+        self, session: AsyncSession, account_ids: list[str]
+    ) -> set[str]:
+        if not account_ids:
+            return set()
+        stmt = (
+            select(AuthSession.account_id)
+            .where(
+                AuthSession.account_id.in_(account_ids),
+                AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
+                AuthSession.resolved_at.is_(None),
+            )
+            .distinct()
+        )
+        return {str(account_id) for account_id in (await session.execute(stmt)).scalars()}
 
     async def _last_collect_success(
         self, session: AsyncSession, target_id: str
@@ -168,15 +268,19 @@ class PostgresDashboardRepository(DashboardRepository):
     async def _latest_failure_code(
         self, session: AsyncSession, target_id: str
     ) -> str | None:
-        # jobs(활동시각=claimed_at/run_after 근사)과 delivery_logs(sent_at) 중 더 최신 non-null
-        # error_code 를 고른다. 종료시각 컬럼 부재(14표) — 근사, 정밀화는 5.9.
+        # jobs 는 실패 발생 시각(last_failed_at)을 우선한다. retry backoff(run_after)는
+        # 미래 재실행 예약시각이라 실패 발생 시각으로 쓰지 않는다.
         job_stmt = (
             select(
                 Job.error_code,
-                func.coalesce(Job.claimed_at, Job.run_after).label("ts"),
+                func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
             )
             .where(Job.target_id == target_id, Job.error_code.is_not(None))
-            .order_by(func.coalesce(Job.claimed_at, Job.run_after).desc().nullslast())
+            .order_by(
+                func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at)
+                .desc()
+                .nullslast()
+            )
             .limit(1)
         )
         delivery_stmt = (
@@ -220,18 +324,20 @@ class PostgresDashboardRepository(DashboardRepository):
         facts: list[AgentHealthFacts] = []
         async with self._session_factory() as session:
             rows = (await session.execute(agents_stmt)).all()
-            for row in rows:
-                current_job_type = (
-                    await session.execute(
-                        select(Job.type)
-                        .where(
-                            Job.agent_id == row.id,
-                            Job.status.in_(_ACTIVE_JOB_STATUSES),
-                        )
-                        .order_by(Job.claimed_at.desc().nullslast())
-                        .limit(1)
+            agent_ids = [str(row.id) for row in rows]
+            current_job_by_agent: dict[str, str] = {}
+            if agent_ids:
+                current_jobs_stmt = (
+                    select(Job.agent_id, Job.type)
+                    .where(
+                        Job.agent_id.in_(agent_ids),
+                        Job.status.in_(_ACTIVE_JOB_STATUSES),
                     )
-                ).scalar_one_or_none()
+                    .order_by(Job.agent_id.asc(), Job.claimed_at.desc().nullslast())
+                )
+                for agent_id, job_type in (await session.execute(current_jobs_stmt)).all():
+                    current_job_by_agent.setdefault(str(agent_id), job_type)
+            for row in rows:
                 data = row.capacity_json or {}
                 capabilities = tuple(data.get("capabilities", []) or [])
                 kakao_status_raw = data.get("kakao_status")
@@ -244,7 +350,7 @@ class PostgresDashboardRepository(DashboardRepository):
                         name=row.name,
                         version=row.version,
                         last_heartbeat_at=row.last_heartbeat_at,
-                        current_job_type=current_job_type,
+                        current_job_type=current_job_by_agent.get(str(row.id)),
                         capabilities=capabilities,
                         kakao_status=kakao_status,
                     )
@@ -262,8 +368,7 @@ class PostgresDashboardRepository(DashboardRepository):
         ]
         telegram_conditions = [
             DeliveryLog.error_code == FailureCategory.TELEGRAM_FAILURE.value,
-            # sent_at 미기록(전송 실패) 도 최근 오류로 포함, 그 외엔 윈도 내만.
-            (DeliveryLog.sent_at.is_(None)) | (DeliveryLog.sent_at >= now - _TELEGRAM_ERROR_WINDOW),
+            DeliveryLog.last_failed_at >= now - _TELEGRAM_ERROR_WINDOW,
         ]
         if tenant_id != ALL_TENANTS:
             kakao_conditions.append(MonitoringTarget.tenant_id == tenant_id)
@@ -377,3 +482,18 @@ def _pick_latest_code(job_row, delivery_row) -> str | None:
     if delivery_ts is not None and (job_ts is None or delivery_ts > job_ts):
         return delivery_row.error_code
     return job_row.error_code
+
+
+def _set_latest(
+    latest: dict[str, tuple[str, datetime | None]],
+    target_id: str,
+    error_code: str,
+    ts: datetime | None,
+) -> None:
+    current = latest.get(target_id)
+    if current is None:
+        latest[target_id] = (error_code, ts)
+        return
+    _code, current_ts = current
+    if ts is not None and (current_ts is None or ts > current_ts):
+        latest[target_id] = (error_code, ts)

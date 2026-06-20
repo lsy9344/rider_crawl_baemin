@@ -8,6 +8,7 @@ auth, and crawl calls are injectable so tests do not open browsers or networks.
 from __future__ import annotations
 
 import dataclasses
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +55,16 @@ ERROR_SECRET_REF_UNRESOLVED = "SECRET_REF_UNRESOLVED"
 
 QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
-_PLAINTEXT_SECRET_KEYS = frozenset[str]()
+_PLAINTEXT_SECRET_KEYS = frozenset(
+    {
+        "username",
+        "password",
+        "coupang_login_id",
+        "coupang_login_password",
+        "verification_email_address",
+        "verification_email_app_password",
+    }
+)
 
 
 class SecretRefUnresolved(RuntimeError):
@@ -70,14 +80,12 @@ class CrawlJobPayload:
     primary_url: str
     expected_display_name: str
     browser_profile_ref: str
-    timeout_seconds: int
+    timeout_seconds: float
     parser_version: str
-    username: str = ""
-    password: str = ""
-    coupang_login_id: str = ""
-    coupang_login_password: str = ""
-    verification_email_address: str = ""
-    verification_email_app_password: str = ""
+    coupang_login_id_ref: str = ""
+    coupang_login_password_ref: str = ""
+    verification_email_address_ref: str = ""
+    verification_email_app_password_ref: str = ""
     verification_email_subject_keyword: str = ""
     verification_email_sender_keyword: str = ""
     coupang_auto_email_2fa_enabled: bool = False
@@ -93,13 +101,18 @@ class CrawlWorker:
         crawl_snapshot: Callable[..., Any] | None = None,
         auth_probe: Callable[[ClaimedJob, AppConfig], str] | None = None,
         secret_resolver: Callable[[str], str | None] | None = None,
+        profile_idle_ttl_seconds: float | None = None,
         log: Callable[[str], None] | None = None,
+        process_boundary_enabled: bool = True,
     ) -> None:
         self._profile_manager = profile_manager
+        self._uses_default_crawl_snapshot = crawl_snapshot is None
         self._crawl_snapshot = crawl_snapshot or reuse_crawl_snapshot
         self._auth_probe = auth_probe
         self._secret_resolver = secret_resolver
+        self._profile_idle_ttl_seconds = profile_idle_ttl_seconds
         self._log = log
+        self._process_boundary_enabled = process_boundary_enabled
 
     def execute(self, job: ClaimedJob) -> JobResult:
         """Execute a supported crawl job or return unsupported for other types."""
@@ -109,20 +122,114 @@ class CrawlWorker:
 
         raw_payload = _raw_payload(job)
         payload = payload_from_job(job)
-        if _plaintext_secret_keys(raw_payload):
-            return make_failure_result(
-                ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
-                "crawl job plaintext secrets are not allowed",
-                result_json={"target_id": payload.target_id, "platform": payload.platform},
-            )
-        if payload.platform not in {"baemin", "coupang"}:
-            return make_failure_result(
-                ERROR_CRAWL_FAILURE,
-                "unsupported crawl platform",
-                result_json={"target_id": payload.target_id, "platform": payload.platform},
-            )
+        if payload.timeout_seconds > 0:
+            if self._should_use_process_boundary():
+                from rider_agent.workers.crawl_process import run_crawl_in_subprocess
 
+                try:
+                    process_job = self._prepare_process_boundary_job(
+                        job, raw_payload, payload
+                    )
+                except BrowserActionRequiredError:
+                    return _auth_failure(payload, AUTH_STATE_AUTH_REQUIRED)
+                except CdpUnavailableError:
+                    return make_failure_result(
+                        ERROR_CDP_UNREACHABLE,
+                        "CDP endpoint unavailable",
+                        result_json={"target_id": payload.target_id, "platform": payload.platform},
+                    )
+                except BrowserLaunchError:
+                    return make_failure_result(
+                        ERROR_PROFILE_UNAVAILABLE,
+                        "browser profile unavailable",
+                        result_json={"target_id": payload.target_id, "platform": payload.platform},
+                    )
+                except SecretRefUnresolved:
+                    return make_failure_result(
+                        ERROR_SECRET_REF_UNRESOLVED,
+                        "secret ref could not be resolved",
+                        result_json={"target_id": payload.target_id, "platform": payload.platform},
+                    )
+                except Exception as exc:  # noqa: BLE001 - process setup is fail-closed.
+                    if _is_missing_data_error(exc):
+                        return make_failure_result(
+                            ERROR_PARSER_MISSING_DATA,
+                            "required crawl data missing",
+                            result_json={"target_id": payload.target_id, "platform": payload.platform},
+                        )
+                    return make_failure_result(
+                        ERROR_CRAWL_FAILURE,
+                        "crawl failed",
+                        result_json={"target_id": payload.target_id, "platform": payload.platform},
+                    )
+
+                timeout_cleanup_ran = False
+
+                def timeout_cleanup() -> None:
+                    nonlocal timeout_cleanup_ran
+                    timeout_cleanup_ran = True
+                    self._cleanup_after_timeout(payload)
+
+                result = run_crawl_in_subprocess(
+                    process_job,
+                    timeout_seconds=float(payload.timeout_seconds),
+                    target_id=payload.target_id,
+                    platform=payload.platform,
+                    cleanup=timeout_cleanup if self._profile_manager is not None else None,
+                )
+                if not timeout_cleanup_ran:
+                    self._cleanup_profiles()
+                return result
+            return _run_with_timeout(
+                lambda: self._execute_payload(job, raw_payload, payload),
+                timeout_seconds=float(payload.timeout_seconds),
+                payload=payload,
+                cleanup=lambda: self._cleanup_after_timeout(payload),
+            )
+        return self._execute_payload(job, raw_payload, payload)
+
+    def _should_use_process_boundary(self) -> bool:
+        return (
+            self._process_boundary_enabled
+            and self._uses_default_crawl_snapshot
+            and self._auth_probe is None
+        )
+
+    def _prepare_process_boundary_job(
+        self,
+        job: ClaimedJob,
+        raw_payload: dict[str, Any],
+        payload: CrawlJobPayload,
+    ) -> ClaimedJob:
+        child_payload = dict(raw_payload)
+        if self._profile_manager is not None:
+            config = self._prepare_config(job, payload)
+            child_payload["cdp_url"] = str(config.cdp_url)
+            child_payload["browser_user_data_dir"] = str(config.browser_user_data_dir)
+        return dataclasses.replace(job, payload=child_payload)
+
+    def _execute_payload(
+        self,
+        job: ClaimedJob,
+        raw_payload: dict[str, Any],
+        payload: CrawlJobPayload,
+    ) -> JobResult:
+        if _plaintext_secret_keys(raw_payload):
+            try:
+                return make_failure_result(
+                    ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
+                    "crawl job plaintext secrets are not allowed",
+                    result_json={"target_id": payload.target_id, "platform": payload.platform},
+                )
+            finally:
+                self._cleanup_profiles()
         try:
+            if payload.platform not in {"baemin", "coupang"}:
+                return make_failure_result(
+                    ERROR_CRAWL_FAILURE,
+                    "unsupported crawl platform",
+                    result_json={"target_id": payload.target_id, "platform": payload.platform},
+                )
             config = self._prepare_config(job, payload)
             auth_state = self._auth_probe(job, config) if self._auth_probe else AUTH_STATE_ACTIVE
             if auth_state != AUTH_STATE_ACTIVE:
@@ -180,6 +287,31 @@ class CrawlWorker:
                 "crawl failed",
                 result_json={"target_id": payload.target_id, "platform": payload.platform},
             )
+        finally:
+            self._cleanup_profiles()
+
+    def _cleanup_profiles(self) -> None:
+        if self._profile_idle_ttl_seconds is None or self._profile_manager is None:
+            return
+        cleanup = getattr(self._profile_manager, "cleanup_idle_profiles", None)
+        if cleanup is None:
+            return
+        try:
+            cleanup(max_idle_seconds=self._profile_idle_ttl_seconds)
+        except Exception:  # noqa: BLE001 - cleanup must not change job result.
+            if self._log is not None:
+                self._log(redact("profile cleanup failed"))
+
+    def _cleanup_after_timeout(self, payload: CrawlJobPayload) -> None:
+        if self._profile_manager is not None:
+            release = getattr(self._profile_manager, "release", None)
+            if callable(release):
+                try:
+                    release(payload.tenant_id, payload.target_id)
+                except Exception:  # noqa: BLE001 - cleanup must not change timeout result.
+                    if self._log is not None:
+                        self._log(redact("profile release after timeout failed"))
+        self._cleanup_profiles()
 
     def make_unsupported(self, job: ClaimedJob) -> JobResult:
         return default_execute_job(job)
@@ -200,11 +332,15 @@ class CrawlWorker:
             )
 
         if self._profile_manager is None:
+            raw = _raw_payload(job)
             return build_config(
                 tenant_id=payload.tenant_id,
                 target_id=payload.target_id,
-                cdp_url=str(_raw_payload(job).get("cdp_url") or "http://127.0.0.1:9222"),
-                user_data_dir=Path("runtime") / "agent-browser-profiles" / payload.target_id,
+                cdp_url=str(raw.get("cdp_url") or "http://127.0.0.1:9222"),
+                user_data_dir=Path(
+                    raw.get("browser_user_data_dir")
+                    or (Path("runtime") / "agent-browser-profiles" / payload.target_id)
+                ),
             )
 
         try:
@@ -247,12 +383,45 @@ def build_execute_job(
     return _execute
 
 
+def _run_with_timeout(
+    call: Callable[[], JobResult],
+    *,
+    timeout_seconds: float,
+    payload: CrawlJobPayload,
+    cleanup: Callable[[], None],
+) -> JobResult:
+    result: dict[str, JobResult] = {}
+    error: dict[str, BaseException] = {}
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            result["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - re-raise in parent after join.
+            error["value"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_target, name="crawl-worker-timeout", daemon=True)
+    thread.start()
+    if not done.wait(timeout_seconds):
+        cleanup()
+        return make_failure_result(
+            ERROR_CRAWL_TIMEOUT,
+            "crawl timed out",
+            result_json={"target_id": payload.target_id, "platform": payload.platform},
+        )
+    if error:
+        raise error["value"]
+    return result["value"]
+
+
 def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
     raw = _raw_payload(job)
     platform = str(raw.get("platform") or _platform_from_type(job.type)).strip().casefold()
     target_id = str(raw.get("target_id") or job.target_id or "").strip()
     tenant_id = str(raw.get("tenant_id") or "").strip()
-    timeout_seconds = _positive_int(raw.get("timeout_seconds"), default=60)
+    timeout_seconds = _positive_float(raw.get("timeout_seconds"), default=60.0)
     return CrawlJobPayload(
         target_id=target_id,
         tenant_id=tenant_id,
@@ -263,12 +432,12 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
         browser_profile_ref=str(raw.get("browser_profile_ref") or "").strip(),
         timeout_seconds=timeout_seconds,
         parser_version=str(raw.get("parser_version") or f"{platform}-v1").strip(),
-        username=_text(raw, "username", "coupang_login_id_ref"),
-        password=_text(raw, "password", "coupang_login_password_ref"),
-        coupang_login_id=_text(raw, "coupang_login_id"),
-        coupang_login_password=_text(raw, "coupang_login_password"),
-        verification_email_address=_text(raw, "verification_email_address"),
-        verification_email_app_password=_text(raw, "verification_email_app_password"),
+        coupang_login_id_ref=_text(raw, "coupang_login_id_ref"),
+        coupang_login_password_ref=_text(raw, "coupang_login_password_ref"),
+        verification_email_address_ref=_text(raw, "verification_email_address_ref"),
+        verification_email_app_password_ref=_text(
+            raw, "verification_email_app_password_ref"
+        ),
         verification_email_subject_keyword=_text(raw, "verification_email_subject_keyword"),
         verification_email_sender_keyword=_text(raw, "verification_email_sender_keyword"),
         coupang_auto_email_2fa_enabled=_truthy(
@@ -301,6 +470,14 @@ def _positive_int(value: Any, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _positive_float(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _text(raw: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = raw.get(key)
@@ -323,22 +500,22 @@ def _plaintext_secret_keys(raw: dict[str, Any]) -> list[str]:
     ]
 
 
-def _resolve_credential(
-    *,
-    plain: str,
+def _resolve_secret_ref(
     ref: str,
+    *,
     secret_resolver: Callable[[str], str | None] | None,
 ) -> str:
-    value = plain or ref
+    value = ref.strip()
     if not value:
         return ""
     if secret_resolver is not None:
         resolved = _safe_resolve(secret_resolver, value)
         if resolved:
             return resolved
-    if _looks_like_secret_ref(value):
-        raise SecretRefUnresolved(value)
-    return value
+    resolved = _safe_resolve(_default_secret_resolver, value)
+    if resolved:
+        return resolved
+    raise SecretRefUnresolved(value)
 
 
 def _looks_like_secret_ref(value: str) -> bool:
@@ -353,6 +530,24 @@ def _safe_resolve(resolver: Callable[[str], str | None], ref: str) -> str:
         return ""
 
 
+def _default_secret_resolver(ref: str) -> str | None:
+    try:
+        from rider_agent.secure_store import DpapiSecretStore, default_secret_store_path
+
+        resolved = DpapiSecretStore(default_secret_store_path()).resolve(ref)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    try:
+        from rider_agent.secure_store import default_secret_store_path
+        from rider_crawl.secret_store import default_secret_store
+
+        return default_secret_store(default_secret_store_path()).resolve(ref)
+    except Exception:
+        return None
+
+
 def _build_config(
     payload: CrawlJobPayload,
     *,
@@ -360,24 +555,17 @@ def _build_config(
     user_data_dir: Path,
     secret_resolver: Callable[[str], str | None] | None = None,
 ) -> AppConfig:
-    coupang_login_id = _resolve_credential(
-        plain=payload.coupang_login_id or payload.username,
-        ref=payload.username,
-        secret_resolver=secret_resolver,
+    coupang_login_id = _resolve_secret_ref(
+        payload.coupang_login_id_ref, secret_resolver=secret_resolver
     )
-    coupang_login_password = _resolve_credential(
-        plain=payload.coupang_login_password or payload.password,
-        ref=payload.password,
-        secret_resolver=secret_resolver,
+    coupang_login_password = _resolve_secret_ref(
+        payload.coupang_login_password_ref, secret_resolver=secret_resolver
     )
-    verification_email_address = _resolve_credential(
-        plain=payload.verification_email_address,
-        ref=payload.verification_email_address,
-        secret_resolver=secret_resolver,
+    verification_email_address = _resolve_secret_ref(
+        payload.verification_email_address_ref, secret_resolver=secret_resolver
     )
-    verification_email_app_password = _resolve_credential(
-        plain=payload.verification_email_app_password,
-        ref=payload.verification_email_app_password,
+    verification_email_app_password = _resolve_secret_ref(
+        payload.verification_email_app_password_ref,
         secret_resolver=secret_resolver,
     )
     enable_email_2fa = bool(
@@ -400,8 +588,8 @@ def _build_config(
         send_enabled=False,
         send_only_on_change=False,
         timezone="Asia/Seoul",
-        run_lock_timeout_seconds=max(60, payload.timeout_seconds * 2),
-        page_timeout_seconds=payload.timeout_seconds * 1000,
+        run_lock_timeout_seconds=max(60, int(payload.timeout_seconds * 2)),
+        page_timeout_seconds=int(payload.timeout_seconds * 1000),
         messenger_name="telegram",
         crawl_name=payload.expected_display_name or payload.target_id,
         state_subdir=payload.target_id,
@@ -411,7 +599,7 @@ def _build_config(
         coupang_login_password=coupang_login_password,
         verification_email_address=verification_email_address,
         verification_email_mailbox_lock_id=(
-            payload.verification_email_address or verification_email_address
+            payload.verification_email_address_ref or verification_email_address
         ),
         verification_email_app_password=verification_email_app_password,
         verification_email_subject_keyword=payload.verification_email_subject_keyword

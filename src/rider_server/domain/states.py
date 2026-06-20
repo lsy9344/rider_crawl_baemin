@@ -157,6 +157,7 @@ class DeliveryStatus(str, Enum):
 
     SENT = "SENT"
     DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
+    SENDING = "SENDING"
     FAILED = "FAILED"
     RETRYING = "RETRYING"
     HELD = "HELD"

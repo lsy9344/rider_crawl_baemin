@@ -166,6 +166,8 @@ jobs:
         env:
           RIDER_POSTGRES_PASSWORD: rider
           RIDER_DB_MIGRATION_BACKUP_CONFIRMED: "1"
+          RIDER_TELEGRAM_WEBHOOK_SECRET: ci_dummy_webhook_secret
+          RIDER_TELEGRAM_BOT_TOKEN: ci_dummy_bot_token
         run: docker compose -f deploy/docker-compose.yml config
 
       - name: Build server Docker image

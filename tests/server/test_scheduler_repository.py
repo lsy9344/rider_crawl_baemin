@@ -125,6 +125,7 @@ def test_capacity_snapshot_counts_only_online_agent_capacity() -> None:
     assert capacity.aggregate_capacity == 2
     assert capacity.aggregate_in_flight == 1
     assert capacity.capabilities == frozenset({JOB_TYPE_CRAWL_BAEMIN})
+    assert capacity.capacity_by_job_type == {JOB_TYPE_CRAWL_BAEMIN: 2}
 
 
 def test_capacity_snapshot_keeps_exact_two_minute_heartbeat_online() -> None:
@@ -138,8 +139,10 @@ def test_capacity_snapshot_keeps_exact_two_minute_heartbeat_online() -> None:
             )
         ],
         aggregate_in_flight=0,
+        in_flight_by_job_type={JOB_TYPE_CRAWL_COUPANG: 1},
         now=now,
     )
 
     assert capacity.aggregate_capacity == 1
     assert capacity.capabilities == frozenset({JOB_TYPE_CRAWL_COUPANG})
+    assert capacity.in_flight_by_job_type == {JOB_TYPE_CRAWL_COUPANG: 1}

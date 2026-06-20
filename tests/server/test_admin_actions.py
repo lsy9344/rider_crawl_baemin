@@ -60,12 +60,17 @@ _SAME_ORIGIN_HEADERS = {"Origin": "http://testserver"}
 # OPERATOR principal 을 주입해 통과시킨다(의도된 보안 강화 — story 4.5).
 _OPERATOR = AdminPrincipal(actor_id=_ACTOR, role=AdminRole.OPERATOR, mfa_verified=True,
                            source="ADMIN_UI/operator")
+_CONFIRM = {"confirm_action": "confirmed"}
 
 
 def TestClient(app, *args, **kwargs):  # noqa: N802 - test helper mirrors imported class name.
     headers = dict(_SAME_ORIGIN_HEADERS)
     headers.update(kwargs.pop("headers", {}) or {})
     return _TestClient(app, *args, headers=headers, **kwargs)
+
+
+def _confirmed(data: dict | None = None) -> dict:
+    return {**(data or {}), **_CONFIRM}
 
 
 def _run(coro):
@@ -399,7 +404,7 @@ def test_route_pause_returns_fragment_and_persists() -> None:
     repo.seed_target(_target(MonitoringTargetStatus.ACTIVE))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.OK
     assert "text/html" in resp.headers["content-type"]
@@ -412,9 +417,13 @@ def test_route_suspend_resume_roundtrip() -> None:
     repo.seed_subscription(_sub())
     client = TestClient(_app_with(repo))
 
-    assert client.post("/admin/subscriptions/sub-1/suspend?tenant=tn-1").status_code == HTTPStatus.OK
+    assert client.post(
+        "/admin/subscriptions/sub-1/suspend?tenant=tn-1", data=_confirmed()
+    ).status_code == HTTPStatus.OK
     assert _run(repo.get_subscription("sub-1")).status is SubscriptionStatus.SUSPENDED
-    assert client.post("/admin/subscriptions/sub-1/resume?tenant=tn-1").status_code == HTTPStatus.OK
+    assert client.post(
+        "/admin/subscriptions/sub-1/resume?tenant=tn-1", data=_confirmed()
+    ).status_code == HTTPStatus.OK
     assert _run(repo.get_subscription("sub-1")).status is SubscriptionStatus.PAYMENT_ACTIVE
 
 
@@ -423,7 +432,7 @@ def test_route_retry_invalid_transition_is_400() -> None:
     repo.seed_job(_job(JOB_STATUS_SUCCEEDED))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/jobs/job-1/retry?tenant=tn-1")
+    resp = client.post("/admin/jobs/job-1/retry?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert resp.json()["error"]["code"]
@@ -434,7 +443,10 @@ def test_route_dispose_invalid_disposition_is_400() -> None:
     repo.seed_held_dispatch(_held("HELD"))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/dispatch/dsp-1/dispose?tenant=tn-1", data={"disposition": "NUKE"})
+    resp = client.post(
+        "/admin/dispatch/dsp-1/dispose?tenant=tn-1",
+        data=_confirmed({"disposition": "NUKE"}),
+    )
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST
 
@@ -444,7 +456,7 @@ def test_route_cross_tenant_is_404() -> None:
     repo.seed_target(_target(tenant=_OTHER))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
@@ -457,7 +469,7 @@ def test_route_requires_admin_session() -> None:
     app.state.resolve_admin_principal = lambda request: None  # 미인증 → fail-closed
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1", data=_confirmed())
     assert resp.status_code == HTTPStatus.UNAUTHORIZED
 
 
@@ -470,7 +482,7 @@ def test_route_viewer_role_cannot_act() -> None:
     app.state.resolve_admin_principal = lambda request: viewer
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1", data=_confirmed())
     assert resp.status_code == HTTPStatus.FORBIDDEN
     # 거부 시도가 result=DENIED 로 audit(보안 audit — 시도 자체를 남긴다).
     assert repo.audits[-1].result == "DENIED"
@@ -486,7 +498,7 @@ def test_route_mfa_unverified_privileged_denied() -> None:
     app.state.resolve_admin_principal = lambda request: no_mfa
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/pause?tenant=tn-1", data=_confirmed())
     assert resp.status_code == HTTPStatus.FORBIDDEN
     assert repo.audits[-1].result == "DENIED"
 
@@ -505,7 +517,10 @@ def test_route_test_send_fail_closed_without_seam() -> None:
     repo = InMemoryAdminActionRepository()
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-send?tenant=tn-1",
+        data=_confirmed({"channel_id": "ch-test"}),
+    )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
 
 
@@ -539,7 +554,10 @@ def test_route_test_send_single_channel_when_seam_wired() -> None:
     app.state.sending_enabled = True  # 5.10 kill switch: 실전송하려면 전역 발송이 켜져 있어야 함.
     client = TestClient(app)
 
-    resp = client.post("/admin/targets/mt-1/test-send?tenant=tn-1", data={"channel_id": "ch-test"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-send?tenant=tn-1",
+        data=_confirmed({"channel_id": "ch-test"}),
+    )
     assert resp.status_code == HTTPStatus.OK
     assert "SENT" in resp.text
     assert sends == ["ch-test"]  # 단일 채널만(fan-out 0)
@@ -659,7 +677,7 @@ def test_route_activate_returns_fragment_and_persists() -> None:
     repo.seed_target(_target(MonitoringTargetStatus.PAUSED))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/activate?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/activate?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.OK
     assert resp.headers["HX-Trigger"] == "admin-entity-changed"
@@ -672,10 +690,29 @@ def test_route_test_crawl_enqueues_baemin() -> None:
     repo.seed_target(_target())
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/test-crawl?tenant=tn-1", data={"platform": "BAEMIN"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-crawl?tenant=tn-1",
+        data=_confirmed({"platform": "BAEMIN"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK
     assert "enqueue" in resp.text
+
+
+def test_route_test_crawl_requires_server_confirmation() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
+
+    resp = client.post(
+        "/admin/targets/mt-1/test-crawl?tenant=tn-1",
+        data={"platform": "BAEMIN"},
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert repo.audits == []
+    assert queue.events == []
 
 
 def test_route_test_crawl_coupang_platform_branch() -> None:
@@ -683,7 +720,10 @@ def test_route_test_crawl_coupang_platform_branch() -> None:
     repo.seed_target(_target())
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/test-crawl?tenant=tn-1", data={"platform": "COUPANG"})
+    resp = client.post(
+        "/admin/targets/mt-1/test-crawl?tenant=tn-1",
+        data=_confirmed({"platform": "COUPANG"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK
 
@@ -693,7 +733,7 @@ def test_route_auth_check_triggers() -> None:
     repo.seed_target(_target())
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/targets/mt-1/auth-check?tenant=tn-1")
+    resp = client.post("/admin/targets/mt-1/auth-check?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.OK
     assert resp.headers["HX-Trigger"] == "admin-entity-changed"
@@ -716,7 +756,10 @@ def test_route_assign_agent_happy_path() -> None:
     repo.seed_target(_target())
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/agents/assign?tenant=tn-1", data={"target_id": "mt-1", "agent_id": "ag-1"})
+    resp = client.post(
+        "/admin/agents/assign?tenant=tn-1",
+        data=_confirmed({"target_id": "mt-1", "agent_id": "ag-1"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK
     assert repo.agent_for("mt-1") == "ag-1"
@@ -726,7 +769,10 @@ def test_route_assign_agent_missing_fields_is_400() -> None:
     repo = InMemoryAdminActionRepository()
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/agents/assign?tenant=tn-1", data={"target_id": "mt-1"})
+    resp = client.post(
+        "/admin/agents/assign?tenant=tn-1",
+        data=_confirmed({"target_id": "mt-1"}),
+    )
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST
 
@@ -736,7 +782,7 @@ def test_route_retry_failed_job_to_pending() -> None:
     repo.seed_job(_job(JOB_STATUS_FAILED))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/jobs/job-1/retry?tenant=tn-1")
+    resp = client.post("/admin/jobs/job-1/retry?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_job("job-1")).status == JOB_STATUS_PENDING
@@ -747,7 +793,10 @@ def test_route_dispose_discard_happy_path() -> None:
     repo.seed_held_dispatch(_held("HELD"))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/dispatch/dsp-1/dispose?tenant=tn-1", data={"disposition": "DISCARD"})
+    resp = client.post(
+        "/admin/dispatch/dsp-1/dispose?tenant=tn-1",
+        data=_confirmed({"disposition": "DISCARD"}),
+    )
 
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_held_dispatch("dsp-1")).status == "DISCARDED"
@@ -758,6 +807,9 @@ def test_route_resume_invalid_to_status_is_400() -> None:
     repo.seed_subscription(_sub(SubscriptionStatus.SUSPENDED))
     client = TestClient(_app_with(repo))
 
-    resp = client.post("/admin/subscriptions/sub-1/resume?tenant=tn-1", data={"to_status": "BOGUS"})
+    resp = client.post(
+        "/admin/subscriptions/sub-1/resume?tenant=tn-1",
+        data=_confirmed({"to_status": "BOGUS"}),
+    )
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST

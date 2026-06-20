@@ -30,6 +30,7 @@ def _config(tmp_path) -> AppConfig:
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=900,
         page_timeout_seconds=1000,
+        verification_email_address="rider@naver.com",
         coupang_2fa_code_digits=6,
     )
 
@@ -140,7 +141,7 @@ def _ok_fetch(code: str = "123456"):
 
 def test_recover_clicks_email_method_send_and_fills_code(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증을 선택하세요</html>",
+        html="<html>이메일 인증을 선택하세요 인증코드를 rider@naver.com 으로 보냅니다</html>",
         clickable=("이메일", "인증번호 발송", "확인"),
         input_selectors=("input[name='code']",),
     )
@@ -201,6 +202,7 @@ def test_recover_ignores_hidden_password_field_on_email_2fa_screen(tmp_path):
     page = _FakePage(
         html=(
             "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다"
             "<input name='password' type='hidden'>"
             "<input placeholder='인증코드'></html>"
         ),
@@ -220,7 +222,10 @@ def test_recover_ignores_hidden_password_field_on_email_2fa_screen(tmp_path):
 
 def test_recover_prefers_tab_and_button_roles_over_broad_text_matches(tmp_path):
     page = _FakePage(
-        html="<html>2단계 인증 로그인 이메일로 인증 인증코드 전송<input placeholder='인증코드'></html>",
+        html=(
+            "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다<input placeholder='인증코드'></html>"
+        ),
         clickable=("2단계 인증 로그인 이메일로 인증 인증코드 전송",),
         role_clickable=(("tab", "이메일로 인증"), ("button", "인증코드 전송"), ("button", "인증 완료")),
         input_selectors=("input[placeholder*='코드']",),
@@ -253,10 +258,11 @@ def test_recover_logs_in_with_ui_credentials_before_email_2fa(tmp_path):
             ("button", "인증 완료"),
         ),
         role_click_updates={
-            ("button", "로그인"): (
-                "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
-                "<input placeholder='인증코드'></html>"
-            ),
+                ("button", "로그인"): (
+                    "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+                    " 인증코드를 rider@naver.com 으로 보냅니다"
+                    "<input placeholder='인증코드'></html>"
+                ),
         },
         role_click_input_updates={
             ("button", "로그인"): ("input[placeholder*='코드']",),
@@ -299,10 +305,11 @@ def test_recover_detects_primary_login_by_password_input_when_body_label_is_shor
             ("button", "인증 완료"),
         ),
         role_click_updates={
-            ("button", "로그인"): (
-                "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
-                "<input placeholder='인증코드'></html>"
-            ),
+                ("button", "로그인"): (
+                    "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+                    " 인증코드를 rider@naver.com 으로 보냅니다"
+                    "<input placeholder='인증코드'></html>"
+                ),
         },
         role_click_input_updates={
             ("button", "로그인"): ("input[placeholder*='코드']",),
@@ -329,7 +336,10 @@ def test_recover_detects_primary_login_by_password_input_when_body_label_is_shor
 
 def test_recover_uses_resend_button_when_code_already_sent(tmp_path):
     page = _FakePage(
-        html="<html>2단계 인증 로그인 이메일로 인증 인증 재요청<input placeholder='인증코드'></html>",
+        html=(
+            "<html>2단계 인증 로그인 이메일로 인증 인증 재요청"
+            " 인증코드를 rider@naver.com 으로 보냈습니다<input placeholder='인증코드'></html>"
+        ),
         clickable=("이메일로 인증", "인증 재요청", "인증 완료"),
         input_selectors=("input[placeholder*='코드']",),
     )
@@ -353,9 +363,57 @@ def test_recover_returns_false_when_send_button_missing(tmp_path):
     assert result is False
 
 
+def test_coupang_email_2fa_does_not_send_code_before_recipient_is_verified(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드 전송</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(
+        page,
+        replace(_config(tmp_path), verification_email_address="rider@naver.com"),
+        fetch_code=_fetch,
+        now=_NOW,
+    )
+
+    assert result is False
+    assert called["hit"] is False
+    assert "인증번호 발송" not in page.clicked_texts
+
+
+def test_coupang_email_2fa_rejects_domain_only_match(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 other@naver.com 으로 보냅니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(
+        page,
+        replace(_config(tmp_path), verification_email_address="rider@naver.com"),
+        fetch_code=_fetch,
+        now=_NOW,
+    )
+
+    assert result is False
+    assert called["hit"] is False
+    assert page.filled == []
+
+
 def test_recover_raises_when_imap_fetch_fails(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증</html>",
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냅니다</html>",
         clickable=("이메일", "인증번호 발송"),
         input_selectors=("input[name='code']",),
     )
@@ -369,9 +427,9 @@ def test_recover_raises_when_imap_fetch_fails(tmp_path):
         )
 
 
-def test_recover_proceeds_when_screen_domain_matches_tab_address(tmp_path):
+def test_recover_proceeds_when_screen_recipient_matches_tab_address(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증 인증코드를 abc@naver.com 으로 보냈습니다</html>",
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냈습니다</html>",
         clickable=("이메일", "인증번호 발송", "확인"),
         input_selectors=("input[name='code']",),
     )
@@ -409,9 +467,9 @@ def test_recover_stops_when_screen_domain_differs_from_tab_address(tmp_path):
     assert page.filled == []
 
 
-def test_recover_skips_cross_check_when_screen_domain_masked(tmp_path):
+def test_recover_proceeds_when_screen_local_part_is_comparably_masked(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증 인증코드를 ri***@na***.com 으로 보냈습니다</html>",
+        html="<html>이메일 인증 인증코드를 ri***@naver.com 으로 보냈습니다</html>",
         clickable=("이메일", "인증번호 발송", "확인"),
         input_selectors=("input[name='code']",),
     )
@@ -425,9 +483,25 @@ def test_recover_skips_cross_check_when_screen_domain_masked(tmp_path):
     assert page.filled == [("input[name='code']", "111222")]
 
 
+def test_recover_stops_when_screen_domain_is_ambiguous_masked(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 ri***@na***.com 으로 보냈습니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(_config(tmp_path), verification_email_address="rider@naver.com")
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("111222"), now=_NOW
+    )
+
+    assert result is False
+    assert page.filled == []
+
+
 def test_recover_raises_when_code_input_missing(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증</html>",
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냅니다</html>",
         clickable=("이메일", "인증번호 발송"),
         input_selectors=(),
     )
@@ -440,7 +514,7 @@ def test_recover_raises_when_code_input_missing(tmp_path):
 
 def test_recover_does_not_leak_code_in_errors(tmp_path):
     page = _FakePage(
-        html="<html>이메일 인증</html>",
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냅니다</html>",
         clickable=("이메일", "인증번호 발송"),
         input_selectors=(),
     )

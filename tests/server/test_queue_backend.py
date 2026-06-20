@@ -32,6 +32,7 @@ from rider_server.queue import (
     PostgresQueueBackend,
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
+from rider_server.queue.retry import default_retry_decider
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
 from rider_server.queue.postgres_queue import (
     _platform_account_auth_update,
@@ -333,17 +334,26 @@ def test_lease_expiry_recover_and_reclaim(backend):
         )
         assert none_yet == []
 
-        # lease 만료 후 recover_stale → PENDING 재진입
+        # lease 만료 후 recover_stale → PENDING 재진입하되 backoff 전에는 재claim 안 됨.
         recovered = await backend.recover_stale(now=_T0 + timedelta(seconds=31))
         assert recovered == 1
 
-        # 다른 Agent 가 재claim 가능
-        again = await backend.claim(
+        early = await backend.claim(
             agent_id=_AGENT_2,
             capabilities=[JOB_TYPE_CRAWL_BAEMIN],
             max_jobs=1,
             lease_seconds=30,
             now=_T0 + timedelta(seconds=32),
+        )
+        assert early == []
+
+        # backoff 가 지난 뒤 다른 Agent 가 재claim 가능
+        again = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0 + timedelta(seconds=62),
         )
         assert len(again) == 1
         assert again[0].job_id == job_id
@@ -368,16 +378,287 @@ def test_stale_owner_complete_is_lease_lost(backend):
             capabilities=[JOB_TYPE_CRAWL_BAEMIN],
             max_jobs=1,
             lease_seconds=30,
-            now=_T0 + timedelta(seconds=32),
+            now=_T0 + timedelta(seconds=62),
         )
         # 옛 소유자(agent-1)가 뒤늦게 success 보고 → 거부
         outcome = await backend.complete(
             job_id=job_id,
             agent_id=_AGENT_1,
             status=JOB_STATUS_SUCCEEDED,
-            now=_T0 + timedelta(seconds=33),
+            now=_T0 + timedelta(seconds=63),
         )
         assert outcome.result == COMPLETE_LEASE_LOST
+
+    asyncio.run(_run())
+
+
+def test_transient_crawl_failure_reenters_pending_with_backoff(backend):
+    async def _run():
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        outcome = await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_FAILED,
+            error_code=FailureCategory.CRAWL_FAILURE.value,
+            now=_T0 + timedelta(seconds=5),
+        )
+
+        assert outcome.accepted is True
+        assert outcome.final_status == JOB_STATUS_PENDING
+        early = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0 + timedelta(seconds=30),
+        )
+        assert early == []
+        [again] = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0 + timedelta(seconds=36),
+        )
+        assert again.job_id == job_id
+        assert again.attempts == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["CRAWL_TIMEOUT", "CDP_UNREACHABLE", "PROFILE_UNAVAILABLE", "PARSER_MISSING_DATA"],
+)
+def test_worker_transient_crawl_error_codes_retry_with_backoff(error_code: str):
+    decision = default_retry_decider(error_code, 1, _T0)
+
+    assert decision is not None
+    assert decision.run_after == _T0 + timedelta(seconds=30)
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        FailureCategory.AUTH_REQUIRED.value,
+        FailureCategory.TARGET_VALIDATION_FAILURE.value,
+        "SECRET_REF_UNRESOLVED",
+        "PLAINTEXT_SECRET_NOT_ALLOWED",
+    ],
+)
+def test_human_intervention_failures_do_not_retry(backend, error_code: str):
+    async def _run():
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        outcome = await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_FAILED,
+            error_code=error_code,
+            now=_T0 + timedelta(seconds=5),
+        )
+
+        assert outcome.accepted is True
+        assert outcome.final_status == JOB_STATUS_FAILED
+        retry = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0 + timedelta(hours=1),
+        )
+        assert retry == []
+
+    asyncio.run(_run())
+
+
+def test_stale_recovery_records_attempt_and_backoff_in_memory():
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0,
+        )
+
+        recovered = await backend.recover_stale(now=_T0 + timedelta(seconds=31))
+
+        assert recovered == 1
+        snapshot = backend.job_snapshot(job_id)
+        assert snapshot is not None
+        assert snapshot.status == JOB_STATUS_PENDING
+        assert snapshot.attempts == 1
+        assert snapshot.error_code == "CRAWL_TIMEOUT"
+        assert snapshot.last_failed_at == _T0 + timedelta(seconds=31)
+        assert snapshot.run_after == _T0 + timedelta(seconds=61)
+
+        early = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0 + timedelta(seconds=32),
+        )
+        assert early == []
+
+    asyncio.run(_run())
+
+
+def test_stale_recovery_stops_after_max_attempts_in_memory():
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0,
+        )
+        await backend.recover_stale(now=_T0 + timedelta(seconds=31))
+
+        await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0 + timedelta(seconds=62),
+        )
+        await backend.recover_stale(now=_T0 + timedelta(seconds=93))
+
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0 + timedelta(seconds=154),
+        )
+        recovered = await backend.recover_stale(now=_T0 + timedelta(seconds=185))
+
+        assert recovered == 1
+        snapshot = backend.job_snapshot(job_id)
+        assert snapshot is not None
+        assert snapshot.status == JOB_STATUS_FAILED
+        assert snapshot.attempts == 3
+        assert snapshot.error_code == "CRAWL_TIMEOUT"
+        assert snapshot.last_failed_at == _T0 + timedelta(seconds=185)
+        assert snapshot.completed_at == _T0 + timedelta(seconds=185)
+        retry = await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0 + timedelta(minutes=30),
+        )
+        assert retry == []
+
+    asyncio.run(_run())
+
+
+def test_complete_persists_completion_metadata_in_memory():
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_SUCCEEDED,
+            result_json={"ok": True},
+            duration_ms=1234,
+            result_schema_version="crawl-result.v1",
+            now=_T0 + timedelta(seconds=2),
+        )
+
+        snapshot = backend.job_snapshot(job_id)
+        assert snapshot is not None
+        assert snapshot.completed_at == _T0 + timedelta(seconds=2)
+        assert snapshot.duration_ms == 1234
+        assert snapshot.result_schema_version == "crawl-result.v1"
+
+    asyncio.run(_run())
+
+
+def test_retry_failure_records_last_failed_at_in_memory():
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_FAILED,
+            error_code=FailureCategory.CRAWL_FAILURE.value,
+            now=_T0 + timedelta(seconds=5),
+        )
+
+        snapshot = backend.job_snapshot(job_id)
+        assert snapshot is not None
+        assert snapshot.status == JOB_STATUS_PENDING
+        assert snapshot.run_after == _T0 + timedelta(seconds=35)
+        assert snapshot.last_failed_at == _T0 + timedelta(seconds=5)
+        assert snapshot.last_failed_at != snapshot.run_after
+
+    asyncio.run(_run())
+
+
+def test_terminal_failure_records_last_failed_at_in_memory():
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_FAILED,
+            error_code=FailureCategory.AUTH_REQUIRED.value,
+            now=_T0 + timedelta(seconds=7),
+        )
+
+        snapshot = backend.job_snapshot(job_id)
+        assert snapshot is not None
+        assert snapshot.status == JOB_STATUS_FAILED
+        assert snapshot.last_failed_at == _T0 + timedelta(seconds=7)
 
     asyncio.run(_run())
 
@@ -570,6 +851,79 @@ def test_claim_returns_enqueued_payload(backend):
             "platform": "baemin",
             "primary_url": "https://example.invalid/performance",
         }
+
+    asyncio.run(_run())
+
+
+def test_duplicate_complete_same_id_returns_accepted(backend):
+    async def _run():
+        job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_1,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        first = await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_SUCCEEDED,
+            result_json={"ok": True},
+            completion_id="completion-1",
+            completion_payload_hash="same-payload",
+            now=_T0 + timedelta(seconds=1),
+        )
+        second = await backend.complete(
+            job_id=job_id,
+            agent_id=_AGENT_1,
+            status=JOB_STATUS_SUCCEEDED,
+            result_json={"ok": True},
+            completion_id="completion-1",
+            completion_payload_hash="same-payload",
+            now=_T0 + timedelta(seconds=2),
+        )
+
+        assert first.result == COMPLETE_ACCEPTED
+        assert second.result == COMPLETE_ACCEPTED
+        assert second.final_status == JOB_STATUS_SUCCEEDED
+
+    asyncio.run(_run())
+
+
+def test_extend_leases_bulk_extends_only_owned_active_jobs(backend):
+    async def _run():
+        owned_ids: list[str] = []
+        for _ in range(2):
+            job_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+            await backend.claim(
+                agent_id=_AGENT_1,
+                capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+                max_jobs=1,
+                lease_seconds=30,
+                now=_T0,
+            )
+            owned_ids.append(job_id)
+        other_id = await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+        await backend.claim(
+            agent_id=_AGENT_2,
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0,
+        )
+
+        extended = await backend.extend_leases(
+            job_ids=[owned_ids[0], owned_ids[1], owned_ids[1], other_id],
+            agent_id=_AGENT_1,
+            lease_seconds=120,
+            now=_T0 + timedelta(seconds=10),
+        )
+
+        assert extended == set(owned_ids)
+        recovered = await backend.recover_stale(now=_T0 + timedelta(seconds=31))
+        assert recovered == 1
 
     asyncio.run(_run())
 

@@ -10,7 +10,7 @@ Postgres 에선 JSONB. telegram_chat_id/thread_id 는 라우팅 식별자라 sec
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKeyConstraint, Index, String, UniqueConstraint, Uuid, text
+from sqlalchemy import Boolean, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base, json_variant
@@ -39,6 +39,15 @@ class MessengerChannel(Base):
             "registration_code",
             unique=True,
             postgresql_where=text("registration_code IS NOT NULL"),
+        ),
+        Index(
+            "uq_messenger_channels_active_kakao_room",
+            "tenant_id",
+            "kakao_room_name",
+            unique=True,
+            postgresql_where=text(
+                "state = 'ACTIVE' AND messenger = 'KAKAO' AND kakao_room_name IS NOT NULL"
+            ),
         ),
     )
 
@@ -81,6 +90,9 @@ class DeliveryRule(Base):
 
 class Snapshot(Base):
     __tablename__ = "snapshots"
+    __table_args__ = (
+        Index("ix_snapshots_target_collected_at_id", "target_id", "collected_at", "id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     target_id: Mapped[uuid.UUID] = fk("monitoring_targets.id")
@@ -92,10 +104,14 @@ class Snapshot(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_snapshot_template_version", "snapshot_id", "template_version"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     snapshot_id: Mapped[uuid.UUID] = fk("snapshots.id")
     template_version: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
     text_hash: Mapped[str] = mapped_column(String, nullable=False)
     text_redacted_preview: Mapped[str] = mapped_column(String, nullable=False)
 
@@ -103,7 +119,16 @@ class Message(Base):
 class DeliveryLog(Base):
     __tablename__ = "delivery_logs"
     # AC3 — dedup_key 유니크 제약 → uq_delivery_logs_dedup_key (naming_convention)
-    __table_args__ = (UniqueConstraint("dedup_key"),)
+    __table_args__ = (
+        UniqueConstraint("dedup_key"),
+        Index(
+            "ix_delivery_logs_dispatch_claim",
+            "status",
+            "available_at",
+            "locked_at",
+        ),
+        Index("ix_delivery_logs_channel_message", "channel_id", "message_id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     message_id: Mapped[uuid.UUID] = fk("messages.id")
@@ -112,3 +137,9 @@ class DeliveryLog(Base):
     dedup_key: Mapped[str] = mapped_column(String, nullable=False)  # 5차원 합성 idempotency key
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)  # FailureCategory 값(3.6)
     sent_at: Mapped[datetime | None] = ts(nullable=True)
+    send_attempted_at: Mapped[datetime | None] = ts(nullable=True)
+    last_failed_at: Mapped[datetime | None] = ts(nullable=True)
+    available_at: Mapped[datetime | None] = ts(nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_at: Mapped[datetime | None] = ts(nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String, nullable=True)

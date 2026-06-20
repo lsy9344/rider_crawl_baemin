@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from .backend import (
@@ -25,14 +25,20 @@ from .backend import (
     ClaimedJobRecord,
     CompleteOutcome,
     QueueBackend,
+    RetryDecider,
 )
+from .retry import default_retry_decider
 from .states import (
     JOB_STATUS_CLAIMED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
     assert_transition,
 )
+
+STALE_LEASE_ERROR_CODE = "CRAWL_TIMEOUT"
 
 
 @dataclass
@@ -46,19 +52,27 @@ class _Job:
     attempts: int = 0
     run_after: datetime | None = None
     payload_json: dict[str, Any] | None = None
+    assigned_agent_id: str | None = None
     agent_id: str | None = None
     lease_expires_at: datetime | None = None
     claimed_at: datetime | None = None
     result_json: dict[str, Any] | None = None
     error_code: str | None = None
+    completed_at: datetime | None = None
+    duration_ms: int | None = None
+    result_schema_version: str | None = None
+    completion_id: str | None = None
+    completion_payload_hash: str | None = None
+    last_failed_at: datetime | None = None
 
 
 class InMemoryQueueBackend(QueueBackend):
     """프로세스 메모리 기반 ``QueueBackend``(lock 으로 atomic claim 강제)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, retry_decider: RetryDecider | None = default_retry_decider) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, _Job] = {}
+        self._retry_decider = retry_decider
         #: best-effort 이벤트 기록(테스트 가시성). secret 평문 없음(redact 통과값).
         self.events: list[dict[str, Any]] = []
 
@@ -68,6 +82,7 @@ class InMemoryQueueBackend(QueueBackend):
         job_type: str,
         target_id: str | None = None,
         payload_json: dict[str, Any] | None = None,
+        assigned_agent_id: str | None = None,
         run_after: datetime | None = None,
         now: datetime,
     ) -> str:
@@ -78,6 +93,7 @@ class InMemoryQueueBackend(QueueBackend):
                 type=job_type,
                 target_id=target_id,
                 payload_json=dict(payload_json) if payload_json is not None else None,
+                assigned_agent_id=assigned_agent_id,
                 status=JOB_STATUS_PENDING,
                 run_after=run_after,
             )
@@ -102,6 +118,7 @@ class InMemoryQueueBackend(QueueBackend):
                 if job.status == JOB_STATUS_PENDING
                 and (job.run_after is None or job.run_after <= now)
                 and job.type in caps
+                and (job.assigned_agent_id is None or job.assigned_agent_id == agent_id)
             ]
             # run_after NULLS FIRST, 그다음 run_after asc(오래 대기한 job 우선).
             candidates.sort(
@@ -134,12 +151,24 @@ class InMemoryQueueBackend(QueueBackend):
         status: str,
         result_json: dict[str, Any] | None = None,
         error_code: str | None = None,
+        duration_ms: int | None = None,
+        result_schema_version: str | None = None,
+        completion_id: str | None = None,
+        completion_payload_hash: str | None = None,
         now: datetime,
     ) -> CompleteOutcome:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return CompleteOutcome(COMPLETE_NOT_FOUND, job_id)
+            if completion_id and job.completion_id == completion_id:
+                if (
+                    job.agent_id == agent_id
+                    and job.completion_payload_hash == completion_payload_hash
+                    and job.status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED)
+                ):
+                    return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=job.status)
+                return CompleteOutcome(COMPLETE_LEASE_LOST, job_id)
             if (
                 job.agent_id != agent_id
                 or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
@@ -147,12 +176,56 @@ class InMemoryQueueBackend(QueueBackend):
             ):
                 # 만료/재할당/이미 종료 → 이 Agent 는 더는 소유하지 않는다(이중 success 차단).
                 return CompleteOutcome(COMPLETE_LEASE_LOST, job_id)
+            next_attempt = job.attempts + 1
+            retry_decision = (
+                self._retry_decider(error_code, next_attempt, now)
+                if status == JOB_STATUS_FAILED and self._retry_decider is not None
+                else None
+            )
+            if retry_decision is not None:
+                assert_transition(job.status, JOB_STATUS_RETRY)
+                assert_transition(JOB_STATUS_RETRY, JOB_STATUS_PENDING)
+                job.status = JOB_STATUS_PENDING
+                job.attempts = next_attempt
+                job.run_after = retry_decision.run_after
+                job.agent_id = None
+                job.lease_expires_at = None
+                job.claimed_at = None
+                job.result_json = result_json
+                job.error_code = error_code
+                job.last_failed_at = now
+                return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=JOB_STATUS_PENDING)
             assert_transition(job.status, status)
             job.status = status
             job.result_json = result_json
             job.error_code = error_code
             job.lease_expires_at = None
+            job.completed_at = now
+            if status == JOB_STATUS_FAILED:
+                job.last_failed_at = now
+            job.duration_ms = duration_ms
+            job.result_schema_version = result_schema_version
+            job.completion_id = completion_id
+            job.completion_payload_hash = completion_payload_hash
             return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=status)
+
+    async def count_in_flight(
+        self,
+        *,
+        agent_id: str,
+        job_types: Sequence[str] = (),
+        now: datetime | None = None,
+    ) -> int:
+        type_filter = set(job_types)
+        with self._lock:
+            return sum(
+                1
+                for job in self._jobs.values()
+                if job.agent_id == agent_id
+                and job.status in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                and (not type_filter or job.type in type_filter)
+                and (now is None or not _lease_expired(job.lease_expires_at, now))
+            )
 
     async def in_flight_job(
         self,
@@ -188,32 +261,81 @@ class InMemoryQueueBackend(QueueBackend):
         lease_seconds: float,
         now: datetime,
     ) -> bool:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if (
-                job is None
-                or job.agent_id != agent_id
-                or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
-                or _lease_expired(job.lease_expires_at, now)
-            ):
-                return False
-            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
-            return True
+        extended = await self.extend_leases(
+            job_ids=[job_id],
+            agent_id=agent_id,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
+        return job_id in extended
 
-    async def recover_stale(self, *, now: datetime) -> int:
-        recovered = 0
+    async def extend_leases(
+        self,
+        *,
+        job_ids: Sequence[str],
+        agent_id: str,
+        lease_seconds: float,
+        now: datetime,
+    ) -> set[str]:
+        unique_job_ids = list(dict.fromkeys(job_ids))
+        extended: set[str] = set()
         with self._lock:
-            for job in self._jobs.values():
+            lease_until = now + timedelta(seconds=lease_seconds)
+            for job_id in unique_job_ids:
+                job = self._jobs.get(job_id)
+                if (
+                    job is None
+                    or job.agent_id != agent_id
+                    or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                    or _lease_expired(job.lease_expires_at, now)
+                ):
+                    continue
+                job.lease_expires_at = lease_until
+                extended.add(job_id)
+        return extended
+
+    async def recover_stale(self, *, now: datetime, batch_size: int | None = None) -> int:
+        recovered = 0
+        limit = batch_size if batch_size is not None and batch_size > 0 else None
+        with self._lock:
+            stale_jobs = [
+                job
+                for job in self._jobs.values()
                 if job.status in (
                     JOB_STATUS_CLAIMED,
                     JOB_STATUS_RUNNING,
-                ) and _lease_expired(job.lease_expires_at, now):
+                )
+                and _lease_expired(job.lease_expires_at, now)
+            ]
+            stale_jobs.sort(
+                key=lambda job: (
+                    job.lease_expires_at or datetime.max.replace(tzinfo=timezone.utc),
+                    job.job_id,
+                )
+            )
+            for job in stale_jobs[:limit]:
+                next_attempt = job.attempts + 1
+                retry_decision = (
+                    self._retry_decider(STALE_LEASE_ERROR_CODE, next_attempt, now)
+                    if self._retry_decider is not None
+                    else None
+                )
+                if retry_decision is not None:
                     assert_transition(job.status, JOB_STATUS_PENDING)
                     job.status = JOB_STATUS_PENDING
-                    job.agent_id = None
-                    job.lease_expires_at = None
-                    job.claimed_at = None
-                    recovered += 1
+                    job.run_after = retry_decision.run_after
+                else:
+                    assert_transition(job.status, JOB_STATUS_FAILED)
+                    job.status = JOB_STATUS_FAILED
+                    job.run_after = None
+                    job.completed_at = now
+                job.attempts = next_attempt
+                job.agent_id = None
+                job.lease_expires_at = None
+                job.claimed_at = None
+                job.error_code = STALE_LEASE_ERROR_CODE
+                job.last_failed_at = now
+                recovered += 1
         return recovered
 
     async def restore_claimed_after_snapshot_failure(
@@ -262,6 +384,38 @@ class InMemoryQueueBackend(QueueBackend):
         if now is not None:
             event["created_at"] = now
         self.events.append(event)
+
+    async def emit_event_for_in_flight_job(
+        self,
+        *,
+        job_id: str,
+        event_type: str,
+        severity: str,
+        message_redacted: str,
+        artifact_refs: Sequence[Any] = (),
+        agent_id: str,
+        now: datetime,
+    ) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job.agent_id != agent_id
+                or job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                or _lease_expired(job.lease_expires_at, now)
+            ):
+                return False
+            event = {
+                "job_id": job_id,
+                "event_type": event_type,
+                "severity": severity,
+                "message_redacted": message_redacted,
+                "artifact_refs": list(artifact_refs),
+                "agent_id": agent_id,
+                "created_at": now,
+            }
+            self.events.append(event)
+            return True
 
     # ── 테스트 가시성 헬퍼(인터페이스 아님 — in-memory 전용) ──────────────────────
     def job_status(self, job_id: str) -> str | None:

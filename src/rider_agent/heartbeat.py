@@ -172,6 +172,7 @@ class HeartbeatResult:
     server_time: Any | None = None
     config_version: Any | None = None
     commands: list[Any] = field(default_factory=list)
+    lease_extension: dict[str, Any] = field(default_factory=dict)
 
 
 def _heartbeat_url(base_url: str | None) -> str:
@@ -188,10 +189,12 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 def _result_from_response(response: dict[str, Any]) -> HeartbeatResult:
     commands = response.get("commands")
+    lease_extension = response.get("lease_extension")
     return HeartbeatResult(
         server_time=response.get("server_time"),
         config_version=response.get("config_version"),
         commands=list(commands) if isinstance(commands, list) else [],
+        lease_extension=dict(lease_extension) if isinstance(lease_extension, dict) else {},
     )
 
 
@@ -339,6 +342,17 @@ class HeartbeatReporter:
         # 성공 → 정상 상태로 회복(이전 revoked 이후 재발급되면 valid 로 복귀 가능).
         self._set_status(TOKEN_STATUS_VALID)
         self.last_result = result
+        lease_extension = result.lease_extension
+        failed_job_ids = lease_extension.get("failed_job_ids")
+        if (
+            lease_extension.get("status") == "degraded"
+            or (isinstance(failed_job_ids, list) and failed_job_ids)
+        ):
+            self._record_error(
+                "AGENT_HEARTBEAT_LEASE_EXTENSION_DEGRADED",
+                "heartbeat lease extension degraded",
+                None,
+            )
         return result
 
     def _handle_transport_error(self, exc: TransportError) -> None:

@@ -10,9 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import threading
+from pathlib import Path
+from types import SimpleNamespace
 
 from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN, CAPABILITY_CRAWL_COUPANG
-from rider_agent.job_loop import ClaimedJob, JOB_STATUS_FAILED, JOB_STATUS_SUCCESS, run_agent
+from rider_agent.job_loop import (
+    ClaimedJob,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SUCCESS,
+    make_failure_result,
+    run_agent,
+)
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
 from rider_agent.workers.crawl_worker import (
     AUTH_STATE_ACTIVE,
@@ -20,6 +28,8 @@ from rider_agent.workers.crawl_worker import (
     AUTH_STATE_CENTER_MISMATCH,
     ERROR_AUTH_REQUIRED,
     ERROR_CENTER_MISMATCH,
+    ERROR_CRAWL_TIMEOUT,
+    ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
     ERROR_TARGET_VALIDATION_FAILURE,
     ERROR_PROFILE_UNAVAILABLE,
     CrawlWorker,
@@ -176,10 +186,10 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username": "vault://coupang/login-id",
-            "password": "vault://coupang/login-password",
-            "verification_email_address": "vault://mail/address",
-            "verification_email_app_password": "vault://mail/app-password",
+            "coupang_login_id_ref": "vault://coupang/login-id",
+            "coupang_login_password_ref": "vault://coupang/login-password",
+            "verification_email_address_ref": "vault://mail/address",
+            "verification_email_app_password_ref": "vault://mail/app-password",
             "verification_email_subject_keyword": "보안코드",
             "verification_email_sender_keyword": "wing",
             "coupang_auto_email_2fa_enabled": True,
@@ -202,14 +212,8 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert config.verification_email_mailbox_lock_id == "vault://mail/address"
 
 
-def test_coupang_job_plaintext_secret_fields_now_accepted() -> None:
+def test_coupang_job_plaintext_secret_fields_are_rejected() -> None:
     calls: list[str | None] = []
-    secrets = {
-        "vault://coupang/login-id": "coupang-login-id",
-        "vault://coupang/login-password": "coupang-login-password",
-        "vault://mail/address": "mailbox@example.invalid",
-        "vault://mail/app-password": "mail-app-password",
-    }
 
     def fake_crawl(config, *, platform_name=None):
         calls.append(platform_name)
@@ -225,19 +229,22 @@ def test_coupang_job_plaintext_secret_fields_now_accepted() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username": "vault://coupang/login-id",
-            "password": "vault://coupang/login-password",
+            "username": "plain-login-id",
+            "password": "plain-login-password",
+            "coupang_login_id": "plain-coupang-login-id",
+            "coupang_login_password": "plain-coupang-login-password",
             "verification_email_address": "myemail@gmail.com",
             "verification_email_app_password": "myapppassword",
             "coupang_auto_email_2fa_enabled": True,
         },
     )
-    worker = CrawlWorker(crawl_snapshot=fake_crawl, secret_resolver=secrets.get)
+    worker = CrawlWorker(crawl_snapshot=fake_crawl)
 
     result = worker.execute(job)
 
-    assert result.status == JOB_STATUS_SUCCESS
-    assert calls == ["coupang"]
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PLAINTEXT_SECRET_NOT_ALLOWED
+    assert calls == []
 
 
 def test_coupang_unresolved_secret_ref_fails_before_crawl() -> None:
@@ -257,10 +264,10 @@ def test_coupang_unresolved_secret_ref_fails_before_crawl() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username": "vault://coupang/login-id",
-            "password": "vault://coupang/missing-password",
-            "verification_email_address": "vault://mail/address",
-            "verification_email_app_password": "vault://mail/app-password",
+            "coupang_login_id_ref": "vault://coupang/login-id",
+            "coupang_login_password_ref": "vault://coupang/missing-password",
+            "verification_email_address_ref": "vault://mail/address",
+            "verification_email_app_password_ref": "vault://mail/app-password",
             "coupang_auto_email_2fa_enabled": True,
         },
     )
@@ -321,6 +328,211 @@ def test_profile_failure_is_fail_closed_before_crawl() -> None:
     assert result.error_code == ERROR_PROFILE_UNAVAILABLE
     assert calls == []
     assert "C:/secret/raw" not in (result.error_message_redacted or "")
+
+
+def test_crawl_timeout_returns_failure_without_hanging() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def stuck_crawl(config, *, platform_name=None):
+        started.set()
+        release.wait()
+        return _baemin_snapshot()
+
+    job = _crawl_job()
+    job = ClaimedJob(
+        job_id=job.job_id,
+        type=job.type,
+        target_id=job.target_id,
+        lease_expires_at=job.lease_expires_at,
+        payload={**job.payload, "timeout_seconds": 0.01},
+    )
+    worker = CrawlWorker(crawl_snapshot=stuck_crawl)
+
+    result = worker.execute(job)
+    release.set()
+
+    assert started.is_set()
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_TIMEOUT
+    assert result.result_json["target_id"] == "target-1"
+
+
+def test_crawl_timeout_releases_target_profile() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class Profiles:
+        def __init__(self) -> None:
+            self.released: list[tuple[str, str]] = []
+            self.cleaned: list[float] = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            return SimpleNamespace(
+                cdp_url="http://127.0.0.1:9222",
+                profile_dir=Path("runtime") / "profiles" / str(target_id),
+            )
+
+        def release(self, tenant_id, target_id):
+            self.released.append((tenant_id, target_id))
+
+        def cleanup_idle_profiles(self, *, max_idle_seconds):
+            self.cleaned.append(max_idle_seconds)
+
+    def stuck_crawl(config, *, platform_name=None):
+        started.set()
+        release.wait()
+        return _baemin_snapshot()
+
+    job = _crawl_job()
+    job = ClaimedJob(
+        job_id=job.job_id,
+        type=job.type,
+        target_id=job.target_id,
+        lease_expires_at=job.lease_expires_at,
+        payload={**job.payload, "timeout_seconds": 0.01},
+    )
+    profiles = Profiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=stuck_crawl,
+        profile_idle_ttl_seconds=30,
+    )
+
+    try:
+        result = worker.execute(job)
+
+        assert started.is_set()
+        assert result.status == JOB_STATUS_FAILED
+        assert result.error_code == ERROR_CRAWL_TIMEOUT
+        assert profiles.released == [("tenant-1", "target-1")]
+        assert profiles.cleaned == [30]
+    finally:
+        release.set()
+
+
+def test_default_crawl_timeout_uses_process_boundary(monkeypatch) -> None:
+    calls: list[tuple[str, float, str, str]] = []
+
+    def fake_process(job, *, timeout_seconds, target_id, platform, cleanup=None):
+        calls.append((job.job_id, timeout_seconds, target_id, platform))
+        return make_failure_result(
+            ERROR_CRAWL_TIMEOUT,
+            "crawl timed out",
+            result_json={"target_id": target_id, "platform": platform},
+        )
+
+    monkeypatch.setattr(
+        "rider_agent.workers.crawl_process.run_crawl_in_subprocess",
+        fake_process,
+    )
+
+    job = _crawl_job()
+    worker = CrawlWorker()
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_TIMEOUT
+    assert calls == [(job.job_id, 60.0, "target-1", "baemin")]
+
+
+def test_stateful_crawl_timeout_uses_process_boundary_and_cleanup(monkeypatch) -> None:
+    calls: list[tuple[str, float, str, str, dict]] = []
+
+    class Profiles:
+        def __init__(self) -> None:
+            self.released: list[tuple[str, str]] = []
+            self.cleaned: list[float] = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9301",
+                user_data_dir=Path("runtime") / "profiles" / str(target_id),
+            )
+            return SimpleNamespace(
+                cdp_url=config.cdp_url,
+                profile_dir=config.browser_user_data_dir,
+            )
+
+        def release(self, tenant_id, target_id):
+            self.released.append((tenant_id, target_id))
+
+        def cleanup_idle_profiles(self, *, max_idle_seconds):
+            self.cleaned.append(max_idle_seconds)
+
+    def fail_thread_timeout(*args, **kwargs):
+        raise AssertionError("browser crawl must not use thread timeout path")
+
+    def fake_process(job, *, timeout_seconds, target_id, platform, cleanup=None):
+        calls.append((job.job_id, timeout_seconds, target_id, platform, dict(job.payload)))
+        if cleanup is not None:
+            cleanup()
+        return make_failure_result(
+            ERROR_CRAWL_TIMEOUT,
+            "crawl timed out",
+            result_json={"target_id": target_id, "platform": platform},
+        )
+
+    monkeypatch.setattr("rider_agent.workers.crawl_worker._run_with_timeout", fail_thread_timeout)
+    monkeypatch.setattr(
+        "rider_agent.workers.crawl_process.run_crawl_in_subprocess",
+        fake_process,
+    )
+
+    profiles = Profiles()
+    job = _crawl_job()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        secret_resolver=lambda ref: "secret",
+        profile_idle_ttl_seconds=30,
+    )
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_TIMEOUT
+    assert len(calls) == 1
+    assert calls[0][:4] == (job.job_id, 60.0, "target-1", "baemin")
+    assert calls[0][4]["cdp_url"] == "http://127.0.0.1:9301"
+    assert calls[0][4]["browser_user_data_dir"].endswith("target-1")
+    assert profiles.released == [("tenant-1", "target-1")]
+    assert profiles.cleaned == [30]
+
+
+def test_default_process_boundary_enabled_with_stateful_context() -> None:
+    assert CrawlWorker(profile_manager=object())._should_use_process_boundary() is True
+    assert CrawlWorker(secret_resolver=lambda ref: "secret")._should_use_process_boundary() is True
+
+
+def test_crawl_worker_runs_profile_cleanup_after_job() -> None:
+    class Profiles:
+        def __init__(self) -> None:
+            self.cleanup_calls: list[float] = []
+
+        def ensure_profile(self, *args, **kwargs):
+            return SimpleNamespace(
+                cdp_url="http://127.0.0.1:9301",
+                profile_dir=Path("runtime") / "profiles" / "target-1",
+            )
+
+        def cleanup_idle_profiles(self, *, max_idle_seconds):
+            self.cleanup_calls.append(max_idle_seconds)
+            return []
+
+    profiles = Profiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        profile_idle_ttl_seconds=30,
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot(),
+    )
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert profiles.cleanup_calls == [30]
 
 
 def test_result_payload_excludes_secrets_raw_html_and_local_paths() -> None:
@@ -497,10 +709,10 @@ def test_run_agent_passes_store_resolver_to_crawl_worker(tmp_path) -> None:
                     "target_id": "target-1",
                     "lease_expires_at": 5_000_000_000.0,
                     **base_job.payload,
-                    "username": "vault://coupang/login-id",
-                    "password": "vault://coupang/login-password",
-                    "verification_email_address": "vault://mail/address",
-                    "verification_email_app_password": "vault://mail/app-password",
+                    "coupang_login_id_ref": "vault://coupang/login-id",
+                    "coupang_login_password_ref": "vault://coupang/login-password",
+                    "verification_email_address_ref": "vault://mail/address",
+                    "verification_email_app_password_ref": "vault://mail/app-password",
                     "coupang_auto_email_2fa_enabled": True,
                 }
             ]

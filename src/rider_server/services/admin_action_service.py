@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
@@ -213,6 +214,17 @@ class AdminActionRepository(Protocol):
     ) -> None: ...
 
     async def record_audit(self, audit: AuditEntry) -> None: ...
+
+    async def enqueue_manual_job(
+        self,
+        *,
+        job_id: str,
+        job_type: str,
+        target_id: str,
+        payload_json: dict,
+        audit: AuditEntry,
+        now: datetime,
+    ) -> str: ...
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -521,10 +533,32 @@ class AdminActionService:
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         if job_type not in JOB_TYPES:
             raise ValueError(f"unknown job type: {job_type}")
+        payload = _test_crawl_payload(target, job_type)
+        enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
+        if callable(enqueue_manual_job):
+            job_id = str(uuid.uuid4())
+            audit = self._audit(
+                actor_id=actor_id,
+                action=ACTION_TEST_CRAWL,
+                target_type=TARGET_TYPE_TARGET,
+                target_id=target_id,
+                at=at,
+                diff={"job_id": job_id, "job_type": job_type},
+                source=source,
+            )
+            await enqueue_manual_job(
+                job_id=job_id,
+                job_type=job_type,
+                target_id=target_id,
+                payload_json=payload,
+                audit=audit,
+                now=at,
+            )
+            return job_id
         job_id = await self._queue.enqueue(
             job_type=job_type,
             target_id=target_id,
-            payload_json=_test_crawl_payload(target, job_type),
+            payload_json=payload,
             now=at,
         )
         audit = self._audit(
@@ -553,10 +587,32 @@ class AdminActionService:
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         platform = await self._repo.get_target_platform(target_id)
+        payload = _auth_check_payload(target, platform=platform or "")
+        enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
+        if callable(enqueue_manual_job):
+            job_id = str(uuid.uuid4())
+            audit = self._audit(
+                actor_id=actor_id,
+                action=ACTION_AUTH_CHECK,
+                target_type=TARGET_TYPE_TARGET,
+                target_id=target_id,
+                at=at,
+                diff={"job_id": job_id},
+                source=source,
+            )
+            await enqueue_manual_job(
+                job_id=job_id,
+                job_type=JOB_TYPE_AUTH_CHECK,
+                target_id=target_id,
+                payload_json=payload,
+                audit=audit,
+                now=at,
+            )
+            return job_id
         job_id = await self._queue.enqueue(
             job_type=JOB_TYPE_AUTH_CHECK,
             target_id=target_id,
-            payload_json=_auth_check_payload(target, platform=platform or ""),
+            payload_json=payload,
             now=at,
         )
         audit = self._audit(

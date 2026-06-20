@@ -49,6 +49,14 @@ class _UpdateHandlingResult:
     error: Exception | None = None
 
 
+@dataclass(frozen=True)
+class _RoutingSnapshot:
+    configs: tuple[AppConfig, ...]
+    config_by_target: dict[TelegramTarget, AppConfig]
+    locks_by_target: dict[TelegramTarget, threading.Lock]
+    keyword_locks_by_target: dict[TelegramTarget, threading.Lock]
+
+
 FetchHtml = Callable[[AppConfig], str]
 SendText = Callable[..., None]
 HandleText = Callable[..., object]
@@ -149,6 +157,7 @@ class TelegramCommandProcessor:
         # 키워드 감지 자동응답. None이 아니면 '!조회' 명령이 아닌 일반 메시지에서
         # 키워드(config.json)를 감지해 자동 안내 메시지를 발송한다.
         self.keyword_responder = keyword_responder
+        self._routing_lock = threading.Lock()
         self.config_by_target = _config_by_unique_target(configs)
         if locks_by_target is not None:
             self.locks_by_target = {
@@ -168,6 +177,8 @@ class TelegramCommandProcessor:
             self.locks_by_target = {target: threading.Lock() for target in self.config_by_target}
         for target in self.config_by_target:
             self.locks_by_target.setdefault(target, threading.Lock())
+        self.keyword_locks_by_target = {target: threading.Lock() for target in self.config_by_target}
+        self._routing_snapshot = self._make_routing_snapshot()
 
     def update_routing(
         self,
@@ -182,25 +193,42 @@ class TelegramCommandProcessor:
         명령이 항상 현재 활성 탭으로만 전달된다.
         """
 
-        self.configs = configs
-        self.config_by_target = _config_by_unique_target(configs)
-        if locks_by_target is not None:
-            normalized = {
-                (_normalize_chat_id(chat_id), _normalize_thread_id(thread_id)): lock
-                for (chat_id, thread_id), lock in locks_by_target.items()
-                if _normalize_chat_id(chat_id)
-            }
-        else:
-            normalized = {}
-        # 기존 대상의 락은 유지하고, 새 대상에는 제공된(혹은 새) 락을 붙인다.
-        merged: dict[TelegramTarget, threading.Lock] = {}
-        for target in self.config_by_target:
-            merged[target] = (
-                normalized.get(target)
-                or self.locks_by_target.get(target)
-                or threading.Lock()
-            )
-        self.locks_by_target = merged
+        with self._routing_lock:
+            self.configs = configs
+            self.config_by_target = _config_by_unique_target(configs)
+            if locks_by_target is not None:
+                normalized = {
+                    (_normalize_chat_id(chat_id), _normalize_thread_id(thread_id)): lock
+                    for (chat_id, thread_id), lock in locks_by_target.items()
+                    if _normalize_chat_id(chat_id)
+                }
+            else:
+                normalized = {}
+            # 기존 대상의 락은 유지하고, 새 대상에는 제공된(혹은 새) 락을 붙인다.
+            merged: dict[TelegramTarget, threading.Lock] = {}
+            keyword_merged: dict[TelegramTarget, threading.Lock] = {}
+            for target in self.config_by_target:
+                merged[target] = (
+                    normalized.get(target)
+                    or self.locks_by_target.get(target)
+                    or threading.Lock()
+                )
+                keyword_merged[target] = self.keyword_locks_by_target.get(target) or threading.Lock()
+            self.locks_by_target = merged
+            self.keyword_locks_by_target = keyword_merged
+            self._routing_snapshot = self._make_routing_snapshot()
+
+    def _make_routing_snapshot(self) -> _RoutingSnapshot:
+        return _RoutingSnapshot(
+            configs=tuple(self.configs),
+            config_by_target=dict(self.config_by_target),
+            locks_by_target=dict(self.locks_by_target),
+            keyword_locks_by_target=dict(self.keyword_locks_by_target),
+        )
+
+    def _current_routing_snapshot(self) -> _RoutingSnapshot:
+        with self._routing_lock:
+            return self._routing_snapshot
 
     def handle_text(
         self,
@@ -215,9 +243,10 @@ class TelegramCommandProcessor:
             # '!조회' 명령이 아니면 키워드 감지 자동응답을 시도한다(설정되어 있을 때).
             return self._handle_keyword_auto_reply(chat_id, text, message_thread_id)
 
+        snapshot = self._current_routing_snapshot()
         normalized_chat_id = _normalize_chat_id(chat_id)
         target = (normalized_chat_id, _normalize_thread_id(message_thread_id))
-        config = self.config_by_target.get(target)
+        config = snapshot.config_by_target.get(target)
         if config is None:
             self.log_event(f"텔레그램 대상 미매칭: {_target_label(target)}")
             return False
@@ -232,14 +261,14 @@ class TelegramCommandProcessor:
             )
             return True
 
-        source = _source_label(config, self.configs.index(config))
-        self.log_event(f"{source} 텔레그램 명령 수신: !{command.name}{command.phone_last4}")
+        source = _source_label(config, snapshot.configs.index(config))
+        self.log_event(f"{source} 텔레그램 명령 수신: rider_lookup")
         if send_progress:
             self.send_text(config, "조회 중입니다.", message_thread_id=message_thread_id)
         try:
-            with self.locks_by_target[target]:
+            with snapshot.locks_by_target[target]:
                 self.log_event(f"{source} 명령 조회 시작")
-                matches = self._lookup(config, command)
+                matches = self._lookup(config, command, snapshot.configs)
                 self.log_event(f"{source} 명령 조회 완료")
         except Exception as exc:
             self.log_event(f"{source} 명령 조회 오류: {exc}")
@@ -286,18 +315,19 @@ class TelegramCommandProcessor:
 
         normalized_chat_id = _normalize_chat_id(chat_id)
         target = (normalized_chat_id, _normalize_thread_id(message_thread_id))
-        config = self.config_by_target.get(target)
+        snapshot = self._current_routing_snapshot()
+        config = snapshot.config_by_target.get(target)
         if config is None:
             # 설정된 대상(채팅방/토픽)이 아니면 자동응답하지 않는다.
             return False
 
         # 같은 대상은 한 번에 하나씩만 검사/전송한다(동시 batch 중복 응답 방지).
-        with self.locks_by_target[target]:
+        with snapshot.keyword_locks_by_target[target]:
             reply = self.keyword_responder.reply_for(target, text)
             if reply is None:
                 return False
 
-            source = _source_label(config, self.configs.index(config))
+            source = _source_label(config, snapshot.configs.index(config))
             self.log_event(f"{source} 키워드 감지 → 자동응답 발송")
             try:
                 self.send_text(config, reply, message_thread_id=message_thread_id)
@@ -308,13 +338,18 @@ class TelegramCommandProcessor:
             self.keyword_responder.mark_sent(target)
         return True
 
-    def _lookup(self, config: AppConfig, command: RiderLookupCommand) -> list[RiderCancelMatch]:
+    def _lookup(
+        self,
+        config: AppConfig,
+        command: RiderLookupCommand,
+        configs: tuple[AppConfig, ...],
+    ) -> list[RiderCancelMatch]:
         matches: list[RiderCancelMatch] = []
         if not config.coupang_eats_url.strip():
             return matches
         html = self.fetch_html(config)
         table = parse_baemin_delivery_history_html(html)
-        index = self.configs.index(config)
+        index = configs.index(config)
         for stats in find_rider_cancel_stats(
             table.riders,
             name=command.name,

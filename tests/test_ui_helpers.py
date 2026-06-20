@@ -250,6 +250,39 @@ def test_validate_coupang_auto_2fa_credentials_ignores_non_target_tabs(tmp_path)
     ui._validate_coupang_auto_2fa_credentials(0, target)
 
 
+def test_validate_active_tab_isolation_validates_coupang_auto_2fa_for_all_active_tabs(tmp_path):
+    selected = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_chat_id="-100111",
+    )
+    selected.baemin_center_name = "쿠팡강남센터"
+    selected.coupang_auto_email_2fa_enabled = False
+
+    unselected = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_chat_id="-100222",
+    )
+    unselected.baemin_center_name = "쿠팡서초센터"
+    unselected.coupang_auto_email_2fa_enabled = True
+    unselected.coupang_login_id = "rider-id"
+    unselected.coupang_login_password = "rider-pw"
+    unselected.verification_email_address = "rider@naver.com"
+    unselected.verification_email_app_password = ""
+
+    with pytest.raises(ValueError, match="크롤링2.*앱 비밀번호"):
+        validate_active_tab_isolation([selected, unselected])
+
+
 def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
     states = ui._messenger_field_states("telegram")
 

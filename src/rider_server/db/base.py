@@ -57,11 +57,18 @@ def create_engine(
     *,
     echo: bool = False,
     poolclass: type[Pool] | None = None,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
 ) -> AsyncEngine:
     """async 엔진을 만든다. URL 은 호출부(settings/env)가 주입한다(하드코딩 금지)."""
     kwargs: dict[str, object] = {}
     if poolclass is not None:
         kwargs["poolclass"] = poolclass
+    else:
+        if pool_size is not None:
+            kwargs["pool_size"] = pool_size
+        if max_overflow is not None:
+            kwargs["max_overflow"] = max_overflow
     return create_async_engine(database_url, echo=echo, future=True, **kwargs)
 
 

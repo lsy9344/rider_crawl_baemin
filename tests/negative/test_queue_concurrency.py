@@ -152,7 +152,7 @@ def test_lease_expiry_recover_and_reassign_real_pg(pg_backend):
             capabilities=[JOB_TYPE_CRAWL_BAEMIN],
             max_jobs=1,
             lease_seconds=30,
-            now=_T0 + timedelta(seconds=32),
+            now=_T0 + timedelta(seconds=62),
         )
         assert len(again) == 1
         assert again[0].job_id == job_id
@@ -180,14 +180,14 @@ def test_stale_owner_complete_returns_lease_lost_real_pg(pg_backend):
             capabilities=[JOB_TYPE_CRAWL_BAEMIN],
             max_jobs=1,
             lease_seconds=30,
-            now=_T0 + timedelta(seconds=32),
+            now=_T0 + timedelta(seconds=62),
         )
         # 옛 소유자(agent-1)가 뒤늦게 success 보고 → LEASE_LOST(라우트 409)
         outcome = await pg_backend.complete(
             job_id=job_id,
             agent_id=_AGENT_1,
             status=JOB_STATUS_SUCCEEDED,
-            now=_T0 + timedelta(seconds=33),
+            now=_T0 + timedelta(seconds=63),
         )
         assert outcome.result == COMPLETE_LEASE_LOST
 

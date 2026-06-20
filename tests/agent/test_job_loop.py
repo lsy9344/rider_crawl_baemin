@@ -77,6 +77,10 @@ def _job(job_id="job-fake-1", *, lease_expires_at=FUTURE_LEASE, type="CRAWL_BAEM
     )
 
 
+def _identity() -> AgentIdentity:
+    return _IDENTITY
+
+
 class FakeTransport:
     """주입 fake transport: URL(claim/events/complete) 라우팅 + (url, body, headers) 캡처.
 
@@ -173,6 +177,31 @@ class FakeStore:
         if ref in self._data:
             return self._data[ref]
         return self._token
+
+
+def test_compose_execute_job_keeps_fallback_for_unknown_job_type():
+    from rider_agent.worker_composition import compose_execute_job
+
+    calls = []
+
+    def fallback(job):
+        calls.append(job.type)
+        return make_failure_result("UNKNOWN", "unknown")
+
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[],
+        fallback=fallback,
+        log=None,
+        now=lambda: 1.0,
+        sleep=lambda seconds: None,
+    )
+
+    result = composition.execute_job(ClaimedJob(job_id="job-1", type="NEW_TYPE"))
+
+    assert result.status == JOB_STATUS_FAILED
+    assert calls == ["NEW_TYPE"]
+    assert composition.close_callbacks == ()
 
 
 def _runner(transport, **kwargs):
@@ -587,6 +616,21 @@ def test_build_components_wires_runner_active_jobs_into_reporter():
     ]
 
 
+def test_build_components_reports_max_jobs_capacity_in_heartbeat_metrics():
+    _runner_obj, reporter = build_agent_components(
+        _IDENTITY,
+        transport=FakeTransport(),
+        max_jobs=4,
+    )
+
+    payload = build_heartbeat_payload(
+        _IDENTITY,
+        metrics_provider=reporter._metrics_provider,
+    )
+
+    assert payload["metrics"]["max_in_flight"] == 4
+
+
 def test_start_heartbeat_thread_runs_then_stops():
     stop = threading.Event()
     sleep = StoppingSleep(stop, stop_after=2)
@@ -748,6 +792,7 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
 
 def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypatch, capsys):
     from rider_agent import __main__ as agent_main
+    import rider_crawl.config as crawl_config
 
     captured: dict = {}
 
@@ -756,7 +801,9 @@ def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypa
         kwargs["log"]("agent failed token=raw-secret-123456")
         return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
 
+    state_root = tmp_path / "state-root"
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(crawl_config, "app_state_root", lambda: state_root)
     rc = agent_main._run_agent_loop(
         [],
         transport=object(),
@@ -768,13 +815,98 @@ def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypa
     assert rc == 0
     assert callable(captured["log"])
     assert callable(captured["session_probe"])
-    log_text = (tmp_path / "logs" / "agent.log").read_text(encoding="utf-8")
+    log_text = (state_root / "logs" / "agent.log").read_text(encoding="utf-8")
     assert REDACTED in log_text
     assert "raw-secret-123456" not in log_text
     assert FAKE_TOKEN not in capsys.readouterr().out
 
 
-def test_run_agent_builds_default_crawl_profile_manager(tmp_path):
+def test_run_agent_loop_second_instance_returns_1_without_starting_runner(
+    tmp_path, capsys
+):
+    from rider_agent import __main__ as agent_main
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    runner_calls = 0
+
+    def fake_run_agent(**kwargs):
+        nonlocal runner_calls
+        runner_calls += 1
+        if runner_calls == 1:
+            first_entered.set()
+            release_first.wait(timeout=2.0)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    first_rc: list[int] = []
+    identity_path = tmp_path / "agent_config.json"
+    first_thread = threading.Thread(
+        target=lambda: first_rc.append(
+            agent_main._run_agent_loop(
+                [],
+                transport=object(),
+                store=object(),
+                identity_path=identity_path,
+                runner=fake_run_agent,
+            )
+        )
+    )
+
+    first_thread.start()
+    assert first_entered.wait(timeout=1.0)
+
+    second_rc = agent_main._run_agent_loop(
+        [],
+        transport=object(),
+        store=object(),
+        identity_path=identity_path,
+        runner=fake_run_agent,
+    )
+
+    release_first.set()
+    first_thread.join(timeout=2.0)
+
+    assert second_rc == 1
+    assert runner_calls == 1
+    assert "already running" in capsys.readouterr().out
+    assert first_rc == [0]
+
+
+def test_run_agent_loop_cli_passes_capacity_and_profile_knobs(tmp_path, monkeypatch):
+    from rider_agent import __main__ as agent_main
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    monkeypatch.chdir(tmp_path)
+    rc = agent_main._run_agent_loop(
+        [
+            "--max-jobs",
+            "2",
+            "--profile-idle-ttl-seconds",
+            "30",
+            "--max-profiles",
+            "4",
+        ],
+        transport=object(),
+        store=object(),
+        identity_path="cfg",
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert captured["max_jobs"] == 2
+    assert captured["profile_idle_ttl_seconds"] == 30
+    assert captured["max_profiles"] == 4
+
+
+def test_run_agent_builds_default_crawl_profile_manager(tmp_path, monkeypatch):
+    from rider_agent import worker_composition
+
+    monkeypatch.setattr(worker_composition, "app_state_root", lambda: tmp_path, raising=False)
     store = FakeStore()
     identity_path = tmp_path / "agent_config.json"
     save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
@@ -795,7 +927,70 @@ def test_run_agent_builds_default_crawl_profile_manager(tmp_path):
 
     assert summary.crawl_worker is not None
     assert summary.crawl_worker._profile_manager is not None
+    profiles_root = summary.crawl_worker._profile_manager._profiles_root
+    assert profiles_root.is_absolute()
+    assert profiles_root == tmp_path / "runtime" / "agent-browser-profiles"
     assert summary.reporter._browser_profiles_provider is not None
+
+
+def test_run_agent_closes_crawl_profile_manager_on_shutdown(tmp_path):
+    class Profiles:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def browser_profiles(self):
+            return []
+
+        def close_all(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+    stop = threading.Event()
+    stop.set()
+    profiles = Profiles()
+
+    summary = run_agent(
+        transport=FakeTransport(claim_script=[{"jobs": []}]),
+        store=store,
+        identity_path=identity_path,
+        sleep=lambda _s: None,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        start_crawl_worker=True,
+        start_kakao_sender=False,
+        capabilities=["CRAWL_BAEMIN"],
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+    )
+
+    assert summary.started is True
+    assert profiles.closed == 1
+
+
+def test_run_agent_rejects_profile_cap_below_max_jobs(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+    stop = threading.Event()
+    stop.set()
+
+    with pytest.raises(ValueError, match="max_profiles.*max_jobs"):
+        run_agent(
+            transport=FakeTransport(claim_script=[{"jobs": []}]),
+            store=store,
+            identity_path=identity_path,
+            sleep=lambda _s: None,
+            now=lambda: 0.0,
+            stop_event=stop,
+            start_heartbeat=False,
+            start_crawl_worker=True,
+            start_kakao_sender=False,
+            max_jobs=4,
+            max_profiles=2,
+        )
 
 
 def test_run_agent_loop_cli_not_started_returns_1_without_leak(capsys):
@@ -930,6 +1125,96 @@ def test_runner_records_error_on_generic_complete_failure_and_survives():
     assert runner.active_jobs() == []
 
 
+def test_complete_failure_keeps_result_in_local_outbox(tmp_path):
+    outbox_path = tmp_path / "complete-outbox.json"
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=1)
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=500),
+    )
+
+    runner = _runner(
+        transport,
+        stop_event=stop,
+        sleep=sleep,
+        execute_job=lambda j: make_success_result(result_json={"ok": True, "token": "raw-secret"}),
+        complete_outbox_path=outbox_path,
+    )
+    runner.run()
+
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert len(payload["pending"]) == 1
+    record = payload["pending"][0]
+    assert record["job_id"] == "job-fake-1"
+    assert record["body"]["status"] == JOB_STATUS_SUCCESS
+    assert record["body"]["result_json"]["ok"] is True
+    assert "raw-secret" not in json.dumps(payload)
+
+
+def test_outbox_replays_before_claiming_new_jobs(tmp_path):
+    outbox_path = tmp_path / "complete-outbox.json"
+    first_transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=500),
+    )
+    first_runner = _runner(
+        first_transport,
+        stop_event=threading.Event(),
+        sleep=lambda _seconds: None,
+        execute_job=lambda j: make_success_result(result_json={"ok": True}),
+        complete_outbox_path=outbox_path,
+    )
+    first_runner.run_once()
+
+    second_transport = FakeTransport(claim_script=[{"jobs": []}])
+    second_runner = _runner(
+        second_transport,
+        stop_event=threading.Event(),
+        sleep=lambda _seconds: None,
+        complete_outbox_path=outbox_path,
+    )
+    second_runner.run_once()
+
+    complete_index = next(
+        index for index, (url, _body, _headers) in enumerate(second_transport.calls)
+        if url.endswith("/complete")
+    )
+    claim_index = next(
+        index for index, (url, _body, _headers) in enumerate(second_transport.calls)
+        if url.endswith(CLAIM_PATH)
+    )
+    assert complete_index < claim_index
+    assert json.loads(outbox_path.read_text(encoding="utf-8"))["pending"] == []
+
+
+def test_runner_retries_transient_complete_failure_before_untracking():
+    class FlakyCompleteTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+            self.failures_left = 1
+
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/complete") and self.failures_left > 0:
+                self.calls.append((url, body, headers))
+                self.failures_left -= 1
+                raise TransportError("agent jobs HTTP error", status_code=500)
+            return super().post_json(url, body, headers=headers)
+
+    transport = FlakyCompleteTransport()
+    runner = _runner(
+        transport,
+        sleep=lambda _seconds: None,
+        execute_job=lambda j: make_success_result(),
+    )
+
+    runner.run_once()
+
+    assert len(transport.calls_for("/complete")) == 2
+    assert runner.last_error_event is None
+    assert runner.active_jobs() == []
+
+
 # ── AC1.3 / AC4 — started 이벤트 보고 실패가 루프/job 을 죽이지 않는다(best-effort) ──
 
 
@@ -994,6 +1279,64 @@ def test_runner_processes_multiple_claimed_jobs():
     assert executed == ["job-fake-1", "job-fake-2"]
     assert len(transport.calls_for("/complete")) == 2
     assert runner.active_jobs() == []  # 둘 다 in-flight 에서 제거.
+
+
+def test_runner_processes_claimed_jobs_concurrently_up_to_max_jobs():
+    job1 = dict(_JOB_DICT)
+    job2 = dict(_JOB_DICT, job_id="job-fake-2")
+    transport = FakeTransport(claim_script=[{"jobs": [job1, job2]}])
+    lock = threading.Lock()
+    running = 0
+    running_counts: list[int] = []
+    both_started = threading.Event()
+
+    def execute(job):
+        nonlocal running
+        with lock:
+            running += 1
+            running_counts.append(running)
+            if running == 2:
+                both_started.set()
+        both_started.wait(timeout=0.2)
+        with lock:
+            running -= 1
+        return make_success_result()
+
+    runner = _runner(
+        transport,
+        max_jobs=2,
+        execute_job=execute,
+        sleep=lambda _seconds: None,
+    )
+
+    runner.run_once()
+
+    assert max(running_counts) == 2
+    assert len(transport.calls_for("/complete")) == 2
+    assert runner.active_jobs() == []
+
+
+def test_runner_tracks_all_claimed_jobs_before_serial_execution_for_heartbeat():
+    job1 = dict(_JOB_DICT)
+    job2 = dict(_JOB_DICT, job_id="job-fake-2")
+    transport = FakeTransport(claim_script=[{"jobs": [job1, job2]}])
+    captured: list[dict] = []
+    holder: dict = {}
+
+    def execute(job):
+        if job.job_id == "job-fake-1":
+            captured.extend(holder["runner"].active_jobs())
+        return make_success_result()
+
+    runner = _runner(transport, max_jobs=2, execute_job=execute)
+    holder["runner"] = runner
+    runner.run_once()
+
+    assert captured == [
+        {"job_id": "job-fake-1", "lease_expires_at": FUTURE_LEASE},
+        {"job_id": "job-fake-2", "lease_expires_at": FUTURE_LEASE},
+    ]
+    assert runner.active_jobs() == []
 
 
 # ── AC1.2 — run_agent startup 게이트: 토큰 revoke 면 루프 미진입 ─────────────────

@@ -614,7 +614,8 @@
       if (confirmMessage && !window.confirm(confirmMessage)) return;
       if (!ADM.target) return;
       var url = "/admin/targets/" + encodeURIComponent(ADM.target) + suffix + "?tenant=" + encodeURIComponent(ADM.tenant);
-      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: vals || {} });
+      vals = Object.assign({}, vals || {}, { confirm_action: "confirmed" });
+      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: vals });
     }
     function findTargetRow(targetId) {
       var rows = document.querySelectorAll("#tlist .trow");

@@ -101,9 +101,11 @@ $env:RIDER_DB_MIGRATION_BACKUP_CONFIRMED="1"
 docker compose -f deploy/docker-compose.yml up --build -d
 ```
 
-compose는 `db` healthcheck 후 `migrate` one-shot으로 Alembic migration을 적용하고, 성공 뒤 `backend-api`와 `scheduler`를 시작합니다. `RIDER_DB_MIGRATION_BACKUP_CONFIRMED=1`이 없으면 migration은 시작하지 않습니다. 외부 DB를 쓰는 배포에서는 compose의 `DATABASE_URL` environment를 운영 secret 주입 값으로 override하세요.
+compose는 `db` healthcheck 후 `migrate` one-shot으로 Alembic migration을 적용하고, 성공 뒤 `backend-api`, `scheduler`, `queue-recovery`, `telegram-dispatch`를 시작합니다. `backend-api`는 FastAPI HTTP/API와 Telegram webhook을 받습니다. `scheduler`는 due monitoring target을 crawl job으로 넣습니다. `queue-recovery`는 lease 만료와 stuck queue를 recovery합니다. `telegram-dispatch`는 dispatch queue의 Telegram send job을 처리합니다. `RIDER_DB_MIGRATION_BACKUP_CONFIRMED=1`이 없으면 migration은 시작하지 않습니다. 외부 DB를 쓰는 배포에서는 compose의 `DATABASE_URL` environment를 운영 secret 주입 값으로 override하세요.
 
-현재 Terraform/compose 기준 운영 형태는 **단일 EC2 + 로컬 PostgreSQL + backend/scheduler 동거**입니다.
+기본 운영 경로는 중앙 서버(`backend-api` + `scheduler` + `queue-recovery` + `telegram-dispatch`)와 Windows Local Agent 조합입니다. Agent는 고객 PC/운영 PC에서 Chrome 화면 읽기와 카카오톡 UI 자동화를 담당하고, 로컬 UI는 소규모 수동 운영과 개발 확인용 경로입니다.
+
+현재 Terraform/compose 기준 운영 형태는 **단일 EC2 + 로컬 PostgreSQL + backend-api/scheduler/queue-recovery/telegram-dispatch 동거**입니다.
 저비용 PoC에는 단순하지만, 단일 장애점입니다. 상용 다중테넌트나 높은 RTO/RPO가 필요하면
 backend 수평확장, 전용 worker/queue, RDS Multi-AZ/PITR, ALB 또는 reverse proxy+TLS를 먼저
 도입해야 합니다.
@@ -151,7 +153,7 @@ Admin 인증 principal resolver와 Telegram webhook secret resolver는 기본값
 
 UI에는 `크롤링1`부터 `크롤링9`까지 9개 탭이 있습니다. 각 탭은 독립된 플랫폼, 주 URL, CDP 주소, 브라우저 프로필 경로, 전송 설정을 저장합니다. 탭마다 `배민` 또는 `쿠팡이츠`를 자유롭게 섞어 쓸 수 있습니다. 여러 계정을 쓰려면 탭마다 서로 다른 Chrome 프로필과 서로 다른 원격 디버깅 포트를 사용하세요. 예를 들어 `크롤링1`은 `9222`, `크롤링2`는 `9223`, ..., `크롤링9`는 `9230`을 사용합니다. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 탭마다 따로 고릅니다.
 
-UI 설정은 `runtime/state/ui_settings.json`에 저장됩니다. 텔레그램 봇 토큰·쿠팡 로그인 정보 같은 비밀값은 이 파일에 평문으로 남기지 않고, 같은 폴더의 별도 파일 `runtime/state/secrets.local.json`에 분리 저장하며 `ui_settings.json`에는 참조 핸들(`*_ref`)만 남깁니다. `chat_id`·토픽 ID 등 비밀이 아닌 값은 그대로 `ui_settings.json`에 저장됩니다. 두 파일 모두 `runtime/`이 `.gitignore` 대상이라 커밋되지 않습니다. 다만 `secrets.local.json`은 아직 평문이며 OS 자격증명 저장소/암호화는 적용 전입니다. 비밀값을 파일에 전혀 두고 싶지 않다면 CLI `--once` 실행용으로 `.env` 또는 환경변수에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_MESSAGE_THREAD_ID`를 넣어 사용할 수 있습니다.
+UI 설정은 `runtime/state/ui_settings.json`에 저장됩니다. 텔레그램 봇 토큰·쿠팡 로그인 정보·인증 이메일 주소 같은 비밀값은 이 파일에 평문으로 남기지 않고 `ui_settings.json`에는 참조 핸들(`*_ref`)만 남깁니다. Windows 기본 secret store는 같은 상태 폴더의 `runtime/state/secrets.local.json`에 Windows DPAPI로 보호한 값을 저장합니다. `RIDER_CRAWL_SECRET_STORE=local_file`(또는 `plaintext`)을 명시하면 평문 JSON store를 쓰지만, 개발/복구용 opt-in으로만 사용하세요. `chat_id`·토픽 ID 등 비밀이 아닌 값은 그대로 `ui_settings.json`에 저장됩니다. `runtime/`은 `.gitignore` 대상이라 커밋되지 않습니다. 비밀값을 파일에 전혀 두고 싶지 않다면 CLI `--once` 실행용으로 `.env` 또는 환경변수에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_MESSAGE_THREAD_ID`를 넣어 사용할 수 있습니다.
 
 ## 여러 배민 아이디로 실행
 
@@ -290,7 +292,9 @@ UI 없이 `.env` 또는 환경변수 설정으로 1회만 실행하려면 다음
 
 > `PERFORMANCE_URL`을 직접 설정하면 플랫폼과 무관하게 주 URL로 우선 사용됩니다.
 
-상태 파일 루트 정책: run lock과 마지막 메시지 해시는 `LOG_DIR`의 형제 디렉터리(`<LOG_DIR>/../runtime/`)에 두어 탭/스코프별로 분리·격리합니다. 따라서 계정을 커스텀 로그 경로로 나눌 때(`LOG_DIR=C:\acct1\logs`, `LOG_DIR=C:\acct2\logs`)는 lock/해시도 계정별로 자동 분리됩니다. CLI로 여러 계정을 따로 실행한다면 계정마다 `LOG_DIR`를 서로 다른 상위 폴더로 지정하세요(예: `C:\acct1\logs`, `C:\acct2\logs`). 반면 텔레그램 offset/lock은 "봇 토큰별 단일·탭 독립"이라 작업 디렉터리(cwd)와 무관한 고정 루트에 둡니다. 고정 루트는 `RIDER_CRAWL_STATE_ROOT` 환경변수로 바꿀 수 있으며, 미설정 시 프로젝트 루트(개발용) 또는 `~/.rider_crawl`을 씁니다. 두 상태군의 루트가 다른 것은 의도된 설계입니다.
+상태 파일 루트 정책: 마지막 메시지 해시는 `LOG_DIR`의 형제 디렉터리(`<LOG_DIR>/../runtime/`)에 두어 탭/스코프별로 분리합니다. 반면 run lock, Chrome 준비 lock, 카카오톡 OS 자동화 lock, 텔레그램 offset/lock은 실제 공유 자원 기준으로 잡기 위해 작업 디렉터리(cwd)와 무관한 고정 앱 상태 루트에 둡니다. 이 고정 루트는 `RIDER_CRAWL_STATE_ROOT` 환경변수로 바꿀 수 있으며, 미설정 시 프로젝트 루트(개발용) 또는 `~/.rider_crawl`을 씁니다. 따라서 같은 CDP/profile 또는 같은 PC 카카오톡 UI를 쓰는 실행은 `LOG_DIR`가 달라도 같은 lock을 공유합니다.
+
+로컬 UI/CLI의 Telegram direct send는 같은 bot token + chat_id + topic 조합에 대해 짧은 in-process 최소 전송 간격을 둡니다. 다중 대상 장시간 운영에서는 이 로컬 direct send가 아니라 서버의 `telegram-dispatch` queue 경로를 기본으로 사용하세요.
 
 Windows:
 

@@ -56,6 +56,7 @@ class AgentRecord:
     token_hash: str | None = None
     token_issued_at: datetime | None = None
     token_revoked_at: datetime | None = None
+    token_rotated_at: datetime | None = None
     registration_code_hash: str | None = None
     registration_code_used_at: datetime | None = None
 
@@ -107,6 +108,8 @@ class AgentRegistry(Protocol):
     ) -> HeartbeatResult: ...
 
     async def resolve_agent_id(self, bearer_token: str) -> str | None: ...
+
+    async def capacity_for_agent(self, agent_id: str) -> dict[str, Any] | None: ...
 
 
 def hash_registration_code(code: str) -> str:
@@ -329,6 +332,16 @@ class InMemoryAgentRegistry:
     async def resolve_agent_id(self, bearer_token: str) -> str | None:
         token_hash = hash_agent_token(bearer_token)
         for agent in self._agents.values():
-            if agent.token_hash == token_hash and agent.token_revoked_at is None:
+            if (
+                agent.token_hash == token_hash
+                and agent.token_revoked_at is None
+                and agent.token_rotated_at is None
+            ):
                 return agent.id
         return None
+
+    async def capacity_for_agent(self, agent_id: str) -> dict[str, Any] | None:
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return None
+        return dict(agent.capacity_json or {})

@@ -14,12 +14,13 @@ ORM(``db.models.messaging.MessengerChannel``) ↔ 순수 domain(``domain.Messeng
 from __future__ import annotations
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.messaging import MessengerChannel as MessengerChannelRow
 from rider_server.domain import Messenger, MessengerChannel, MessengerChannelState
 
-from .channel_registration import ChannelRepository
+from .channel_registration import ChannelNotFoundError, ChannelRepository, KakaoRoomCollisionError
 
 
 def _to_domain(row: MessengerChannelRow) -> MessengerChannel:
@@ -72,8 +73,14 @@ class PostgresChannelRepository(ChannelRepository):
             )
         )
         async with self._session_factory() as session:
-            await session.execute(stmt)
-            await session.commit()
+            try:
+                result = await session.execute(stmt)
+                if result.rowcount == 0:
+                    raise ChannelNotFoundError(channel.id)
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise _channel_integrity_error(exc) from exc
 
     async def active_channels(self) -> list[MessengerChannel]:
         stmt = select(MessengerChannelRow).where(
@@ -82,3 +89,10 @@ class PostgresChannelRepository(ChannelRepository):
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
         return [_to_domain(row) for row in rows]
+
+
+def _channel_integrity_error(exc: IntegrityError) -> ValueError:
+    text = str(getattr(exc, "orig", exc)).lower()
+    if "kakao" in text or "messenger_channels" in text:
+        return KakaoRoomCollisionError("활성 Kakao 채널 방명이 중복되었습니다")
+    return ValueError("중복된 메시지 채널입니다")

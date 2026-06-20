@@ -95,7 +95,7 @@
 
 ## 1. 한 줄 요약
 
-현재 프로젝트는 중앙 서버 + Windows Local Agent + 관리자 웹 대시보드로 나뉘는 구조로 리팩토링되어 있다. 기존 Tkinter UI는 `크롤링1`부터 `크롤링9`까지 탭을 만들고, 각 탭이 하나의 배민 또는 쿠팡이츠 계정 세션을 담당한다. 각 탭은 별도 Chrome 프로필과 별도 CDP 포트에 연결해 로그인된 웹 화면을 읽고, 텔레그램 또는 카카오톡으로 실적 메시지를 보낸다. 새 `rider_server`는 PostgreSQL을 정본 저장소로 쓰고, Agent 등록, 작업 큐, 관리자 화면, Telegram webhook, scheduler를 담당한다.
+현재 프로젝트는 중앙 서버 + Windows Local Agent + 관리자 웹 대시보드로 나뉘는 구조로 리팩토링되어 있다. 기존 Tkinter UI는 `크롤링1`부터 `크롤링9`까지 탭을 만들고, 각 탭이 하나의 배민 또는 쿠팡이츠 계정 세션을 담당한다. 각 탭은 별도 Chrome 프로필과 별도 CDP 포트에 연결해 로그인된 웹 화면을 읽고, 텔레그램 또는 카카오톡으로 실적 메시지를 보낸다. 새 `rider_server`는 PostgreSQL을 정본 저장소로 쓰고, Agent 등록, 작업 큐, 관리자 화면, Telegram webhook, `backend-api`, `scheduler`, `queue-recovery`, `telegram-dispatch` 런타임을 담당한다.
 
 현재 구조는 소수 계정 운영에는 맞지만, 100명 또는 1000명 고객을 판매용으로 운영하려면 로컬 Chrome 세션 관리, Agent 배포/업데이트, 비밀값 보관, 장애 알림, 백업/복구 정책을 더 단단히 운영해야 한다.
 
@@ -358,7 +358,7 @@ runtime/state/ui_settings.json
 - (해소됨) 저장이 단순 `write_text()`였다.
 - (해소됨) atomic write가 아니었다.
 - (해소됨) 전원 종료 또는 프로세스 종료가 파일 쓰기 중 발생하면 일부 파일이 깨질 가능성이 있었다.
-- (Epic 2 이전) 쿠팡 비밀번호, 텔레그램 토큰 같은 민감 설정이 같은 JSON에 평문 저장됐다. Epic 2(Story 2.4) secret store seam(`rider_crawl/secret_store.py`) 도입 후에는 설정 JSON에 평문 대신 `*_ref` 불투명 핸들만 남기고 실제 값은 분리된 store 파일(`runtime/state/secrets.local.json`)에 둔다. atomic write(Story 2.2)도 적용돼 위 "단순 `write_text`/비-atomic" 한계는 해소됐다.
+- (Epic 2 이전) 쿠팡 비밀번호, 텔레그램 토큰 같은 민감 설정이 같은 JSON에 평문 저장됐다. Epic 2(Story 2.4) secret store seam(`rider_crawl/secret_store.py`) 도입 후에는 설정 JSON에 평문 대신 `*_ref` 불투명 핸들만 남기고 실제 값은 secret store에 둔다. 현재 Windows 기본값은 `runtime/state/secrets.local.json`에 DPAPI 보호값을 저장하는 방식이고, `RIDER_CRAWL_SECRET_STORE=local_file`을 명시한 경우에만 평문 파일 store를 쓴다. atomic write(Story 2.2)도 적용돼 위 "단순 `write_text`/비-atomic" 한계는 해소됐다.
 
 ### 7.2 현재 런타임 설정 스냅샷
 
@@ -636,6 +636,8 @@ CDP 보안 정책:
 | `messengers/telegram.py` | 텔레그램 adapter |
 | `messengers/kakao.py` | 카카오 adapter |
 | `sender.py` | 실제 텔레그램 API 호출과 카카오톡 UI 자동화 legacy 코드 |
+
+로컬 UI와 CLI `--once`는 이 adapter를 통해 직접 전송한다. 다중 대상 장시간 운영의 기본 경로는 중앙 서버가 collect/dispatch job을 만들고 Windows Local Agent와 `telegram-dispatch` worker가 나눠 처리하는 server dispatch 경로다.
 
 현재 지원:
 

@@ -221,8 +221,9 @@ def _startup_cmd_text(command: Sequence[str]) -> str:
     writer 가 Windows 에서 CRLF 로 변환하게 한다(round-trip 일관 → 멱등 비교가 안정적).
     """
 
+    cwd_line = subprocess.list2cmdline(["cd", "/d", str(Path.cwd())])
     line = subprocess.list2cmdline(list(command))
-    return f"@echo off\n{line}\n"
+    return f"@echo off\n{cwd_line}\n{line}\n"
 
 
 def _schtasks_create_args(command: Sequence[str]) -> list[str]:

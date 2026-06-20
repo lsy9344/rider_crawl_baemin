@@ -50,6 +50,17 @@ _FIXED_AT = datetime(2026, 1, 1, 0, 0, 0)
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 
+
+def test_delivery_outbox_migration_holds_legacy_pending_rows_before_text_backfill() -> None:
+    source = Path("migrations/versions/0015_delivery_outbox.py").read_text(encoding="utf-8")
+
+    assert "UPDATE delivery_logs" in source
+    assert "status = 'HELD'" in source
+    assert "status IN ('RETRYING', 'FAILED')" in source
+    assert source.index("UPDATE delivery_logs") < source.index(
+        "UPDATE messages SET text = text_redacted_preview"
+    )
+
 # 활성 탭(배민/쿠팡)·비활성 탭 fixture 빌더 ────────────────────────────────
 
 
@@ -602,6 +613,7 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
                 "interval_minutes": 30,
                 "coupang_login_id": "fakeplainid",
                 "coupang_login_password": "fakeplainpw",
+                "verification_email_app_password": "fakeapppw",
             }
         ],
     )
@@ -619,12 +631,18 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
     assert b"fakeplainid" in backup_bytes
     assert b"fakeplainpw" in backup_bytes
 
-    # Plaintext credentials are now stored directly in DB (운영 간소화).
     account = result.targets[0].mapping.platform_account
+    target_id = result.targets[0].mapping.monitoring_target.id
     assert isinstance(account.username, str)
     assert isinstance(account.password, str)
-    assert account.username == "fakeplainid"
-    assert account.password == "fakeplainpw"
+    assert account.username == f"local:{target_id}/coupang_login_id"
+    assert account.password == f"local:{target_id}/coupang_login_password"
+    assert account.verification_email_app_password == (
+        f"local:{target_id}/verification_email_app_password"
+    )
+    assert account.username != "fakeplainid"
+    assert account.password != "fakeplainpw"
+    assert account.verification_email_app_password != "fakeapppw"
 
 
 # ── 도메인 매핑 정합: 쿠팡(두 번째 플랫폼) 중립 필드 ───────────────────────

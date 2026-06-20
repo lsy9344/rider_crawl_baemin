@@ -274,6 +274,25 @@ def test_can_admit_allows_with_capacity_and_capability() -> None:
     assert policy.can_admit(cap, JOB_TYPE_CRAWL_BAEMIN) is True
 
 
+def test_can_admit_uses_job_type_capacity_when_available() -> None:
+    cap = policy.CapacityPolicy(
+        aggregate_capacity=4,
+        aggregate_in_flight=2,
+        capabilities=frozenset({JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG}),
+        capacity_by_job_type={
+            JOB_TYPE_CRAWL_BAEMIN: 2,
+            JOB_TYPE_CRAWL_COUPANG: 1,
+        },
+        in_flight_by_job_type={
+            JOB_TYPE_CRAWL_BAEMIN: 0,
+            JOB_TYPE_CRAWL_COUPANG: 1,
+        },
+    )
+
+    assert policy.can_admit(cap, JOB_TYPE_CRAWL_BAEMIN) is True
+    assert policy.can_admit(cap, JOB_TYPE_CRAWL_COUPANG) is False
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # QA gap-fill (qa-generate-e2e-tests, Story 5.4) — 추가 경계/분기 커버리지
 # ══════════════════════════════════════════════════════════════════════════

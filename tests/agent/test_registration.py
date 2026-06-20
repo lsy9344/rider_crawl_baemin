@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -184,6 +185,99 @@ def test_register_idempotent_does_not_post_when_identity_exists(tmp_path):
     )
     assert second.calls == []
     assert identity.agent_token == "agtok-fake-issued"  # 덮어쓰지 않음.
+
+
+def test_concurrent_registration_preserves_identity_token_pair(tmp_path, monkeypatch):
+    import rider_crawl.ui_settings as ui_settings
+
+    identity_path = tmp_path / "agent_config.json"
+    first = {
+        **CANNED,
+        "agent_id": "agent-fake-a",
+        "agent_token": "agtok-fake-a",
+        "config_version": "cfg-fake-a",
+    }
+    second = {
+        **CANNED,
+        "agent_id": "agent-fake-b",
+        "agent_token": "agtok-fake-b",
+        "config_version": "cfg-fake-b",
+    }
+
+    class SequencedTransport:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.calls = 0
+
+        def post_json(self, url: str, body: dict) -> dict:
+            with self._lock:
+                self.calls += 1
+                return dict(first if self.calls == 1 else second)
+
+    class RaceStore:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+            self.first_put_started = threading.Event()
+            self.second_config_written = threading.Event()
+
+        def put(self, value: str, *, ref: str = "") -> str:
+            self.values[ref] = value
+            if value == "agtok-fake-a":
+                self.first_put_started.set()
+                self.second_config_written.wait(timeout=0.5)
+            return ref
+
+        def resolve(self, ref: str) -> str | None:
+            return self.values.get(ref)
+
+    original_atomic_write = ui_settings._atomic_write_text
+
+    def observed_atomic_write(path, text):
+        original_atomic_write(path, text)
+        if path == identity_path and "agent-fake-b" in text:
+            store.second_config_written.set()
+
+    monkeypatch.setattr(ui_settings, "_atomic_write_text", observed_atomic_write)
+
+    transport = SequencedTransport()
+    store = RaceStore()
+    results = []
+
+    first_thread = threading.Thread(
+        target=lambda: results.append(
+            register_agent(
+                "regcode-fake-a",
+                transport=transport,
+                store=store,
+                identity_path=identity_path,
+                machine_info=_INFO,
+            )
+        )
+    )
+    second_thread = threading.Thread(
+        target=lambda: results.append(
+            register_agent(
+                "regcode-fake-b",
+                transport=transport,
+                store=store,
+                identity_path=identity_path,
+                machine_info=_INFO,
+            )
+        )
+    )
+
+    first_thread.start()
+    assert store.first_put_started.wait(timeout=1.0)
+    second_thread.start()
+    first_thread.join(timeout=2.0)
+    second_thread.join(timeout=2.0)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    loaded = load_local_agent_identity(store=store, identity_path=identity_path)
+    assert loaded is not None
+    valid_pairs = {("agent-fake-a", "agtok-fake-a"), ("agent-fake-b", "agtok-fake-b")}
+    assert (loaded.agent_id, loaded.agent_token) in valid_pairs
 
 
 def test_register_rejected_code_raises_without_leak_and_no_overwrite(tmp_path):

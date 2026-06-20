@@ -49,7 +49,7 @@ _PASSWORD_INPUT_SELECTORS = (
     "input[name='password']",
 )
 _LOGIN_BUTTON_TEXTS = ("로그인", "login")
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%*+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+_EMAIL_RE = re.compile(r"(?P<email>[A-Za-z0-9._%*+\-]+@[A-Za-z0-9.*\-]+\.[A-Za-z]{2,})")
 _SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
 
 
@@ -76,11 +76,11 @@ def recover_coupang_session_with_email_2fa(
     if _is_password_login_screen(refreshed_text, page):
         return False
 
-    requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
-    if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
+    if not _account_matches_screen(page, config.verification_email_address):
         return False
 
-    if not _account_matches_screen(page, config.verification_email_address):
+    requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
+    if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
         return False
 
     code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
@@ -125,20 +125,56 @@ def _imap_fetch(**kwargs: Any) -> str:
     return fetch_latest_verification_code(**kwargs)
 
 
-def _onscreen_domains(page: Any) -> set[str]:
+def _onscreen_recipients(page: Any) -> set[str]:
     text = _safe_page_text(page)
     return {
-        domain
+        email
         for match in _EMAIL_RE.finditer(text)
-        if (domain := match.group(1).casefold()) in _SUPPORTED_SCREEN_DOMAINS
+        if (email := match.group("email").casefold()) and domain_of(email).replace("*", "") in _SUPPORTED_SCREEN_DOMAINS
     }
 
 
 def _account_matches_screen(page: Any, account_address: str) -> bool:
-    screen = _onscreen_domains(page)
-    if not screen:
+    account = str(account_address or "").strip().casefold()
+    if "@" not in account:
+        return False
+    recipients = _onscreen_recipients(page)
+    if not recipients:
+        return False
+    return any(_recipient_matches_account(recipient, account) for recipient in recipients)
+
+
+def _recipient_matches_account(recipient: str, account: str) -> bool:
+    if recipient == account:
         return True
-    return domain_of(account_address) in screen
+    recipient_local, _, recipient_domain = recipient.partition("@")
+    account_local, _, account_domain = account.partition("@")
+    if "*" in recipient_domain:
+        return False
+    if recipient_domain != account_domain:
+        return False
+    if "*" not in recipient_local:
+        return False
+    return _masked_local_part_matches(recipient_local, account_local)
+
+
+def _masked_local_part_matches(mask: str, value: str) -> bool:
+    pieces = [piece for piece in re.split(r"\*+", mask) if piece]
+    if not pieces:
+        return False
+    if not value.startswith(pieces[0]):
+        return False
+    if len(pieces) == 1:
+        return True
+    if not value.endswith(pieces[-1]):
+        return False
+    position = 0
+    for piece in pieces:
+        found = value.find(piece, position)
+        if found == -1:
+            return False
+        position = found + len(piece)
+    return True
 
 
 def _interaction_timeout(config: AppConfig) -> int:

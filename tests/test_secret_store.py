@@ -4,6 +4,7 @@
 secrets.local.json 미변형). 값은 명백한 가짜값(tok-fake/pw-fake/id-fake)만 쓴다(A1 게이트).
 """
 
+from rider_crawl import secret_store
 from rider_crawl.secret_store import (
     SECRET_STORAGE_AGENT_LOCAL,
     SECRET_STORAGE_CENTRAL,
@@ -121,6 +122,27 @@ def test_put_with_reused_ref_updates_stored_value(tmp_path):
     assert LocalFileSecretStore(path).resolve("r1") == "pw-new"
 
 
+def test_default_secret_store_uses_windows_protected_store_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(secret_store.sys, "platform", "win32")
+    monkeypatch.delenv("RIDER_CRAWL_SECRET_STORE", raising=False)
+
+    store = secret_store.default_secret_store(tmp_path / "secrets.local.json")
+
+    assert store.__class__.__name__ == "WindowsDpapiSecretStore"
+
+
+def test_file_secret_store_requires_explicit_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setattr(secret_store.sys, "platform", "win32")
+
+    monkeypatch.delenv("RIDER_CRAWL_SECRET_STORE", raising=False)
+    default_store = secret_store.default_secret_store(tmp_path / "default.json")
+    assert not isinstance(default_store, LocalFileSecretStore)
+
+    monkeypatch.setenv("RIDER_CRAWL_SECRET_STORE", "local_file")
+    opted_in = secret_store.default_secret_store(tmp_path / "file.json")
+    assert isinstance(opted_in, LocalFileSecretStore)
+
+
 def test_otp_is_not_stored_and_excluded_from_store_handled_fields():
     # GAP(AC2/Task1): OTP/2FA 코드는 **비저장** 분류이고, store가 영속하는 secret 필드 집합
     # (_SECRET_FIELDS)에 포함되지 않아야 한다(store는 token/password/login-id만 다룬다).
@@ -130,5 +152,6 @@ def test_otp_is_not_stored_and_excluded_from_store_handled_fields():
         "telegram_bot_token",
         "coupang_login_password",
         "coupang_login_id",
+        "verification_email_address",
         "verification_email_app_password",
     }

@@ -6,7 +6,7 @@
 
 **같은 트랜잭션(AC3):** ``agents.token_revoked_at``/``token_rotated_at`` UPDATE 와 ``audit_logs``
 INSERT 를 **한 세션·한 commit** 으로 묶는다(token 무효화 성공·audit 누락 불가). 신규 테이블 0
-(0005 가 additive 컬럼만 추가). ``is_revoked`` 는 ``token_revoked_at IS NOT NULL`` 로 판정한다.
+(0005 가 additive 컬럼만 추가). ``is_revoked`` 는 revoke/rotate 시각 중 하나라도 있으면 거부한다.
 """
 
 from __future__ import annotations
@@ -51,10 +51,10 @@ class PostgresAgentTokenRepository:
             key = uuid.UUID(agent_id)
         except (ValueError, AttributeError, TypeError):
             return True  # 식별 불가 → fail-closed(거부)
-        stmt = select(AgentRow.token_revoked_at).where(AgentRow.id == key)
+        stmt = select(AgentRow.token_revoked_at, AgentRow.token_rotated_at).where(AgentRow.id == key)
         async with self._session_factory() as session:
-            revoked_at = (await session.execute(stmt)).scalar_one_or_none()
-        return revoked_at is not None
+            row = (await session.execute(stmt)).one_or_none()
+        return row is None or row.token_revoked_at is not None or row.token_rotated_at is not None
 
     async def record_audit(self, audit: AuditEntry) -> None:
         async with self._session_factory() as session:

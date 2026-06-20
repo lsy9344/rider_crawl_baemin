@@ -188,7 +188,7 @@ def test_due_query_returns_active_due_targets_only(pg_env):
     repo, _backend, _factory = pg_env
 
     async def _run():
-        due = await repo.due_targets(now=_T0)
+        due = await repo.due_targets(now=_T0, limit=100)
         ids = {t.target_id for t in due}
         assert _TARGET_DUE in ids
         assert _TARGET_FUTURE not in ids  # next_run_at 미래 → due 아님

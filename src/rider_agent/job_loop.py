@@ -34,6 +34,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import json
 import os
 import threading
 import time
@@ -41,12 +44,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from rider_crawl.redaction import redact, redacted_error_event
+from rider_crawl.redaction import redact, redact_mapping, redacted_error_event
 
 from rider_agent.heartbeat import (
     DEFAULT_CAPABILITIES,
     MIN_HEARTBEAT_INTERVAL_SECONDS,
     HeartbeatReporter,
+    default_metrics,
 )
 from rider_agent.registration import (
     DEFAULT_SERVER_BASE_URL,
@@ -62,6 +66,7 @@ from rider_agent.secure_store import (
     load_local_agent_identity,
     validate_agent_token,
 )
+from rider_agent.worker_composition import compose_execute_job
 
 # ── 경로 상수(4.2 _register_url·4.3 _heartbeat_url 패턴과 정합) ────────────────
 
@@ -73,6 +78,12 @@ JOBS_OP_LABEL = "agent jobs"
 
 # job 없을 때 재폴링 전 대기(초). architecture-contract main_loop 의 short_poll_interval.
 DEFAULT_SHORT_POLL_INTERVAL_SECONDS = 5.0
+DEFAULT_COMPLETE_RETRY_ATTEMPTS = 3
+DEFAULT_COMPLETE_RETRY_DELAY_SECONDS = 1.0
+COMPLETE_REPORT_SENT = "sent"
+COMPLETE_REPORT_LEASE_LOST = "lease_lost"
+COMPLETE_REPORT_FAILED = "failed"
+COMPLETE_REPORT_REVOKED = "revoked"
 
 # ── job status / 이벤트 — **평문 상수**, enum/"정확히 N개" lock 금지 ───────────
 # secure_store ``TOKEN_STATUS_*``·heartbeat ``DEFAULT_CAPABILITIES`` 선례: 후속 워커가
@@ -306,6 +317,7 @@ def complete_job(
     *,
     transport: Transport,
     base_url: str | None = None,
+    completion_id: str | None = None,
 ) -> dict[str, Any]:
     """``POST /v1/jobs/{job_id}/complete`` 로 결과를 보고한다.
 
@@ -314,7 +326,18 @@ def complete_job(
     이미 redact 통과값이라 raw error/secret 평문이 없다. token 은 헤더로만.
     """
 
-    body = {
+    body = _complete_body(result, completion_id=completion_id)
+    return transport.post_json(
+        _complete_url(base_url, job_id), body, headers=_auth_headers(identity.agent_token)
+    )
+
+
+def _complete_body(
+    result: JobResult,
+    *,
+    completion_id: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "status": result.status,
         "result_json": result.result_json,
         "error_code": result.error_code,
@@ -324,9 +347,9 @@ def complete_job(
         "started_at": result.started_at,
         "finished_at": result.finished_at,
     }
-    return transport.post_json(
-        _complete_url(base_url, job_id), body, headers=_auth_headers(identity.agent_token)
-    )
+    if completion_id:
+        body["completion_id"] = completion_id
+    return body
 
 
 def emit_job_event(
@@ -352,6 +375,104 @@ def emit_job_event(
     return transport.post_json(
         _events_url(base_url, job_id), body, headers=_auth_headers(identity.agent_token)
     )
+
+
+class CompleteOutbox:
+    """Small durable store for completed job reports that failed to reach the server."""
+
+    def __init__(self, path: Any | None) -> None:
+        self._path = Path(path) if path is not None else None
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self._path is not None
+
+    def pending_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            payload = self._read_payload()
+            return [dict(record) for record in payload["pending"] if isinstance(record, dict)]
+
+    def put(self, *, job_id: str, body: dict[str, Any], completion_id: str) -> None:
+        if self._path is None:
+            return
+        record = {
+            "job_id": job_id,
+            "completion_id": completion_id,
+            "body": redact_mapping(body),
+        }
+        with self._lock:
+            payload = self._read_payload()
+            payload["pending"] = [
+                item
+                for item in payload["pending"]
+                if item.get("completion_id") != completion_id
+            ]
+            payload["pending"].append(record)
+            self._write_payload(payload)
+
+    def mark_sent(self, completion_id: str) -> None:
+        if self._path is None:
+            return
+        with self._lock:
+            payload = self._read_payload()
+            payload["pending"] = [
+                item
+                for item in payload["pending"]
+                if item.get("completion_id") != completion_id
+            ]
+            self._write_payload(payload)
+
+    def mark_discarded(self, completion_id: str, *, reason: str) -> None:
+        if self._path is None:
+            return
+        with self._lock:
+            payload = self._read_payload()
+            remaining = []
+            discarded = payload["discarded"]
+            for item in payload["pending"]:
+                if item.get("completion_id") == completion_id:
+                    discarded.append(
+                        {
+                            "job_id": item.get("job_id"),
+                            "completion_id": completion_id,
+                            "reason": redact(reason),
+                        }
+                    )
+                else:
+                    remaining.append(item)
+            payload["pending"] = remaining
+            payload["discarded"] = discarded
+            self._write_payload(payload)
+
+    def _read_payload(self) -> dict[str, list[dict[str, Any]]]:
+        if self._path is None or not self._path.exists():
+            return {"pending": [], "discarded": []}
+        try:
+            payload = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"pending": [], "discarded": []}
+        if not isinstance(payload, dict):
+            return {"pending": [], "discarded": []}
+        pending = payload.get("pending")
+        discarded = payload.get("discarded")
+        return {
+            "pending": [
+                item for item in pending if isinstance(item, dict)
+            ] if isinstance(pending, list) else [],
+            "discarded": [
+                item for item in discarded if isinstance(item, dict)
+            ] if isinstance(discarded, list) else [],
+        }
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
+        if self._path is None:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+        tmp_path = self._path.with_name(f"{self._path.name}.tmp")
+        tmp_path.write_text(encoded, encoding="utf-8")
+        tmp_path.replace(self._path)
 
 
 # ── 루프 primitive + lease 인지 + 결과 보고 ───────────────────────────────────
@@ -388,6 +509,7 @@ class JobRunner:
         stop_event: threading.Event | None = None,
         on_status: Callable[[str], None] | None = None,
         log: Callable[[str], None] | None = None,
+        complete_outbox_path: Any | None = None,
     ) -> None:
         self.identity = identity
         self._transport = transport
@@ -395,13 +517,14 @@ class JobRunner:
         self._sleep = sleep
         self._now = now
         self._capabilities = capabilities
-        self._max_jobs = max_jobs
+        self._max_jobs = max(1, int(max_jobs))
         self._short_poll_interval = short_poll_interval_seconds
         self._base_url = base_url
         self._token_check = token_check
         self._stop_event = stop_event if stop_event is not None else threading.Event()
         self._on_status = on_status
         self._log = log
+        self._complete_outbox = CompleteOutbox(complete_outbox_path)
         #: in-flight job(claim~complete 사이). heartbeat thread 가 동시 읽으므로 lock 보호.
         self._lock = threading.Lock()
         self._in_flight: dict[str, ClaimedJob] = {}
@@ -445,7 +568,7 @@ class JobRunner:
             if self._stop_event.is_set():
                 break
             # 매 주기 끝에 대기 — 어떤 분기에서도 즉시 재호출(무한 스핀)하지 않는다.
-            self._sleep(self._short_poll_interval)
+            self._sleep_interruptible(self._short_poll_interval)
 
     def run_once(self) -> None:
         """단발 주기: token 게이트 → claim → 각 job execute+complete. 어떤 예외도 흡수(best-effort)."""
@@ -459,6 +582,9 @@ class JobRunner:
                 "job claim skipped: token invalid — re-registration required",
                 None,
             )
+            return
+
+        if not self._replay_outbox():
             return
 
         try:
@@ -479,11 +605,58 @@ class JobRunner:
         # claim 성공 → 정상 상태로 회복(이전 revoked 이후 재발급되면 valid 로 복귀).
         self._set_status(TOKEN_STATUS_VALID)
 
+        # claim 한 전체 묶음을 heartbeat 에 노출해 serial 처리 대기 중인 lease 도 연장 입력에 포함한다.
+        self._track_many(jobs)
+
         # claim 한 job 만 실행한다(임의 job 생성·실행 0).
-        for job in jobs:
-            self._process_job(job)
+        self._process_jobs(jobs)
 
     # ── job 처리(execute → complete) ──────────────────────────────────────────
+
+    def _process_jobs(self, jobs: Sequence[ClaimedJob]) -> None:
+        if not jobs:
+            return
+        if self._max_jobs <= 1 or len(jobs) <= 1:
+            self._process_jobs_serial(jobs)
+            return
+        self._process_jobs_parallel(jobs)
+
+    def _process_jobs_serial(self, jobs: Sequence[ClaimedJob]) -> None:
+        pending = {job.job_id for job in jobs}
+        try:
+            for job in jobs:
+                if self._stop_event.is_set():
+                    break
+                pending.discard(job.job_id)
+                self._process_job(job)
+        finally:
+            for job_id in pending:
+                self._untrack(job_id)
+
+    def _process_jobs_parallel(self, jobs: Sequence[ClaimedJob]) -> None:
+        pending = {job.job_id for job in jobs}
+        with ThreadPoolExecutor(
+            max_workers=min(self._max_jobs, len(jobs)),
+            thread_name_prefix="rider-agent-job",
+        ) as executor:
+            futures = {}
+            for job in jobs:
+                if self._stop_event.is_set():
+                    break
+                pending.discard(job.job_id)
+                futures[executor.submit(self._process_job, job)] = job
+            for future in as_completed(futures):
+                job = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001 - defensive guard for worker thread.
+                    self._record_error(
+                        ERROR_JOB_EXECUTION,
+                        f"job worker failed: {job.type}",
+                        exc,
+                    )
+        for job_id in pending:
+            self._untrack(job_id)
 
     def _process_job(self, job: ClaimedJob) -> None:
         self._track(job)
@@ -508,34 +681,142 @@ class JobRunner:
         self._complete(job, result)
 
     def _complete(self, job: ClaimedJob, result: JobResult) -> None:
+        completion_id = self._completion_id(job, result)
+        self._complete_outbox.put(
+            job_id=job.job_id,
+            body=_complete_body(result, completion_id=completion_id),
+            completion_id=completion_id,
+        )
         try:
-            complete_job(
-                self.identity,
-                job.job_id,
-                result,
-                transport=self._transport,
-                base_url=self._base_url,
-            )
-        except TransportError as exc:
-            if exc.status_code in (409, 410):
-                # lease lost / 이미 재할당 — 다른 Agent 소유로 본다. crash 없이 흡수·기록.
-                self._record_error(
-                    ERROR_JOB_LEASE_LOST,
-                    "job complete rejected: lease lost or already reassigned",
-                    exc,
-                )
-            elif exc.status_code == 401:
-                self._handle_transport_error(
-                    ERROR_JOB_REVOKED, "job complete rejected: token revoked", exc
-                )
-            else:
-                self._record_error(ERROR_JOB_COMPLETE, "job complete failed", exc)
-        except Exception as exc:  # noqa: BLE001 — best-effort.
-            self._record_error(ERROR_JOB_COMPLETE, "job complete failed", exc)
+            outcome = self._complete_with_retry(job, result, completion_id=completion_id)
+            if outcome == COMPLETE_REPORT_SENT:
+                self._complete_outbox.mark_sent(completion_id)
+            elif outcome == COMPLETE_REPORT_LEASE_LOST:
+                self._complete_outbox.mark_discarded(completion_id, reason=outcome)
         finally:
             # client 관점에서 이 job 처리는 끝났다 — in-flight 에서 제거(heartbeat 연장 중단).
             # 재완료/재시도는 서버 lease 만료→재할당(Epic 5)에 맡긴다(best-effort).
             self._untrack(job.job_id)
+
+    def _complete_with_retry(
+        self,
+        job: ClaimedJob,
+        result: JobResult,
+        *,
+        completion_id: str | None = None,
+    ) -> str:
+        attempts = max(1, DEFAULT_COMPLETE_RETRY_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            should_retry = attempt < attempts
+            try:
+                complete_job(
+                    self.identity,
+                    job.job_id,
+                    result,
+                    transport=self._transport,
+                    base_url=self._base_url,
+                    completion_id=completion_id,
+                )
+                return COMPLETE_REPORT_SENT
+            except TransportError as exc:
+                if exc.status_code in (409, 410):
+                    # lease lost / 이미 재할당 — 다른 Agent 소유로 본다. crash 없이 흡수·기록.
+                    self._record_error(
+                        ERROR_JOB_LEASE_LOST,
+                        "job complete rejected: lease lost or already reassigned",
+                        exc,
+                    )
+                    return COMPLETE_REPORT_LEASE_LOST
+                if exc.status_code == 401:
+                    self._handle_transport_error(
+                        ERROR_JOB_REVOKED, "job complete rejected: token revoked", exc
+                    )
+                    return COMPLETE_REPORT_REVOKED
+                if should_retry and self._sleep_before_complete_retry():
+                    continue
+                self._record_error(ERROR_JOB_COMPLETE, "job complete failed", exc)
+                return COMPLETE_REPORT_FAILED
+            except Exception as exc:  # noqa: BLE001 — best-effort.
+                if should_retry and self._sleep_before_complete_retry():
+                    continue
+                self._record_error(ERROR_JOB_COMPLETE, "job complete failed", exc)
+                return COMPLETE_REPORT_FAILED
+        return COMPLETE_REPORT_FAILED
+
+    def _replay_outbox(self) -> bool:
+        for record in self._complete_outbox.pending_records():
+            job_id = record.get("job_id")
+            completion_id = record.get("completion_id")
+            body = record.get("body")
+            if not isinstance(job_id, str) or not isinstance(completion_id, str) or not isinstance(body, dict):
+                if isinstance(completion_id, str):
+                    self._complete_outbox.mark_discarded(completion_id, reason="invalid outbox record")
+                continue
+            result = self._result_from_complete_body(body)
+            if result is None:
+                self._complete_outbox.mark_discarded(completion_id, reason="invalid outbox body")
+                continue
+            outcome = self._complete_with_retry(
+                ClaimedJob(job_id=job_id),
+                result,
+                completion_id=completion_id,
+            )
+            if outcome == COMPLETE_REPORT_SENT:
+                self._complete_outbox.mark_sent(completion_id)
+                continue
+            if outcome == COMPLETE_REPORT_LEASE_LOST:
+                self._complete_outbox.mark_discarded(completion_id, reason=outcome)
+                continue
+            return False
+        return True
+
+    def _completion_id(self, job: ClaimedJob, result: JobResult) -> str:
+        payload = {
+            "job_id": job.job_id,
+            "body": redact_mapping(_complete_body(result)),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _result_from_complete_body(body: dict[str, Any]) -> JobResult | None:
+        status = body.get("status")
+        if not isinstance(status, str) or not status:
+            return None
+        result_json = body.get("result_json")
+        metrics = body.get("metrics")
+        error_code = body.get("error_code")
+        error_message = body.get("error_message_redacted")
+        started_at = body.get("started_at")
+        finished_at = body.get("finished_at")
+        safe_started_at = (
+            started_at if isinstance(started_at, (int, float)) and not isinstance(started_at, bool) else None
+        )
+        safe_finished_at = (
+            finished_at if isinstance(finished_at, (int, float)) and not isinstance(finished_at, bool) else None
+        )
+        return JobResult(
+            status=status,
+            result_json=result_json if isinstance(result_json, dict) else None,
+            error_code=error_code if isinstance(error_code, str) else None,
+            error_message_redacted=error_message if isinstance(error_message, str) else None,
+            metrics=metrics if isinstance(metrics, dict) else None,
+            agent_id=str(body.get("agent_id") or ""),
+            started_at=safe_started_at,
+            finished_at=safe_finished_at,
+        )
+
+    def _sleep_before_complete_retry(self) -> bool:
+        if self._stop_event.is_set():
+            return False
+        self._sleep_interruptible(DEFAULT_COMPLETE_RETRY_DELAY_SECONDS)
+        return not self._stop_event.is_set()
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        if self._sleep is time.sleep:
+            self._stop_event.wait(max(0.0, float(seconds)))
+            return
+        self._sleep(seconds)
 
     def _emit_started(self, job: ClaimedJob) -> None:
         # 최소 진행 이벤트(claim 직후). best-effort — 실패해도 루프를 죽이지 않는다.
@@ -558,6 +839,11 @@ class JobRunner:
     def _track(self, job: ClaimedJob) -> None:
         with self._lock:
             self._in_flight[job.job_id] = job
+
+    def _track_many(self, jobs: Sequence[ClaimedJob]) -> None:
+        with self._lock:
+            for job in jobs:
+                self._in_flight[job.job_id] = job
 
     def _untrack(self, job_id: str) -> None:
         with self._lock:
@@ -630,12 +916,14 @@ def build_agent_components(
     max_jobs: int = 1,
     short_poll_interval_seconds: float = DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
     heartbeat_interval_seconds: float = MIN_HEARTBEAT_INTERVAL_SECONDS,
+    metrics_provider: Any = None,
     token_check: Callable[[AgentIdentity], bool] | None = None,
     stop_event: threading.Event | None = None,
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
     kakao_status_provider: Any = None,
+    complete_outbox_path: Any | None = None,
 ) -> tuple[JobRunner, HeartbeatReporter]:
     """:class:`JobRunner` 와 :class:`HeartbeatReporter` 를 구성한다(핵심 배선: active_jobs).
 
@@ -650,6 +938,19 @@ def build_agent_components(
     """
 
     shared_stop = stop_event if stop_event is not None else threading.Event()
+    effective_max_jobs = max(1, int(max_jobs))
+
+    def _metrics_with_capacity() -> dict[str, Any]:
+        source = metrics_provider() if callable(metrics_provider) else metrics_provider
+        if isinstance(source, dict):
+            metrics = dict(source)
+        elif source is None:
+            metrics = default_metrics()
+        else:
+            metrics = default_metrics()
+        metrics["max_in_flight"] = effective_max_jobs
+        return metrics
+
     runner = JobRunner(
         identity,
         transport=transport,
@@ -657,13 +958,14 @@ def build_agent_components(
         sleep=sleep,
         now=now,
         capabilities=capabilities,
-        max_jobs=max_jobs,
+        max_jobs=effective_max_jobs,
         short_poll_interval_seconds=short_poll_interval_seconds,
         base_url=base_url,
         token_check=token_check,
         stop_event=shared_stop,
         on_status=on_status,
         log=log,
+        complete_outbox_path=complete_outbox_path,
     )
     reporter = HeartbeatReporter(
         identity,
@@ -673,6 +975,7 @@ def build_agent_components(
         sleep=sleep,
         stop_event=shared_stop,
         capabilities=capabilities,
+        metrics_provider=_metrics_with_capacity,
         active_jobs_provider=runner.active_jobs,
         browser_profiles_provider=browser_profiles_provider,
         kakao_status_provider=kakao_status_provider,
@@ -710,6 +1013,7 @@ def run_agent(
     max_jobs: int = 1,
     short_poll_interval_seconds: float = DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
     heartbeat_interval_seconds: float = MIN_HEARTBEAT_INTERVAL_SECONDS,
+    metrics_provider: Any = None,
     token_check: Callable[[AgentIdentity], bool] | None = None,
     stop_event: threading.Event | None = None,
     on_status: Callable[[str], None] | None = None,
@@ -727,12 +1031,15 @@ def run_agent(
     crawl_profile_manager: Any = None,
     crawl_snapshot: Callable[..., Any] | None = None,
     crawl_auth_probe: Callable[[ClaimedJob, Any], str] | None = None,
+    profile_idle_ttl_seconds: float | None = 3600.0,
+    max_profiles: int | None = 20,
     start_kakao_sender: bool = False,
     kakao_send: Callable[..., Any] | None = None,
     kakao_build_config: Callable[..., Any] | None = None,
     session_probe: Callable[[], bool] | None = None,
     start_heartbeat: bool = True,
     heartbeat_join_timeout: float = 5.0,
+    complete_outbox_path: Any | None = None,
 ) -> AgentRunSummary:
     """architecture-contract startup 을 구현한다: identity 로드 → token 검증 → (활성 시) Kakao
     sender 워커 기동 → heartbeat thread 기동 → 메인 run 루프. 모든 주입점(transport/store/
@@ -770,113 +1077,44 @@ def run_agent(
             on_status(validation.status)
         return AgentRunSummary(started=False, token_status=validation.status)
 
-    # 활성 노드면 auth 실행자를 합성해 AUTH_CHECK/OPEN_AUTH_BROWSER 를 실제 처리한다.
-    effective_execute_job = execute_job
-    if start_auth_worker and (
-        "AUTH_CHECK" in capabilities or "OPEN_AUTH_BROWSER" in capabilities
+    effective_max_jobs = max(1, int(max_jobs))
+    effective_max_profiles = max_profiles
+    if (
+        start_crawl_worker
+        and effective_max_profiles is not None
+        and effective_max_profiles < effective_max_jobs
     ):
-        from rider_agent.auth.baemin_auth import build_auth_execute_job
+        raise ValueError("max_profiles must be greater than or equal to max_jobs")
 
-        auth_kwargs: dict[str, Any] = {
-            "fallback": effective_execute_job,
-            "now": now,
-            "sleep": sleep,
-            "log": log,
-        }
-        if auth_login_probe is not None:
-            auth_kwargs["login_probe"] = auth_login_probe
-        if auth_open_auth_browser is not None:
-            auth_kwargs["open_auth_browser"] = auth_open_auth_browser
-        if auth_detect_completion is not None:
-            auth_kwargs["detect_completion"] = auth_detect_completion
-        if auth_max_wait_seconds is not None:
-            auth_kwargs["max_wait_seconds"] = auth_max_wait_seconds
-        if auth_poll_interval_seconds is not None:
-            auth_kwargs["poll_interval_seconds"] = auth_poll_interval_seconds
-        if auth_max_attempts is not None:
-            auth_kwargs["max_attempts"] = auth_max_attempts
-        effective_execute_job = build_auth_execute_job(**auth_kwargs)
-
-    # 활성 노드면 crawl worker 를 구성하고 CRAWL_* 라우팅 + browser_profiles 소스를 배선한다.
-    crawl_worker = None
-    effective_browser_profiles = browser_profiles_provider
-    if start_crawl_worker and (
-        "CRAWL_BAEMIN" in capabilities or "CRAWL_COUPANG" in capabilities
-    ):
-        if crawl_profile_manager is None and crawl_snapshot is None:
-            from rider_agent.browser_profile import BrowserProfileManager
-
-            crawl_profile_manager = BrowserProfileManager(
-                profiles_root=Path("runtime") / "agent-browser-profiles",
-                agent_id=identity.agent_id,
-                log=log,
-            )
-        from rider_agent.workers.crawl_worker import (
-            CrawlWorker,
-            build_execute_job as build_crawl_execute_job,
-        )
-
-        crawl_worker = CrawlWorker(
-            profile_manager=crawl_profile_manager,
-            crawl_snapshot=crawl_snapshot,
-            auth_probe=crawl_auth_probe,
-            secret_resolver=getattr(store, "resolve", None),
-            log=log,
-        )
-        effective_execute_job = build_crawl_execute_job(
-            crawl_worker=crawl_worker, fallback=effective_execute_job
-        )
-        if (
-            effective_browser_profiles is None
-            and crawl_profile_manager is not None
-            and hasattr(crawl_profile_manager, "browser_profiles")
-        ):
-            effective_browser_profiles = crawl_profile_manager.browser_profiles
-
-    # 활성 노드면 4.6 KakaoSenderWorker 를 띄우고 KAKAO_SEND 라우팅 + kakao_status 소스를
-    # 배선한다(4.4 가 남긴 startup seam 의 실제 배선). 워커 모듈은 reuse seam(rider_crawl)을
-    # 끌어오므로 활성일 때만 lazy import 해 import-safety/무회귀를 유지한다.
-    kakao_worker = None
-    effective_kakao_status = kakao_status_provider
-    if start_kakao_sender:
-        # 4.7 interactive-session 게이트 — Kakao 노드가 비대화형(Session 0 service-only)이면
-        # 워커를 띄우지 않고(fail-closed) on_status/log 로 surfacing 한다. 판정은 autostart 에
-        # 응집(lazy import 로 순환 import 회피 — 4.6 선례). **session_probe=None(미주입)이면 게이트
-        # 통과 = 4.6 동작 그대로(무회귀 절대 불변).**
-        from rider_agent.autostart import kakao_session_allowed
-
-        allowed, reason = kakao_session_allowed(
-            capabilities, session_probe=session_probe
-        )
-        if not allowed:
-            if log is not None:
-                log(
-                    redact(
-                        f"kakao sender disabled: non-interactive session ({reason})"
-                    )
-                )
-            if on_status is not None:
-                on_status(reason)
-        else:
-            from rider_agent.workers.kakao_sender import (
-                build_execute_job,
-                start_kakao_sender_worker_if_enabled,
-            )
-
-            kakao_worker = start_kakao_sender_worker_if_enabled(
-                capabilities=capabilities,
-                send=kakao_send,
-                build_config=kakao_build_config,
-                sleep=sleep,
-                now=now,
-                log=log,
-            )
-            if kakao_worker is not None:
-                effective_execute_job = build_execute_job(
-                    kakao_worker=kakao_worker, fallback=effective_execute_job
-                )
-                if effective_kakao_status is None:
-                    effective_kakao_status = kakao_worker.kakao_status
+    composition = compose_execute_job(
+        identity=identity,
+        capabilities=capabilities,
+        fallback=execute_job,
+        log=log,
+        now=now,
+        sleep=sleep,
+        browser_profiles_provider=browser_profiles_provider,
+        kakao_status_provider=kakao_status_provider,
+        on_status=on_status,
+        start_auth_worker=start_auth_worker,
+        auth_login_probe=auth_login_probe,
+        auth_open_auth_browser=auth_open_auth_browser,
+        auth_detect_completion=auth_detect_completion,
+        auth_max_wait_seconds=auth_max_wait_seconds,
+        auth_poll_interval_seconds=auth_poll_interval_seconds,
+        auth_max_attempts=auth_max_attempts,
+        start_crawl_worker=start_crawl_worker,
+        crawl_profile_manager=crawl_profile_manager,
+        crawl_snapshot=crawl_snapshot,
+        crawl_auth_probe=crawl_auth_probe,
+        secret_resolver=getattr(store, "resolve", None),
+        profile_idle_ttl_seconds=profile_idle_ttl_seconds,
+        max_profiles=effective_max_profiles,
+        start_kakao_sender=start_kakao_sender,
+        kakao_send=kakao_send,
+        kakao_build_config=kakao_build_config,
+        session_probe=session_probe,
+    )
 
     runner, reporter = build_agent_components(
         identity,
@@ -884,17 +1122,19 @@ def run_agent(
         base_url=base_url,
         sleep=sleep,
         now=now,
-        execute_job=effective_execute_job,
+        execute_job=composition.execute_job,
         capabilities=capabilities,
-        max_jobs=max_jobs,
+        max_jobs=effective_max_jobs,
         short_poll_interval_seconds=short_poll_interval_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        metrics_provider=metrics_provider,
         token_check=token_check,
         stop_event=stop_event,
         on_status=on_status,
         log=log,
-        browser_profiles_provider=effective_browser_profiles,
-        kakao_status_provider=effective_kakao_status,
+        browser_profiles_provider=composition.browser_profiles_provider,
+        kakao_status_provider=composition.kakao_status_provider,
+        complete_outbox_path=complete_outbox_path,
     )
 
     hb_thread = start_heartbeat_thread(reporter) if start_heartbeat else None
@@ -903,8 +1143,8 @@ def run_agent(
     finally:
         reporter.stop()
         runner.stop()
-        if kakao_worker is not None:
-            kakao_worker.stop()
+        for close in composition.close_callbacks:
+            close()
         if hb_thread is not None:
             hb_thread.join(timeout=heartbeat_join_timeout)
 
@@ -914,6 +1154,6 @@ def run_agent(
         runner=runner,
         reporter=reporter,
         heartbeat_thread=hb_thread,
-        kakao_worker=kakao_worker,
-        crawl_worker=crawl_worker,
+        kakao_worker=composition.kakao_worker,
+        crawl_worker=composition.crawl_worker,
     )

@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 from rider_crawl.config import AppConfig
 from rider_crawl.models import (
     CurrentScreenSnapshot,
@@ -5,6 +8,9 @@ from rider_crawl.models import (
     PeakPeriodSnapshot,
     PerformanceSnapshot,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_coupang_snapshot_models_are_available():
@@ -166,6 +172,47 @@ def test_app_default_crawl_and_send_use_extension_registries(tmp_path, monkeypat
     app._send_message(config, "hello")
 
     assert sent == [(config, "hello")]
+
+
+def test_architecture_docs_mention_deployed_worker_services():
+    compose_text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    docs_text = "\n".join(
+        [
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            (ROOT / "docs" / "module-architecture.md").read_text(encoding="utf-8"),
+            (ROOT / "docs" / "project-current-state-and-structure.md").read_text(encoding="utf-8"),
+        ]
+    ).casefold()
+
+    services = {
+        "backend-api": ("api", "fastapi"),
+        "scheduler": ("scheduler", "due"),
+        "queue-recovery": ("queue", "recovery"),
+        "telegram-dispatch": ("telegram", "dispatch"),
+    }
+    for service_name, role_words in services.items():
+        assert f"  {service_name}:" in compose_text
+        assert service_name in docs_text
+        for role_word in role_words:
+            assert role_word in docs_text
+
+
+def test_rider_crawl_does_not_import_rider_server():
+    offenders: list[str] = []
+    crawl_dir = ROOT / "src" / "rider_crawl"
+    for path in crawl_dir.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(name == "rider_server" or name.startswith("rider_server.") for name in names):
+                offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
 
 
 def _config(tmp_path, *, platform_name: str = "baemin") -> AppConfig:

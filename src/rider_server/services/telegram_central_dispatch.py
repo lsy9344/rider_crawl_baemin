@@ -195,6 +195,7 @@ class CentralTelegramSender:
             timeout_seconds=self.timeout_seconds,
             retry_attempts=1,
             sleep=lambda *_: None,
+            local_rate_limit_seconds=0.0,
         )
 
     def as_send_callback(self) -> Callable[[DispatchJob, str], None]:

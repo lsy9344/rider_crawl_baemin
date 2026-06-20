@@ -43,16 +43,44 @@ from .principal import (
 
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+
+def _ip_matches_any(ip: str, entries: Sequence[str]) -> bool:
+    """Return True when ``ip`` is in one of the configured exact IP/CIDR entries."""
+
+    if not entries:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for entry in entries:
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                if addr in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif addr == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue
+    return False
+
 def source_ip(request: Request) -> str:
-    """요청의 source IP 를 도출한다 — ``X-Forwarded-For`` 선두 토큰 우선(reverse-proxy), 없으면
-    ``request.client.host``. 둘 다 없으면 빈 문자열(미상 → allowlist 가 설정돼 있으면 거부됨).
+    """요청의 source IP 를 도출한다.
+
+    기본은 ``request.client.host`` 이다. ``X-Forwarded-For`` 는 직접 클라이언트가 spoof할 수
+    있으므로, 요청이 명시적으로 설정된 trusted proxy CIDR에서 왔을 때만 선두 토큰을 신뢰한다.
     """
 
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
     client = request.client
-    return client.host if client is not None else ""
+    raw_client = client.host if client is not None else ""
+    trusted_proxy_cidrs = getattr(request.app.state, "trusted_proxy_cidrs", ()) or ()
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff and _ip_matches_any(raw_client, trusted_proxy_cidrs):
+        return xff.split(",")[0].strip()
+    return raw_client
 
 
 def ip_allowed(ip: str, allowlist: Sequence[str]) -> bool:
@@ -65,23 +93,7 @@ def ip_allowed(ip: str, allowlist: Sequence[str]) -> bool:
 
     if not allowlist:
         return True
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return False  # source 미상 → 거부(fail-closed)
-    for entry in allowlist:
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            if "/" in entry:
-                if addr in ipaddress.ip_network(entry, strict=False):
-                    return True
-            elif addr == ipaddress.ip_address(entry):
-                return True
-        except ValueError:
-            continue  # 잘못된 allowlist 항목은 무시(나머지로 판정)
-    return False
+    return _ip_matches_any(ip, allowlist)
 
 
 def _normalize_origin(value: str) -> str | None:

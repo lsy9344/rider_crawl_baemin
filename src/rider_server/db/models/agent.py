@@ -62,6 +62,16 @@ class Agent(Base):
 
 class BrowserProfile(Base):
     __tablename__ = "browser_profiles"
+    __table_args__ = (
+        Index("uq_browser_profiles_agent_target", "agent_id", "target_id", unique=True),
+        Index(
+            "uq_browser_profiles_agent_cdp_port",
+            "agent_id",
+            "cdp_port",
+            unique=True,
+            postgresql_where=text("cdp_port IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     agent_id: Mapped[uuid.UUID] = fk("agents.id")
@@ -77,6 +87,7 @@ class Job(Base):
     id: Mapped[uuid.UUID] = uuid_pk()
     type: Mapped[str] = mapped_column(String, nullable=False)  # UPPER_SNAKE job type
     target_id: Mapped[uuid.UUID | None] = fk("monitoring_targets.id", nullable=True)
+    assigned_agent_id: Mapped[uuid.UUID | None] = fk("agents.id", nullable=True)
     agent_id: Mapped[uuid.UUID | None] = fk("agents.id", nullable=True)  # claim 전엔 미할당
     status: Mapped[str] = mapped_column(String, nullable=False)
     run_after: Mapped[datetime | None] = ts(nullable=True)
@@ -87,12 +98,38 @@ class Job(Base):
     lease_expires_at: Mapped[datetime | None] = ts(nullable=True)  # claim 시 부여, 만료 시 stale 회수
     claimed_at: Mapped[datetime | None] = ts(nullable=True)
     result_json: Mapped[dict | None] = mapped_column(json_variant(), nullable=True)  # complete 결과(JSONB)
+    # ── retry/status 관측 컬럼(additive, 0014 마이그레이션) ─────────────────────
+    completed_at: Mapped[datetime | None] = ts(nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result_schema_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    completion_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    completion_payload_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_failed_at: Mapped[datetime | None] = ts(nullable=True)
 
     # claim 대상 행(status='PENDING', run_after 정렬) 스캔 최소화 — SKIP LOCKED 성능.
     # naming_convention 의존 없이 명시 이름(결정적). claim 은 (status, run_after),
     # stale lease 회수는 partial (status, lease_expires_at) 로 각각 잠근다.
     __table_args__ = (
         Index("ix_jobs_status", "status", "run_after"),
+        Index(
+            "ix_jobs_pending_claim",
+            "status",
+            "type",
+            "assigned_agent_id",
+            "run_after",
+            "id",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        Index(
+            "ix_jobs_active_crawl_target_type",
+            "target_id",
+            "type",
+            "status",
+            postgresql_where=text(
+                "target_id IS NOT NULL AND type IN ('CRAWL_BAEMIN', 'CRAWL_COUPANG') "
+                "AND status IN ('PENDING', 'CLAIMED', 'RUNNING', 'RETRY')"
+            ),
+        ),
         Index(
             "ix_jobs_status_lease_expires_at",
             "status",

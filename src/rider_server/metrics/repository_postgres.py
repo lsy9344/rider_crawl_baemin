@@ -124,13 +124,13 @@ class PostgresMetricsRepository(MetricsRepository):
 
     async def telegram_error_count(self, *, since: datetime, now: datetime) -> int:
         # fleet 전체 최근 윈도 TELEGRAM_FAILURE 카운트(채널/tenant scope 없음 — fleet 수치).
-        # sent_at 미기록(전송 실패)도 최근 오류로 포함, 그 외엔 윈도 내만(5.6 패턴 동형).
+        # 실패 발생 시각 기준. 오래된 실패 row(sent_at=NULL)가 계속 최근 오류로 보이지 않게 한다.
         stmt = (
             select(func.count())
             .select_from(DeliveryLog)
             .where(
                 DeliveryLog.error_code == FailureCategory.TELEGRAM_FAILURE.value,
-                (DeliveryLog.sent_at.is_(None)) | (DeliveryLog.sent_at >= since),
+                DeliveryLog.last_failed_at >= since,
             )
         )
         async with self._session_factory() as session:

@@ -69,6 +69,7 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
     _validate_active_coupang_urls(active_settings)
+    _validate_active_coupang_auto_2fa_credentials(active_settings)
     _validate_active_telegram_required(active_settings)
     _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
@@ -517,7 +518,6 @@ class RiderBotUi:
             settings_tabs = self._read_all_settings()
             selected_index = self._selected_tab_index()
             validate_active_tab_isolation(settings_tabs)
-            _validate_coupang_auto_2fa_credentials(selected_index, settings_tabs[selected_index])
         except ValueError as exc:
             messagebox.showerror("설정 오류", str(exc))
             return None
@@ -1217,6 +1217,11 @@ def _validate_coupang_auto_2fa_credentials(index: int, settings: UiSettings) -> 
         raise ValueError(f"크롤링{index + 1} 인증 이메일은 naver.com 또는 gmail.com 주소여야 합니다.")
 
 
+def _validate_active_coupang_auto_2fa_credentials(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        _validate_coupang_auto_2fa_credentials(index, settings)
+
+
 def _is_coupang_path_url(url: str, path: str) -> bool:
     parsed = urlsplit(url.strip())
     host = (parsed.hostname or "").casefold()
@@ -1289,8 +1294,8 @@ def _send_failure_requests_retry(exc: Exception) -> bool:
 
     ``False`` asks the scheduler for a fast (5s) retry; ``True`` lets it wait the
     full interval. Non-ambiguous failures (message visibly not delivered) take the
-    fast path. Ambiguous failures — the message may already have been sent and the
-    last hash was not recorded — must skip the fast retry to avoid double-sending.
+    fast path. Ambiguous failures: the message may already have been sent and the
+    last hash was not recorded, so they must skip the fast retry to avoid double-sending.
     """
 
     return bool(getattr(exc, "ambiguous", False))

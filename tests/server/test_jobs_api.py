@@ -17,6 +17,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +40,7 @@ from rider_server.queue import (
     InMemoryQueueBackend,
 )
 from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN
+from rider_server.services.agent_registry import InMemoryAgentRegistry
 from rider_server.services.job_result_ingest_service import (
     JobResultIngestService,
     SnapshotIngestRecord,
@@ -58,16 +60,27 @@ def _app_with_backend(
     backend: InMemoryQueueBackend,
     *,
     job_result_ingest_service=None,
+    agent_registry=None,
     resolved_agent_id: str | None = "agent-1",
 ):
     app = create_app(
         _SETTINGS,
         queue_backend=backend,
+        agent_registry=agent_registry,
         job_result_ingest_service=job_result_ingest_service,
     )
     if resolved_agent_id is not None:
         app.state.resolve_agent_id = lambda _token: resolved_agent_id
     return app
+
+
+class _CapacityRegistry(InMemoryAgentRegistry):
+    def __init__(self, capacities: dict[str, dict[str, object]]) -> None:
+        super().__init__()
+        self._capacities = capacities
+
+    async def capacity_for_agent(self, agent_id: str):
+        return self._capacities.get(agent_id)
 
 
 class _CompleteRaceBackend:
@@ -94,6 +107,10 @@ class _CompleteRaceBackend:
         status: str,
         result_json=None,
         error_code=None,
+        duration_ms=None,
+        result_schema_version=None,
+        completion_id=None,
+        completion_payload_hash=None,
         now: datetime,
     ):
         self.complete_calls.append(
@@ -103,6 +120,10 @@ class _CompleteRaceBackend:
                 "status": status,
                 "result_json": result_json,
                 "error_code": error_code,
+                "duration_ms": duration_ms,
+                "result_schema_version": result_schema_version,
+                "completion_id": completion_id,
+                "completion_payload_hash": completion_payload_hash,
             }
         )
         return CompleteOutcome(self._complete_result, job_id)
@@ -121,6 +142,15 @@ class _CompleteRaceBackend:
 
     async def emit_event(self, **_kwargs):
         return None
+
+
+class _ClaimRecordingBackend:
+    def __init__(self) -> None:
+        self.claim_calls: list[dict[str, object]] = []
+
+    async def claim(self, **kwargs):
+        self.claim_calls.append(kwargs)
+        return []
 
 
 class _UuidErrorBackend:
@@ -158,6 +188,16 @@ class _CountingRecoverBackend(InMemoryQueueBackend):
         return await super().recover_stale(**kwargs)
 
 
+class _RecordingJobCompletionService:
+    def __init__(self, *, result_status: str = JOB_STATUS_SUCCEEDED) -> None:
+        self.result_status = result_status
+        self.calls: list[dict[str, object]] = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(job_id=kwargs["job_id"], status=self.result_status)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (1) HTTP 라우트 계약
 # ══════════════════════════════════════════════════════════════════════════
@@ -184,6 +224,101 @@ def test_claim_empty_queue_returns_empty_jobs():
     )
     assert r.status_code == 200
     assert r.json() == {"jobs": []}
+
+
+def test_claim_uses_configured_job_lease_seconds():
+    backend = _ClaimRecordingBackend()
+    settings = Settings(
+        app_env="test",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        job_lease_seconds=180,
+    )
+    app = create_app(settings, queue_backend=backend)
+    app.state.resolve_agent_id = lambda _token: "agent-1"
+    client = TestClient(app)
+
+    r = client.post(
+        "/v1/jobs/claim",
+        json={"agent_id": "agent-1", "capabilities": [JOB_TYPE_CRAWL_BAEMIN], "max_jobs": 1},
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 200
+    assert backend.claim_calls[0]["lease_seconds"] == 180
+
+
+def test_claim_rejects_unreasonably_large_max_jobs() -> None:
+    backend = _ClaimRecordingBackend()
+    client = TestClient(_app_with_backend(backend))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+            "max_jobs": 10_000,
+        },
+        headers=_BEARER,
+    )
+
+    assert response.status_code == 422
+    assert backend.claim_calls == []
+
+
+def test_claim_allows_batch_size_of_50() -> None:
+    backend = _ClaimRecordingBackend()
+    client = TestClient(_app_with_backend(backend))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+            "max_jobs": 50,
+        },
+        headers=_BEARER,
+    )
+
+    assert response.status_code == 200
+    assert backend.claim_calls[0]["max_jobs"] == 50
+
+
+def test_claim_rejects_capabilities_list_that_is_too_large() -> None:
+    backend = _ClaimRecordingBackend()
+    client = TestClient(_app_with_backend(backend))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN] * 1_000,
+            "max_jobs": 1,
+        },
+        headers=_BEARER,
+    )
+
+    assert response.status_code == 422
+    assert backend.claim_calls == []
+
+
+def test_claim_rejects_overlong_capability_string() -> None:
+    backend = _ClaimRecordingBackend()
+    client = TestClient(_app_with_backend(backend))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": ["C" * 1_000],
+            "max_jobs": 1,
+        },
+        headers=_BEARER,
+    )
+
+    assert response.status_code == 422
+    assert backend.claim_calls == []
 
 
 def test_claim_returns_job_with_iso_utc_lease():
@@ -213,10 +348,10 @@ def test_claim_returns_job_with_iso_utc_lease():
     assert jobs[0]["lease_expires_at"].endswith("Z")
 
 
-def test_claim_recovers_expired_lease_before_selecting_jobs():
+def test_claim_does_not_recover_expired_lease_before_selecting_jobs():
     import asyncio
 
-    backend = InMemoryQueueBackend()
+    backend = _CountingRecoverBackend()
     job_id = asyncio.run(
         backend.enqueue(
             job_type=JOB_TYPE_CRAWL_BAEMIN,
@@ -246,12 +381,104 @@ def test_claim_recovers_expired_lease_before_selecting_jobs():
     )
 
     assert r.status_code == 200
-    jobs = r.json()["jobs"]
-    assert [job["job_id"] for job in jobs] == [job_id]
-    assert backend.job_status(job_id) == JOB_STATUS_CLAIMED
+    assert r.json() == {"jobs": []}
 
 
-def test_claim_throttles_stale_recovery_between_fast_polls():
+def test_claim_does_not_return_job_assigned_to_other_agent() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    asyncio.run(
+        backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_BAEMIN,
+            target_id="target-1",
+            payload_json={"target_id": "target-1"},
+            assigned_agent_id="agent-1",
+            now=_NOW,
+        )
+    )
+    client = TestClient(_app_with_backend(backend, resolved_agent_id="agent-2"))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-2",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+            "max_jobs": 5,
+        },
+        headers=_headers_for("agent-2"),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"jobs": []}
+
+
+def test_claim_clamps_to_agent_remaining_capacity() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    registry = _CapacityRegistry({"agent-1": {"max_in_flight": 2}})
+    existing_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_NOW))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_NOW,
+        )
+    )
+    pending_ids = [
+        asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_NOW))
+        for _ in range(2)
+    ]
+    client = TestClient(_app_with_backend(backend, agent_registry=registry))
+
+    response = client.post(
+        "/v1/jobs/claim",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": [JOB_TYPE_CRAWL_BAEMIN],
+            "max_jobs": 50,
+        },
+        headers=_BEARER,
+    )
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["job_id"] in pending_ids
+    assert backend.job_snapshot(existing_id).agent_id == "agent-1"
+
+
+def test_complete_route_delegates_completion_policy_to_service() -> None:
+    backend = InMemoryQueueBackend()
+    app = _app_with_backend(backend)
+    service = _RecordingJobCompletionService()
+    app.state.job_completion_service = service
+    client = TestClient(app)
+
+    r = client.post(
+        "/v1/jobs/job-service-1/complete",
+        json={
+            "status": "success",
+            "agent_id": "agent-1",
+            "result_json": {"ok": True},
+            "metrics": {"duration_ms": 12},
+        },
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"job_id": "job-service-1", "status": JOB_STATUS_SUCCEEDED}
+    assert len(service.calls) == 1
+    call = service.calls[0]
+    assert call["job_id"] == "job-service-1"
+    assert call["agent_id"] == "agent-1"
+    assert call["status"] == JOB_STATUS_SUCCEEDED
+
+
+def test_claim_does_not_call_stale_recovery_between_fast_polls():
     backend = _CountingRecoverBackend()
     client = TestClient(_app_with_backend(backend))
 
@@ -267,7 +494,7 @@ def test_claim_throttles_stale_recovery_between_fast_polls():
         )
         assert r.status_code == 200
 
-    assert backend.recover_calls == 1
+    assert backend.recover_calls == 0
 
 
 def test_complete_reassigned_or_mismatch_owner_returns_409():
@@ -380,11 +607,56 @@ def test_complete_unknown_status_returns_422():
     assert r.status_code == 422
 
 
-def test_events_accepted_202():
+def test_complete_rejects_large_result_json_and_metrics() -> None:
+    import asyncio
+
     backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    oversized_payloads = [
+        {"result_json": {f"field_{index}": index for index in range(2_000)}},
+        {"metrics": {f"metric_{index}": index for index in range(1_000)}},
+    ]
+    for oversized in oversized_payloads:
+        response = client.post(
+            f"/v1/jobs/{job_id}/complete",
+            json={"status": "success", "agent_id": "agent-1", **oversized},
+            headers=_BEARER,
+        )
+
+        assert response.status_code == 422
+        assert backend.job_status(job_id) == JOB_STATUS_CLAIMED
+
+
+def test_events_accepted_202():
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
     client = TestClient(_app_with_backend(backend))
     r = client.post(
-        "/v1/jobs/job-1/events",
+        f"/v1/jobs/{job_id}/events",
         json={
             "event_type": "JOB_STARTED",
             "severity": "info",
@@ -397,17 +669,93 @@ def test_events_accepted_202():
     assert backend.events and backend.events[0]["event_type"] == "JOB_STARTED"
 
 
-def test_events_passes_resolved_agent_id_to_backend() -> None:
+def test_events_rejects_large_artifact_refs_and_strings() -> None:
+    import asyncio
+
     backend = InMemoryQueueBackend()
-    calls: list[dict[str, object]] = []
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
 
-    async def _capture_event(**kwargs):
-        calls.append(kwargs)
+    oversized_payloads = [
+        {"artifact_refs": [f"artifact-{index}" for index in range(1_000)]},
+        {"artifact_refs": ["x" * 10_000]},
+    ]
+    for oversized in oversized_payloads:
+        response = client.post(
+            f"/v1/jobs/{job_id}/events",
+            json={
+                "event_type": "JOB_STARTED",
+                "severity": "info",
+                "message_redacted": "job started",
+                **oversized,
+            },
+            headers=_BEARER,
+        )
 
-    backend.emit_event = _capture_event  # type: ignore[method-assign]
+        assert response.status_code == 422
+        assert backend.events == []
+
+
+def test_events_rejects_cross_agent_owner_without_writing() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend, resolved_agent_id="agent-2"))
+
+    response = client.post(
+        f"/v1/jobs/{job_id}/events",
+        json={
+            "event_type": "JOB_STARTED",
+            "severity": "info",
+            "message_redacted": "wrong owner",
+            "artifact_refs": [],
+        },
+        headers=_headers_for("agent-2"),
+    )
+
+    assert response.status_code == 409
+    assert backend.events == []
+
+
+def test_events_passes_resolved_agent_id_to_backend() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-route-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
     client = TestClient(_app_with_backend(backend, resolved_agent_id="agent-route-1"))
     response = client.post(
-        "/v1/jobs/job-route-1/events",
+        f"/v1/jobs/{job_id}/events",
         json={
             "event_type": "JOB_STARTED",
             "severity": "info",
@@ -418,7 +766,7 @@ def test_events_passes_resolved_agent_id_to_backend() -> None:
     )
 
     assert response.status_code == 202
-    assert calls[0]["agent_id"] == "agent-route-1"
+    assert backend.events[0]["agent_id"] == "agent-route-1"
 
 
 # ── (QA gap A) events 본문은 서버가 한 번 더 redact 통과시켜 secret 평문이 안 남는다 ──
@@ -427,11 +775,24 @@ def test_events_passes_resolved_agent_id_to_backend() -> None:
 def test_events_redacts_secret_in_message():
     # guardrail #8 (secret 평문 0): message 에 token/phone 형 문자열이 섞여 와도 서버가
     # redact() 를 한 번 더 통과시켜 평문이 events 기록/로그에 남지 않는다.
+    import asyncio
+
     backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
     client = TestClient(_app_with_backend(backend))
     leak = "auth failed token=987654321:ABCdefGHIjkl phone=010-1234-5678"
     r = client.post(
-        "/v1/jobs/job-x/events",
+        f"/v1/jobs/{job_id}/events",
         json={
             "event_type": "JOB_FAILED",
             "severity": "error",
@@ -500,6 +861,74 @@ def test_complete_success_returns_200_with_succeeded():
         "started_at": now.timestamp(),
         "finished_at": now.timestamp() + 1,
     }
+
+
+def test_complete_route_records_duration_and_schema_version_metadata():
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(
+        f"/v1/jobs/{job_id}/complete",
+        json={
+            "status": "success",
+            "agent_id": "agent-1",
+            "result_json": {"schema_version": "crawl-result.v2"},
+            "started_at": 10.0,
+            "finished_at": 11.5,
+        },
+        headers=_BEARER,
+    )
+
+    assert r.status_code == 200
+    snapshot = backend.job_snapshot(job_id)
+    assert snapshot is not None
+    assert snapshot.duration_ms == 1500
+    assert snapshot.result_schema_version == "crawl-result.v2"
+    assert snapshot.completed_at is not None
+
+
+def test_complete_retry_with_same_completion_id_is_idempotent() -> None:
+    import asyncio
+
+    backend = InMemoryQueueBackend()
+    now = datetime.now(timezone.utc)
+    job_id = asyncio.run(backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=now))
+    asyncio.run(
+        backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=1,
+            lease_seconds=120,
+            now=now,
+        )
+    )
+    client = TestClient(_app_with_backend(backend))
+    payload = {
+        "status": "success",
+        "agent_id": "agent-1",
+        "completion_id": "completion-1",
+        "result_json": {"ok": True},
+    }
+
+    first = client.post(f"/v1/jobs/{job_id}/complete", json=payload, headers=_BEARER)
+    retry = client.post(f"/v1/jobs/{job_id}/complete", json=payload, headers=_BEARER)
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json() == {"job_id": job_id, "status": JOB_STATUS_SUCCEEDED}
 
 
 def test_complete_redacts_result_json_before_queue_storage():
@@ -703,6 +1132,8 @@ def test_complete_success_uses_atomic_snapshot_complete_when_service_provides_it
         def __init__(self) -> None:
             super().__init__()
             self.records: list[SnapshotIngestRecord] = []
+            self.duration_ms: int | None = None
+            self.result_schema_version: str | None = None
 
         async def complete_snapshot_job(
             self,
@@ -712,9 +1143,13 @@ def test_complete_success_uses_atomic_snapshot_complete_when_service_provides_it
             status: str,
             result_json: dict | None,
             error_code: str | None,
+            duration_ms: int | None,
+            result_schema_version: str | None,
             now: datetime,
         ) -> CompleteOutcome:
             self.records.append(record)
+            self.duration_ms = duration_ms
+            self.result_schema_version = result_schema_version
             return CompleteOutcome(COMPLETE_ACCEPTED, record.job_id, final_status=status)
 
     service = _AtomicIngestService()
@@ -744,6 +1179,7 @@ def test_complete_success_uses_atomic_snapshot_complete_when_service_provides_it
                 },
                 "artifact_refs": [],
             },
+            "metrics": {"duration_ms": 4321},
         },
         headers=_BEARER,
     )
@@ -751,6 +1187,8 @@ def test_complete_success_uses_atomic_snapshot_complete_when_service_provides_it
     assert r.status_code == 200
     assert r.json()["status"] == JOB_STATUS_SUCCEEDED
     assert [record.job_id for record in service.records] == ["job-atomic-1"]
+    assert service.duration_ms == 4321
+    assert service.result_schema_version == "1"
     assert backend.complete_calls == []
 
 

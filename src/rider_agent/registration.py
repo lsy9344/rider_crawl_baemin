@@ -39,6 +39,7 @@ from rider_agent.secure_store import (
     load_local_agent_identity,
     save_agent_identity,
 )
+from rider_agent.locking import agent_state_lock
 
 REGISTER_PATH = "/v1/agents/register"
 
@@ -231,29 +232,31 @@ def register_agent(
     기존 identity 를 덮어쓰지 않는다.
     """
 
-    existing = load_local_agent_identity(store=store, identity_path=identity_path)
-    if existing is not None:
-        # 멱등: 일회용 코드를 다시 소모/덮어쓰지 않는다.
-        return existing
+    identity_path = Path(identity_path)
+    with agent_state_lock(identity_path.parent, "agent-registration.lock"):
+        existing = load_local_agent_identity(store=store, identity_path=identity_path)
+        if existing is not None:
+            # 멱등: 일회용 코드를 다시 소모/덮어쓰지 않는다.
+            return existing
 
-    if not (registration_code or "").strip():
-        raise RegistrationError("registration code is required")
+        if not (registration_code or "").strip():
+            raise RegistrationError("registration code is required")
 
-    info = machine_info if machine_info is not None else collect_machine_info()
-    body = {
-        "registration_code": registration_code,
-        "machine_fingerprint": info.machine_fingerprint,
-        "hostname": info.hostname,
-        "os": info.os,
-        "agent_version": info.agent_version,
-    }
+        info = machine_info if machine_info is not None else collect_machine_info()
+        body = {
+            "registration_code": registration_code,
+            "machine_fingerprint": info.machine_fingerprint,
+            "hostname": info.hostname,
+            "os": info.os,
+            "agent_version": info.agent_version,
+        }
 
-    try:
-        response = transport.post_json(_register_url(base_url), body)
-    except TransportError as exc:
-        # 기존 identity 가 없으므로 덮어쓸 것도 없다(위에서 early-return). 평문 미포함 메시지.
-        raise RegistrationError(_failure_message(exc)) from exc
+        try:
+            response = transport.post_json(_register_url(base_url), body)
+        except TransportError as exc:
+            # 기존 identity 가 없으므로 덮어쓸 것도 없다(위에서 early-return). 평문 미포함 메시지.
+            raise RegistrationError(_failure_message(exc)) from exc
 
-    identity = _identity_from_response(response)
-    save_agent_identity(identity, store=store, identity_path=identity_path)
-    return identity
+        identity = _identity_from_response(response)
+        save_agent_identity(identity, store=store, identity_path=identity_path)
+        return identity

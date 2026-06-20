@@ -32,7 +32,6 @@ from rider_server.db.models.messaging import (
 from rider_server.domain import (
     DeliveryLog,
     DeliveryStatus,
-    FailureCategory,
     Message,
     Messenger,
     MessengerChannel,
@@ -138,6 +137,8 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         status: str,
         result_json: dict | None,
         error_code: str | None,
+        duration_ms: int | None,
+        result_schema_version: str | None,
         now: datetime,
     ) -> CompleteOutcome:
         """Atomically complete a crawl job and persist its downstream records."""
@@ -146,8 +147,6 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         agent_uuid = _uuid(agent_id)
         snapshot_id = _snapshot_id_for_job(record.job_id)
         message_id = _message_id_for_job(record.job_id)
-        pending_telegram_deliveries: list[_PendingTelegramDelivery] = []
-
         async with self._session_factory() as session:
             async with session.begin():
                 job = (
@@ -172,6 +171,10 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 job.status = status
                 job.result_json = result_json
                 job.error_code = error_code
+                job.completed_at = now
+                job.duration_ms = duration_ms
+                job.result_schema_version = result_schema_version
+                job.last_failed_at = now if status != JOB_STATUS_SUCCEEDED else None
                 job.lease_expires_at = None
 
                 await session.execute(
@@ -189,20 +192,18 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                         id=message_id,
                         snapshot_id=snapshot_id,
                         template_version=message.template_version,
+                        text=message.text,
                         text_hash=message.text_hash,
                         text_redacted_preview=message.text_redacted_preview,
                     )
                 )
-                pending_telegram_deliveries = await self._enqueue_dispatch_records(
+                await self._enqueue_dispatch_records(
                     session,
                     record=record,
                     message=message,
                     message_id=message_id,
                     now=now,
                 )
-
-        for delivery in pending_telegram_deliveries:
-            await self._deliver_telegram_after_commit(delivery, now=now)
 
         return CompleteOutcome(COMPLETE_ACCEPTED, record.job_id, final_status=status)
 
@@ -214,8 +215,7 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         message: Message,
         message_id: uuid.UUID,
         now: datetime,
-    ) -> list[_PendingTelegramDelivery]:
-        pending_telegram_deliveries: list[_PendingTelegramDelivery] = []
+    ) -> None:
         rows = (
             await session.execute(
                 select(DeliveryRuleRow, MessengerChannelRow)
@@ -231,7 +231,21 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
             )
         ).all()
 
+        change_only_channel_ids = [
+            channel.id for rule, channel in rows if rule.send_only_on_change
+        ]
+        previous_hashes = await _latest_message_hashes_by_channel(
+            session,
+            target_id=_uuid(record.target_id),
+            channel_ids=change_only_channel_ids,
+            template_version=message.template_version,
+            exclude_message_id=message_id,
+        )
+
         for rule, channel in rows:
+            if rule.send_only_on_change:
+                if previous_hashes.get(channel.id) == message.text_hash:
+                    continue
             channel_id = str(channel.id)
             dedup_key = IdempotentDeliveryService.build_dedup_key(
                 target_id=record.target_id,
@@ -241,48 +255,25 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 message_hash=message.text_hash,
             )
             log_id = _delivery_log_id_for_job(record.job_id, channel_id)
-            status = DeliveryStatus.RETRYING.value
-            error_code = None
-            sent_at = None
-            if channel.messenger == Messenger.TELEGRAM.value:
-                if self._telegram_sender is None:
-                    status = DeliveryStatus.HELD.value
-                    error_code = FailureCategory.TELEGRAM_FAILURE.value
-
             result = await session.execute(
                 pg_insert(DeliveryLogRow).values(
                     id=log_id,
                     message_id=message_id,
                     channel_id=channel.id,
-                    status=status,
+                    status=DeliveryStatus.RETRYING.value,
                     dedup_key=dedup_key,
-                    error_code=error_code,
-                    sent_at=sent_at,
+                    error_code=None,
+                    sent_at=None,
+                    available_at=now,
+                    attempt_count=0,
+                    locked_at=None,
+                    locked_by=None,
                 ).on_conflict_do_nothing(index_elements=[DeliveryLogRow.dedup_key])
             )
             if int(result.rowcount or 0) == 0:
                 continue
 
             if channel.messenger == Messenger.TELEGRAM.value:
-                if self._telegram_sender is not None:
-                    job = DispatchJob(
-                        id=str(_dispatch_job_id_for_job(record.job_id, channel_id)),
-                        target_id=record.target_id,
-                        channel_id=channel_id,
-                        message_id=message.id,
-                        messenger=Messenger.TELEGRAM,
-                        template_version=message.template_version,
-                        message_hash=message.text_hash,
-                    )
-                    pending_telegram_deliveries.append(
-                        _PendingTelegramDelivery(
-                            channel=_channel_to_domain(channel),
-                            job=job,
-                            message=message,
-                            log_id=log_id,
-                            collected_at=record.collected_at,
-                        )
-                    )
                 continue
 
             if channel.messenger != Messenger.KAKAO.value:
@@ -309,41 +300,6 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                     result_json=None,
                 )
             )
-        return pending_telegram_deliveries
-
-    async def _deliver_telegram_after_commit(
-        self,
-        delivery: _PendingTelegramDelivery,
-        *,
-        now: datetime,
-    ) -> None:
-        if self._telegram_sender is None:
-            return
-        try:
-            log = await _attempt_telegram_delivery(
-                channel=delivery.channel,
-                job=delivery.job,
-                message=delivery.message,
-                log_id=str(delivery.log_id),
-                collected_at=delivery.collected_at,
-                now=now,
-                send=self._telegram_sender,
-            )
-            async with self._session_factory() as session:
-                await session.execute(
-                    update(DeliveryLogRow)
-                    .where(DeliveryLogRow.id == delivery.log_id)
-                    .values(
-                        status=log.status.value,
-                        error_code=log.error_code,
-                        sent_at=log.sent_at,
-                    )
-                )
-                await session.commit()
-        except Exception:
-            return
-
-
 def _record_scoped_to_locked_job(
     record: SnapshotIngestRecord,
     job: JobRow,
@@ -359,6 +315,36 @@ def _record_scoped_to_locked_job(
         platform=_required_job_payload_text(job, "platform").casefold(),
         platform_account_id=_required_job_payload_text(job, "platform_account_id"),
     )
+
+
+async def _latest_message_hashes_by_channel(
+    session: AsyncSession,
+    *,
+    target_id: uuid.UUID,
+    channel_ids: list[uuid.UUID],
+    template_version: str,
+    exclude_message_id: uuid.UUID,
+) -> dict[uuid.UUID, str]:
+    if not channel_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(DeliveryLogRow.channel_id, MessageRow.text_hash)
+            .join(MessageRow, DeliveryLogRow.message_id == MessageRow.id)
+            .join(SnapshotRow, MessageRow.snapshot_id == SnapshotRow.id)
+            .where(
+                SnapshotRow.target_id == target_id,
+                DeliveryLogRow.channel_id.in_(channel_ids),
+                MessageRow.template_version == template_version,
+                MessageRow.id != exclude_message_id,
+            )
+            .order_by(SnapshotRow.collected_at.desc(), DeliveryLogRow.id.desc())
+        )
+    ).all()
+    latest: dict[uuid.UUID, str] = {}
+    for channel_id, text_hash in rows:
+        latest.setdefault(channel_id, text_hash)
+    return latest
 
 
 def _required_job_payload_text(job: JobRow, key: str) -> str:

@@ -17,7 +17,7 @@ from .config import (
     AppConfig,
     coupang_center_name_risk,
 )
-from .secret_store import LocalFileSecretStore, SecretStore
+from .secret_store import SecretStore, default_secret_store
 
 # 직렬화에서 제외(비영속)하고 로컬 store로 분리하는 평문 secret 필드. 각 필드는 대응
 # ``<field>_ref``를 갖는다(아래 dataclass). OTP/2FA는 비저장 분류라 여기 없다.
@@ -25,6 +25,7 @@ _SECRET_FIELDS: tuple[str, ...] = (
     "telegram_bot_token",
     "coupang_login_password",
     "coupang_login_id",
+    "verification_email_address",
     "verification_email_app_password",
 )
 
@@ -77,6 +78,7 @@ class UiSettings:
     telegram_bot_token_ref: str = ""
     coupang_login_password_ref: str = ""
     coupang_login_id_ref: str = ""
+    verification_email_address_ref: str = ""
     verification_email_app_password_ref: str = ""
 
     @classmethod
@@ -192,9 +194,7 @@ class UiSettingsStore:
         # 기본 store는 설정 파일 옆의 **별도** 파일(secrets.local.json). ui.py 진입점은 기본
         # store를 쓰므로 시그니처 호환(기본 인자)으로 두어 호출부 무변경을 유지하고, 테스트는
         # tmp_path store를 주입해 실 파일을 만지지 않는다(AC6/7).
-        self.secret_store: SecretStore = secret_store or LocalFileSecretStore(
-            path.parent / "secrets.local.json"
-        )
+        self.secret_store: SecretStore = secret_store or default_secret_store(path.parent / "secrets.local.json")
 
     def load(self) -> UiSettings:
         if not self.path.exists():
@@ -274,8 +274,21 @@ class UiSettingsStore:
     def save_all(self, settings: list[UiSettings]) -> None:
         for item in settings:
             self._absorb_secrets(item)
-        payload = {"crawlings": [_to_jsonable(item) for item in settings]}
+        crawlings = [_to_jsonable(item) for item in settings]
+        existing_tail = self._existing_crawlings_tail(start_index=len(settings))
+        payload = {"crawlings": crawlings + existing_tail}
         _atomic_write_text(self.path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _existing_crawlings_tail(self, *, start_index: int) -> list[Any]:
+        if not self.path.exists():
+            return []
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, dict) or not isinstance(raw.get("crawlings"), list):
+            return []
+        return raw["crawlings"][start_index:]
 
     def _absorb_secrets(self, settings: UiSettings) -> None:
         # 직렬화 직전: 비어있지 않은 평문 secret을 store로 빼고 대응 ``*_ref``를 채운다. 평문

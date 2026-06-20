@@ -106,7 +106,7 @@ class InMemoryAgentTokenRepository:
         self.audits.append(audit)
 
     async def is_revoked(self, agent_id: str) -> bool:
-        return agent_id in self._revoked
+        return agent_id in self._revoked or agent_id in self._rotated
 
     async def record_audit(self, audit: AuditEntry) -> None:
         self.audits.append(audit)
@@ -114,7 +114,7 @@ class InMemoryAgentTokenRepository:
     # ── sync 노출(resolver 반영용) ──────────────────────────────────────────────
     @property
     def revoked_ids(self) -> set[str]:
-        return set(self._revoked)
+        return set(self._revoked) | set(self._rotated)
 
     def revoked_at(self, agent_id: str) -> datetime | None:
         return self._revoked.get(agent_id)

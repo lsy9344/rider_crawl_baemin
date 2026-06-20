@@ -155,6 +155,31 @@ def test_backend_api_env_documents_admin_allowed_origins() -> None:
     assert "RIDER_ADMIN_ALLOWED_ORIGINS" in env
 
 
+def test_backend_api_env_does_not_enable_public_admin_by_default() -> None:
+    env = Path("deploy/env/backend-api.env").read_text(encoding="utf-8")
+
+    assert "RIDER_ADMIN_PUBLIC_ACCESS=1" not in env
+    assert "RIDER_ADMIN_PUBLIC_ACCESS=true" not in env.lower()
+
+
+def test_compose_passes_telegram_env_ref_values_to_backend() -> None:
+    compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+    telegram_env = Path("deploy/env/telegram-webhook.env").read_text(encoding="utf-8")
+
+    backend = compose[compose.index("\n  backend-api:\n") : compose.index("\n  scheduler:\n")]
+    assert "- ./env/telegram-webhook.env" in backend
+    assert "TELEGRAM_WEBHOOK_SECRET_REF=env:RIDER_TELEGRAM_WEBHOOK_SECRET" in telegram_env
+    assert "TELEGRAM_BOT_TOKEN_REF=env:RIDER_TELEGRAM_BOT_TOKEN" in telegram_env
+    assert (
+        "RIDER_TELEGRAM_WEBHOOK_SECRET: ${RIDER_TELEGRAM_WEBHOOK_SECRET:?set RIDER_TELEGRAM_WEBHOOK_SECRET}"
+        in backend
+    )
+    assert (
+        "RIDER_TELEGRAM_BOT_TOKEN: ${RIDER_TELEGRAM_BOT_TOKEN:?set RIDER_TELEGRAM_BOT_TOKEN}"
+        in backend
+    )
+
+
 def test_telegram_env_documents_default_supported_env_secret_refs() -> None:
     env = Path("deploy/env/telegram-webhook.env").read_text(encoding="utf-8")
 
@@ -209,12 +234,12 @@ def test_refactoring_review_report_is_marked_as_historical() -> None:
 
 def test_backup_runbook_documents_current_migration_head() -> None:
     runbook = Path("docs/runbooks/backup-restore.md").read_text(encoding="utf-8")
-    latest = Path("migrations/versions/0013_jobs_stale_lease_index.py").read_text(
+    latest = Path("migrations/versions/0019_profile_channel_uniqueness.py").read_text(
         encoding="utf-8"
     )
 
-    assert 'revision = "0013_jobs_stale_lease_index"' in latest
-    assert "0013_jobs_stale_lease_index" in runbook
+    assert 'revision = "0019_profile_channel_uniqueness"' in latest
+    assert "0019_profile_channel_uniqueness" in runbook
     assert "0005_audit_fields_and_agent_token_revoke" not in runbook
 
 
@@ -310,10 +335,10 @@ def test_create_app_reuses_single_database_engine_for_default_components(
 
     engine = _Engine()
     session_factory = object()
-    created_urls: list[str] = []
+    created_calls: list[tuple[str, dict[str, object]]] = []
 
-    def _fake_create_engine(database_url: str):
-        created_urls.append(database_url)
+    def _fake_create_engine(database_url: str, **kwargs: object):
+        created_calls.append((database_url, kwargs))
         return engine
 
     def _fake_create_session_factory(engine_arg):
@@ -329,11 +354,18 @@ def test_create_app_reuses_single_database_engine_for_default_components(
         build_sha=None,
         build_time=None,
         database_url="postgresql+asyncpg://user:pass@db:5432/rider",
+        db_pool_size=7,
+        db_max_overflow=3,
     )
 
     app = server_main.create_app(settings)
 
-    assert created_urls == [settings.database_url]
+    assert created_calls == [
+        (
+            settings.database_url,
+            {"pool_size": settings.db_pool_size, "max_overflow": settings.db_max_overflow},
+        )
+    ]
     assert app.state.db_engine is engine
     assert app.state.db_session_factory is session_factory
 

@@ -100,13 +100,13 @@ class AppConfig:
     @property
     def runtime_dir(self) -> Path:
         # 상태 루트 정책(의도적 분리):
-        # - run lock / last message hash는 ``runtime_dir``(= log_dir 기준)에 둔다.
-        #   이들은 스코프/탭별(``state_subdir``)로 나뉘고, UI가 log_dir 위치를
-        #   바꿀 수 있으며, 테스트는 tmp_path로 격리해야 한다.
-        # - 반면 텔레그램 offset/lock은 "토큰별 단일·탭 독립"이라 log_dir과 무관해야
-        #   하므로 ``app_state_root()``(고정 루트)에 둔다. 두 상태군의 요구가 달라
-        #   루트가 갈라져 있으며, 이는 버그가 아니라 의도된 설계다.
-        #   (telegram_commands._default_offset_store_path 참고)
+        # - last message hash는 ``runtime_dir``(= log_dir 기준)에 둔다. 이 값은
+        #   스코프/탭별(``state_subdir``)로 나뉘고, UI가 log_dir 위치를 바꿀 수
+        #   있으며, 테스트는 tmp_path로 격리해야 한다.
+        # - 반면 run lock / Chrome 준비 lock / Kakao OS 자동화 lock / 텔레그램
+        #   offset은 실제 공유 자원 기준이라 log_dir과 무관해야 하므로
+        #   ``app_state_root()``(고정 루트)에 둔다. 두 상태군의 요구가 달라 루트가
+        #   갈라져 있으며, 이는 버그가 아니라 의도된 설계다.
         #
         # runtime은 항상 log_dir의 형제(``log_dir.parent / "runtime"``)에 둔다.
         # 이전에는 ``log_dir.name == "logs"``일 때만 그렇게 하고 그 외에는 cwd 기준
@@ -154,10 +154,10 @@ def app_state_root() -> Path:
     묶이면 안 된다. 다른 디렉터리에서 실행하면 같은 봇 토큰도 다른 파일을 써서 같은
     업데이트를 다시 처리할 수 있기 때문이다. 그래서 cwd가 아니라 고정된 루트를 쓴다.
 
-    상태 루트 정책: 이 고정 루트는 "토큰별 단일·탭 독립" 상태(텔레그램 offset)
-    전용이다. run lock / last message hash는 스코프/탭별 분리가 필요해 일부러
-    ``AppConfig.runtime_dir``(log_dir 기준)에 둔다. 두 상태군의 요구가 달라 루트가
-    갈라진 것은 의도된 설계다(``AppConfig.runtime_dir`` 주석 참고).
+    상태 루트 정책: 이 고정 루트는 "실제 공유 자원 기준" 상태(run lock, Chrome
+    준비 lock, Kakao OS 자동화 lock, 텔레그램 offset/lock)에 쓴다. last message
+    hash는 스코프/탭별 분리가 필요해 일부러 ``AppConfig.runtime_dir``(log_dir 기준)
+    아래에 둔다. 두 상태군의 요구가 달라 루트가 갈라진 것은 의도된 설계다.
 
     우선순위: ``RIDER_CRAWL_STATE_ROOT`` 환경변수 > 패키지 설치 위치 기준 프로젝트
     루트(개발용 ``src`` 레이아웃) > 그래도 못 찾으면 사용자 홈 아래 고정 경로.

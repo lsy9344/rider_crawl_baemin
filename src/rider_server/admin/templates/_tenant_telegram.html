@@ -1,9 +1,9 @@
-{# 고객별 텔레그램 설정 테이블 partial — 30초 polling. secret 은 설정 여부만 표시. autoescape 유지. #}
+{# 고객별 텔레그램 설정 테이블 partial: 30초 polling. secret 은 설정 여부만 표시. autoescape 유지. #}
 <div class="table-wrap">
 <table>
   <caption class="muted">고객별 텔레그램 설정 ({{ rows | length }}건)</caption>
   <thead>
-    <tr><th>고객명</th><th>봇 토큰</th><th>webhook secret</th><th>실발송</th></tr>
+    <tr><th>고객명</th><th>봇 토큰</th><th>텔레그램 webhook 보안키</th><th>실제 메시지 보내기</th></tr>
   </thead>
   <tbody>
     {% for row in rows %}
