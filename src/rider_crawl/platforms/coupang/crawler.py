@@ -952,6 +952,20 @@ def _wait_for_target_page_ready(
     except timeout_errors as exc:
         if _page_looks_like_coupang_login_required(page):
             raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
+        if path == "/page/peak-dashboard":
+            try:
+                _reload_target_page(
+                    page,
+                    config,
+                    target_url=target_url,
+                    load_timeout_errors=timeout_errors,
+                )
+                page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
+                return
+            except timeout_errors as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from retry_exc
+                exc = retry_exc
         seconds = max(1, config.page_timeout_seconds // 1000)
         raise RuntimeError(
             f"{label}가 {seconds}초 안에 준비되지 않았습니다. "

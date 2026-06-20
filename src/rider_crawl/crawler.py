@@ -15,6 +15,8 @@ from .config import (
 )
 from .models import CurrentScreenSnapshot
 from .parser import (
+    BaeminDeliveryHistoryTable,
+    MissingPerformanceDataError,
     baemin_delivery_history_to_snapshot,
     has_today_delivery_status,
     parse_achievement_report_text,
@@ -59,38 +61,85 @@ def _merge_cancel_rate(
 ) -> CurrentScreenSnapshot:
     # '취소율'은 거절과 취소를 합쳐 (거절+취소)/(완료+거절+취소)로 계산한다. 배달현황
     # 스냅샷의 reject_rate가 바로 이 합산율이라(baemin_delivery_history_to_snapshot
-    # 참고) 그대로 가져와 cancel_rate에 싣는다. 피크 실적은 달성현황 값을 그대로 둔다.
-    return replace(snapshot, cancel_rate=cancel.reject_rate)
+    # 참고) 그대로 가져와 cancel_rate에 싣는다.
+    # '수행중인원'(운행상태가 '운행중'인 라이더 수, 쿠팡의 '온라인 N명'과 동일 개념)도
+    # 배달현황 표에서만 얻을 수 있다. 달성현황(report) 스냅샷의 active_riders는 0으로
+    # 비어 있으므로 배달현황 집계값을 함께 옮긴다. 피크 실적은 달성현황 값을 그대로 둔다.
+    return replace(
+        snapshot,
+        cancel_rate=cancel.reject_rate,
+        active_riders=cancel.active_riders,
+    )
+
+
+# 배달현황 표의 한 페이지 최대 행수. 사이트 드롭다운은 10/20/50/100만 지원하고, size에
+# 100을 넘는 값(200/500 등)을 주면 서버가 무시하고 기본 20으로 떨어진다(실측). 그래서
+# 페이지당 100명을 읽되, 라이더가 100명을 넘으면 다음 페이지를 더 읽어야 한다 — 그러지
+# 않으면 '수행중인원'(운행중) 집계가 1페이지(앞 100명)로만 한정돼 누락된다(실측: 109명
+# 센터에서 size=20 단일 페이지는 운행중 7명, 전체는 23명).
+_BAEMIN_HISTORY_PAGE_SIZE = 100
+# 무한 루프 방지용 페이지 상한(센터당 수천 명은 없음). 100*MAX 명까지 커버한다.
+_BAEMIN_HISTORY_MAX_PAGES = 20
+
+
+def _baemin_history_page_url(page_index: int) -> str:
+    return _delivery_history_page_url(
+        DEFAULT_BAEMIN_DELIVERY_HISTORY_URL, page_index, _BAEMIN_HISTORY_PAGE_SIZE
+    )
 
 
 def crawl_baemin_cancel_summary(config: AppConfig) -> CurrentScreenSnapshot | None:
-    """배민 배달현황(history) 표를 읽어 합계 취소율 스냅샷을 만든다.
+    """배민 배달현황(history) 표를 읽어 합계 취소율 + 수행중인원 스냅샷을 만든다.
 
-    취소율은 부가 정보라 어떤 실패도 달성현황 전송을 막아선 안 된다. 그래서 수집·파싱
-    중 어떤 예외가 나도 None을 돌려 호출 측이 취소율 줄만 생략하게 한다.
+    취소율·수행중인원은 부가 정보라 어떤 실패도 달성현황 전송을 막아선 안 된다. 그래서
+    수집·파싱 중 어떤 예외가 나도 None을 돌려 호출 측이 해당 줄만 생략하게 한다.
     """
     try:
-        html = fetch_baemin_delivery_history_html(config)
-        table = parse_baemin_delivery_history_html(html)
-        return baemin_delivery_history_to_snapshot(table)
+        tables = _fetch_baemin_delivery_history_tables(config)
+        if not tables:
+            return None
+        return baemin_delivery_history_to_snapshot(_combine_history_page_tables(tables))
     except Exception:
         return None
 
 
-def fetch_baemin_delivery_history_html(config: AppConfig) -> str:
+def _combine_history_page_tables(
+    tables: list[BaeminDeliveryHistoryTable],
+) -> BaeminDeliveryHistoryTable:
+    """여러 페이지의 배달현황 표를 하나로 합친다.
+
+    합계(summary) 행은 모든 페이지에 같은 '서버 전체 총계'로 반복 노출된다(실측). 페이지
+    별로 더하면 취소율 분모(완료+거절+취소)가 페이지 수만큼 부풀려지므로, 합계는 **첫
+    페이지 것만** 쓰고 '운행중' 집계용 라이더 행만 모든 페이지에서 이어 붙인다. 첫 페이지에
+    합계 행이 없으면(None) baemin_delivery_history_to_snapshot이 전체 라이더 합으로 폴백한다.
+    """
+    return BaeminDeliveryHistoryTable(
+        headers=tables[0].headers,
+        summary=tables[0].summary,
+        riders=[rider for table in tables for rider in table.riders],
+    )
+
+
+def _fetch_baemin_delivery_history_tables(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
     if config.browser_mode == "cdp":
-        return _fetch_baemin_history_via_cdp(config)
+        return _fetch_baemin_history_tables_via_cdp(config)
     if config.browser_mode == "persistent":
-        return _fetch_baemin_history_via_persistent_context(config)
+        return _fetch_baemin_history_tables_via_persistent_context(config)
     raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
 
 
-def _fetch_baemin_history_via_cdp(config: AppConfig) -> str:
+def _fetch_baemin_history_tables_via_cdp(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
     ensure_local_cdp_address(config.cdp_url)
-    return asyncio.run(_fetch_baemin_history_via_cdp_async(config))
+    return asyncio.run(_fetch_baemin_history_tables_via_cdp_async(config))
 
 
-async def _fetch_baemin_history_via_cdp_async(config: AppConfig) -> str:
+async def _fetch_baemin_history_tables_via_cdp_async(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:
@@ -99,12 +148,44 @@ async def _fetch_baemin_history_via_cdp_async(config: AppConfig) -> str:
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
         page = await context.new_page()
         try:
-            return await _collect_baemin_history_html(page, config)
+            return await _collect_baemin_history_tables(page, config)
         finally:
             await page.close()
 
 
-def _fetch_baemin_history_via_persistent_context(config: AppConfig) -> str:
+async def _collect_baemin_history_tables(
+    page: Any, config: AppConfig
+) -> list[BaeminDeliveryHistoryTable]:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    tables: list[BaeminDeliveryHistoryTable] = []
+    for page_index in range(_BAEMIN_HISTORY_MAX_PAGES):
+        url = _baemin_history_page_url(page_index)
+        await _goto_page(page, url, config)
+        # 새 탭이라도 센터는 로그인 세션을 따라가지만, 센터 선택 화면으로 튕기면 설정
+        # 센터를 골라준 뒤 다시 이동한다(보통 첫 페이지에서만 일어난다).
+        if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+            await _select_baemin_center(page, config)
+            await _goto_page(page, url, config)
+        try:
+            await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+        except PlaywrightTimeoutError:
+            pass
+        try:
+            table = parse_baemin_delivery_history_html(await page.content())
+        except MissingPerformanceDataError:
+            break
+        tables.append(table)
+        # 라이더가 페이지 크기보다 적으면 마지막 페이지다. 100명을 꽉 채웠으면 다음
+        # 페이지에 더 있을 수 있으므로 계속 읽는다.
+        if len(table.riders) < _BAEMIN_HISTORY_PAGE_SIZE:
+            break
+    return tables
+
+
+def _fetch_baemin_history_tables_via_persistent_context(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
@@ -117,40 +198,26 @@ def _fetch_baemin_history_via_persistent_context(config: AppConfig) -> str:
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(
-                DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
-                wait_until="domcontentloaded",
-                timeout=config.page_timeout_seconds,
-            )
-            if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
-                page.goto(
-                    DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
-                    wait_until="domcontentloaded",
-                    timeout=config.page_timeout_seconds,
-                )
-            try:
-                page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
-            except PlaywrightTimeoutError:
-                pass
-            return page.content()
+            tables: list[BaeminDeliveryHistoryTable] = []
+            for page_index in range(_BAEMIN_HISTORY_MAX_PAGES):
+                url = _baemin_history_page_url(page_index)
+                page.goto(url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+                if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+                    page.goto(url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+                try:
+                    page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+                except PlaywrightTimeoutError:
+                    pass
+                try:
+                    table = parse_baemin_delivery_history_html(page.content())
+                except MissingPerformanceDataError:
+                    break
+                tables.append(table)
+                if len(table.riders) < _BAEMIN_HISTORY_PAGE_SIZE:
+                    break
+            return tables
         finally:
             context.close()
-
-
-async def _collect_baemin_history_html(page: Any, config: AppConfig) -> str:
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
-    await _goto_page(page, DEFAULT_BAEMIN_DELIVERY_HISTORY_URL, config)
-    # 새 탭이라도 센터는 로그인 세션을 따라가지만, 센터 선택 화면으로 튕기면 설정 센터를
-    # 골라준 뒤 다시 배달현황으로 이동한다(달성현황 수집과 동일한 안전장치).
-    if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
-        await _select_baemin_center(page, config)
-        await _goto_page(page, DEFAULT_BAEMIN_DELIVERY_HISTORY_URL, config)
-    try:
-        await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
-    except PlaywrightTimeoutError:
-        pass
-    return await page.content()
 
 
 def fetch_page_html(config: AppConfig) -> str:

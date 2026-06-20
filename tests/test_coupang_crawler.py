@@ -822,6 +822,43 @@ def test_coupang_fetch_target_page_content_reports_peak_dashboard_readiness_time
         )
 
 
+def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_before_failing(tmp_path):
+    config = _config(tmp_path)
+    page = _FakePage(config.peak_dashboard_url, wait_error=FakeTimeout("locator timeout"))
+    browser = _FakeBrowser([page])
+
+    with pytest.raises(RuntimeError, match="쿠팡이츠 피크 대시보드"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+        )
+
+    assert page.goto_calls == [config.peak_dashboard_url]
+    assert page.required_texts == ["피크타임별 현황", "피크타임별 현황"]
+
+
+def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_and_succeeds(tmp_path):
+    config = _config(tmp_path)
+    page = _RefreshablePeakPage(
+        config.peak_dashboard_url,
+        ready_html="<html>피크타임별 현황</html>",
+    )
+    browser = _FakeBrowser([page])
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+    )
+
+    assert html == "<html>피크타임별 현황</html>"
+    assert page.goto_calls == [config.peak_dashboard_url]
+    assert page.required_texts == ["피크타임별 현황", "피크타임별 현황"]
+
+
 def test_coupang_fetch_target_page_content_waits_for_peak_dashboard_required_text(tmp_path):
     config = _config(tmp_path)
     page = _FakePage(config.peak_dashboard_url, html="<html>피크타임별 현황</html>")
@@ -1122,6 +1159,24 @@ class _FakePage:
 
     def content(self) -> str:
         return self.html
+
+
+class _RefreshablePeakPage(_FakePage):
+    def __init__(self, url: str, *, ready_html: str) -> None:
+        super().__init__(url, html="<html>loading</html>")
+        self._ready_html = ready_html
+        self._wait_attempts = 0
+
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        self.html = self._ready_html
+        return None
+
+    def wait_for(self, **_kwargs):
+        self._wait_attempts += 1
+        if self._wait_attempts == 1:
+            raise FakeTimeout("locator timeout")
+        return None
 
 
 class _RecoverablePage:

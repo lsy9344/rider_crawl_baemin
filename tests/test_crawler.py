@@ -140,8 +140,13 @@ def test_crawl_current_screen_merges_cancel_rate_from_history(tmp_path):
     )
 
     # 배달현황 스냅샷의 reject_rate가 (거절+취소)/전체 합산율이고, 이 값이 취소율로 실린다.
+    # active_riders(운행중 라이더 수)는 달성현황 스냅샷엔 0이라 배달현황 값으로 채워진다.
     history = dataclasses.replace(
-        _MINIMAL_SNAPSHOT, reject_rate=4.7, cancel_rate=1.2, cancelled_count=2
+        _MINIMAL_SNAPSHOT,
+        reject_rate=4.7,
+        cancel_rate=1.2,
+        cancelled_count=2,
+        active_riders=5,
     )
 
     snapshot = crawl_current_screen(
@@ -153,6 +158,8 @@ def test_crawl_current_screen_merges_cancel_rate_from_history(tmp_path):
     # 달성현황 피크 실적은 그대로, 배달현황의 거절+취소 합산율이 취소율로 덧붙는다.
     assert snapshot.lunch_peak_count == 323
     assert snapshot.cancel_rate == 4.7
+    # '수행중인원'(운행중 라이더 수)도 배달현황에서 함께 옮겨온다.
+    assert snapshot.active_riders == 5
 
 
 def test_crawl_current_screen_keeps_report_when_cancel_summary_unavailable(tmp_path):
@@ -185,6 +192,37 @@ def test_crawl_current_screen_keeps_report_when_cancel_summary_unavailable(tmp_p
     # 취소율 수집 실패(None)는 달성현황 전송을 막지 않고 취소율만 비운다.
     assert snapshot.lunch_peak_count == 323
     assert snapshot.cancel_rate is None
+
+
+def test_combine_history_page_tables_keeps_page0_summary_and_concats_riders():
+    # 라이더가 100명을 넘으면 여러 페이지를 읽는다. 합계(summary) 행은 모든 페이지에 같은
+    # '서버 전체 총계'로 반복되므로 첫 페이지 것만 쓰고(더하면 취소율 분모가 부풀려짐),
+    # '운행중' 집계용 라이더 행만 모든 페이지에서 이어 붙인다.
+    from rider_crawl.crawler import _combine_history_page_tables
+    from rider_crawl.parser import BaeminDeliveryHistoryTable
+
+    headers = ["이름", "운행상태", "완료"]
+    page0 = BaeminDeliveryHistoryTable(
+        headers=headers,
+        summary={"이름": "합계", "운행상태": "-", "완료": "100"},
+        riders=[
+            {"이름": "강민기", "운행상태": "운행중", "완료": "55"},
+            {"이름": "강경우", "운행상태": "운행 종료", "완료": "0"},
+        ],
+    )
+    page1 = BaeminDeliveryHistoryTable(
+        headers=headers,
+        summary={"이름": "합계", "운행상태": "-", "완료": "100"},
+        riders=[{"이름": "최윤호", "운행상태": "운행중", "완료": "10"}],
+    )
+
+    combined = _combine_history_page_tables([page0, page1])
+
+    # 합계는 첫 페이지 것만 — 페이지 수만큼 더해 200이 되면 안 된다.
+    assert combined.summary == {"이름": "합계", "운행상태": "-", "완료": "100"}
+    # 라이더는 모든 페이지를 합쳐 3명(운행중 2 + 운행 종료 1).
+    assert len(combined.riders) == 3
+    assert [rider["이름"] for rider in combined.riders] == ["강민기", "강경우", "최윤호"]
 
 
 def test_fetch_page_html_uses_cdp_mode_by_default(tmp_path, monkeypatch):
