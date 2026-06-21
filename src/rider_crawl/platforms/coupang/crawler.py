@@ -492,6 +492,19 @@ def _browser_pages(browser: Any) -> list[Any]:
     return pages
 
 
+def _page_is_crashed(page: Any) -> bool:
+    # 렌더러가 크래시한 탭은 URL이 그대로 남아 _select_page_by_url이 다시 고를 수
+    # 있다. 그 죽은 탭을 재사용하면 콘텐츠 수집이 실패·행으로 이어지므로,
+    # Playwright Page.is_crashed()로 걸러낸다(없거나 예외면 보수적으로 False).
+    is_crashed = getattr(page, "is_crashed", None)
+    if not callable(is_crashed):
+        return False
+    try:
+        return bool(is_crashed())
+    except Exception:
+        return False
+
+
 def _fetch_target_page_content(
     browser: Any,
     config: AppConfig,

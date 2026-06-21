@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from rider_crawl.scheduler import BotScheduler
 
 

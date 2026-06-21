@@ -32,6 +32,10 @@ PREVIEW_TEXT_HEIGHT = 24
 MESSENGER_OPTIONS = (("telegram", "텔레그램"), ("kakao", "카카오톡"))
 PLATFORM_OPTIONS = (("baemin", "배민"), ("coupang", "쿠팡이츠"))
 TELEGRAM_SEND_MIN_INTERVAL_SECONDS = 1.0
+# 탭이 이 배수만큼의 주기 동안 성공 회차가 한 번도 없으면 '침묵'으로 보고 알린다.
+SILENT_TAB_INTERVAL_FACTOR = 3
+# 워커가 비정상 종료됐을 때 자동 재시작을 시도하는 최대 횟수(크래시 루프 방지).
+MAX_AUTO_RESTARTS = 3
 TELEGRAM_FIELD_KEYS = ("telegram_bot_token", "telegram_chat_id", "telegram_message_thread_id")
 KAKAO_FIELD_KEYS = ("kakao_chat_name",)
 MESSENGER_FIELD_KEYS = TELEGRAM_FIELD_KEYS + KAKAO_FIELD_KEYS
@@ -196,6 +200,10 @@ class RiderBotUi:
         # 탭별 시작/정지 시간 스케줄의 직전 '시간대 안' 여부. 상승 에지(밖→안)에서만
         # 자동 시작해, 시간대 안에서 에러로 멈춘 탭을 매 틱 되살리지 않는다.
         self._schedule_prev_in_window: dict[int, bool] = {}
+        # 탭별 마지막 성공 회차 시각(monotonic). 무전송 침묵 감지·자동 재시작 가시화에 쓴다.
+        self.last_success_by_tab: dict[int, float] = {}
+        self._silent_alerted_by_tab: dict[int, bool] = {}
+        self._auto_restart_count_by_tab: dict[int, int] = {}
         # 텔레그램 명령 폴러는 봇 토큰 단위로 하나만 돈다. 여러 탭이 같은 토큰을
         # 공유하면 getUpdates를 두 폴러가 나눠 받아 '!조회' 명령이 다른 탭으로 가
         # 누락될 수 있으므로, 토큰별로 폴러 하나를 두고 그 토큰을 쓰는 활성 탭 전부를
@@ -616,12 +624,20 @@ class RiderBotUi:
         # 호출부(start 또는 _auto_start_tab)가 책임진다.
         stop_event = threading.Event()
         self.stop_events_by_tab[tab_index] = stop_event
+        # 방금 시작한 탭은 아직 성공 회차가 없다. 침묵 감지가 즉시 오탐하지 않도록
+        # 시작 시각을 성공 기준선으로 시드한다(첫 성공에서 _show_result가 갱신).
+        self._ensure_health_tracking()
+        self.last_success_by_tab[tab_index] = time.monotonic()
+        self._silent_alerted_by_tab[tab_index] = False
         scheduler = BotScheduler(
             interval_minutes=settings.interval_minutes,
             run_job=lambda event=stop_event: self._run_once_background(
                 tab_index,
                 settings,
                 event,
+            ),
+            on_job_error=lambda exc, idx=tab_index, s=settings: self._on_worker_job_error(
+                idx, s, exc
             ),
         )
         worker = threading.Thread(
@@ -661,6 +677,9 @@ class RiderBotUi:
             now = datetime.now()
             now_minutes = now.hour * 60 + now.minute
             for tab_index, settings in enumerate(self.settings_tabs):
+                # 스케줄 사용 여부와 무관하게 모든 탭의 건강 상태를 먼저 점검한다
+                # (크롤링1처럼 스케줄 없이 수동 시작한 탭도 비정상 종료를 잡아야 한다).
+                self._check_tab_health(tab_index, settings)
                 start = _hhmm_to_minutes(settings.start_time)
                 stop = _hhmm_to_minutes(settings.stop_time)
                 if not settings.schedule_enabled or start is None or stop is None or start == stop:
@@ -677,6 +696,69 @@ class RiderBotUi:
                     self._auto_start_tab(tab_index)
         finally:
             self.root.after(20000, self._poll_schedule)
+
+    def _ensure_health_tracking(self) -> None:
+        # __new__ 기반 테스트가 __init__을 건너뛰어도 안전하도록 per-tab 추적 dict을
+        # 보장한다(telegram_send_locks 등과 동일한 지연 초기화 관례).
+        for attr in (
+            "last_success_by_tab",
+            "_silent_alerted_by_tab",
+            "_auto_restart_count_by_tab",
+        ):
+            if not hasattr(self, attr):
+                setattr(self, attr, {})
+
+    def _check_tab_health(self, tab_index: int, settings: UiSettings) -> None:
+        # 워커 bookkeeping이 아직 없으면(부분 초기화 테스트 등) 점검할 대상이 없다.
+        if not hasattr(self, "stop_events_by_tab") or not hasattr(self, "workers_by_tab"):
+            return
+        self._ensure_health_tracking()
+        # (a) 중지 요청이 없는데 워커가 죽어 있으면 비정상 종료다. 생존 가드(변경1) 이후엔
+        # 거의 없어야 하지만 끝까지의 안전망으로 감지해 자동 재시작한다.
+        stop_event = self.stop_events_by_tab.get(tab_index)
+        if (
+            stop_event is not None
+            and not stop_event.is_set()
+            and tab_index in self.workers_by_tab
+            and not self._has_live_workers(tab_index)
+        ):
+            self._handle_dead_worker(tab_index)
+            return
+        # (b) 워커는 살아 있는데 N주기 이상 성공 회차가 없으면 침묵으로 보고 1회 알린다.
+        if not self._has_live_workers(tab_index):
+            return
+        last = self.last_success_by_tab.get(tab_index)
+        if last is None:
+            return
+        silent_for = time.monotonic() - last
+        limit = max(settings.interval_minutes * 60 * SILENT_TAB_INTERVAL_FACTOR, 600)
+        if silent_for > limit and not self._silent_alerted_by_tab.get(tab_index):
+            self.messages.put(
+                ("error", f"크롤링{tab_index + 1} {int(silent_for // 60)}분간 성공 회차 없음 — 점검 필요")
+            )
+            self._silent_alerted_by_tab[tab_index] = True
+
+    def _handle_dead_worker(self, tab_index: int) -> None:
+        self._ensure_health_tracking()
+        # 다음 폴에서 같은 사망을 재감지하지 않도록 bookkeeping을 먼저 비운다.
+        self.workers_by_tab.pop(tab_index, None)
+        self.stop_events_by_tab.pop(tab_index, None)
+        count = self._auto_restart_count_by_tab.get(tab_index, 0) + 1
+        self._auto_restart_count_by_tab[tab_index] = count
+        if count > MAX_AUTO_RESTARTS:
+            self.messages.put(
+                (
+                    "error",
+                    f"크롤링{tab_index + 1} 워커가 반복 비정상 종료됨"
+                    f"(자동 재시작 {MAX_AUTO_RESTARTS}회 초과) — 수동 점검 필요",
+                )
+            )
+            return
+        self.messages.put(
+            ("error", f"크롤링{tab_index + 1} 워커 비정상 종료 감지 — 자동 재시작({count}회)")
+        )
+        # 모달 없는 자동 시작(URL/자동복구 자격증명 재검증, 이미 live면 skip 내장).
+        self._auto_start_tab(tab_index)
 
     def stop(self) -> None:
         tab_index = self._selected_tab_index()
@@ -768,11 +850,32 @@ class RiderBotUi:
             # 스케줄러가 다음 정규 주기까지 기다려 일시 장애 복구가 늦어진다.
             self._append_run_error(f"{label} 실행 중 예외", exc, log_dir=settings.log_dir)
             return False
+        except BaseException as exc:  # noqa: BLE001 - 워커 사망 방지(이중 안전망)
+            # asyncio.CancelledError처럼 Exception이 아닌 예외도 여기서 잡아 로그를
+            # 남기고 실패 회차(False)로 처리한다. KeyboardInterrupt/SystemExit는 정상
+            # 종료 신호라 그대로 올려보낸다(finally가 락은 해제한다). False를 돌려주므로
+            # 스케줄러 생존 가드의 on_job_error는 이 경로에선 뜨지 않아 이중 로깅이 없다.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            self._append_run_error(
+                f"{label} 실행 중 예외(BaseException)", exc, log_dir=settings.log_dir
+            )
+            return False
         finally:
             tab_lock.release()
         self.messages.put(("log", f"{label} 완료"))
         self.messages.put(("result", (tab_index, result, settings.interval_minutes)))
         return True
+
+    def _on_worker_job_error(
+        self, tab_index: int, settings: UiSettings, exc: BaseException
+    ) -> None:
+        # 스케줄러 생존 가드(BotScheduler.run_loop)가 잡은, _run_once_background를
+        # 빠져나온 예외다. 워커 데몬 스레드는 가드 덕분에 살아 있고, 여기서는 흔적만
+        # 남긴다(과거엔 이런 예외가 스레드를 조용히 죽여 탭이 무인 정지했다).
+        self._append_run_error(
+            f"크롤링{tab_index + 1} 워커 예외(자동 복구)", exc, log_dir=settings.log_dir
+        )
 
     def _crawl_lock_for_tab(self, tab_index: int) -> threading.Lock:
         if not hasattr(self, "crawl_locks_by_tab"):
@@ -873,6 +976,11 @@ class RiderBotUi:
         self.root.after(200, self._poll_messages)
 
     def _show_result(self, tab_index: int, result: RunResult, interval_minutes: int) -> None:
+        # 성공 회차 도달 = 워커가 살아 정상 동작 중. 침묵/재시작 추적 상태를 초기화한다.
+        self._ensure_health_tracking()
+        self.last_success_by_tab[tab_index] = time.monotonic()
+        self._silent_alerted_by_tab[tab_index] = False
+        self._auto_restart_count_by_tab[tab_index] = 0
         if result.skipped:
             status = "중복 메시지 건너뜀"
         elif result.sent:
@@ -1067,7 +1175,7 @@ class RiderBotUi:
         self.preview.see("end")
         self.preview.configure(state="disabled")
 
-    def _append_run_error(self, prefix: str, exc: Exception, *, log_dir: Path) -> None:
+    def _append_run_error(self, prefix: str, exc: BaseException, *, log_dir: Path) -> None:
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
         log_path = self._write_run_error_log(prefix, detail, log_dir=log_dir)
         if log_path is None:

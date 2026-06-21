@@ -939,7 +939,7 @@ def test_start_runs_only_selected_tab_with_its_own_interval(tmp_path, monkeypatc
     intervals: list[int] = []
 
     class _RecordingScheduler:
-        def __init__(self, *, interval_minutes, run_job):
+        def __init__(self, *, interval_minutes, run_job, on_job_error=None):
             intervals.append(interval_minutes)
             self.run_job = run_job
 
@@ -992,7 +992,7 @@ def test_per_tab_start_stop_works_for_all_nine_tabs(tmp_path, monkeypatch):
     recorded: list[tuple[int, int]] = []
 
     class _RecordingScheduler:
-        def __init__(self, *, interval_minutes, run_job):
+        def __init__(self, *, interval_minutes, run_job, on_job_error=None):
             recorded.append((notebook.current_index, interval_minutes))
             self.run_job = run_job
             self._stop = None

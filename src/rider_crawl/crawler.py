@@ -251,6 +251,14 @@ def fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
     except CdpUnavailableError:
         raise
     except Exception as exc:
+        # 렌더러(페이지)가 크래시한 경우는 일시 장애다. 다음 회차에
+        # _open_baemin_delivery_history_page가 크래시 탭을 거르고 새 탭으로 복구하므로,
+        # CDP 연결 실패로 오분류하지 말고 빠른 재시도(RuntimeError) 경로로 보낸다.
+        if _is_page_crash(exc):
+            raise RuntimeError(
+                "Chrome 페이지(렌더러)가 크래시했습니다. 다음 회차에 새 탭으로 자동 복구합니다.\n"
+                f"상세 오류: {type(exc).__name__}: {exc}"
+            ) from exc
         # Chrome이 CDP 포트에 안 떠 있어 connect_over_cdp가 거부되면(ECONNREFUSED 등),
         # 이건 "Chrome 준비하기"가 안 된 환경 오류이지 일시적 페이지 로딩 실패가 아니다.
         # 스케줄러 5초 재시도로는 절대 복구되지 않으므로 별도 예외로 구분해, UI가 정규
@@ -286,8 +294,15 @@ def _is_cdp_connection_failure(exc: Exception) -> bool:
     return any(signal in message for signal in signals)
 
 
+def _is_page_crash(exc: BaseException) -> bool:
+    # Chromium 렌더러가 죽었을 때 Playwright가 내는 신호들. 연결 단계 실패(위)와
+    # 달리 페이지/타깃이 살아 있다가 크래시한 경우로, 새 탭으로 복구 가능한 일시 장애다.
+    message = str(exc).casefold()
+    signals = ("page crashed", "target crashed", "target closed")
+    return any(signal in message for signal in signals)
+
+
 async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:
@@ -295,16 +310,31 @@ async def _fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
         # CDP 대상은 사용자가 켜 둔 Chrome이므로 browser.close()를 호출하지 않는다.
         # 여러 아이디/프로필을 운영 중일 때 사용자의 Chrome 창이나 로그인 세션을
         # 닫지 않도록, 쿠팡 크롤러와 동일하게 닫지 않는 정책으로 맞춘다.
-        page = await _open_baemin_delivery_history_page(browser, config)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=10_000)
-        except PlaywrightTimeoutError:
-            pass
-        html = await _collect_baemin_achievement_report_text(page, config)
+        # 크래시한 페이지에서 goto/콘텐츠 수집이 영영 멈추지 않도록 open+collect 전체에
+        # 상한을 둔다. collect는 자체적으로 page_timeout_seconds까지만 돌지만, 앞단의
+        # open(goto/센터 선택)이 멈출 수 있어 둘을 합친 예산으로 감싼다. 타임아웃 시
+        # async_playwright 컨텍스트가 우리 클라이언트 연결만 정리한다(사용자 Chrome은
+        # 그대로). TimeoutError는 호출부 except Exception → RuntimeError → 빠른 재시도.
+        budget_seconds = (config.page_timeout_seconds / 1000) * 2 + 30
+        html = await asyncio.wait_for(
+            _open_and_collect_baemin_report(browser, config),
+            timeout=budget_seconds,
+        )
 
     if not html:
         raise RuntimeError("배민 달성현황 텍스트를 가져오지 못했습니다")
     return str(html)
+
+
+async def _open_and_collect_baemin_report(browser: Any, config: AppConfig) -> str:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    page = await _open_baemin_delivery_history_page(browser, config)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10_000)
+    except PlaywrightTimeoutError:
+        pass
+    return await _collect_baemin_achievement_report_text(page, config)
 
 
 async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
@@ -346,7 +376,9 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
 
 
 async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) -> Any:
-    pages = _browser_pages(browser)
+    # 크래시한 탭은 선택 후보에서 제외한다. 매치되는 페이지가 없으면 아래에서
+    # context.new_page()로 새 탭을 열어 자동 복구한다.
+    pages = [page for page in _browser_pages(browser) if not _page_is_crashed(page)]
     report_url = _baemin_report_url(config)
     page = _select_page_by_url(pages, report_url)
     if page is None:
@@ -359,7 +391,8 @@ async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) ->
 
     if _has_configured_baemin_center(config):
         await _goto_page(page, _BAEMIN_CENTER_CHANGE_URL, config)
-        await _select_baemin_center(page, config)
+        if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+            await _select_baemin_center(page, config)
 
     await _goto_page(page, report_url, config)
     if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
@@ -502,6 +535,19 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
 
     select = page.locator("select").first
     if await select.count():
+        options = await _baemin_select_options(select)
+        if len(options) == 1:
+            option = options[0]
+            if option["value"]:
+                await select.select_option(value=option["value"], timeout=config.page_timeout_seconds)
+            else:
+                await select.select_option(label=option["label"], timeout=config.page_timeout_seconds)
+            await page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            return
         if config.baemin_center_id.strip():
             try:
                 await select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
@@ -529,6 +575,27 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
         await page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
         pass
+
+
+async def _baemin_select_options(select: Any) -> list[dict[str, str]]:
+    try:
+        raw_options = await select.locator("option").evaluate_all(
+            """(options) => options.map((option) => ({
+                label: (option.innerText || option.textContent || '').trim(),
+                value: (option.value || '').trim()
+            }))"""
+        )
+    except Exception:
+        return []
+
+    options: list[dict[str, str]] = []
+    for raw in raw_options:
+        label = _normalize_visible_text(str(raw.get("label") or raw.get("text") or ""))
+        value = str(raw.get("value") or "").strip()
+        if not label and not value:
+            continue
+        options.append({"label": label, "value": value})
+    return options
 
 
 def _has_configured_baemin_center(config: AppConfig) -> bool:
@@ -867,6 +934,19 @@ def _browser_pages(browser: Any) -> list[Any]:
     for context in browser.contexts:
         pages.extend(context.pages)
     return pages
+
+
+def _page_is_crashed(page: Any) -> bool:
+    # 렌더러가 크래시한 탭은 URL이 그대로 남아 _select_page_by_url이 다시 고를 수
+    # 있다. 그 죽은 탭을 재사용하면 goto/콘텐츠 수집이 실패·행으로 이어지므로,
+    # Playwright Page.is_crashed()로 걸러낸다(없거나 예외면 보수적으로 False).
+    is_crashed = getattr(page, "is_crashed", None)
+    if not callable(is_crashed):
+        return False
+    try:
+        return bool(is_crashed())
+    except Exception:
+        return False
 
 
 def _fetch_target_page_content(

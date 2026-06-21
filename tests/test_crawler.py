@@ -547,6 +547,55 @@ def test_open_baemin_delivery_history_page_enforces_configured_center_before_his
     assert selected == [(crawler._BAEMIN_CENTER_CHANGE_URL, "DP123")]
 
 
+def test_open_baemin_delivery_history_page_skips_center_selection_when_change_page_redirects_to_report(
+    tmp_path, monkeypatch
+):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="강남센터",
+        baemin_center_id="DP123",
+    )
+    page = _FakeAsyncNavigationPage(config.coupang_eats_url)
+    browser = _FakeBrowser([page])
+
+    async def fake_goto_page(received_page, url, _config):
+        received_page.goto_urls.append(url)
+        if url == crawler._BAEMIN_CENTER_CHANGE_URL:
+            received_page.url = crawler._baemin_report_url(config)
+        else:
+            received_page.url = url
+
+    async def fail_select_baemin_center(_received_page, _received_config):
+        raise AssertionError("center selection should be skipped after redirect")
+
+    monkeypatch.setattr(crawler, "_goto_page", fake_goto_page)
+    monkeypatch.setattr(crawler, "_select_baemin_center", fail_select_baemin_center)
+
+    opened_page = asyncio.run(crawler._open_baemin_delivery_history_page(browser, config))
+
+    assert opened_page is page
+    assert page.goto_urls[0] == crawler._BAEMIN_CENTER_CHANGE_URL
+    assert page.goto_urls[-1] == crawler._baemin_report_url(config)
+
+
+def test_select_baemin_center_auto_selects_single_available_option(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="강남센터",
+        baemin_center_id="DP123",
+    )
+    page = _FakeBaeminCenterSelectPage(
+        [{"label": "남양주센터 (DP999)", "value": "DP999", "selected": True}]
+    )
+
+    asyncio.run(crawler._select_baemin_center(page, config))
+
+    assert page.selected_value == "DP999"
+    assert page.clicked_buttons == ["선택 완료"]
+
+
 def test_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
     config = _config(tmp_path, browser_mode="cdp")
     browser = _FakeBrowser(
@@ -888,6 +937,82 @@ class _FakeAsyncNavigationPage:
 
     async def wait_for_load_state(self, *_args, **_kwargs):
         return None
+
+
+class _FakeBaeminCenterSelectPage:
+    def __init__(self, options: list[dict[str, object]]) -> None:
+        self.options = options
+        self.selected_value: str | None = None
+        self.clicked_buttons: list[str] = []
+
+    def locator(self, selector: str):
+        assert selector == "select"
+        return _FakeBaeminSelectLocator(self)
+
+    def get_by_role(self, role: str, *, name: str, **_kwargs):
+        assert role == "button"
+        return _FakeBaeminButtonLocator(self, name)
+
+    def get_by_text(self, _text: str, exact: bool = False):
+        return _FakeMissingTextLocator()
+
+    async def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeBaeminSelectLocator:
+    def __init__(self, page: _FakeBaeminCenterSelectPage) -> None:
+        self.page = page
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1
+
+    async def select_option(self, *, value=None, label=None, **_kwargs):
+        for option in self.page.options:
+            if value is not None and option["value"] == value:
+                self.page.selected_value = str(option["value"])
+                return [self.page.selected_value]
+            if label is not None and option["label"] == label:
+                self.page.selected_value = str(option["value"])
+                return [self.page.selected_value]
+        raise ValueError("option not found")
+
+    def locator(self, selector: str):
+        assert selector == "option"
+        return _FakeBaeminOptionLocator(self.page)
+
+
+class _FakeBaeminOptionLocator:
+    def __init__(self, page: _FakeBaeminCenterSelectPage) -> None:
+        self.page = page
+
+    async def evaluate_all(self, _script):
+        return self.page.options
+
+
+class _FakeBaeminButtonLocator:
+    def __init__(self, page: _FakeBaeminCenterSelectPage, name: str) -> None:
+        self.page = page
+        self.name = name
+
+    async def click(self, **_kwargs):
+        self.page.clicked_buttons.append(self.name)
+
+
+class _FakeMissingTextLocator:
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 0
+
+    async def click(self, **_kwargs):
+        raise AssertionError("text should not be clicked")
 
 
 class _FakeAsyncButton:
