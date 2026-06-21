@@ -298,6 +298,26 @@ def test_coupang_center_mismatch_is_not_swallowed_by_screen_detection(tmp_path, 
         crawl_performance_snapshot(config)
 
 
+def test_coupang_aux_runtime_error_does_not_block_peak_dashboard(tmp_path, monkeypatch):
+    # 보조 rider-performance 페이지가 준비 지연 등 RuntimeError로 실패해도, 권위 페이지인
+    # peak-dashboard 수집은 계속돼야 한다('수행중인원'만 빠진다). 센터 불일치가 아닌
+    # 일반 RuntimeError는 best-effort로 흡수한다.
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+    rider_url = crawler._rider_performance_url(config)
+
+    def fake_fetch_page_html(_config, *, target_url=None, force_new_tab=False):
+        if target_url == rider_url:
+            raise RuntimeError("쿠팡이츠 실적 페이지가 60초 안에 준비되지 않았습니다.")
+        return _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+    monkeypatch.setattr(crawler, "fetch_page_html", fake_fetch_page_html)
+
+    snapshot = crawl_performance_snapshot(config)
+
+    assert snapshot.current_screen is None
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
 def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_matches(tmp_path):
     # 실제 선택 센터 헤딩은 "서초센터"인데, 드롭다운 option에만 기대 센터명이 있는
     # 경우. 헤딩 exact 비교이므로 부수 텍스트 일치로는 통과하면 안 된다(회귀 방지).
@@ -849,6 +869,49 @@ def test_coupang_fetch_target_page_content_waits_for_peak_dashboard_required_tex
     assert page.required_texts == ["피크타임별 현황"]
 
 
+def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_before_failing(tmp_path):
+    # 재시도해도 계속 타임아웃이면 결국 준비 실패(RuntimeError)로 끝난다. 단, 그 전에
+    # peak-dashboard를 한 번 reload하고 required_text를 다시 기다린다(두 번 시도).
+    config = _config(tmp_path)
+    page = _FakePage(config.peak_dashboard_url, wait_error=FakeTimeout("locator timeout"))
+    browser = _FakeBrowser([page])
+
+    with pytest.raises(RuntimeError, match="쿠팡이츠 피크 대시보드"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+        )
+
+    # required_text 대기를 두 번 했고(첫 시도 + 재시도), 그 사이 reload(target_url로 goto)를
+    # 정확히 한 번 했다. goto를 직접 단언해 'wait_for만 두 번' 구현으로는 통과하지 못하게 한다.
+    assert page.required_texts == ["피크타임별 현황", "피크타임별 현황"]
+    assert page.goto_calls == [config.peak_dashboard_url]
+
+
+def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_and_succeeds(tmp_path):
+    # 첫 대기는 타임아웃이지만 reload 후 둘째 대기는 통과하면 정상 HTML을 돌려준다.
+    config = _config(tmp_path)
+    page = _RefreshablePeakPage(
+        config.peak_dashboard_url,
+        ready_html="<html>피크타임별 현황</html>",
+    )
+    browser = _FakeBrowser([page])
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+    )
+
+    assert html == "<html>피크타임별 현황</html>"
+    assert page.required_texts == ["피크타임별 현황", "피크타임별 현황"]
+    # 성공 케이스도 reload(target_url로 goto)를 한 번 거친 뒤 둘째 대기가 통과한 것이다.
+    assert page.goto_calls == [config.peak_dashboard_url]
+
+
 def test_coupang_login_required_stops_tab_when_auto_2fa_disabled(tmp_path):
     # 자동 2FA가 꺼져 있으면(기본값) 로그인 만료 시 기존처럼 탭을 중지한다.
     config = _config(tmp_path)
@@ -1186,6 +1249,30 @@ class _FakePage:
 
     def content(self) -> str:
         return self.html
+
+
+class _RefreshablePeakPage(_FakePage):
+    """첫 wait_for는 타임아웃, reload(goto) 뒤 둘째 wait_for는 통과하는 피크 페이지.
+
+    peak-dashboard 준비 지연 시 1회 자동 재시도(_reload_target_page → 재대기) 흐름을
+    검증한다.
+    """
+
+    def __init__(self, url: str, *, ready_html: str) -> None:
+        super().__init__(url, html="<html>loading</html>")
+        self._ready_html = ready_html
+        self._wait_attempts = 0
+
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        self.html = self._ready_html
+        return None
+
+    def wait_for(self, **_kwargs):
+        self._wait_attempts += 1
+        if self._wait_attempts == 1:
+            raise FakeTimeout("locator timeout")
+        return None
 
 
 class _RecoverablePage:

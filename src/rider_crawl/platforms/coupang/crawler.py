@@ -45,6 +45,11 @@ def crawl_performance_snapshot(
     elif fetch_peak_dashboard_html is None:
         # rider-performance는 수행중 인원을 채우는 보조 페이지다. 실패해도 peak-dashboard
         # 수집은 계속하고, stale 화면이면 같은 세션의 임시 탭에서 한 번 더 읽는다.
+        # 보조 페이지의 '탭 부재/로그인 만료'(BrowserActionRequiredError)·'파싱 실패'
+        # (MissingPerformanceDataError)·'준비 지연/CDP 불가'(RuntimeError)는 best-effort로
+        # 흡수해 '수행중인원'만 생략한다 — 보조 timeout 하나로 권위 페이지(peak-dashboard)
+        # 수집까지 막지 않기 위해서다. 다만 '센터 불일치'(CoupangCenterValidationError)는
+        # 다른 계정 데이터를 정상처럼 흘려보내면 안 되므로 흡수하지 않고 그대로 올린다.
         try:
             rider_url = _rider_performance_url(config)
             current_screen_html = fetch_page_html(config, target_url=rider_url)
@@ -54,7 +59,9 @@ def crawl_performance_snapshot(
                 current_screen_html = fetch_page_html(config, target_url=rider_url, force_new_tab=True)
                 current_screen = parse_current_screen_html(current_screen_html)
             _validate_coupang_center(config, current_screen)
-        except (BrowserActionRequiredError, MissingPerformanceDataError):
+        except CoupangCenterValidationError:
+            raise
+        except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
             current_screen = None
 
     peak_dashboard_html = (
@@ -63,7 +70,9 @@ def crawl_performance_snapshot(
         else fetch_page_html(config, target_url=_peak_dashboard_url(config))
     )
     # 피크 대시보드 헤딩에 기대 센터가 노출되면 그것으로 다른 계정/오래된 탭을 막는다.
-    # 헤딩이 없으면(피크 페이지가 센터를 노출하지 않으면) 기존처럼 검증을 건너뛴다.
+    # 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면(미노출 포함)
+    # 검증을 건너뛰지 않고 CoupangCenterValidationError를 던져 잘못된 계정 전송을 막는다.
+    # (기대 센터명이 비어 있을 때만 검증을 건너뛴다.)
     _validate_coupang_center_in_peak_html(config, peak_dashboard_html)
     return PerformanceSnapshot(
         current_screen=current_screen,
@@ -142,7 +151,8 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
     값 같은 부수 텍스트(예: ``<option>강남센터</option>``)에 기대 센터명이 있으면
     잘못 통과한다. 그래서 헤딩(``h1``~``h3``)만 보고, 헤딩에 ``센터명 시프트(시간)…``
     형태로 시프트가 붙어 있으면 앞쪽 센터명만 떼어내 비교한다.
-    피크 페이지에 센터 헤딩이 노출되지 않으면 실적 페이지 검증만 사용한다.
+    피크 페이지는 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면
+    (미노출 포함) CoupangCenterValidationError를 던진다.
     기대 센터가 비어 있으면 검증을 건너뛴다(기존 동작 유지).
     """
 
@@ -907,6 +917,20 @@ def _wait_for_target_page_ready(
     except timeout_errors as exc:
         if _page_looks_like_coupang_login_required(page):
             raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
+        if path == "/page/peak-dashboard":
+            try:
+                _reload_target_page(
+                    page,
+                    config,
+                    target_url=target_url,
+                    load_timeout_errors=timeout_errors,
+                )
+                page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
+                return
+            except timeout_errors as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from retry_exc
+                exc = retry_exc
         seconds = max(1, config.page_timeout_seconds // 1000)
         raise RuntimeError(
             f"{label}가 {seconds}초 안에 준비되지 않았습니다. "
