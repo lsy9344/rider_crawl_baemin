@@ -1,3 +1,4 @@
+import asyncio
 import queue
 import threading
 import time
@@ -1158,6 +1159,136 @@ def test_show_result_makes_disabled_send_visible():
 
     assert ui.status_var.value == "메시지 생성 완료(전송 꺼짐)"
     assert "크롤링2 메시지 생성 완료(전송 꺼짐)" in appended[0]
+
+
+def test_run_once_background_logs_base_exception_and_returns_false(tmp_path, monkeypatch):
+    # run_once가 Exception이 아닌 예외(CancelledError 등)를 던져도 워커 핸들러가 잡아
+    # 로그를 남기고 False(빠른 재시도)를 돌려준다 — 워커 사망 방지(이중 안전망).
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.crawl_locks_by_tab = {}
+    monkeypatch.setattr("rider_crawl.ui.run_once", lambda config, **_k: (_ for _ in ()).throw(asyncio.CancelledError()))
+    settings = _settings(tmp_path)
+
+    result = app._run_once_background(0, settings, respect_schedule=False)
+
+    assert result is False
+    # finally가 락을 해제해 다시 획득 가능해야 한다.
+    assert app._crawl_lock_for_tab(0).acquire(blocking=False) is True
+    msgs = []
+    while not app.messages.empty():
+        msgs.append(app.messages.get_nowait())
+    assert any(kind == "error" and "BaseException" in str(payload) for kind, payload in msgs)
+    assert (settings.log_dir / "run_errors.log").exists()
+
+
+def test_run_once_background_reraises_keyboard_interrupt(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.crawl_locks_by_tab = {}
+    monkeypatch.setattr("rider_crawl.ui.run_once", lambda config, **_k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    settings = _settings(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        app._run_once_background(0, settings, respect_schedule=False)
+
+    # 재발생 경로에서도 finally가 락을 해제한다.
+    assert app._crawl_lock_for_tab(0).acquire(blocking=False) is True
+
+
+def test_show_result_records_last_success_and_resets_tracking():
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.status_var = _FakeVar()
+    app.next_run_var = _FakeVar()
+    app._append_preview = lambda *a, **k: None
+    app._silent_alerted_by_tab = {1: True}
+    app._auto_restart_count_by_tab = {1: 2}
+
+    app._show_result(1, RunResult(message="m", sent=True, skipped=False, message_hash="h"), 35)
+
+    assert 1 in app.last_success_by_tab
+    assert app._silent_alerted_by_tab[1] is False
+    assert app._auto_restart_count_by_tab[1] == 0
+
+
+def test_check_tab_health_detects_dead_worker_and_auto_restarts(tmp_path, monkeypatch):
+    # 중지 요청이 없는데 워커가 죽어 있으면(비정상 종료) 자동 재시작한다.
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {0: [_FakeThread(alive=False)]}
+    app.stop_events_by_tab = {0: threading.Event()}  # set() 안 함 = 사용자 중지 아님
+    restarted: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: restarted.append(idx))
+
+    app._check_tab_health(0, _settings(tmp_path))
+
+    assert restarted == [0]
+    assert 0 not in app.workers_by_tab
+    assert 0 not in app.stop_events_by_tab
+    msgs = []
+    while not app.messages.empty():
+        msgs.append(app.messages.get_nowait())
+    assert any(kind == "error" and "자동 재시작" in str(payload) for kind, payload in msgs)
+
+
+def test_check_tab_health_ignores_user_stopped_tab(tmp_path, monkeypatch):
+    # 사용자가 중지(stop_event.set())한 탭은 비정상 종료가 아니므로 재시작하지 않는다.
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {0: [_FakeThread(alive=False)]}
+    stop_event = threading.Event()
+    stop_event.set()
+    app.stop_events_by_tab = {0: stop_event}
+    restarted: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: restarted.append(idx))
+
+    app._check_tab_health(0, _settings(tmp_path))
+
+    assert restarted == []
+
+
+def test_handle_dead_worker_caps_auto_restart(tmp_path, monkeypatch):
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {}
+    app.stop_events_by_tab = {}
+    restarts: list[int] = []
+    monkeypatch.setattr(app, "_auto_start_tab", lambda idx: restarts.append(idx))
+
+    for _ in range(ui.MAX_AUTO_RESTARTS + 1):
+        app.workers_by_tab[0] = [_FakeThread(alive=False)]
+        app.stop_events_by_tab[0] = threading.Event()
+        app._handle_dead_worker(0)
+
+    # 정확히 MAX_AUTO_RESTARTS회만 자동 재시작하고, 그 이후엔 수동 점검 알림으로 전환한다.
+    assert restarts == [0] * ui.MAX_AUTO_RESTARTS
+    msgs = []
+    while not app.messages.empty():
+        msgs.append(app.messages.get_nowait())
+    assert any(kind == "error" and "수동 점검 필요" in str(payload) for kind, payload in msgs)
+
+
+def test_check_tab_health_alerts_on_silent_tab_once(tmp_path, monkeypatch):
+    # 워커는 살아 있는데 N주기 이상 성공 회차가 없으면 1회만 알린다(디듀프).
+    app = RiderBotUi.__new__(RiderBotUi)
+    app.messages = queue.Queue()
+    app.workers_by_tab = {0: [_FakeThread(alive=True)]}
+    app.stop_events_by_tab = {0: threading.Event()}
+    app.last_success_by_tab = {0: time.monotonic() - 100_000}  # 한참 전 마지막 성공
+    app._silent_alerted_by_tab = {}
+    app._auto_restart_count_by_tab = {}
+    settings = _settings(tmp_path, interval_minutes="9")
+
+    app._check_tab_health(0, settings)
+    app._check_tab_health(0, settings)  # 두 번째는 디듀프되어 추가 알림 없음
+
+    error_msgs = []
+    while not app.messages.empty():
+        kind, payload = app.messages.get_nowait()
+        if kind == "error":
+            error_msgs.append(payload)
+    assert len(error_msgs) == 1
+    assert "성공 회차 없음" in str(error_msgs[0])
 
 
 def test_same_tab_run_is_skipped_when_already_running(tmp_path, monkeypatch):
