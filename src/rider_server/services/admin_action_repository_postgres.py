@@ -236,6 +236,14 @@ class PostgresAdminActionRepository:
         job_uuid = uuid.UUID(str(job_id))
         target_uuid = uuid.UUID(str(target_id))
         async with self._session_factory() as session:
+            assigned_agent_id = (
+                await session.execute(
+                    select(BrowserProfileRow.agent_id)
+                    .where(BrowserProfileRow.target_id == target_uuid)
+                    .order_by(BrowserProfileRow.id.asc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
             existing = (
                 await session.execute(
                     select(JobRow.id)
@@ -255,6 +263,7 @@ class PostgresAdminActionRepository:
                     id=job_uuid,
                     type=job_type,
                     target_id=target_uuid,
+                    assigned_agent_id=assigned_agent_id,
                     payload_json=payload_json,
                     agent_id=None,
                     status=JOB_STATUS_PENDING,

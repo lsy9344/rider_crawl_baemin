@@ -6,7 +6,27 @@
 적용 내용: 이 작업지시서의 Agent affinity, server-side capacity clamp, complete outbox/idempotency, heartbeat lease extension surfacing, recovery batch size, DB index/connection budget, stale SENDING hold, runbook 보강을 코드/테스트/문서에 적용했다.  
 범위: 여러 Agent, 단일 Agent 수십 개 이상 crawl, 서버 통신, PostgreSQL/배포, 기능 공백
 
-## 1. 현재 판정
+후속 검토 반영(2026-06-20):
+
+- Agent crawl worker는 plaintext secret payload를 subprocess 임시 job 파일 생성 전에 fail-closed한다.
+- legacy migration은 `verification_email_address`도 다른 credential 필드와 동일하게 SecretRef handle만 매핑한다.
+- scheduler와 수동 enqueue는 browser profile affinity를 `jobs.assigned_agent_id`로 보존한다.
+- Admin target fragment는 첫 page 밖 high severity 항목을 찾기 위해 target 전체를 다시 읽지 않는다. critical 후보 query는 OK snapshot 을 LEFT OUTER JOIN 으로 묶어, 성공 수집 이력이 없는 fail-closed 대상(AUTH_REQUIRED/STOPPED/TARGET_VALIDATION 등)도 후보에 포함한다(호출부가 severity 로 재필터).
+- Admin 관리 화면은 내부 enum/필드명 대신 운영자용 한글 label을 표시한다.
+- `docs/runbooks/backup-restore.md`, `docs/runbooks/crawl-scale-runbook.md`, `docs/operations/aws-product-setup-2026-06-18.md`를 현재 구현 기준으로 갱신했다.
+
+후속 검토 반영(2026-06-21):
+
+- Task 4(complete idempotency): atomic snapshot complete 경로(`complete_snapshot_job`)도 `completion_id`/`completion_payload_hash` 를 받아 멱등 처리한다. 같은 completion_id 재시도(outbox replay/클라 재시도)는 이미 terminal 인 job 을 LEASE_LOST 가 아니라 이전 성공과 같은 ACCEPTED 로 돌려주고, Snapshot/Message 중복 INSERT 를 건너뛴다. PG-gated 멱등 테스트(`tests/negative/test_atomic_snapshot_idempotency_pg.py`)로 잠갔다.
+- Task 12(polling/heartbeat jitter·backoff): Agent claim 실패(network/5xx) 연속 시 지수 backoff(상한 60s)를 적용하고, empty-queue polling 과 heartbeat 간격에 per-Agent stable jitter(agent_id seed 기반 결정적, random 미사용)를 더해 서버 복구 직후 thundering herd 를 막는다. 401/revoke 는 backoff 대상이 아니다. 테스트 `test_claim_failures_backoff_with_jitter`/`test_heartbeat_interval_has_stable_jitter` 추가.
+- Medium 4(crawl hard timeout): 기본 crawl subprocess 는 자체 프로세스 그룹/세션으로 띄우고, timeout 시 child Python 만이 아니라 그 자손(Chrome 트리)까지 종료한다(Windows `taskkill /T /F`, POSIX `killpg`). 고아 Chrome 프로세스를 막는다. 테스트 `test_subprocess_timeout_kills_process_tree` 추가.
+
+남은 범위:
+
+- 실제 PostgreSQL 다중 Agent 경합 테스트 자동화와 Windows Agent lab smoke는 환경 의존 검증이라 별도 CI/nightly 또는 release gate로 유지한다.
+- token rotate 의미는 A안으로 정리했다. rotate 시 `token_rotated_at`을 기록하고 기존 token의 claim/heartbeat/complete를 차단한다.
+
+## 1. 작성 당시 판정
 
 현재 구조는 "여러 PC의 여러 Agent가 서버의 PostgreSQL queue에서 작업을 claim해서 처리하는 모델"을 갖추고 있다. `jobs` claim은 PostgreSQL `FOR UPDATE SKIP LOCKED`를 쓰고, complete는 owner/lease를 검사하며, scheduler는 due target을 batch로 enqueue하고 conditional update로 중복 tick을 줄인다.
 
@@ -28,6 +48,8 @@
 - `deploy/docker-compose.yml`은 `backend-api`, `scheduler`, `queue-recovery`, `telegram-dispatch`를 별도 프로세스로 띄운다.
 
 ## 3. 주요 문제
+
+아래 문제 목록은 이 문서 작성 당시 발견 사항이다. 후속 보완이 끝난 항목의 현재 상태는 상단 "후속 검토 반영"을 기준으로 본다.
 
 ### Critical 1: 여러 Agent 환경에서 잘못된 Agent가 job을 claim할 수 있음
 
@@ -471,12 +493,12 @@ $env:TEST_DATABASE_URL="postgresql+asyncpg://USER:PASSWORD@HOST:5432/DB"
 
 목표: 운영자가 rotate를 누르면 기존 token이 계속 쓰이는 혼선을 없앤다.
 
+적용 상태: A안으로 반영했다. rotate는 기존 token을 즉시 무효화하고 새 registration flow를 요구한다. `token_rotated_at`이 있으면 resolver/registry가 기존 bearer를 거부한다.
+
 작업:
 
-- rotate의 의미를 둘 중 하나로 정한다.
+- rotate의 의미는 A안이다.
   - A안: rotate는 기존 token을 즉시 revoke하고 새 registration flow를 요구한다.
-  - B안: rotate는 새 token 발급까지는 준비 상태이고 기존 token은 유지된다.
-- 권장: A안. `token_rotated_at` 또는 별도 `token_generation`을 resolver가 보게 한다.
 - Admin action 문구와 runbook을 실제 동작에 맞춘다.
 
 실패 테스트부터 작성:

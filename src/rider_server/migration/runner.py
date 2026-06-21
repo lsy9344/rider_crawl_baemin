@@ -258,7 +258,11 @@ def map_active_tab(settings: UiSettings, *, created_at: datetime) -> TargetMappi
             plaintext_attr="coupang_login_password",
             ref_attr="coupang_login_password_ref",
         ),
-        verification_email_address=settings.verification_email_address,
+        verification_email_address=_secret_ref_only(
+            settings,
+            plaintext_attr="verification_email_address",
+            ref_attr="verification_email_address_ref",
+        ),
         verification_email_app_password=_secret_ref_only(
             settings,
             plaintext_attr="verification_email_app_password",

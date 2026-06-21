@@ -423,7 +423,12 @@ def test_mapping_ids_are_consistent_across_models(tmp_path) -> None:
 def test_platform_account_uses_secret_refs_not_plaintext(tmp_path) -> None:
     settings_path = tmp_path / "ui_settings.json"
     # 활성 쿠팡(자격증명 ref 보유) + 활성 배민(자격증명 없음).
-    _write_settings(settings_path, [_active_coupang(), _active_baemin()])
+    coupang_settings = {
+        **_active_coupang(),
+        "verification_email_address_ref": "local:fake-b/verification_email_address",
+        "verification_email_app_password_ref": "local:fake-b/verification_email_app_password",
+    }
+    _write_settings(settings_path, [coupang_settings, _active_baemin()])
     result = run_migration(
         settings_path=settings_path,
         state_root=tmp_path / "state",
@@ -436,10 +441,17 @@ def test_platform_account_uses_secret_refs_not_plaintext(tmp_path) -> None:
     assert isinstance(coupang.username, str)
     assert isinstance(coupang.password, str)
     assert coupang.username == "local:fake-b/coupang_login_id"
+    assert coupang.password == "local:fake-b/coupang_login_password"
+    assert coupang.verification_email_address == "local:fake-b/verification_email_address"
+    assert coupang.verification_email_app_password == (
+        "local:fake-b/verification_email_app_password"
+    )
 
     baemin = by_platform[Platform.BAEMIN]
     assert baemin.username == ""
     assert baemin.password == ""
+    assert baemin.verification_email_address == ""
+    assert baemin.verification_email_app_password == ""
 
 
 def test_map_active_tab_unknown_platform_is_fail_closed(tmp_path) -> None:
@@ -613,6 +625,7 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
                 "interval_minutes": 30,
                 "coupang_login_id": "fakeplainid",
                 "coupang_login_password": "fakeplainpw",
+                "verification_email_address": "fake-mail@example.invalid",
                 "verification_email_app_password": "fakeapppw",
             }
         ],
@@ -630,6 +643,7 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
     backup_bytes = backup_path.read_bytes()
     assert b"fakeplainid" in backup_bytes
     assert b"fakeplainpw" in backup_bytes
+    assert b"fake-mail@example.invalid" in backup_bytes
 
     account = result.targets[0].mapping.platform_account
     target_id = result.targets[0].mapping.monitoring_target.id
@@ -637,11 +651,15 @@ def test_backup_preserves_plaintext_while_mapping_exposes_refs_only(tmp_path) ->
     assert isinstance(account.password, str)
     assert account.username == f"local:{target_id}/coupang_login_id"
     assert account.password == f"local:{target_id}/coupang_login_password"
+    assert account.verification_email_address == (
+        f"local:{target_id}/verification_email_address"
+    )
     assert account.verification_email_app_password == (
         f"local:{target_id}/verification_email_app_password"
     )
     assert account.username != "fakeplainid"
     assert account.password != "fakeplainpw"
+    assert account.verification_email_address != "fake-mail@example.invalid"
     assert account.verification_email_app_password != "fakeapppw"
 
 

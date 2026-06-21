@@ -415,6 +415,75 @@ def test_runner_empty_claim_skips_execute_and_sleeps():
     assert runner._short_poll_interval == DEFAULT_SHORT_POLL_INTERVAL_SECONDS
 
 
+def test_claim_failures_backoff_with_jitter():
+    # 연속 claim 실패(5xx)면 다음 폴링 대기가 지수 backoff 로 늘고, per-Agent stable jitter 가
+    # 더해진다(서버 복구 직후 thundering herd 완화). 성공하면 backoff 가 리셋된다.
+    from rider_agent.job_loop import (
+        CLAIM_BACKOFF_MULTIPLIER,
+        DEFAULT_CLAIM_BACKOFF_BASE_SECONDS,
+        DEFAULT_POLL_JITTER_RATIO,
+        DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
+    )
+    from rider_agent.heartbeat import stable_jitter_ratio
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=3)
+    # 2회 연속 5xx 실패 후 3회차 빈 큐 성공.
+    transport = FakeTransport(
+        claim_script=[
+            TransportError("agent jobs HTTP error", status_code=503),
+            TransportError("agent jobs HTTP error", status_code=503),
+            {"jobs": []},
+        ]
+    )
+    runner = _runner(transport, stop_event=stop, sleep=sleep)
+    runner.run()
+
+    seed_ratio = stable_jitter_ratio(_IDENTITY.agent_id)
+    base = DEFAULT_CLAIM_BACKOFF_BASE_SECONDS
+
+    def _expected(backoff_base: float) -> float:
+        return backoff_base + backoff_base * DEFAULT_POLL_JITTER_RATIO * seed_ratio
+
+    waits = sleep.intervals
+    assert len(waits) == 3
+    # 1차 실패 후: backoff base(=5s) + jitter.
+    assert waits[0] == pytest.approx(_expected(base))
+    # 2차 실패 후: backoff base*multiplier(=10s) + jitter — 지수 증가.
+    assert waits[1] == pytest.approx(_expected(base * CLAIM_BACKOFF_MULTIPLIER))
+    assert waits[1] > waits[0]
+    # 3차 성공 후: backoff 리셋 → short_poll + jitter(실패 대기보다 짧다).
+    short = DEFAULT_SHORT_POLL_INTERVAL_SECONDS
+    assert waits[2] == pytest.approx(
+        short + short * DEFAULT_POLL_JITTER_RATIO * seed_ratio
+    )
+    assert waits[2] < waits[1]
+
+
+def test_claim_401_is_not_backed_off():
+    # 401/revoke 는 일시 장애가 아니라 재등록 필요 — backoff 로 숨기지 않고 short_poll 간격을 유지.
+    from rider_agent.job_loop import (
+        DEFAULT_POLL_JITTER_RATIO,
+        DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
+    )
+    from rider_agent.heartbeat import stable_jitter_ratio
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport(
+        claim_error=TransportError("agent jobs HTTP error", status_code=401)
+    )
+    runner = _runner(transport, stop_event=stop, sleep=sleep)
+    runner.run()
+
+    assert runner.needs_registration is True
+    seed_ratio = stable_jitter_ratio(_IDENTITY.agent_id)
+    short = DEFAULT_SHORT_POLL_INTERVAL_SECONDS
+    expected = short + short * DEFAULT_POLL_JITTER_RATIO * seed_ratio
+    # 401 은 backoff 카운터를 올리지 않으므로 매 대기가 short_poll(+jitter) 그대로다.
+    assert all(w == pytest.approx(expected) for w in sleep.intervals)
+
+
 def test_runner_token_gate_blocks_claim_when_revoked():
     transport = FakeTransport()
     statuses: list[str] = []

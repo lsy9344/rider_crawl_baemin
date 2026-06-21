@@ -288,8 +288,57 @@ def test_reporter_runs_n_times_then_stops():
 
     # 결정적: 정확히 3회 보고 후 정지(실 sleep/네트워크 0).
     assert len(transport.calls) == 3
+    # interval=30(MIN)에서는 jitter 를 빼도 clamp 하한 30 으로 되돌아온다(상한/하한 불변식 유지).
     assert sleep.intervals == [30, 30, 30]
     assert reporter.last_result is not None
+
+
+def test_heartbeat_interval_has_stable_jitter():
+    # per-Agent stable jitter: 같은 Agent 는 매 주기 같은(결정적) jitter, [30,60] 안.
+    from rider_agent.heartbeat import (
+        DEFAULT_HEARTBEAT_JITTER_RATIO,
+        MAX_HEARTBEAT_INTERVAL_SECONDS,
+        MIN_HEARTBEAT_INTERVAL_SECONDS,
+        stable_jitter_ratio,
+    )
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=3)
+    reporter = HeartbeatReporter(
+        _IDENTITY, transport=FakeTransport(), interval_seconds=45, sleep=sleep, stop_event=stop
+    )
+    reporter.run()
+
+    span = 45 * DEFAULT_HEARTBEAT_JITTER_RATIO
+    expected = 45 - span * stable_jitter_ratio(_IDENTITY.agent_id)
+    # 결정적·안정: 매 주기 같은 값이고 45 보다 짧다(위로 안 더해 60 상한 안전).
+    assert sleep.intervals == [pytest.approx(expected)] * 3
+    assert all(
+        MIN_HEARTBEAT_INTERVAL_SECONDS <= w <= MAX_HEARTBEAT_INTERVAL_SECONDS
+        for w in sleep.intervals
+    )
+    assert sleep.intervals[0] < 45
+
+
+def test_heartbeat_jitter_differs_across_agents():
+    # 서로 다른 Agent 는 서로 다른 jitter → 같은 초에 heartbeat 가 몰리지 않는다(thundering herd).
+    other = AgentIdentity(
+        agent_id="agent-fake-2",
+        agent_token=FAKE_TOKEN,
+        tenant_scope={"tenant": "t-fake"},
+        config_version="cfg-fake-1",
+    )
+    stop_a, stop_b = threading.Event(), threading.Event()
+    sleep_a = StoppingSleep(stop_a, stop_after=1)
+    sleep_b = StoppingSleep(stop_b, stop_after=1)
+    HeartbeatReporter(
+        _IDENTITY, transport=FakeTransport(), interval_seconds=50, sleep=sleep_a, stop_event=stop_a
+    ).run()
+    HeartbeatReporter(
+        other, transport=FakeTransport(), interval_seconds=50, sleep=sleep_b, stop_event=stop_b
+    ).run()
+
+    assert sleep_a.intervals[0] != sleep_b.intervals[0]
 
 
 def test_reporter_survives_single_failure_and_continues():

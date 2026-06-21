@@ -196,8 +196,11 @@ class TelegramDispatchWorker:
     async def apply_update(
         self,
         log_id: uuid.UUID,
-        update: DeliveryLogUpdate,
+        update_values: DeliveryLogUpdate,
     ) -> None:
+        # 주의: 파라미터 이름을 ``update`` 로 두면 모듈 상단 ``from sqlalchemy import update``
+        # 를 섀도잉해 ``update(DeliveryLogRow)`` 가 dataclass 호출(TypeError)이 된다.
+        # ``hold_stale_sending`` 처럼 SQLAlchemy ``update`` 를 그대로 쓰기 위해 이름을 분리한다.
         if self._session_factory is None:
             return
         async with self._session_factory() as session:
@@ -209,14 +212,14 @@ class TelegramDispatchWorker:
                     DeliveryLogRow.status == DeliveryStatus.SENDING.value,
                 )
                 .values(
-                    status=update.status,
-                    error_code=update.error_code,
-                    sent_at=update.sent_at,
-                    last_failed_at=update.last_failed_at,
-                    available_at=update.available_at,
-                    attempt_count=update.attempt_count,
-                    locked_at=update.locked_at,
-                    locked_by=update.locked_by,
+                    status=update_values.status,
+                    error_code=update_values.error_code,
+                    sent_at=update_values.sent_at,
+                    last_failed_at=update_values.last_failed_at,
+                    available_at=update_values.available_at,
+                    attempt_count=update_values.attempt_count,
+                    locked_at=update_values.locked_at,
+                    locked_by=update_values.locked_by,
                 )
             )
             await session.commit()

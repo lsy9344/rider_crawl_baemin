@@ -75,7 +75,11 @@ class TenantAdminEntityService:
         reason: str | None = None,
     ) -> Tenant:
         existing = await self._scoped_tenant(tenant_id)
-        if sending_enabled is True:
+        # 실발송 게이트(임시): 테스트 통과 상태 모델은 후속 범위(work-order "후속 범위")라
+        # 아직 없다. 그래서 OFF→ON **전이**만 막는다 — 이미 켜진 tenant 의 다른 필드 편집(폼이
+        # 현재 값 sending_enabled=True 를 그대로 재전송)은 거부하지 않는다(no-op re-assert 허용).
+        # OFF 로 끄는 것은 항상 허용한다(안전 방향).
+        if sending_enabled is True and not existing.sending_enabled:
             raise ValueError(
                 "수집 테스트와 전송 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다"
             )

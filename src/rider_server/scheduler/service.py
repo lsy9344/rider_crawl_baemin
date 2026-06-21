@@ -58,6 +58,7 @@ class DueTarget:
     verification_email_app_password: str = ""
     verification_email_subject_keyword: str = "인증번호"
     verification_email_sender_keyword: str = "coupang"
+    assigned_agent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,7 @@ class SchedulerRepository(abc.ABC):
                 job_type=job_type,
                 target_id=target.target_id,
                 payload_json=payload_json,
+                assigned_agent_id=target.assigned_agent_id or None,
                 run_after=now,
                 now=now,
             )

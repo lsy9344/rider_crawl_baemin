@@ -31,7 +31,8 @@ polling을 만들지 않는 **send-only 중앙 경로**로 둔다. 전송 대상
     재시도는 **단일 시도(``retry_attempts=1``)** 로 두고 backoff/재시도는 3.6이 소유
     (이중 재시도 금지).
   - 단방향 import: ``rider_server`` → ``rider_crawl`` 만(``send_telegram_text``·``redact``·
-    ``AppConfig`` 재사용), 역방향 0.
+    ``TelegramSendConfig`` 재사용), 역방향 0. 전송 설정은 placeholder 가득한 ``AppConfig``
+    carrier 가 아니라 3-필드 ``TelegramSendConfig`` DTO 로 만든다(maintenance Task 8-A).
   - frozen 불변: ``TelegramRoute`` 는 ``@dataclass(frozen=True)``.
   - 비노출(NFR-5, project-context 81): bot token은 ``resolve_token`` 주입으로만 들어오고
     어떤 로그/예외에도 평문으로 남지 않는다. ``telegram_chat_id``/``thread_id`` 는 라우팅
@@ -41,20 +42,19 @@ polling을 만들지 않는 **send-only 중앙 경로**로 둔다. 전송 대상
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
-from rider_crawl.config import AppConfig
 from rider_crawl.redaction import redact
-from rider_crawl.sender import TelegramSendError, send_telegram_text
+from rider_crawl.sender import (
+    TelegramSendConfig,
+    TelegramSendError,
+    send_telegram_text,
+)
 from rider_server.domain import Messenger, MessengerChannel, MessengerChannelState
 from rider_server.services.dispatch_fanout_service import DispatchJob, UnknownChannelError
 
 # transport seam 타입(= ``send_telegram_text`` 의 ``urlopen`` 인자와 동일).
 UrlOpen = Callable[..., object]
-
-# placeholder 파일 경로(전송과 무관 — ``send_telegram_text`` 는 log_dir/browser dir를 읽지 않는다).
-_PLACEHOLDER_PATH = Path(".")
 
 
 def _normalize_thread_id(raw: str | None) -> str | None:
@@ -101,31 +101,18 @@ class TelegramRoute:
         return cls(chat_id=chat_id, thread_id=_normalize_thread_id(channel.thread_id))
 
 
-def _app_config_for(channel: MessengerChannel, token: str) -> AppConfig:
-    """``send_telegram_text`` 재사용을 위한 per-channel ``AppConfig`` carrier를 만든다.
+def _send_config_for(channel: MessengerChannel, token: str) -> TelegramSendConfig:
+    """``send_telegram_text`` 재사용을 위한 per-channel 전송 설정 DTO를 만든다.
 
     ``send_telegram_text`` 는 ``telegram_bot_token``/``telegram_chat_id``(+옵션
-    ``telegram_message_thread_id``)만 읽으므로(``sender.py`` 90-100) 그 셋만 의미값으로
-    채우고, 나머지 required 필드는 send에 무관한 **안전 placeholder**(빈 문자열/False/0)로
-    둔다. ``thread_id`` 는 ``send_telegram_text(message_thread_id=...)`` 인자로 넘기므로
-    carrier에는 비워 둔다. token은 carrier 안에서만 쓰이고 로그/예외엔 남지 않는다.
+    ``telegram_message_thread_id``)만 읽으므로(``sender.py`` 누적), placeholder 로 가득 찬
+    ``AppConfig`` carrier 대신 :class:`TelegramSendConfig` 에 그 셋만 채운다(maintenance
+    Task 8-A: AppConfig carrier 축소). ``thread_id`` 는 ``send_telegram_text
+    (message_thread_id=...)`` 인자로 넘기므로 DTO에는 비워 둔다. token은 DTO 안에서만 쓰이고
+    ``repr``/로그/예외엔 남지 않는다.
     """
 
-    return AppConfig(
-        coupang_eats_url="",
-        baemin_center_name="",
-        baemin_center_id="",
-        browser_mode="",
-        cdp_url="",
-        browser_user_data_dir=_PLACEHOLDER_PATH,
-        headless=False,
-        kakao_chat_name="",
-        log_dir=_PLACEHOLDER_PATH,
-        send_enabled=False,
-        send_only_on_change=False,
-        timezone="",
-        run_lock_timeout_seconds=0,
-        page_timeout_seconds=0,
+    return TelegramSendConfig(
         telegram_bot_token=token,
         telegram_chat_id=channel.telegram_chat_id or "",
         telegram_message_thread_id="",
@@ -181,7 +168,7 @@ class CentralTelegramSender:
 
         route = TelegramRoute.from_channel(channel)
         token = self.resolve_token(channel)
-        config = _app_config_for(channel, token)
+        config = _send_config_for(channel, token)
 
         # Bot API quirk(슈퍼그룹 migrate·retry-after·ambiguous·ok!=true)는 send_telegram_text
         # 가 소유 — 여기서 재구현 금지. retry_attempts=1로 단일 시도(재시도/backoff=3.6,

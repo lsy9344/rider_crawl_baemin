@@ -357,6 +357,65 @@ def test_dispatch_worker_marks_send_started_before_external_send(monkeypatch) ->
     assert calls == ["claim", "send-started", "send", "update"]
 
 
+def test_apply_update_runs_real_sqlalchemy_update_without_shadowing() -> None:
+    """회귀: ``apply_update`` 파라미터가 모듈 ``from sqlalchemy import update`` 를 섀도잉하면
+    ``update(DeliveryLogRow)`` 가 dataclass 호출(TypeError)이 된다. monkeypatch 없이 실제
+    본문을 실행해 SQLAlchemy Update 구문이 생성·execute 되는지 확인한다."""
+    from sqlalchemy.sql.dml import Update
+
+    from rider_server.services.dispatch_worker import (
+        DeliveryLogUpdate,
+        TelegramDispatchWorker,
+    )
+
+    executed: list = []
+
+    class _FakeResult:
+        rowcount = 1
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, statement):
+            executed.append(statement)
+            return _FakeResult()
+
+        async def commit(self):
+            executed.append("commit")
+
+    def _session_factory():
+        return _FakeSession()
+
+    worker = TelegramDispatchWorker(
+        telegram_sender=lambda *_args: None,
+        session_factory=_session_factory,
+    )
+    update_values = DeliveryLogUpdate(
+        status=DeliveryStatus.SENT.value,
+        error_code=None,
+        sent_at=_NOW,
+        available_at=None,
+        attempt_count=1,
+        locked_at=None,
+        locked_by=None,
+    )
+
+    # 버그가 있으면 여기서 TypeError('DeliveryLogUpdate' object is not callable)가 난다.
+    asyncio.run(
+        worker.apply_update(
+            uuid.UUID("77777777-7777-7777-7777-777777777777"), update_values
+        )
+    )
+
+    # execute 에 실제 SQLAlchemy Update 구문(상태머신 함수)이 전달됐는지 확인.
+    assert any(isinstance(stmt, Update) for stmt in executed)
+    assert "commit" in executed
+
+
 def test_stale_sending_delivery_is_held_not_auto_retried(monkeypatch) -> None:
     from rider_server.services.dispatch_worker import TelegramDispatchWorker
 

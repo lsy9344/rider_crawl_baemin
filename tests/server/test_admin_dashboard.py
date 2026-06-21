@@ -361,6 +361,22 @@ def test_manage_tab_shows_customer_setup_flow_and_send_gate() -> None:
     assert "sending_enabled" not in body
 
 
+def test_manage_tab_uses_operator_labels_for_statuses_and_channels() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}&mode=manage").text
+
+    assert '<option value="PAYMENT_FAILED_GRACE">결제 유예</option>' in body
+    assert '<option value="SUSPENDED">정지</option>' in body
+    assert '<option value="CANCELLED">해지</option>' in body
+    assert '<option value="TELEGRAM">텔레그램</option>' in body
+    assert '<option value="KAKAO">카카오톡</option>' in body
+    assert "<label>텔레그램 채팅 ID" in body
+    assert "<label>텔레그램 토픽 ID" in body
+    assert "<label>카카오톡 방 이름" in body
+    assert "PAYMENT_FAILED_GRACE: 결제 유예" not in body
+    assert "<label>telegram_chat_id" not in body
+    assert "<label>thread_id" not in body
+
+
 def test_dashboard_tabs_and_password_inputs_are_accessible_and_readable() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
@@ -419,8 +435,17 @@ def test_targets_fragment_paginates_large_target_sets() -> None:
     assert "가게-200" not in second
 
 
-def test_targets_fragment_prefetches_high_severity_before_first_page() -> None:
-    repo = InMemoryDashboardRepository()
+def test_targets_fragment_prefetches_critical_target_before_first_page() -> None:
+    class _PagingRepo(InMemoryDashboardRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, object]] = []
+
+        async def target_health(self, **kw):  # type: ignore[override]
+            self.calls.append(dict(kw))
+            return await super().target_health(**kw)
+
+    repo = _PagingRepo()
     fresh = datetime.now(timezone.utc)
     for idx in range(150):
         repo.seed_target(
@@ -444,6 +469,9 @@ def test_targets_fragment_prefetches_high_severity_before_first_page() -> None:
 
     assert "target-critical" in first
     assert "위험-업체" in first
+    assert all(call["limit"] is not None for call in repo.calls)
+    assert repo.calls[-1]["limit"] == 101
+    assert repo.calls[-1]["offset"] == 0
 
 
 def test_targets_fragment_passes_limit_and_offset_to_repository() -> None:
@@ -1142,4 +1170,10 @@ def test_full_page_invokes_only_read_methods() -> None:
 def test_dashboard_repository_port_exposes_only_read_methods() -> None:
     # 포트 표면에 write/전이 메서드가 아예 없음(타입으로 읽기 전용 보장 — AST 가드와 상보).
     public = {n for n in vars(DashboardRepository).keys() if not n.startswith("_")}
-    assert public == {"target_health", "agent_health", "channel_health", "auth_required"}
+    assert public == {
+        "target_health",
+        "critical_target_health",
+        "agent_health",
+        "channel_health",
+        "auth_required",
+    }

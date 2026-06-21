@@ -140,6 +140,7 @@ def _target(
     verification_email_app_password="",
     verification_email_subject_keyword="인증번호",
     verification_email_sender_keyword="coupang",
+    assigned_agent_id="",
 ):
     return DueTarget(
         target_id=tid,
@@ -156,6 +157,7 @@ def _target(
         verification_email_app_password=verification_email_app_password,
         verification_email_subject_keyword=verification_email_subject_keyword,
         verification_email_sender_keyword=verification_email_sender_keyword,
+        assigned_agent_id=assigned_agent_id,
     )
 
 
@@ -194,6 +196,22 @@ def test_enqueued_jobs_use_platform_specific_canonical_job_type() -> None:
     # 실제 backend 에 PENDING job 으로 들어갔는지 확인.
     for o in result.outcomes:
         assert backend.job_status(o.job_id) == "PENDING"
+
+
+def test_scheduler_preserves_target_agent_affinity_on_enqueued_job() -> None:
+    target = _target("t-affinity", assigned_agent_id="agent-1")
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    assert job.assigned_agent_id == "agent-1"
 
 
 def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:

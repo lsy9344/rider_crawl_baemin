@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import threading
@@ -81,6 +82,30 @@ DEFAULT_CAPABILITIES: tuple[str, ...] = (
 # [Source: implementation-contract.md P3-03(60), operations-security-test-contract.md(25)]
 MIN_HEARTBEAT_INTERVAL_SECONDS = 30
 MAX_HEARTBEAT_INTERVAL_SECONDS = 60
+
+# heartbeat 간격에 더하는 per-Agent stable jitter 비율(0~이 값 사이 결정적 오프셋). 여러 Agent
+# 가 같은 초에 heartbeat 를 몰아 보내지 않게 분산한다(thundering herd 완화, random 미사용).
+DEFAULT_HEARTBEAT_JITTER_RATIO = 0.1
+
+
+def stable_jitter_ratio(seed: str) -> float:
+    """``seed``(agent_id 등) 기반 결정적 jitter 비율 [0,1) 을 만든다(random 미사용).
+
+    같은 seed 는 항상 같은 값, 다른 seed 는 고르게 다른 값 → 여러 Agent 의 polling/heartbeat
+    가 같은 초에 겹치지 않고 분산된다(thundering herd 완화). sha256 앞 8바이트를 [0,1) 로 정규화.
+    """
+
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:8], "big")
+    return bucket / float(1 << 64)
+
+
+def jittered_interval(base_seconds: float, *, seed: str, ratio: float) -> float:
+    """``base_seconds`` 에 seed 기반 안정 jitter(최대 ``base*ratio``)를 더한다(결정적)."""
+
+    base = max(0.0, float(base_seconds))
+    span = base * max(0.0, float(ratio))
+    return base + span * stable_jitter_ratio(seed)
 
 # provider 미주입 시 안전 기본값(후속 스토리 소유 소스의 placeholder).
 DEFAULT_KAKAO_STATUS: dict[str, Any] = {"state": "disabled", "queue_depth": 0}
@@ -278,10 +303,14 @@ class HeartbeatReporter:
         browser_profiles_provider: Any = None,
         on_status: Callable[[str], None] | None = None,
         log: Callable[[str], None] | None = None,
+        jitter_ratio: float = DEFAULT_HEARTBEAT_JITTER_RATIO,
     ) -> None:
         self.identity = identity
         self._transport = transport
         self.interval_seconds = clamp_interval(interval_seconds)
+        # per-Agent stable jitter(agent_id seed) — heartbeat 가 같은 초에 몰리지 않게 분산.
+        self._jitter_ratio = max(0.0, float(jitter_ratio))
+        self._jitter_seed = str(getattr(identity, "agent_id", "") or "")
         self._base_url = base_url
         self._sleep = sleep
         self._stop_event = stop_event if stop_event is not None else threading.Event()
@@ -316,7 +345,19 @@ class HeartbeatReporter:
             if self._stop_event.is_set():
                 break
             # 매 주기 끝에 대기 — 어떤 분기에서도 즉시 재호출(무한 스핀)하지 않는다.
-            self._sleep(self.interval_seconds)
+            self._sleep(self._next_interval())
+
+    def _next_interval(self) -> float:
+        """다음 heartbeat 전 대기(초): interval 에서 per-Agent stable jitter 만큼 **빼서** 분산.
+
+        jitter 를 위로 더하면 60 초 상한(offline 판정 load-bearing — 60 초과 금지)을 넘을 수
+        있으므로, 대신 interval 보다 짧게(최대 ``interval*ratio`` 만큼) 만들어 여러 Agent 의
+        heartbeat 가 같은 초에 겹치지 않게 한다. 결과는 ``clamp_interval`` 로 [30,60] 안에 든다.
+        """
+
+        span = max(0.0, self.interval_seconds * self._jitter_ratio)
+        reduced = self.interval_seconds - span * stable_jitter_ratio(self._jitter_seed)
+        return clamp_interval(reduced)
 
     def report_once(self) -> HeartbeatResult | None:
         """단발 보고. 어떤 예외도 루프를 죽이지 않게 흡수한다(best-effort)."""

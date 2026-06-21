@@ -19,7 +19,7 @@ seed 후 검증). agents 는 tenant 소유가 아닌 fleet 전역 자원이라 s
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -72,6 +72,10 @@ _AUTH_SESSION_PENDING_STATES = (
     BaeminAuthState.USER_ACTION_PENDING.value,
 )
 
+#: critical 후보 정렬에서 "성공 수집 이력 없음"(NULL)을 가장 오래된 값으로 치환하는 하한.
+#: aware UTC — collected_at(timezone-aware) 와 비교 가능해야 하고, 어떤 실제 성공보다 과거다.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 class PostgresDashboardRepository(DashboardRepository):
     """async SQLAlchemy 기반 읽기 전용 ``DashboardRepository``."""
@@ -123,6 +127,102 @@ class PostgresDashboardRepository(DashboardRepository):
         facts: list[TargetHealthFacts] = []
         async with self._session_factory() as session:
             rows = (await session.execute(base_stmt)).all()
+            target_ids = [str(row.id) for row in rows]
+            account_ids = [str(row.account_id) for row in rows]
+            last_success_by_target = await self._last_collect_successes(
+                session, target_ids
+            )
+            last_delivery_by_target = await self._last_delivery_successes(
+                session, target_ids
+            )
+            latest_failure_by_target = await self._latest_failure_codes(
+                session, target_ids
+            )
+            pending_account_ids = await self._auth_session_pending_account_ids(
+                session, account_ids
+            )
+            for row in rows:
+                target_id = str(row.id)
+                facts.append(
+                    TargetHealthFacts(
+                        target_id=target_id,
+                        tenant_id=str(row.tenant_id),
+                        customer_name=row.customer_name,
+                        name=row.name,
+                        center_name=row.center_name,
+                        platform=row.platform,
+                        interval_minutes=row.interval_minutes,
+                        last_success_at=last_success_by_target.get(target_id),
+                        last_delivery_at=last_delivery_by_target.get(target_id),
+                        last_failure_code=latest_failure_by_target.get(target_id),
+                        account_auth_state=row.auth_state,
+                        lifecycle_state=row.lifecycle_state,
+                        auth_session_pending=str(row.account_id) in pending_account_ids,
+                    )
+                )
+        return facts
+
+    async def critical_target_health(
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int,
+    ) -> list[TargetHealthFacts]:
+        if not tenant_id.strip() or limit <= 0:
+            return []
+        latest_ok = (
+            select(
+                Snapshot.target_id.label("target_id"),
+                func.max(Snapshot.collected_at).label("last_success_at"),
+            )
+            .where(Snapshot.quality_state == SnapshotQualityState.OK.value)
+            .group_by(Snapshot.target_id)
+            .subquery()
+        )
+        where_clauses = [
+            PlatformAccount.tenant_id == MonitoringTarget.tenant_id,
+            MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
+        ]
+        if tenant_id != ALL_TENANTS:
+            where_clauses.append(MonitoringTarget.tenant_id == tenant_id)
+        # 후보 정렬 키: 수집 성공 이력이 없는(NULL) 대상은 "가장 오래 정상 적재 못한" 후보로
+        # 맨 앞에 둔다 — AUTH_REQUIRED/STOPPED/TARGET_VALIDATION 처럼 OK snapshot 이 한 번도
+        # 없는 fail-closed 대상이 page 밖에서 누락되지 않게 한다(호출부가 severity 로 재필터).
+        oldest_first = func.coalesce(latest_ok.c.last_success_at, _EPOCH)
+        stmt = (
+            select(
+                MonitoringTarget.id,
+                MonitoringTarget.tenant_id,
+                Tenant.name.label("customer_name"),
+                MonitoringTarget.name,
+                MonitoringTarget.center_name,
+                PlatformAccount.platform,
+                MonitoringTarget.interval_minutes,
+                PlatformAccount.id.label("account_id"),
+                PlatformAccount.auth_state,
+                Tenant.status.label("lifecycle_state"),
+            )
+            .join(
+                PlatformAccount,
+                MonitoringTarget.platform_account_id == PlatformAccount.id,
+            )
+            .join(Tenant, MonitoringTarget.tenant_id == Tenant.id)
+            # LEFT OUTER JOIN: 성공 수집 이력이 없는 fail-closed 대상도 후보에 포함한다
+            # (INNER JOIN 이면 OK snapshot 이 없는 대상이 통째로 빠져 page 밖 critical 누락).
+            .outerjoin(latest_ok, latest_ok.c.target_id == MonitoringTarget.id)
+            .where(*where_clauses)
+            .order_by(
+                oldest_first.asc(),
+                Tenant.name.asc(),
+                MonitoringTarget.name.asc(),
+                MonitoringTarget.id.asc(),
+            )
+            .limit(max(0, limit))
+        )
+        facts: list[TargetHealthFacts] = []
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).all()
             target_ids = [str(row.id) for row in rows]
             account_ids = [str(row.account_id) for row in rows]
             last_success_by_target = await self._last_collect_successes(

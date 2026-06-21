@@ -9,7 +9,9 @@
 - Telegram dispatch가 오래된 `SENDING` delivery log를 발견하면 자동 재전송하지 않고 `HELD`로 보낸다. 전송 성공 여부가 애매한 상태라 운영자가 확인한 뒤 재개/폐기해야 한다.
 - Job claim lease_seconds 기본값은 `RIDER_JOB_LEASE_SECONDS=120` 이다. 일반적으로 crawl timeout보다 길게 두되, 너무 길면 Agent 장애 후 stale job 회수가 늦어진다.
 - Agent heartbeat interval 기본 범위는 30~60초(`MIN_HEARTBEAT_INTERVAL_SECONDS=30`, `MAX_HEARTBEAT_INTERVAL_SECONDS=60`)이다.
-- 기본 crawler만 쓰고 profile/secret/auth seam이 없는 경로는 child process timeout 경계를 쓴다. 일반 `rider_agent run` 의 profile-managed crawl은 in-process timeout helper를 쓰며, timeout 시 해당 target profile release와 idle cleanup을 수행한다. stuck thread를 OS 레벨로 반드시 kill해야 하는 운영은 profile-managed crawl의 subprocess 격리를 별도 구현한 뒤 `--max-jobs` 를 올린다.
+- 기본 crawler만 쓰고 auth seam이 없는 경로는 subprocess timeout 경계를 쓴다. 일반 `rider_agent run` 의 profile-managed crawl도 parent가 profile/CDP 값을 준비한 뒤 child process에서 crawl을 실행하며, timeout 시 해당 target profile release와 idle cleanup을 수행한다.
+- subprocess로 넘어가는 job payload에는 SecretRef handle만 들어가야 한다. `username`, `password`, `verification_email_address`, `verification_email_app_password` 같은 plaintext secret 필드는 임시 job 파일을 쓰기 전에 fail-closed 된다.
+- 테스트나 특수 주입 경로처럼 custom crawl/auth seam을 쓰면 subprocess 경계가 비활성화되고 in-process timeout helper가 fallback으로 동작할 수 있다.
 
 ## DB Pool / Postgres 연결 수
 

@@ -183,6 +183,34 @@ def test_module_is_send_only_no_getupdates_or_poller():
     assert "send_telegram_text" in imported_names
 
 
+def test_send_config_carrier_is_minimal_dto_not_appconfig():
+    # maintenance Task 8-A: 중앙 전송은 placeholder 가득한 AppConfig carrier 가 아니라
+    # 3-필드 TelegramSendConfig DTO 로 send 설정을 만든다. AppConfig 를 import/구성하지 않는다.
+    import ast
+
+    from rider_crawl.sender import TelegramSendConfig
+    from rider_server.services.telegram_central_dispatch import _send_config_for
+
+    channel = _channel(thread_id="7")
+    config = _send_config_for(channel, _FAKE_TOKEN)
+    assert isinstance(config, TelegramSendConfig)
+    assert config.telegram_bot_token == _FAKE_TOKEN
+    assert config.telegram_chat_id == _FAKE_CHAT_ID
+    # thread_id 는 send_telegram_text(message_thread_id=...) 인자로 넘기므로 DTO엔 비운다.
+    assert config.telegram_message_thread_id == ""
+    # token 은 repr 에 남지 않는다(secret 비노출).
+    assert _FAKE_TOKEN not in repr(config)
+
+    source = Path(
+        "src/rider_server/services/telegram_central_dispatch.py"
+    ).read_text(encoding="utf-8")
+    imported_names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            imported_names.update(alias.name for alias in node.names)
+    assert "AppConfig" not in imported_names  # carrier 축소: AppConfig 의존 제거.
+
+
 def test_send_uses_resolve_token_seam_for_each_call():
     seen: list = []
     sender = _sender([_channel()], urlopen=_ok_urlopen([]), token_seen=seen)

@@ -5,9 +5,10 @@ import json
 import platform
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen as default_urlopen
@@ -15,6 +16,38 @@ from urllib.request import Request, urlopen as default_urlopen
 from .config import AppConfig, app_state_root
 from .log_rotation import rotate_if_needed
 from .lock import RunLock
+
+
+class TelegramSendConfigLike(Protocol):
+    """``send_telegram_text`` 가 실제로 읽는 Telegram 전송 설정 표면(구조적 타입).
+
+    ``AppConfig`` 는 이 셋(+다수의 무관 필드)을 가지므로 그대로 만족한다. 서버 중앙 전송 경로
+    (``rider_server.services.telegram_central_dispatch``)는 ``AppConfig`` 의 15+ placeholder
+    필드를 채우는 carrier 대신 :class:`TelegramSendConfig` 만 만들어 넘긴다(maintenance Task 8-A).
+    """
+
+    @property
+    def telegram_bot_token(self) -> str: ...
+
+    @property
+    def telegram_chat_id(self) -> str: ...
+
+    @property
+    def telegram_message_thread_id(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class TelegramSendConfig:
+    """``send_telegram_text`` 전용 최소 설정 DTO(bot token·chat_id·thread_id 만).
+
+    placeholder 로 가득 찬 ``AppConfig`` carrier 를 대체한다 — 전송에 필요한 3개 값만 들고,
+    token 은 ``repr`` 에 남기지 않는다(secret 비노출). thread_id 는 ``send_telegram_text``
+    인자로도 넘길 수 있어 빈 문자열 기본값을 둔다.
+    """
+
+    telegram_bot_token: str = field(default="", repr=False)
+    telegram_chat_id: str = ""
+    telegram_message_thread_id: str = ""
 
 KAKAO_SEND_VERIFY_TIMEOUT_SECONDS = 2.0
 KAKAO_SEND_VERIFY_INTERVAL_SECONDS = 0.1
@@ -83,7 +116,7 @@ UrlOpen = Callable[..., Any]
 
 
 def send_telegram_text(
-    config: AppConfig,
+    config: TelegramSendConfigLike,
     message: str,
     *,
     message_thread_id: int | None = None,
@@ -159,7 +192,7 @@ def get_telegram_updates(
 
 
 def _telegram_api_request(
-    config: AppConfig,
+    config: TelegramSendConfigLike,
     method: str,
     payload: dict[str, object],
     *,
@@ -344,21 +377,21 @@ def _telegram_local_rate_limit_key(token: str, chat_id: str, thread_id: int | No
     return (token_hash, chat_id, "" if thread_id is None else str(thread_id))
 
 
-def _required_telegram_bot_token(config: AppConfig) -> str:
+def _required_telegram_bot_token(config: TelegramSendConfigLike) -> str:
     token = config.telegram_bot_token.strip()
     if not token:
         raise TelegramSendError("TELEGRAM_BOT_TOKEN is required before sending")
     return token
 
 
-def _required_telegram_chat_id(config: AppConfig) -> str:
+def _required_telegram_chat_id(config: TelegramSendConfigLike) -> str:
     chat_id = config.telegram_chat_id.strip()
     if not chat_id:
         raise TelegramSendError("TELEGRAM_CHAT_ID is required before sending")
     return chat_id
 
 
-def _optional_telegram_message_thread_id(config: AppConfig) -> int | None:
+def _optional_telegram_message_thread_id(config: TelegramSendConfigLike) -> int | None:
     raw = config.telegram_message_thread_id.strip()
     if not raw:
         return None

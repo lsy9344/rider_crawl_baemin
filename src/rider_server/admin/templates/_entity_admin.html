@@ -55,7 +55,10 @@
       <label>업체 표시명 <input type="text" name="name" required></label>
       <label>센터/상점명 (쿠팡 필수) <input type="text" name="center_name"></label>
       <label>주소(url) <input type="text" name="url"></label>
-      <label>외부 관리 코드 <input type="text" name="external_id"></label>
+      <details class="advanced-fields">
+        <summary>고급 설정</summary>
+        <label>관리 코드(선택) <input type="text" name="external_id"></label>
+      </details>
       <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
       <button type="submit" class="create" data-required-select-submit disabled>업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
     </form>
@@ -114,7 +117,7 @@
       </label>
       <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
-      <label>외부 관리 코드 <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
+      <label>관리 코드(선택) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
@@ -143,9 +146,9 @@
           <label>구독 상태
             <select name="status">
               <option value="PAYMENT_ACTIVE">결제 활성</option>
-              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE: 결제 유예</option>
-              <option value="SUSPENDED">SUSPENDED: 정지</option>
-              <option value="CANCELLED">CANCELLED: 해지</option>
+              <option value="PAYMENT_FAILED_GRACE">결제 유예</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="CANCELLED">해지</option>
             </select>
           </label>
           <button type="submit" class="create" data-required-select-submit disabled>구독 생성</button><span class="inline-action-status" aria-live="polite"></span>
@@ -159,9 +162,9 @@
           <label>구독 상태
             <select id="sub-edit-status">
               <option value="PAYMENT_ACTIVE">결제 활성</option>
-              <option value="PAYMENT_FAILED_GRACE">PAYMENT_FAILED_GRACE: 결제 유예</option>
-              <option value="SUSPENDED">SUSPENDED: 정지</option>
-              <option value="CANCELLED">CANCELLED: 해지</option>
+              <option value="PAYMENT_FAILED_GRACE">결제 유예</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="CANCELLED">해지</option>
             </select>
           </label>
           <button type="button" data-requires="sub-edit-id" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
@@ -174,7 +177,7 @@
         <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 ID/PW/이메일 앱 비밀번호와 이메일 주소는 SecretRef 핸들만 입력하세요. 예: vault://platform-account/coupang-login-id</p>
         <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>플랫폼
-            <select name="platform"><option value="BAEMIN">BAEMIN</option><option value="COUPANG">COUPANG</option></select>
+            <select name="platform"><option value="BAEMIN">배민</option><option value="COUPANG">쿠팡이츠</option></select>
           </label>
           <label>라벨 <input type="text" name="label"></label>
           <label>로그인 ID ref <input type="text" name="username" placeholder="vault://platform-account/coupang-login-id"></label>
@@ -205,16 +208,16 @@
       </fieldset>
 
       <fieldset id="entity-channel-form">
-        <legend>메시지 채널 (chat_id/thread_id/방명 = 라우팅 식별자, secret 아님)</legend>
+        <legend>메시지 채널 (라우팅 식별자, secret 아님)</legend>
         <p class="muted" style="margin:0.1rem 0 0.8rem">Kakao 는 방명 입력 시 바로 ACTIVE 됩니다. 방명이 비면 PENDING 상태로 생성됩니다. Telegram 은 항상 PENDING 으로 시작합니다.</p>
         <form hx-post="/admin/messenger-channels?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>메신저
-            <select name="messenger" id="channel-messenger" onchange="syncChannelCreateFields()"><option value="TELEGRAM">TELEGRAM</option><option value="KAKAO">KAKAO</option></select>
+            <select name="messenger" id="channel-messenger" onchange="syncChannelCreateFields()"><option value="TELEGRAM">텔레그램</option><option value="KAKAO">카카오톡</option></select>
           </label>
-          <label>telegram_chat_id <input type="text" name="telegram_chat_id" data-channel-messenger="TELEGRAM"></label>
-          <label>thread_id <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
-          <label>kakao_room_name <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
-          <label>registration_code <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
+          <label>텔레그램 채팅 ID <input type="text" name="telegram_chat_id" data-channel-messenger="TELEGRAM"></label>
+          <label>텔레그램 토픽 ID <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
+          <label>카카오톡 방 이름 <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
+          <label>등록 코드 <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
           <button type="submit" class="create">채널 생성</button><span class="inline-action-status" aria-live="polite"></span>
         </form>
         <div class="edit-row">
@@ -224,9 +227,9 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
                     onchange="populateChannelFields(this)"><option value="">불러오는 중…</option></select>
           </label>
-          <label>telegram_chat_id <input type="text" id="ch-edit-chat"></label>
-          <label>thread_id <input type="text" id="ch-edit-thread"></label>
-          <label>kakao_room_name <input type="text" id="ch-edit-kakao"></label>
+          <label>텔레그램 채팅 ID <input type="text" id="ch-edit-chat"></label>
+          <label>텔레그램 토픽 ID <input type="text" id="ch-edit-thread"></label>
+          <label>카카오톡 방 이름 <input type="text" id="ch-edit-kakao"></label>
           <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
             <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
             <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/activate', {}, '선택한 채널을 수동 활성화할까요? 라우팅 정보를 확인했나요?')">수동 활성화</button><span class="inline-action-status" aria-live="polite"></span>
@@ -248,11 +251,11 @@
           <label>고객 상태
             <select id="cust-edit-status">
               <option value="">변경 안 함</option>
-              <option value="ACTIVE">ACTIVE: 운영</option>
+              <option value="ACTIVE">운영</option>
               <option value="PAYMENT_ACTIVE">결제 활성</option>
               <option value="SETUP_PENDING">세팅 중</option>
-              <option value="SUSPENDED">SUSPENDED: 정지</option>
-              <option value="LEAD">LEAD: 리드</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="LEAD">문의 단계</option>
             </select>
           </label>
           <button type="button" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>

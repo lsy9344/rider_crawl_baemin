@@ -2,6 +2,8 @@
 
 > 적용 완료: 2026-06-20에 본 작업지시서의 보안, Agent 안정성, dispatch/queue/scheduler/metrics, Admin 운영 안전, DB/migration/CI 항목을 코드·테스트·문서에 반영했다. 적용 후 전체 pytest와 배포 config 검증을 통과했다.
 
+> 정합성 주의(2026-06-21 갱신): 본문 Task 체크박스(`- [ ]`)는 추적용 양식이며, 실제 반영 여부는 각 Task 의 "검증" 명령과 현재 코드/테스트를 기준으로 본다(상단 "적용 완료" 기준). 2026-06-21 후속 검증에서 두 결함을 추가로 고쳤다: (1) Task 2 dispatch worker 의 `apply_update` 가 `sqlalchemy.update` 를 섀도잉해 실전송 시 TypeError 로 깨지던 버그(파라미터를 `update_values` 로 변경, 실본문 실행 회귀 테스트 추가), (2) Task 4 atomic snapshot complete 경로가 `completion_id` 를 무시해 outbox replay 가 멱등 200 대신 LEASE_LOST 로 처리되던 갭(멱등 분기 추가, PG-gated 멱등 테스트 추가).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` for independent task slices, or `superpowers:executing-plans` if one worker executes this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 5-10번 검토에서 나온 보안, 중복 전송, Agent 안정성, 100+ job 확장성, Admin 운영 안전 문제를 실행 가능한 작업 단위로 고친다.

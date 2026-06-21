@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.account import MonitoringTarget, PlatformAccount
 from rider_server.admin.severity import is_agent_online
-from rider_server.db.models.agent import Agent, Job
+from rider_server.db.models.agent import Agent, BrowserProfile, Job
 from rider_server.db.models.tenancy import Subscription, Tenant
 from rider_server.domain import (
     CustomerLifecycleState,
@@ -113,6 +113,13 @@ class PostgresSchedulerRepository(SchedulerRepository):
     async def due_targets(self, *, now: datetime, limit: int) -> list[DueTarget]:
         if limit <= 0:
             return []
+        assigned_agent_id = (
+            select(BrowserProfile.agent_id)
+            .where(BrowserProfile.target_id == MonitoringTarget.id)
+            .order_by(BrowserProfile.id.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
         stmt = (
             select(
                 MonitoringTarget.id,
@@ -129,6 +136,7 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 PlatformAccount.verification_email_sender_keyword,
                 MonitoringTarget.interval_minutes,
                 MonitoringTarget.next_run_at,
+                assigned_agent_id.label("assigned_agent_id"),
             )
             .join(
                 PlatformAccount,
@@ -164,6 +172,9 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 verification_email_app_password=row.verification_email_app_password,
                 verification_email_subject_keyword=row.verification_email_subject_keyword,
                 verification_email_sender_keyword=row.verification_email_sender_keyword,
+                assigned_agent_id=str(row.assigned_agent_id)
+                if row.assigned_agent_id is not None
+                else "",
             )
             for row in rows
         ]
@@ -364,6 +375,9 @@ class PostgresSchedulerRepository(SchedulerRepository):
                         id=job_id,
                         type=job_type,
                         target_id=uuid.UUID(target.target_id),
+                        assigned_agent_id=uuid.UUID(target.assigned_agent_id)
+                        if target.assigned_agent_id
+                        else None,
                         agent_id=None,
                         status=JOB_STATUS_PENDING,
                         run_after=now,

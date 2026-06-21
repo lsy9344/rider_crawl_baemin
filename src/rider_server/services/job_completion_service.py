@@ -111,6 +111,8 @@ class AtomicSnapshotIngestService(SnapshotIngestService, Protocol):
         error_code: str | None,
         duration_ms: int | None,
         result_schema_version: str | None,
+        completion_id: str | None = ...,
+        completion_payload_hash: str | None = ...,
         now: datetime,
     ) -> Any: ...
 
@@ -150,6 +152,7 @@ class JobCompletionService:
             agent_id=agent_id,
             status=status,
             result_json=ingest_result_json,
+            completion_id=completion_id,
             now=now,
         )
 
@@ -162,6 +165,8 @@ class JobCompletionService:
                 error_code=error_code,
                 duration_ms=duration_ms,
                 result_schema_version=result_schema_version,
+                completion_id=completion_id,
+                completion_payload_hash=completion_payload_hash,
                 now=now,
             )
             return self._result_from_outcome(outcome, status=status)
@@ -195,6 +200,7 @@ class JobCompletionService:
         agent_id: str,
         status: str,
         result_json: dict[str, Any] | None,
+        completion_id: str | None = None,
         now: datetime,
     ) -> SnapshotIngestRecord | None:
         if self._ingest_service is None or status != JOB_STATUS_SUCCEEDED:
@@ -210,6 +216,16 @@ class JobCompletionService:
             except ValueError as exc:
                 raise JobCompletionInvalid("invalid job id") from exc
             if in_flight_job is None:
+                # job 이 더 이상 in-flight 가 아님. completion_id 가 있고 atomic ingest 가
+                # 활성이면 멱등 재시도일 수 있으므로 여기서 conflict 로 막지 않고, atomic
+                # complete_snapshot_job 의 멱등 검사(completion_id 일치 → ACCEPTED)에 위임한다.
+                # expected_target_id 검증은 in-flight job 이 없어 건너뛴다(멱등 hit 이면 재삽입
+                # 자체를 안 하고, mismatch 면 LEASE_LOST 로 안전하게 막힌다).
+                if completion_id and self._atomic_ingest_service is not None:
+                    return self._build_replay_record(
+                        job_id=job_id, agent_id=agent_id, status=status,
+                        result_json=result_json, now=now,
+                    )
                 outcome = await self._queue_complete(
                     job_id=job_id,
                     agent_id=agent_id,
@@ -240,6 +256,35 @@ class JobCompletionService:
         except ValueError as exc:
             raise JobCompletionInvalid("invalid job id") from exc
 
+    def _build_replay_record(
+        self,
+        *,
+        job_id: str,
+        agent_id: str,
+        status: str,
+        result_json: dict[str, Any] | None,
+        now: datetime,
+    ) -> SnapshotIngestRecord | None:
+        """in-flight 가 아닌(이미 terminal) job 의 멱등 replay 용 ingest record 를 만든다.
+
+        in-flight job 이 없어 ``expected_target_id`` 검증은 건너뛴다 — atomic complete 의
+        completion_id 멱등 검사가 일치/불일치를 ACCEPTED/LEASE_LOST 로 가른다.
+        """
+
+        try:
+            return self._ingest_service.prepare_complete(
+                job_id=job_id,
+                agent_id=agent_id,
+                status=status,
+                result_json=result_json,
+                completed_at=now,
+                expected_target_id=None,
+            )
+        except JobResultIngestError as exc:
+            raise JobCompletionInvalid(str(exc)) from exc
+        except ValueError as exc:
+            raise JobCompletionInvalid("invalid job id") from exc
+
     async def _atomic_complete(
         self,
         record: SnapshotIngestRecord,
@@ -250,6 +295,8 @@ class JobCompletionService:
         error_code: str | None,
         duration_ms: int | None,
         result_schema_version: str | None,
+        completion_id: str | None = None,
+        completion_payload_hash: str | None = None,
         now: datetime,
     ) -> CompleteOutcome:
         if self._atomic_ingest_service is None:
@@ -263,6 +310,8 @@ class JobCompletionService:
                 error_code=error_code,
                 duration_ms=duration_ms,
                 result_schema_version=result_schema_version,
+                completion_id=completion_id,
+                completion_payload_hash=completion_payload_hash,
                 now=now,
             )
             if isawaitable(outcome):

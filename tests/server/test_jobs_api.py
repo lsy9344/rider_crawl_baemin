@@ -1145,11 +1145,15 @@ def test_complete_success_uses_atomic_snapshot_complete_when_service_provides_it
             error_code: str | None,
             duration_ms: int | None,
             result_schema_version: str | None,
+            completion_id: str | None = None,
+            completion_payload_hash: str | None = None,
             now: datetime,
         ) -> CompleteOutcome:
             self.records.append(record)
             self.duration_ms = duration_ms
             self.result_schema_version = result_schema_version
+            self.completion_id = completion_id
+            self.completion_payload_hash = completion_payload_hash
             return CompleteOutcome(COMPLETE_ACCEPTED, record.job_id, final_status=status)
 
     service = _AtomicIngestService()

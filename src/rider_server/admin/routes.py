@@ -253,7 +253,7 @@ async def _target_rows_for_display(
     now: datetime,
     limit: int | None = None,
     offset: int = 0,
-    prefetch_high_severity: bool = False,
+    include_critical_bucket: bool = False,
 ):
     facts_rows = await repo.target_health(
         tenant_id=tenant_id,
@@ -261,27 +261,24 @@ async def _target_rows_for_display(
         limit=limit,
         offset=offset,
     )
-    rows = [_target_row_for_display(facts, now) for facts in facts_rows]
-    if prefetch_high_severity and limit is not None and offset == 0:
-        seen = {row.target_id for row in rows}
-        all_facts = await repo.target_health(
+    if include_critical_bucket and offset == 0 and limit is not None and limit > 0:
+        seen_ids = {facts.target_id for facts in facts_rows}
+        critical_rows = await repo.critical_target_health(
             tenant_id=tenant_id,
             now=now,
-            limit=None,
-            offset=0,
+            limit=min(limit, 25),
         )
-        for facts in all_facts:
-            if facts.target_id in seen:
-                continue
-            row = _target_row_for_display(facts, now)
-            if severity_policy.severity_rank(row.severity) >= severity_policy.severity_rank(
-                SEVERITY_CRITICAL
-            ):
-                rows.append(row)
-                seen = seen | {row.target_id}
+        critical_rows = [
+            facts
+            for facts in critical_rows
+            if severity_policy.severity_rank(_target_row_for_display(facts, now).severity)
+            >= severity_policy.severity_rank(SEVERITY_CRITICAL)
+        ]
+        facts_rows.extend(
+            facts for facts in critical_rows if facts.target_id not in seen_ids
+        )
+    rows = [_target_row_for_display(facts, now) for facts in facts_rows]
     rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
-    if prefetch_high_severity and limit is not None and offset == 0:
-        rows = rows[:limit]
     return rows
 
 
@@ -390,7 +387,7 @@ async def targets_fragment(
             now=_now(),
             limit=limit + 1,
             offset=offset,
-            prefetch_high_severity=True,
+            include_critical_bucket=True,
         )
     except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
         return _db_failure_fragment(request)

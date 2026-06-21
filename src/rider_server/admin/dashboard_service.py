@@ -139,7 +139,8 @@ class AuthRequiredRow:
 class DashboardRepository(abc.ABC):
     """대시보드 read-model 의 DB 접근 포트(backend 중립, **읽기 전용**).
 
-    customer-owned 질의(:meth:`target_health`/:meth:`channel_health`/:meth:`auth_required`)는
+    customer-owned 질의(:meth:`target_health`/:meth:`critical_target_health`/
+    :meth:`channel_health`/:meth:`auth_required`)는
     ``tenant_id`` 로 scope 된다(architecture #Data-Boundaries). :meth:`agent_health` 는 agents
     가 tenant 소유가 아닌 fleet 전역 자원이라 tenant scope 가 없다(명시적 예외).
 
@@ -156,6 +157,29 @@ class DashboardRepository(abc.ABC):
         offset: int = 0,
     ) -> list[TargetHealthFacts]:
         """tenant 의 대상별 파생 집계 facts(AC1·AC2·AC3 입력)."""
+
+    async def critical_target_health(
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int,
+    ) -> list[TargetHealthFacts]:
+        """첫 화면 우선 노출용 critical 후보 facts.
+
+        기본 구현은 전체 target facts 위에서 계산한다. PostgreSQL 구현은 별도 bounded query 로
+        가장 오래된 성공 수집 후보만 가져와 page 밖 critical target 을 놓치지 않게 한다.
+        """
+
+        facts = await self.target_health(tenant_id=tenant_id, now=now)
+        rows = [
+            row
+            for row in facts
+            if severity.severity_rank(DashboardService.target_row(row, now).severity)
+            >= severity.severity_rank(severity.SEVERITY_CRITICAL)
+        ]
+        rows.sort(key=lambda row: row.last_success_at or datetime.max)
+        return rows[: max(0, limit)]
 
     @abc.abstractmethod
     async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
@@ -357,6 +381,26 @@ class InMemoryDashboardRepository(DashboardRepository):
         if limit is not None:
             rows = rows[: max(0, limit)]
         return rows
+
+    async def critical_target_health(
+        self,
+        *,
+        tenant_id: str,
+        now: datetime,
+        limit: int,
+    ) -> list[TargetHealthFacts]:
+        if tenant_id == ALL_TENANTS:
+            facts = [row for values in self._targets.values() for row in values]
+        else:
+            facts = list(self._targets.get(tenant_id, []))
+        rows = [
+            row
+            for row in facts
+            if severity.severity_rank(DashboardService.target_row(row, now).severity)
+            >= severity.severity_rank(severity.SEVERITY_CRITICAL)
+        ]
+        rows.sort(key=lambda row: row.last_success_at or datetime.max)
+        return rows[: max(0, limit)]
 
     async def agent_health(self, *, now: datetime) -> list[AgentHealthFacts]:
         return list(self._agents)

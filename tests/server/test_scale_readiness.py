@@ -152,3 +152,28 @@ def test_runbook_documents_crawl_scale_operating_model() -> None:
         "scale smoke commands",
     ):
         assert needle in runbook
+
+
+def test_crawl_scale_runbook_matches_current_process_boundary() -> None:
+    runbook = Path("docs/runbooks/crawl-scale-runbook.md").read_text(encoding="utf-8")
+
+    assert "subprocess timeout 경계" in runbook
+    assert "profile-managed crawl은 in-process timeout helper" not in runbook
+
+
+def test_backup_restore_runbook_names_current_migration_head() -> None:
+    runbook = Path("docs/runbooks/backup-restore.md").read_text(encoding="utf-8")
+
+    assert "0020_fleet_claim_scale" in runbook
+    assert "0019_profile_channel_uniqueness" not in runbook
+
+
+def test_aws_product_setup_notes_secret_refs_not_plaintext_storage() -> None:
+    doc = Path("docs/operations/aws-product-setup-2026-06-18.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SecretRef 핸들" in doc
+    assert "Pending Local Hardening For Next Deploy" in doc
+    assert "values directly in PostgreSQL" not in doc
+    assert "DB에 그대로 저장" not in doc

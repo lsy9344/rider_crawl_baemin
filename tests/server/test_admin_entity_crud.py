@@ -1161,6 +1161,36 @@ def test_update_tenant_rejects_sending_enabled_true_without_readiness_evidence()
     assert repo.audits == []
 
 
+def test_update_tenant_allows_idempotent_sending_enabled_true_on_already_live() -> None:
+    # 게이트는 OFF→ON 전이만 막는다. 이미 ON 인 고객의 다른 필드 편집 시 폼이 현재 값
+    # sending_enabled=True 를 그대로 재전송해도 거부하지 않는다(no-op re-assert 허용).
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+            sending_enabled=True,
+        )
+    )
+    svc = _svc(repo)
+
+    updated = _run(
+        svc.update_tenant(
+            _TENANT,
+            name="새이름",
+            sending_enabled=True,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.name == "새이름"
+    assert updated.sending_enabled is True
+    assert _run(repo.get_tenant(_TENANT)).sending_enabled is True
+
+
 def test_delete_tenant_removes_empty_customer_and_audits() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())

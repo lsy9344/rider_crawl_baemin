@@ -15,6 +15,8 @@ import ctypes.wintypes
 import hashlib
 import json
 import os
+import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Protocol
@@ -43,6 +45,34 @@ def classify_secret_storage(secret_kind: str) -> str:
     """secret 종류를 3분류값(central/agent_local/not_stored) 중 정확히 하나로 반환한다."""
 
     return SECRET_STORAGE_CLASSIFICATION[secret_kind]
+
+
+def _restrict_file_to_current_user(path: Path) -> None:
+    """파일 secret fallback 권한을 현재 사용자 중심으로 좁힌다."""
+
+    target = Path(path)
+    if sys.platform == "win32":
+        username = os.environ.get("USERNAME", "").strip()
+        if not username:
+            raise RuntimeError("cannot restrict secret file permissions without USERNAME")
+        domain = os.environ.get("USERDOMAIN", "").strip()
+        principal = f"{domain}\\{username}" if domain else username
+        completed = subprocess.run(
+            [
+                "icacls",
+                str(target),
+                "/inheritance:r",
+                "/grant:r",
+                f"{principal}:F",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("failed to restrict secret file permissions")
+        return
+    os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
 
 
 class SecretStore(Protocol):
@@ -102,6 +132,7 @@ class LocalFileSecretStore:
         from .ui_settings import _atomic_write_text
 
         _atomic_write_text(self.path, json.dumps(data, ensure_ascii=False, indent=2))
+        _restrict_file_to_current_user(self.path)
 
 
 class WindowsDpapiSecretStore:

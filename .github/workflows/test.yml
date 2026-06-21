@@ -171,7 +171,37 @@ jobs:
         run: docker compose -f deploy/docker-compose.yml config
 
       - name: Build server Docker image
-        run: docker build -f deploy/Dockerfile.server .
+        run: docker build -f deploy/Dockerfile.server -t rider-server:ci .
+
+      # Task 8-C: backend /health smoke. 무거운 DB/migration 없이 컨테이너를 띄워
+      # liveness probe(/health 는 dependency-free)를 실제로 친다. fast PR 경로는 건너뛰고
+      # push/schedule/manual 에서만 실행한다.
+      - name: Backend /health smoke
+        if: github.event_name != 'pull_request'
+        env:
+          # /health 는 DB 에 접속하지 않지만 production create_app 은 DATABASE_URL 존재를
+          # 요구한다(test_production_app_requires_database_url). 더미 URL 로 부팅만 시킨다.
+          DUMMY_DATABASE_URL: postgresql+asyncpg://rider:rider@127.0.0.1:5432/rider
+        run: |
+          docker run -d --name rider-health-smoke \
+            -e APP_ENV=production \
+            -e DATABASE_URL="$DUMMY_DATABASE_URL" \
+            -p 8000:8000 rider-server:ci
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'; then
+              ok="yes"
+              echo "health ok after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker logs rider-health-smoke || true
+          docker rm -f rider-health-smoke || true
+          if [ -z "$ok" ]; then
+            echo "::error::backend /health did not become healthy"
+            exit 1
+          fi
 
   ci-summary:
     name: CI summary

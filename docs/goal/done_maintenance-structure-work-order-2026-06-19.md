@@ -946,14 +946,24 @@ Progress note:
 - Modify: `src/rider_server/services/crawl_service.py`
 - Add tests near existing Telegram/crawl service tests
 
-- [ ] Introduce a small DTO/Protocol for Telegram send config.
-- [ ] Keep `rider_crawl.AppConfig` conversion inside one adapter.
-- [ ] Verify:
+- [x] Introduce a small DTO/Protocol for Telegram send config.
+- [x] Keep `rider_crawl.AppConfig` conversion inside one adapter.
+- [x] Verify:
 
 ```powershell
 .\scripts\test.ps1 quick tests\server\test_telegram_central_dispatch.py tests\server\test_run_once_split.py
 .\scripts\test.ps1 architecture
 ```
+
+Progress note:
+
+- 2026-06-21: `rider_crawl.sender` 에 `TelegramSendConfig` DTO 와 `TelegramSendConfigLike`
+  Protocol 을 추가하고, `send_telegram_text`/`_telegram_api_request`/3개 telegram 접근자의
+  타입을 Protocol 로 완화했다. 서버 중앙 전송(`telegram_central_dispatch.py`)은 placeholder
+  15+ 필드를 채우던 `AppConfig` carrier(`_app_config_for`) 를 3-필드 DTO(`_send_config_for`)
+  로 교체하고 `AppConfig` import 를 제거했다. 기존 send-path 테스트(payload chat_id/
+  thread_id/token URL)는 DTO 를 통해 그대로 통과하며, carrier 축소를 잠그는
+  `test_send_config_carrier_is_minimal_dto_not_appconfig` 를 추가했다.
 
 ### Task 8-B: `rider_agent/reuse.py` 역할별 port 분리
 
@@ -982,9 +992,18 @@ Progress note:
 - Modify: `.github/workflows/test.yml`
 - Modify: `tests/server/test_deployment_config.py`
 
-- [ ] Add a static test that Dockerfile server dependency list stays aligned with `pyproject.toml` server extra, or generate the Dockerfile list from one source.
-- [ ] Add scheduled/push CI smoke that builds and starts backend enough to hit `/health`.
-- [ ] Keep fast PR path reasonable; heavy smoke can run on schedule/push.
+- [x] Add a static test that Dockerfile server dependency list stays aligned with `pyproject.toml` server extra, or generate the Dockerfile list from one source.
+- [x] Add scheduled/push CI smoke that builds and starts backend enough to hit `/health`.
+- [x] Keep fast PR path reasonable; heavy smoke can run on schedule/push.
+
+Progress note:
+
+- 2026-06-21: `test_server_dockerfile_dependency_list_matches_pyproject_server_extra` 로
+  Dockerfile `pip install` 목록과 pyproject `server` extra 를 양방향 정합(한쪽 추가/누락
+  차단). CI `deployment-config` job 에 `Backend /health smoke` 스텝을 추가해 빌드한 이미지를
+  더미 `DATABASE_URL` 로 부팅하고 `/health` liveness 를 실제로 친다. PR fast 경로는
+  `if: github.event_name != 'pull_request'` 로 건너뛰고 push/schedule/manual 에서만 돈다.
+  workflow 정합은 `test_ci_runs_backend_health_smoke_off_pr_path` 가 잠근다.
 
 ### Task 8-D: env sample과 root config 정리
 

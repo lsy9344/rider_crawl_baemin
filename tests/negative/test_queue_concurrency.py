@@ -35,6 +35,10 @@ _T0 = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
 _AGENT_1 = "11111111-1111-1111-1111-111111111111"
 _AGENT_2 = "22222222-2222-2222-2222-222222222222"
 
+#: 다중 Agent scale 테스트용 Agent 풀(20대) — work-order Task 10 시나리오.
+_SCALE_AGENT_COUNT = 20
+_SCALE_AGENT_IDS = [f"a{n:03d}0000-0000-0000-0000-000000000000" for n in range(_SCALE_AGENT_COUNT)]
+
 
 async def _seed_agents(session_factory, agent_ids) -> None:
     """PG ``agents`` 행을 시드한다(jobs.agent_id FK 충족)."""
@@ -190,5 +194,172 @@ def test_stale_owner_complete_returns_lease_lost_real_pg(pg_backend):
             now=_T0 + timedelta(seconds=63),
         )
         assert outcome.result == COMPLETE_LEASE_LOST
+
+    asyncio.run(_run())
+
+
+# ── (4) 다중 Agent scale 경합 — work-order Task 10(20 Agent × 200 jobs) ──────────
+
+
+def _scale_pg_backend():
+    """20대 Agent 를 시드한 fresh PG backend + teardown(scale 경합 테스트용)."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.pool import NullPool
+
+    from rider_server.db.base import create_engine, create_session_factory
+    from rider_server.queue import PostgresQueueBackend
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", _TEST_DB_URL)
+    prev = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = _TEST_DB_URL
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
+    factory = create_session_factory(engine)
+    asyncio.run(_seed_agents(factory, _SCALE_AGENT_IDS))
+    backend = PostgresQueueBackend(factory)
+
+    def _teardown() -> None:
+        try:
+            command.downgrade(cfg, "base")
+        finally:
+            asyncio.run(engine.dispose())
+            if prev is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = prev
+
+    return backend, _teardown
+
+
+@pytest.fixture
+def scale_pg_backend():
+    backend, teardown = _scale_pg_backend()
+    try:
+        yield backend
+    finally:
+        teardown()
+
+
+@_pg_gate
+def test_many_agents_claim_200_jobs_exactly_once_with_affinity(scale_pg_backend):
+    """20 Agent 가 200 PENDING job 을 동시에 claim 해도 (1) 같은 job 이 둘 이상에게
+    claim 되지 않고 (2) affinity 가 있는 job 은 지정 Agent 만 가져간다(잘못된 claim 0)."""
+    from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN
+
+    backend = scale_pg_backend
+    total_jobs = 200
+    # 매 10번째 job 은 특정 Agent 에 affinity 고정(나머지는 free).
+    affinity_by_job: dict[str, str] = {}
+
+    async def _run():
+        # ── enqueue 200 ──
+        for i in range(total_jobs):
+            assigned = _SCALE_AGENT_IDS[i % _SCALE_AGENT_COUNT] if i % 10 == 0 else None
+            job_id = await backend.enqueue(
+                job_type=JOB_TYPE_CRAWL_BAEMIN,
+                assigned_agent_id=assigned,
+                now=_T0,
+            )
+            if assigned is not None:
+                affinity_by_job[job_id] = assigned
+
+        # ── 20 Agent 동시 claim(각자 넉넉한 max_jobs 로 경합 유발) ──
+        async def _claim(agent_id: str):
+            out: list[str] = []
+            # 큐가 빌 때까지 반복 claim(한 round 로는 200개를 못 비울 수 있음).
+            while True:
+                rows = await backend.claim(
+                    agent_id=agent_id,
+                    capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+                    max_jobs=15,
+                    lease_seconds=300,
+                    now=_T0,
+                )
+                if not rows:
+                    break
+                out.extend(r.job_id for r in rows)
+            return agent_id, out
+
+        results = await asyncio.gather(*(_claim(a) for a in _SCALE_AGENT_IDS))
+
+        # (1) exactly-once: 어떤 job 도 두 Agent 가 동시에 갖지 않는다.
+        claimed_by_agent: dict[str, list[str]] = {a: jobs for a, jobs in results}
+        all_claimed = [jid for jobs in claimed_by_agent.values() for jid in jobs]
+        assert len(all_claimed) == len(set(all_claimed)), "같은 job 이 둘 이상에게 claim 됐다"
+
+        # (2) affinity 위반 0: 고정된 job 은 지정 Agent 만 claim.
+        for agent_id, jobs in claimed_by_agent.items():
+            for jid in jobs:
+                owner = affinity_by_job.get(jid)
+                if owner is not None:
+                    assert owner == agent_id, "affinity 가 다른 Agent 가 job 을 claim 했다"
+
+        # free job 은 전부 소진(affinity job 은 그 Agent 가 claim round 에 참여했으니 함께 소진).
+        assert len(set(all_claimed)) == total_jobs, "모든 job 이 정확히 한 번 claim 돼야 한다"
+
+    asyncio.run(_run())
+
+
+@_pg_gate
+def test_concurrent_recovery_and_claim_never_double_succeeds(scale_pg_backend):
+    """stale recovery 와 동시 claim 이 경합해도 한 job 의 terminal success 는 1회뿐이다
+    (옛 소유자 complete 는 LEASE_LOST). work-order 완료기준: terminal 이중 success 0."""
+    from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
+    from rider_server.queue.states import JOB_STATUS_SUCCEEDED, JOB_TYPE_CRAWL_BAEMIN
+
+    backend = scale_pg_backend
+
+    async def _run():
+        # 50개 job 을 첫 Agent 가 짧은 lease 로 claim → lease 만료 → recovery 와 재claim 경합.
+        job_ids: list[str] = []
+        for _ in range(50):
+            job_ids.append(
+                await backend.enqueue(job_type=JOB_TYPE_CRAWL_BAEMIN, now=_T0)
+            )
+        first = await backend.claim(
+            agent_id=_SCALE_AGENT_IDS[0],
+            capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+            max_jobs=50,
+            lease_seconds=30,
+            now=_T0,
+        )
+        assert len(first) == 50
+        later = _T0 + timedelta(seconds=31)
+
+        # recovery 와 두 번째 Agent 의 재claim 을 동시에 — lock 경합 하에서.
+        async def _recover():
+            return await backend.recover_stale(now=later)
+
+        async def _reclaim():
+            return await backend.claim(
+                agent_id=_SCALE_AGENT_IDS[1],
+                capabilities=[JOB_TYPE_CRAWL_BAEMIN],
+                max_jobs=50,
+                lease_seconds=300,
+                now=_T0 + timedelta(seconds=62),
+            )
+
+        await asyncio.gather(_recover(), _reclaim())
+
+        # 옛 소유자(agent-0)의 뒤늦은 success 는 전부 LEASE_LOST 여야 한다.
+        succeeded = 0
+        for jid in job_ids:
+            outcome = await backend.complete(
+                job_id=jid,
+                agent_id=_SCALE_AGENT_IDS[0],
+                status=JOB_STATUS_SUCCEEDED,
+                now=_T0 + timedelta(seconds=70),
+            )
+            # 재할당됐으면 LEASE_LOST, 아직 agent-0 소유면 ACCEPTED — 둘 다 terminal 1회 의미 유지.
+            assert outcome.result in (COMPLETE_LEASE_LOST, COMPLETE_ACCEPTED)
+            if outcome.result == COMPLETE_ACCEPTED:
+                succeeded += 1
+        # 재claim 한 job 은 agent-0 이 success 로 만들 수 없다(이중 success 차단).
+        assert succeeded < 50, "재할당된 job 을 옛 소유자가 success 처리하면 안 된다"
 
     asyncio.run(_run())

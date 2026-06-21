@@ -51,6 +51,7 @@ from rider_agent.heartbeat import (
     MIN_HEARTBEAT_INTERVAL_SECONDS,
     HeartbeatReporter,
     default_metrics,
+    jittered_interval,
 )
 from rider_agent.registration import (
     DEFAULT_SERVER_BASE_URL,
@@ -80,6 +81,15 @@ JOBS_OP_LABEL = "agent jobs"
 DEFAULT_SHORT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_COMPLETE_RETRY_ATTEMPTS = 3
 DEFAULT_COMPLETE_RETRY_DELAY_SECONDS = 1.0
+
+# claim 실패(network/5xx) 연속 시 지수 backoff 상한(초)·배수. 서버 복구 직후 모든 Agent 가
+# 같은 초에 몰리는 thundering herd 를 막는다. 401/revoke 는 backoff 대상이 아니라 재등록 surfacing.
+DEFAULT_CLAIM_BACKOFF_BASE_SECONDS = 5.0
+DEFAULT_CLAIM_BACKOFF_MAX_SECONDS = 60.0
+CLAIM_BACKOFF_MULTIPLIER = 2.0
+# per-Agent stable jitter 비율(0~이 값 사이의 결정적 오프셋을 대기에 더한다). random 미사용 —
+# agent_id 해시 기반이라 같은 Agent 는 항상 같은 jitter, Agent 간엔 서로 다르게 분산된다.
+DEFAULT_POLL_JITTER_RATIO = 0.2
 COMPLETE_REPORT_SENT = "sent"
 COMPLETE_REPORT_LEASE_LOST = "lease_lost"
 COMPLETE_REPORT_FAILED = "failed"
@@ -510,6 +520,9 @@ class JobRunner:
         on_status: Callable[[str], None] | None = None,
         log: Callable[[str], None] | None = None,
         complete_outbox_path: Any | None = None,
+        backoff_base_seconds: float = DEFAULT_CLAIM_BACKOFF_BASE_SECONDS,
+        backoff_max_seconds: float = DEFAULT_CLAIM_BACKOFF_MAX_SECONDS,
+        poll_jitter_ratio: float = DEFAULT_POLL_JITTER_RATIO,
     ) -> None:
         self.identity = identity
         self._transport = transport
@@ -525,6 +538,13 @@ class JobRunner:
         self._on_status = on_status
         self._log = log
         self._complete_outbox = CompleteOutbox(complete_outbox_path)
+        # claim 실패 backoff/jitter 상태. seed 는 agent_id(없으면 빈 문자열) — per-Agent 안정.
+        self._backoff_base = max(0.0, float(backoff_base_seconds))
+        self._backoff_max = max(self._backoff_base, float(backoff_max_seconds))
+        self._poll_jitter_ratio = max(0.0, float(poll_jitter_ratio))
+        self._jitter_seed = str(getattr(identity, "agent_id", "") or "")
+        #: 연속 claim 실패 횟수(성공/job 수신 시 0 으로 리셋). 다음 대기 backoff 산정에 쓴다.
+        self._consecutive_claim_failures = 0
         #: in-flight job(claim~complete 사이). heartbeat thread 가 동시 읽으므로 lock 보호.
         self._lock = threading.Lock()
         self._in_flight: dict[str, ClaimedJob] = {}
@@ -568,7 +588,26 @@ class JobRunner:
             if self._stop_event.is_set():
                 break
             # 매 주기 끝에 대기 — 어떤 분기에서도 즉시 재호출(무한 스핀)하지 않는다.
-            self._sleep_interruptible(self._short_poll_interval)
+            # 빈 큐는 short_poll + per-Agent jitter, 연속 claim 실패는 지수 backoff(+jitter).
+            self._sleep_interruptible(self._next_poll_delay())
+
+    def _next_poll_delay(self) -> float:
+        """다음 폴링 전 대기(초): 빈 큐는 short_poll, 연속 실패는 지수 backoff. 둘 다 jitter 가산.
+
+        per-Agent stable jitter 로 서버 복구 직후 여러 Agent 가 같은 초에 몰리는 thundering
+        herd 를 막는다(결정적 — random 미사용, agent_id seed 기반).
+        """
+
+        if self._consecutive_claim_failures > 0:
+            backoff = self._backoff_base * (
+                CLAIM_BACKOFF_MULTIPLIER ** (self._consecutive_claim_failures - 1)
+            )
+            base = min(self._backoff_max, backoff)
+        else:
+            base = self._short_poll_interval
+        return jittered_interval(
+            base, seed=self._jitter_seed, ratio=self._poll_jitter_ratio
+        )
 
     def run_once(self) -> None:
         """단발 주기: token 게이트 → claim → 각 job execute+complete. 어떤 예외도 흡수(best-effort)."""
@@ -597,13 +636,21 @@ class JobRunner:
             )
         except TransportError as exc:
             self._handle_transport_error(ERROR_JOB_CLAIM, "job claim failed", exc)
+            # 401/revoke 는 backoff 대상이 아니다(재등록 필요 — 폴링 backoff 로 숨기지 않는다).
+            # network/5xx 등 일시 실패만 연속 카운터를 올려 다음 대기에 지수 backoff 를 적용한다.
+            if exc.status_code == 401:
+                self._consecutive_claim_failures = 0
+            else:
+                self._consecutive_claim_failures += 1
             return
         except Exception as exc:  # noqa: BLE001 — best-effort: 어떤 예외도 thread 를 죽이지 않는다.
             self._record_error(ERROR_JOB_CLAIM, "job claim failed", exc)
+            self._consecutive_claim_failures += 1
             return
 
-        # claim 성공 → 정상 상태로 회복(이전 revoked 이후 재발급되면 valid 로 복귀).
+        # claim 성공 → 정상 상태로 회복(이전 revoked 이후 재발급되면 valid 로 복귀) + backoff 리셋.
         self._set_status(TOKEN_STATUS_VALID)
+        self._consecutive_claim_failures = 0
 
         # claim 한 전체 묶음을 heartbeat 에 노출해 serial 처리 대기 중인 lease 도 연장 입력에 포함한다.
         self._track_many(jobs)

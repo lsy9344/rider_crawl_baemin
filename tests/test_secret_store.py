@@ -143,6 +143,20 @@ def test_file_secret_store_requires_explicit_opt_in(tmp_path, monkeypatch):
     assert isinstance(opted_in, LocalFileSecretStore)
 
 
+def test_local_file_secret_store_restricts_file_permissions(tmp_path, monkeypatch):
+    path = tmp_path / "store.json"
+    calls = []
+
+    def _fake_restrict(written_path):
+        calls.append(written_path)
+
+    monkeypatch.setattr(secret_store, "_restrict_file_to_current_user", _fake_restrict)
+
+    LocalFileSecretStore(path).put("pw-fake", ref="r1")
+
+    assert calls == [path]
+
+
 def test_otp_is_not_stored_and_excluded_from_store_handled_fields():
     # GAP(AC2/Task1): OTP/2FA 코드는 **비저장** 분류이고, store가 영속하는 secret 필드 집합
     # (_SECRET_FIELDS)에 포함되지 않아야 한다(store는 token/password/login-id만 다룬다).

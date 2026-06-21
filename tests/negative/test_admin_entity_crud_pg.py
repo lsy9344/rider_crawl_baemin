@@ -98,13 +98,16 @@ def test_create_target_inserts_with_audit_same_tx() -> None:
                 tenant_id=_TENANT_A,
                 platform_account_id=_ACC_A,
                 name="대상",
-                center_name="",  # 쿠팡 빈 center → 위험 경고(차단 아님)
+                # 쿠팡 빈 center 는 차단(always-run test_create_coupang_blank_center_rejected)
+                # — INSERT same-tx 영속을 검증하려면 유효 center 로 통과시킨다.
+                center_name="쿠팡센터-강남",
                 at=_T0,
                 actor_id=_ACTOR,
             )
-            assert result.center_name_risky is True
+            assert result.center_name_risky is False
             stored = await repo.get_monitoring_target(new_id)
             assert stored is not None and stored.name == "대상"
+            assert stored.center_name == "쿠팡센터-강남"
         finally:
             await engine.dispose()
 

@@ -122,6 +122,8 @@ class CrawlWorker:
 
         raw_payload = _raw_payload(job)
         payload = payload_from_job(job)
+        if _plaintext_secret_keys(raw_payload):
+            return _plaintext_secret_failure(payload, cleanup=self._cleanup_profiles)
         if payload.timeout_seconds > 0:
             if self._should_use_process_boundary():
                 from rider_agent.workers.crawl_process import run_crawl_in_subprocess
@@ -215,14 +217,7 @@ class CrawlWorker:
         payload: CrawlJobPayload,
     ) -> JobResult:
         if _plaintext_secret_keys(raw_payload):
-            try:
-                return make_failure_result(
-                    ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
-                    "crawl job plaintext secrets are not allowed",
-                    result_json={"target_id": payload.target_id, "platform": payload.platform},
-                )
-            finally:
-                self._cleanup_profiles()
+            return _plaintext_secret_failure(payload, cleanup=self._cleanup_profiles)
         try:
             if payload.platform not in {"baemin", "coupang"}:
                 return make_failure_result(
@@ -624,6 +619,22 @@ def _auth_failure(payload: CrawlJobPayload, auth_state: str) -> JobResult:
             "auth_state": auth_state,
         },
     )
+
+
+def _plaintext_secret_failure(
+    payload: CrawlJobPayload,
+    *,
+    cleanup: Callable[[], None] | None = None,
+) -> JobResult:
+    try:
+        return make_failure_result(
+            ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
+            "crawl job plaintext secrets are not allowed",
+            result_json={"target_id": payload.target_id, "platform": payload.platform},
+        )
+    finally:
+        if cleanup is not None:
+            cleanup()
 
 
 def _display_name_mismatch(raw: Any, expected: str) -> bool:

@@ -28,7 +28,7 @@
    확인한다(additive 컬럼만인지, 테이블 수 14 유지인지).
 4. 스테이징/리허설 DB 에 `upgrade head` → 검증 → `downgrade` round-trip 을 먼저 통과시킨다.
 5. 운영에 `upgrade head` 적용. 실패 시 즉시 `downgrade <prev>` 또는 스냅샷 복원으로 롤백한다.
-6. 적용 후 head 리비전이 기대값(현재 `0019_profile_channel_uniqueness`)인지 확인한다.
+6. 적용 후 head 리비전이 기대값(현재 `0020_fleet_claim_scale`)인지 확인한다.
 
 ### 0015 delivery outbox legacy row 주의
 

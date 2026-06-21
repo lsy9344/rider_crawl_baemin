@@ -8,6 +8,7 @@ Postgres; the checks are static or use injected seams.
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from pathlib import Path
 
@@ -43,6 +44,40 @@ def test_server_dockerfile_installs_full_server_runtime_dependencies() -> None:
     assert "COPY migrations /app/migrations" in dockerfile
 
 
+def _requirement_key(spec: str) -> str:
+    """버전/extra 를 떼고 정규화한 패키지 이름(예: ``uvicorn[standard]>=0.30`` → ``uvicorn``)."""
+
+    # 버전 연산자 앞까지가 name(+optional [extra]); extra 와 버전 제약은 비교에서 제외한다.
+    name = re.split(r"[<>=!~ ]", spec.strip(), maxsplit=1)[0]
+    name = name.split("[", maxsplit=1)[0]
+    return name.strip().lower()
+
+
+def test_server_dockerfile_dependency_list_matches_pyproject_server_extra() -> None:
+    """Task 8-C: Dockerfile 의 pip install 목록이 pyproject ``server`` extra 와 정확히
+    일치(정본화). 한쪽에만 추가/누락된 server 의존성을 정적으로 차단한다."""
+
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    pyproject_server = {
+        _requirement_key(dep)
+        for dep in data["project"]["optional-dependencies"]["server"]
+    }
+
+    dockerfile = Path("deploy/Dockerfile.server").read_text(encoding="utf-8")
+    # ``RUN pip install ... \`` 블록의 따옴표로 감싼 각 의존성 문자열을 추출한다.
+    install_block = dockerfile[dockerfile.index("pip install") :]
+    install_block = install_block[: install_block.index("\n\n")]
+    dockerfile_deps = {
+        _requirement_key(match) for match in re.findall(r'"([^"]+)"', install_block)
+    }
+
+    assert dockerfile_deps == pyproject_server, (
+        "Dockerfile.server 의 pip install 목록과 pyproject server extra 가 어긋났습니다. "
+        f"Dockerfile-only={dockerfile_deps - pyproject_server}, "
+        f"pyproject-only={pyproject_server - dockerfile_deps}"
+    )
+
+
 def test_compose_defines_durable_db_and_migration_service() -> None:
     compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
 
@@ -62,11 +97,22 @@ def test_ci_validates_deployment_compose_and_server_image() -> None:
 
     assert "deployment-config:" in workflow
     assert "docker compose -f deploy/docker-compose.yml config" in workflow
-    assert "docker build -f deploy/Dockerfile.server ." in workflow
+    assert "docker build -f deploy/Dockerfile.server -t rider-server:ci ." in workflow
     assert "RIDER_POSTGRES_PASSWORD" in workflow
     assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in workflow
     assert "DEPLOYMENT_RESULT" in workflow
     assert "Deployment config" in workflow
+
+
+def test_ci_runs_backend_health_smoke_off_pr_path() -> None:
+    """Task 8-C: push/schedule 에서 backend /health smoke 가 돌고, fast PR 경로는 건너뛴다."""
+
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "Backend /health smoke" in workflow
+    assert "if: github.event_name != 'pull_request'" in workflow
+    assert "http://127.0.0.1:8000/health" in workflow
+    assert "docker run -d --name rider-health-smoke" in workflow
 
 
 def test_compose_backend_host_port_is_configurable() -> None:
@@ -234,12 +280,12 @@ def test_refactoring_review_report_is_marked_as_historical() -> None:
 
 def test_backup_runbook_documents_current_migration_head() -> None:
     runbook = Path("docs/runbooks/backup-restore.md").read_text(encoding="utf-8")
-    latest = Path("migrations/versions/0019_profile_channel_uniqueness.py").read_text(
+    latest = Path("migrations/versions/0020_fleet_claim_scale_hardening.py").read_text(
         encoding="utf-8"
     )
 
-    assert 'revision = "0019_profile_channel_uniqueness"' in latest
-    assert "0019_profile_channel_uniqueness" in runbook
+    assert 'revision = "0020_fleet_claim_scale"' in latest
+    assert "0020_fleet_claim_scale" in runbook
     assert "0005_audit_fields_and_agent_token_revoke" not in runbook
 
 

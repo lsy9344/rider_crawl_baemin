@@ -45,6 +45,7 @@ from rider_server.queue import (
 )
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
@@ -139,9 +140,17 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         error_code: str | None,
         duration_ms: int | None,
         result_schema_version: str | None,
+        completion_id: str | None = None,
+        completion_payload_hash: str | None = None,
         now: datetime,
     ) -> CompleteOutcome:
-        """Atomically complete a crawl job and persist its downstream records."""
+        """Atomically complete a crawl job and persist its downstream records.
+
+        completion_id/hash 멱등: outbox replay 나 client 재시도로 같은 completion_id 가 다시
+        오면 이미 terminal 인 job 을 LEASE_LOST/conflict 가 아니라 **이전 성공과 같은 ACCEPTED**
+        로 돌려준다(``postgres_queue.complete`` 와 동일 의미). 멱등 hit 면 Snapshot/Message/
+        dispatch 재삽입(결정적 PK 라 PK 충돌)을 건너뛴다.
+        """
 
         job_uuid = _uuid(record.job_id)
         agent_uuid = _uuid(agent_id)
@@ -156,6 +165,19 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 ).scalar_one_or_none()
                 if job is None:
                     return CompleteOutcome(COMPLETE_NOT_FOUND, record.job_id)
+                # 멱등 분기(다른 검사보다 먼저 — postgres_queue.complete 선례): 같은 completion_id
+                # 재시도면 동일 agent·동일 hash·terminal 일 때 이전 성공과 같은 ACCEPTED, 아니면
+                # LEASE_LOST(다른 payload/소유자). downstream 재삽입은 하지 않는다.
+                if completion_id and job.completion_id == completion_id:
+                    if (
+                        job.agent_id == agent_uuid
+                        and job.completion_payload_hash == completion_payload_hash
+                        and job.status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED)
+                    ):
+                        return CompleteOutcome(
+                            COMPLETE_ACCEPTED, record.job_id, final_status=job.status
+                        )
+                    return CompleteOutcome(COMPLETE_LEASE_LOST, record.job_id)
                 owner_mismatch = job.agent_id != agent_uuid
                 not_in_flight = job.status not in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
                 expired = job.lease_expires_at is None or now >= job.lease_expires_at
@@ -176,6 +198,8 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 job.result_schema_version = result_schema_version
                 job.last_failed_at = now if status != JOB_STATUS_SUCCEEDED else None
                 job.lease_expires_at = None
+                job.completion_id = completion_id
+                job.completion_payload_hash = completion_payload_hash
 
                 await session.execute(
                     insert(SnapshotRow).values(

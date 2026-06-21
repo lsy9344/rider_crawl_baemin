@@ -247,6 +247,35 @@ def test_coupang_job_plaintext_secret_fields_are_rejected() -> None:
     assert calls == []
 
 
+def test_default_process_boundary_rejects_plaintext_before_subprocess(monkeypatch) -> None:
+    def fail_subprocess(*args, **kwargs):
+        raise AssertionError("plaintext payload must not cross process boundary")
+
+    monkeypatch.setattr(
+        "rider_agent.workers.crawl_process.run_crawl_in_subprocess",
+        fail_subprocess,
+    )
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "password": "plain-login-password",
+        },
+    )
+
+    result = CrawlWorker().execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PLAINTEXT_SECRET_NOT_ALLOWED
+
+
 def test_coupang_unresolved_secret_ref_fails_before_crawl() -> None:
     calls: list[str | None] = []
 
@@ -744,3 +773,74 @@ def test_run_agent_passes_store_resolver_to_crawl_worker(tmp_path) -> None:
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
     assert config.verification_email_app_password == "mail-app-password"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# crawl_process: timeout 시 child Python 만이 아니라 Chrome 트리까지 종료(고아 방지)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_subprocess_timeout_kills_process_tree(monkeypatch) -> None:
+    import subprocess as _sp
+
+    import rider_agent.workers.crawl_process as cp
+
+    captured: dict = {}
+    tree_killed: list[int] = []
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.pid = 4321
+            self._alive = True
+
+        def wait(self, timeout=None):
+            # 첫 wait(타임아웃 대기)는 TimeoutExpired 로 timeout 분기 유발.
+            if self._alive:
+                self._alive = False
+                raise _sp.TimeoutExpired(cmd="crawl", timeout=timeout or 0)
+            return 0
+
+        def poll(self):
+            return None if self._alive else 0
+
+    def _fake_popen(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    def _fake_terminate(proc):
+        tree_killed.append(proc.pid)
+
+    monkeypatch.setattr(cp.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(cp, "_terminate_process_tree", _fake_terminate)
+
+    job = ClaimedJob(
+        job_id="job-1", type="CRAWL_BAEMIN", target_id="target-1",
+        lease_expires_at=None, payload={"timeout_seconds": 0},
+    )
+    cleanup_called: list[bool] = []
+    result = cp.run_crawl_in_subprocess(
+        job, timeout_seconds=0.01, target_id="target-1", platform="baemin",
+        cleanup=lambda: cleanup_called.append(True),
+    )
+
+    # child 는 자체 프로세스 그룹/세션으로 띄워져 트리 kill 이 가능해야 한다.
+    kwargs = captured["kwargs"]
+    assert ("creationflags" in kwargs) or kwargs.get("start_new_session") is True
+    # timeout 시 트리 종료가 호출되고 cleanup 도 돈다.
+    assert tree_killed == [4321]
+    assert cleanup_called == [True]
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_TIMEOUT
+
+
+def test_terminate_process_tree_is_best_effort_when_already_gone() -> None:
+    import rider_agent.workers.crawl_process as cp
+
+    class _DeadProc:
+        pid = 999
+
+        def poll(self):
+            return 0  # 이미 종료됨.
+
+    # 이미 죽은 proc 이면 아무 것도 하지 않고 조용히 반환(예외 없음).
+    cp._terminate_process_tree(_DeadProc())

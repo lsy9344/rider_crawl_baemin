@@ -111,11 +111,13 @@ async def _seed(session_factory) -> None:
         session.add(_msg("11111111-aaaa-1111-1111-111111111111", "51111111-1111-1111-1111-111111111111"))
         session.add(_msg("22222222-aaaa-2222-2222-222222222222", "52222222-2222-2222-2222-222222222222"))
         await session.flush()
-        def _dlog(did, mid, status, sent_at, error_code=None, dedup=""):
-            return DeliveryLog(id=uuid.UUID(did), message_id=uuid.UUID(mid), channel_id=uuid.UUID(_CHAN_A), status=status, dedup_key=dedup, error_code=error_code, sent_at=sent_at)
+        def _dlog(did, mid, status, sent_at, error_code=None, dedup="", last_failed_at=None):
+            return DeliveryLog(id=uuid.UUID(did), message_id=uuid.UUID(mid), channel_id=uuid.UUID(_CHAN_A), status=status, dedup_key=dedup, error_code=error_code, sent_at=sent_at, last_failed_at=last_failed_at)
         session.add(_dlog("d1111111-1111-1111-1111-111111111111", "11111111-aaaa-1111-1111-111111111111", "SENT", _T0 - timedelta(minutes=4), None, "k1"))
         session.add(_dlog("d2222222-2222-2222-2222-222222222222", "22222222-aaaa-2222-2222-222222222222", "SENT", _T0 - timedelta(minutes=2), None, "k2"))
-        session.add(_dlog("d3333333-3333-3333-3333-333333333333", "22222222-aaaa-2222-2222-222222222222", "FAILED", _T0 - timedelta(minutes=1), "TELEGRAM_FAILURE", "k3"))
+        # FAILED 행: 시도 시각(sent_at)과 실패 시각(last_failed_at)을 모두 둔다 —
+        # telegram error 윈도는 last_failed_at, 최신 실패 사유는 sent_at 으로 각각 집계된다.
+        session.add(_dlog("d3333333-3333-3333-3333-333333333333", "22222222-aaaa-2222-2222-222222222222", "FAILED", _T0 - timedelta(minutes=1), "TELEGRAM_FAILURE", "k3", last_failed_at=_T0 - timedelta(minutes=1)))
         # ── jobs: crawl FAILED(-6min) + 2 KAKAO_SEND PENDING(run_after -120s/-60s) ──
         session.add(Job(id=uuid.uuid4(), type="CRAWL_BAEMIN", target_id=uuid.UUID(_T1), status="FAILED", error_code="CRAWL_FAILURE", claimed_at=_T0 - timedelta(minutes=6), attempts=1))
         session.add(Job(id=uuid.uuid4(), type=JOB_TYPE_KAKAO_SEND, target_id=uuid.UUID(_T1), status="PENDING", run_after=_T0 - timedelta(seconds=120), attempts=0))
@@ -197,6 +199,25 @@ def test_target_health_is_tenant_isolated(pg_repo) -> None:
     assert _T1 in ids_a and _T2 in ids_a
     assert _T3 not in ids_a  # tenant B 누출 0
     assert all(f.tenant_id == _TENANT_A for f in facts_a)
+
+
+# ── (2b) critical 후보 — 성공 수집 이력 없는 fail-closed 대상 포함 ──────────────
+
+@_pg_gate
+def test_critical_candidates_include_failclosed_target_without_ok_snapshot(pg_repo) -> None:
+    # _T2 는 계정 AUTH_REQUIRED 인데 OK snapshot 이 한 번도 없다(성공 수집 이력 0).
+    # 옛 INNER JOIN 구현은 이 대상을 후보에서 통째로 제외해 page 밖 critical 을 놓쳤다.
+    candidates = asyncio.run(
+        pg_repo.critical_target_health(tenant_id=_TENANT_A, now=_T0, limit=25)
+    )
+    ids = {f.target_id for f in candidates}
+    assert _T2 in ids, "성공 수집 이력 없는 fail-closed 대상도 critical 후보여야 한다"
+    # NULL last_success_at(미수집)이 가장 오래된 후보로 맨 앞에 정렬된다.
+    assert candidates[0].target_id == _T2
+    assert candidates[0].last_success_at is None
+    # tenant 격리는 critical 경로에서도 유지된다.
+    assert all(f.tenant_id == _TENANT_A for f in candidates)
+    assert _T3 not in ids
 
 
 # ── (3) 채널 구분 — kakao lag / telegram error ─────────────────────────────────

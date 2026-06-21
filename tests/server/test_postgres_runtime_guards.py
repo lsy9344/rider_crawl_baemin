@@ -30,6 +30,30 @@ def test_scheduler_atomic_claim_enqueue_uses_one_postgres_transaction() -> None:
     assert "queue_backend.enqueue" not in body
 
 
+def test_scheduler_postgres_jobs_preserve_browser_profile_affinity() -> None:
+    source = _source("src/rider_server/scheduler/postgres_repository.py")
+    due_body = source[
+        source.index("async def due_targets") : source.index("async def tenant_gate")
+    ]
+    enqueue_body = source[
+        source.index("async def claim_due_target_and_enqueue") : source.index(
+            "async def release_due_target"
+        )
+    ]
+
+    assert "BrowserProfile.agent_id" in due_body
+    assert "assigned_agent_id=" in due_body
+    assert "assigned_agent_id=" in enqueue_body
+
+
+def test_admin_manual_enqueue_preserves_browser_profile_affinity() -> None:
+    source = _source("src/rider_server/services/admin_action_repository_postgres.py")
+    body = source[source.index("async def enqueue_manual_job") :]
+
+    assert "BrowserProfileRow.agent_id" in body
+    assert "assigned_agent_id=assigned_agent_id" in body
+
+
 def test_dashboard_target_health_requires_target_and_account_same_tenant() -> None:
     source = _source("src/rider_server/admin/dashboard_repository_postgres.py")
 
@@ -96,8 +120,10 @@ def test_dispatch_worker_claims_delivery_logs_with_skip_locked() -> None:
     assert "DeliveryLogRow.locked_at.is_(None)" in source
     assert "DeliveryLogRow.locked_at <= now - self._lock_timeout" in source
     assert "DeliveryLogRow.available_at" in source
-    assert "locked_at=update.locked_at" in source
-    assert "locked_by=update.locked_by" in source
+    # apply_update 본문은 SQLAlchemy update() 를 섀도잉하지 않도록 update_values 파라미터를 쓴다
+    # (옛 `update` 파라미터 이름은 `update(DeliveryLogRow)` 를 TypeError 로 깨뜨렸다).
+    assert "locked_at=update_values.locked_at" in source
+    assert "locked_by=update_values.locked_by" in source
 
 
 def test_default_snapshot_ingest_enqueues_telegram_as_worker_claimable() -> None:
