@@ -614,6 +614,28 @@ def test_coupang_fetch_target_page_content_does_not_open_new_tab_when_target_mis
     assert browser.contexts[0].new_page_calls == 0
 
 
+def test_coupang_fetch_target_page_content_skips_crashed_target_page(tmp_path):
+    # 크래시한 대상 탭은 재사용하지 않는다. 걸러진 뒤엔 (대상에 따라) 새 탭으로 복구하거나
+    # 조치 필요로 올리며, 어느 경우든 크래시한 탭의 내용은 절대 반환하지 않는다.
+    config = _config(tmp_path)
+    crashed = _FakePage(config.coupang_eats_url, html="<html>crashed</html>")
+    crashed.is_crashed = lambda: True
+    browser = _FakeBrowser([crashed], new_page_html="<html>fresh</html>")
+
+    try:
+        html = crawler._fetch_target_page_content(
+            browser, config, load_timeout_errors=(FakeTimeout,)
+        )
+    except BrowserActionRequiredError:
+        html = ""
+
+    assert "crashed" not in html
+
+
+def test_coupang_page_is_crashed_handles_missing_method():
+    assert crawler._page_is_crashed(object()) is False
+
+
 def test_coupang_fetch_target_page_content_does_not_open_new_tab_when_target_duplicated(tmp_path):
     config = _config(tmp_path)
     browser = _FakeBrowser(

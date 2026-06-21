@@ -45,6 +45,8 @@
 | `쿠팡이츠 대상 탭이 여러 개 열려 있습니다` | 같은 URL 중복 탭 | 중복 탭 하나만 남기기 |
 | `Chrome CDP 연결 실패` / `ECONNREFUSED` | 그 포트에 Chrome 미기동 | '준비하기'로 해당 포트 Chrome 실행 |
 | `세션이 만료되었습니다 / 다시 로그인` (xauth) | 진짜 로그인 만료 | 2FA 자동복구 또는 수동 로그인 |
+| `Page.goto: Page crashed` / `Target crashed` | Chromium 렌더러 크래시(메모리 압박 등) | 다음 회차 새 탭 자동 복구(인시던트 C, 수정됨) |
+| **로그가 어느 시각 이후 완전히 끊김**(에러도 성공도 없음) | 워커 스레드 사망 또는 행 | 인시던트 C 참고. 자동 재시작됨, 알림 확인 |
 
 ---
 
@@ -182,6 +184,59 @@
   - CDP로 "열린 탭 읽기"는 탭 상태에 의존하므로, **로그인된 컨텍스트가 있으면 임시 탭으로
     대상을 직접 여는 패턴**이 견고하다(주/보조 페이지 모두).
   - 실패 지점엔 "그 순간 무엇이 열려 있었는지"를 남기는 진단 로깅이 사후 추적에 결정적.
+
+---
+
+### 2026-06-21 — 크롤링1(배민) 08:59 이후 13시간 무인 정지
+
+- **증상**: 크롤링1이 오전 8시대 이후 카톡 전송이 끊김. 앱·다른 탭(크롤링2)은 정상.
+  `logs/run_errors.log`의 **마지막 항목이 08:59:05**이고 그 이후로 에러도 성공도 전무.
+  마지막 정상 전송 08:58:54(`runtime/state/crawling1/last_message.*.sha256` mtime / kakao_diagnostics).
+- **트레이스백 핵심(08:59:05, 마지막 줄)**
+  ```
+  crawler.py _open_baemin_delivery_history_page → _goto_page → page.goto(.../center/change)
+  playwright ... Error: Page.goto: Page crashed   (= Chromium 렌더러 크래시)
+  → RuntimeError: Chrome CDP 연결 또는 배민 달성현황 수집 실패
+  ```
+- **조사**
+  - 앱 프로세스(PID 15740)는 **장애 내내 06-17 기동 그대로**(오늘 재시작 안 됨), 9222 Chrome도 생존.
+    `/json`상 페이지는 저녁엔 `/delivery/report`로 정상 복구돼 있었음(크래시 후 Chrome이 탭을 재로드).
+  - "Page crashed"는 `except Exception`→`return False`→**5초 재시도**라야 하는데, 08:59:05 단 1건뿐.
+    5초마다 같은 에러가 안 쌓였다 = 다음 회차가 에러도 안 남기고 멈춤 → **워커 루프가 더 안 돈다.**
+  - 결정타: 같은 프로세스 안에서 ~22:08 수동 '시작'이 먹혀(`ui_settings.json` 저장 22:08, 재전송 22:18)
+    크롤링1이 부활. `start()`는 워커가 살아 있으면 `_has_live_workers`로 **거부**하므로, 시작이
+    먹혔다 = **옛 워커 스레드가 이미 죽어 있었다**는 직접 증거.
+- **원인**: 렌더러 크래시 직후 회차에서 `Exception`이 아닌 예외(`asyncio.CancelledError` 등
+  `BaseException`)가 `_run_once_background`의 `except Exception`과 `scheduler.run_loop`의 동기
+  `self.run_job()` 밖으로 전파되어 **데몬 워커 스레드를 traceback 없이 종료**시켰다. 워커가 죽으니
+  재시도·로그·전송이 전부 멈춤 → 무인 정지. 기여요인: 아침 내내 datastudio 달성현황 렌더가 느려
+  `MissingPerformanceDataError`가 반복되던 스트레스 상태 + 장시간 떠 있는 무거운 페이지 +
+  `eb39b7b`의 배달현황 다중 페이지(최대 20 goto/회차)로 같은 Chrome 부하 증가.
+- **조치 (코드 수정)**
+  1. **스케줄러 생존 가드** (`scheduler.py`): `run_loop`이 `run_job()`을 `try/except BaseException`으로
+     감싸 `KeyboardInterrupt`/`SystemExit`만 재발생, 그 외엔 흔적 남기고(실패 회차→재시도) 루프 유지.
+     `on_job_error` 훅 추가 → `ui._on_worker_job_error`가 `run_errors.log`에 한 줄.
+  2. **UI 핸들러 완전화** (`ui.py` `_run_once_background`): `except Exception` 뒤에 `except BaseException`
+     절(KeyboardInterrupt/SystemExit 재발생) → CancelledError 등도 로그+`False`. 이중 안전망.
+  3. **렌더러 크래시 복구** (`crawler.py`, `platforms/coupang/crawler.py`): `_page_is_crashed`로
+     `page.is_crashed()`인 탭을 선택 후보에서 제외 → 새 탭으로 자동 복구. `_is_page_crash`로
+     "Page crashed"를 CDP연결오류와 구분해 재시도 가능 RuntimeError로.
+  4. **실행 워치독** (`crawler.py`): 배민 async open+collect를 `asyncio.wait_for`(예산
+     `page_timeout_seconds/1000*2+30`)로 감싸 크래시 페이지의 무한 대기를 Runtimeable로 끊음.
+  5. **무인 정지 가시화 + 자동 재시작** (`ui.py`): `_poll_schedule`(전탭, 스케줄 무관)이 ①중지요청
+     없는데 워커 사망 시 `_handle_dead_worker`로 **최대 3회 자동 재시작**(초과 시 '수동 점검' 알림),
+     ②N주기(기본 3배, 최소 10분) 무전송 시 1회 침묵 알림. `last_success_by_tab`로 성공 추적.
+- **검증**: 전체 테스트 **502 passed**(신규 18: 스케줄러 BaseException 생존/훅/재발생, UI BaseException·
+  죽은워커 자동재시작·캡·침묵알림, crawler 크래시 페이지 스킵·워치독 타임아웃 매핑, 쿠팡 크래시 스킵).
+  운영 적용 시 §1.A에 따라 **앱 재시작 필요**(scheduler/ui/crawler 모두 in-process).
+- **교훈**:
+  - **로그가 특정 시각 이후 완전히 끊겼다(에러도 성공도 없다)** = 흔한 "자동 중지"와 다른 신호.
+    데몬 워커 스레드 사망/행을 의심하라. `_has_live_workers`가 죽은 워커를 살아있다 보지 않으므로
+    그 시점 이후 그 탭은 영영 안 돈다(과거엔 13시간).
+  - `except Exception`은 `asyncio.CancelledError` 같은 `BaseException`을 **안 잡는다.** 워커 루프의
+    최상단은 `except BaseException`으로 감싸 한 회차 예외가 스레드를 죽이지 못하게 해야 한다.
+  - in-process 모듈이 죽으면 앱은 멀쩡해 보여도 그 탭만 조용히 정지한다 — 탭별 "마지막 성공 시각"
+    하트비트/무전송 알림이 없으면 장시간 아무도 모른다.
 
 ---
 

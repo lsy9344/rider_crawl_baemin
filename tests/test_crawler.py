@@ -579,6 +579,82 @@ def test_open_baemin_delivery_history_page_skips_center_selection_when_change_pa
     assert page.goto_urls[-1] == crawler._baemin_report_url(config)
 
 
+def test_page_is_crashed_handles_missing_or_raising_method():
+    assert crawler._page_is_crashed(object()) is False
+
+    class _Boom:
+        def is_crashed(self):
+            raise RuntimeError("x")
+
+    assert crawler._page_is_crashed(_Boom()) is False
+
+    class _Crashed:
+        def is_crashed(self):
+            return True
+
+    assert crawler._page_is_crashed(_Crashed()) is True
+
+
+def test_is_page_crash_classifies_crash_messages():
+    assert crawler._is_page_crash(Exception("Page.goto: Page crashed")) is True
+    assert crawler._is_page_crash(Exception("Target crashed")) is True
+    assert crawler._is_page_crash(Exception("Target closed")) is True
+    assert crawler._is_page_crash(Exception("connect ECONNREFUSED 127.0.0.1:9222")) is False
+
+
+def test_open_baemin_delivery_history_page_skips_crashed_report_page(tmp_path, monkeypatch):
+    # 크래시한 달성현황 탭은 재사용하지 않고 새 탭을 열어 복구한다.
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="강남센터",
+        baemin_center_id="DP123",
+    )
+    crashed = _FakeCrashedNavigationPage(crawler._baemin_report_url(config))
+    browser = _FakeBrowser([crashed])
+
+    async def fake_select_baemin_center(_page, _config):
+        return None
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(TimeoutError=TimeoutError),
+    )
+    monkeypatch.setattr(crawler, "_select_baemin_center", fake_select_baemin_center)
+
+    opened_page = asyncio.run(crawler._open_baemin_delivery_history_page(browser, config))
+
+    assert opened_page is not crashed
+    assert opened_page in browser.contexts[0].new_pages
+
+
+def test_fetch_via_cdp_report_timeout_maps_to_retryable_runtime_error(tmp_path, monkeypatch):
+    # open+collect가 워치독 타임아웃(TimeoutError)으로 끊기면 CdpUnavailableError가 아니라
+    # RuntimeError로 변환돼 빠른 재시도 경로를 탄다(워커는 살아 있다).
+    config = _config(tmp_path, browser_mode="cdp")
+    browser = _FakeAsyncCdpBrowser()
+    playwright = _FakeAsyncPlaywright(browser)
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(TimeoutError=TimeoutError, async_playwright=lambda: playwright),
+    )
+
+    async def timing_out(_browser, _config):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(crawler, "_open_and_collect_baemin_report", timing_out)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        crawler.fetch_page_html_via_crawl4ai_cdp(config)
+
+    assert not isinstance(exc_info.value, crawler.CdpUnavailableError)
+
+
 def test_select_baemin_center_auto_selects_single_available_option(tmp_path):
     config = _config(
         tmp_path,
@@ -911,6 +987,13 @@ class _FakeBrowser:
 class _FakeContext:
     def __init__(self, pages: list[_FakePage]) -> None:
         self.pages = pages
+        self.new_pages: list[_FakeAsyncNavigationPage] = []
+
+    async def new_page(self):
+        page = _FakeAsyncNavigationPage("about:blank")
+        self.pages.append(page)
+        self.new_pages.append(page)
+        return page
 
 
 class _FakeAsyncPage:
@@ -937,6 +1020,11 @@ class _FakeAsyncNavigationPage:
 
     async def wait_for_load_state(self, *_args, **_kwargs):
         return None
+
+
+class _FakeCrashedNavigationPage(_FakeAsyncNavigationPage):
+    def is_crashed(self) -> bool:
+        return True
 
 
 class _FakeBaeminCenterSelectPage:

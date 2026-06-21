@@ -515,7 +515,9 @@ def _fetch_target_page_content(
     force_new_tab: bool = False,
 ) -> str:
     target_url = target_url or config.coupang_eats_url
-    pages = _browser_pages(browser)
+    # 크래시한 탭은 선택 후보에서 제외한다(URL이 남아 재사용될 수 있음). 매치가 없으면
+    # 아래 복구/새 탭 경로로 자동 복구한다.
+    pages = [page for page in _browser_pages(browser) if not _page_is_crashed(page)]
     if force_new_tab:
         opened = _open_target_in_new_tab(
             browser,
