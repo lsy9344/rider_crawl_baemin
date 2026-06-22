@@ -128,6 +128,9 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "ssh-keyscan" not in workflow
     assert "git checkout -B main -f FETCH_HEAD" in workflow
     assert "docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans" in workflow
+    assert "for i in $(seq 1 60)" in workflow
+    assert "production health ok after ${i}s" in workflow
+    assert "logs --tail=80 backend-api" in workflow
     assert "curl -fsS http://127.0.0.1:8000/health" in workflow
     assert "Production deploy" in workflow
 

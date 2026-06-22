@@ -222,7 +222,16 @@ jobs:
           set +a
           docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans
           docker compose -p rider -f deploy/docker-compose.yml ps
-          curl -fsS http://127.0.0.1:8000/health
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo "production health ok after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -p rider -f deploy/docker-compose.yml ps
+          docker compose -p rider -f deploy/docker-compose.yml logs --tail=80 backend-api
+          exit 1
 
   ci-summary:
     name: CI summary
