@@ -378,7 +378,7 @@
         <span class="count" id="t-count">{{ tg_total }} / {{ tg_total }}곳</span>
       </div>
       <div class="target-notice" id="target-notice" role="status" aria-live="polite" hidden></div>
-      <div id="targets" hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-entity-changed from:body, every 30s" hx-swap="innerHTML swap:0.15s">
+      <div id="targets" hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">
         {% include "_targets.html" %}
       </div>
       <div class="filter-empty" id="filter-empty">조건에 맞는 업체가 없습니다: 필터를 조정하세요. <button class="btn" onclick="resetFilters()">필터 초기화</button></div>
@@ -660,3 +660,4 @@
   </script>
 </body>
 </html>
+
