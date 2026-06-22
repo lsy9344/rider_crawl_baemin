@@ -34,6 +34,8 @@ from rider_server.main import create_app
 from rider_server.queue.memory_queue import InMemoryQueueBackend
 from rider_server.queue.states import (
     InvalidJobTransition,
+    JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_SUCCEEDED,
@@ -882,12 +884,40 @@ def test_route_auth_start_triggers_coupang_open_auth_browser() -> None:
             verification_email_app_password="mail-app-password-ref",
         )
     )
-    client = TestClient(_app_with(repo))
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
 
     resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
 
     assert resp.status_code == HTTPStatus.OK
     assert "인증 시작" in resp.text
+    assert (
+        _run(
+            queue.claim(
+                agent_id="agent-crawl-only",
+                capabilities=[JOB_TYPE_CRAWL_COUPANG],
+                max_jobs=1,
+                lease_seconds=60,
+                now=_NOW,
+            )
+        )
+        == []
+    )
+    claimed = _run(
+        queue.claim(
+            agent_id="agent-auth",
+            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            max_jobs=1,
+            lease_seconds=60,
+            now=_NOW,
+        )
+    )
+    assert len(claimed) == 1
+    assert claimed[0].type == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert claimed[0].payload_json["job_type"] == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert claimed[0].payload_json["platform"] == "coupang"
+    assert claimed[0].payload_json["coupang_auto_email_2fa_enabled"] is True
+    assert claimed[0].payload_json["verification_email_address_ref"] == "mailbox-ref"
 
 
 def test_route_auth_start_missing_credentials_is_400() -> None:

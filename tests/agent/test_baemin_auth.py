@@ -28,6 +28,8 @@ from rider_agent.auth.baemin_auth import (
     AUTH_STATE_BLOCKED_OR_CAPTCHA,
     AUTH_STATE_UNKNOWN,
     DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_MAX_WAIT_SECONDS,
+    DEFAULT_POLL_INTERVAL_SECONDS,
     ERROR_AUTH_REQUIRED,
     REASON_AUTH_TIMEOUT,
     build_auth_execute_job,
@@ -262,19 +264,157 @@ def test_open_auth_browser_accepts_auth_only_open_success_without_probe():
     assert detect_calls == []
 
 
-def test_default_detect_completion_coupang_does_not_probe_with_crawl(monkeypatch):
+def test_default_detect_completion_coupang_returns_true_for_ready_target_without_crawl(monkeypatch):
+    from types import SimpleNamespace
+
     crawl_calls = []
     monkeypatch.setattr(
         "rider_agent.reuse.crawl_snapshot",
         lambda *args, **kwargs: crawl_calls.append((args, kwargs)),
     )
+    waits = []
+
+    class FakeText:
+        def wait_for(self, timeout=None):
+            waits.append(timeout)
+
+    class FakePage:
+        url = "https://partner.coupangeats.com/page/peak-dashboard"
+
+        def content(self):
+            return "<html>피크타임별 현황</html>"
+
+        def get_by_text(self, text):
+            assert text == "피크타임별 현황"
+            return FakeText()
+
+        def goto(self, *_args, **_kwargs):
+            raise AssertionError("already-ready target should not navigate")
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            raise AssertionError("already-ready target should not wait for navigation")
+
+    class FakeContext:
+        pages = [FakePage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
 
     completed = default_detect_completion(
-        _auth_job(type=CAPABILITY_OPEN_AUTH_BROWSER, payload={"platform": "coupang"})
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                "expected_display_name": "쿠팡상점A",
+            },
+        )
+    )
+
+    assert completed is True
+    assert waits == [60_000]
+    assert crawl_calls == []
+
+
+def test_default_detect_completion_coupang_returns_false_for_login_required_page(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakePage:
+        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
+
+        def content(self):
+            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
+
+    class FakeContext:
+        pages = [FakePage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+            },
+        )
     )
 
     assert completed is False
-    assert crawl_calls == []
+
+
+def test_default_detect_completion_coupang_rejects_unsupported_target_path(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakePage:
+        url = "https://partner.coupangeats.com/page/unknown-dashboard"
+
+        def content(self):
+            return "<html>partner page</html>"
+
+        def get_by_text(self, _text):
+            raise AssertionError("unsupported path should not be treated as ready")
+
+    class FakeContext:
+        pages = [FakePage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/unknown-dashboard",
+            },
+        )
+    )
+
+    assert completed is False
 
 
 def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
@@ -633,6 +773,147 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
     assert not any(action[0] == "crawl_snapshot" for action in actions)
 
 
+def test_default_open_auth_browser_coupang_recovery_requires_ready_target(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeText:
+        def wait_for(self, timeout=None):
+            raise RuntimeError("target not ready")
+
+    class FakePage:
+        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
+
+        def content(self):
+            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def get_by_text(self, _text):
+            return FakeText()
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+    browser = FakeBrowser(page)
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda page_arg, config: True,
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(browser),
+    )
+
+    result = default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                "expected_display_name": "쿠팡상점A",
+                "coupang_login_id_ref": "coupang-login-id",
+                "coupang_login_password_ref": "coupang-login-password",
+                "verification_email_address_ref": "mailbox-ref",
+                "verification_email_app_password_ref": "mail-app-password-ref",
+                "coupang_auto_email_2fa_enabled": True,
+            },
+        )
+    )
+
+    assert result is False
+
+
+def test_default_open_auth_browser_coupang_recovery_rejects_unsupported_target_path(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakePage:
+        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
+
+        def content(self):
+            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def get_by_text(self, _text):
+            raise AssertionError("unsupported path should not be treated as ready")
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda page_arg, config: True,
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(FakeBrowser(page)),
+    )
+
+    result = default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/unknown-dashboard",
+                "expected_display_name": "쿠팡상점A",
+                "coupang_login_id_ref": "coupang-login-id",
+                "coupang_login_password_ref": "coupang-login-password",
+                "verification_email_address_ref": "mailbox-ref",
+                "verification_email_app_password_ref": "mail-app-password-ref",
+                "coupang_auto_email_2fa_enabled": True,
+            },
+        )
+    )
+
+    assert result is False
+
+
 def test_default_open_auth_browser_coupang_reuses_existing_login_tab(monkeypatch):
     from types import SimpleNamespace
 
@@ -646,6 +927,7 @@ def test_default_open_auth_browser_coupang_reuses_existing_login_tab(monkeypatch
             return self.html
 
         def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
             self.gotos.append((url, wait_until, timeout))
 
         def wait_for_load_state(self, *_args, **_kwargs):
@@ -653,6 +935,17 @@ def test_default_open_auth_browser_coupang_reuses_existing_login_tab(monkeypatch
 
         def wait_for_timeout(self, _timeout):
             return None
+
+        def get_by_text(self, _text):
+            page = self
+
+            class FakeText:
+                def wait_for(self, timeout=None):
+                    if "partner.coupangeats.com" not in page.url:
+                        raise RuntimeError("target not ready")
+                    return None
+
+            return FakeText()
 
     class FakeContext:
         def __init__(self, pages):
@@ -917,6 +1210,31 @@ def test_open_auth_browser_default_bounds_are_finite():
     # 운영 기본 상한이 유한(무한 재시도 금지 모듈 상수)임을 잠근다.
     assert DEFAULT_MAX_ATTEMPTS >= 1
     assert DEFAULT_MAX_ATTEMPTS < 1000
+
+
+def test_open_auth_browser_default_bounds_cover_email_2fa_wait_window():
+    assert DEFAULT_MAX_WAIT_SECONDS >= 180.0
+    assert DEFAULT_POLL_INTERVAL_SECONDS == 5.0
+    assert DEFAULT_MAX_ATTEMPTS >= int(DEFAULT_MAX_WAIT_SECONDS / DEFAULT_POLL_INTERVAL_SECONDS) + 1
+
+
+def test_open_auth_browser_timeout_result_includes_safe_detection_diagnostics():
+    result = execute_open_auth_browser_job(
+        _auth_job(type=CAPABILITY_OPEN_AUTH_BROWSER),
+        open_auth_browser=lambda j: None,
+        detect_completion=lambda j: False,
+        now=lambda: 0.0,
+        sleep=lambda s: None,
+        max_attempts=2,
+        max_wait_seconds=1e9,
+        poll_interval_seconds=5.0,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.result_json["reason"] == REASON_AUTH_TIMEOUT
+    assert result.result_json["first_incomplete_stage"] == "open_auth_browser"
+    assert result.result_json["last_detect_state"] == "not_completed"
+    assert result.result_json["detect_attempts"] == 2
 
 
 # ══════════════════════════════════════════════════════════════════════════

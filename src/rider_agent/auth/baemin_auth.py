@@ -95,7 +95,7 @@ SEVERITY_WARNING = "warning"
 # [Source: src/rider_agent/browser_profile.py(71-73·345-392)]
 DEFAULT_MAX_WAIT_SECONDS = 180.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = int(DEFAULT_MAX_WAIT_SECONDS / DEFAULT_POLL_INTERVAL_SECONDS) + 1
 _INTERACTION_TIMEOUT_MS = 10_000
 
 _USERNAME_INPUT_SELECTORS = (
@@ -252,10 +252,66 @@ def default_detect_completion(
 
     platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
     if platform == "coupang":
-        return False
+        return _detect_coupang_completion(job, secret_resolver=secret_resolver)
     if secret_resolver is None:
         return default_login_probe(job) == AUTH_STATE_ACTIVE
     return default_login_probe(job, secret_resolver=secret_resolver) == AUTH_STATE_ACTIVE
+
+
+def _detect_coupang_completion(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> bool:
+    from rider_crawl.platforms.coupang import crawler as coupang_crawler
+
+    try:
+        config = _config_from_auth_job(job, secret_resolver=secret_resolver)
+        target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+        with _sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+            timeout_errors = _playwright_timeout_errors()
+            pages = coupang_crawler._browser_pages(browser)
+            if coupang_crawler._login_required_page(pages) is not None:
+                return False
+            if target_url and not _coupang_target_url_has_readiness_signal(target_url):
+                return False
+
+            page = coupang_crawler._select_page_by_url(pages, target_url) if target_url else None
+            if page is not None and target_url:
+                try:
+                    coupang_crawler._wait_for_target_page_ready(
+                        page,
+                        config,
+                        target_url=target_url,
+                        timeout_errors=timeout_errors,
+                    )
+                    return True
+                except BrowserActionRequiredError:
+                    return False
+                except Exception:
+                    return False
+
+            return _has_coupang_partner_session(pages)
+    except Exception:
+        return False
+
+
+def _has_coupang_partner_session(pages: list[Any]) -> bool:
+    from urllib.parse import urlsplit
+
+    for page in pages:
+        host = (urlsplit(str(getattr(page, "url", ""))).hostname or "").casefold()
+        if host == "partner.coupangeats.com":
+            return True
+    return False
+
+
+def _coupang_target_url_has_readiness_signal(target_url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    path = (urlsplit(str(target_url or "")).path or "").rstrip("/") or "/"
+    return path.casefold() in {"/page/peak-dashboard", "/page/rider-performance"}
 
 
 def _drive_baemin_login_flow(config: Any) -> None:
@@ -331,7 +387,7 @@ def _drive_coupang_email_2fa_flow(config: Any) -> bool:
                 pass
 
         try:
-            if target_url:
+            if target_url and _coupang_target_url_has_readiness_signal(target_url):
                 coupang_crawler._wait_for_target_page_ready(
                     page,
                     config,
@@ -349,13 +405,27 @@ def _drive_coupang_email_2fa_flow(config: Any) -> bool:
         except Exception:
             recovered = False
         if recovered and target_url:
+            if not _coupang_target_url_has_readiness_signal(target_url):
+                return False
             coupang_crawler._reload_target_page(
                 page,
                 config,
                 target_url=target_url,
                 load_timeout_errors=timeout_errors,
             )
-        return bool(recovered)
+            try:
+                coupang_crawler._wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=target_url,
+                    timeout_errors=timeout_errors,
+                )
+                return True
+            except BrowserActionRequiredError:
+                return False
+            except Exception:
+                return False
+        return False
 
 
 def _first_browser_page(browser: Any) -> Any | None:
@@ -595,6 +665,8 @@ def execute_open_auth_browser_job(
                 "auth_state": AUTH_STATE_AUTH_VERIFIED,
             }
         )
+    first_incomplete_stage = "open_auth_browser"
+    last_detect_state = "not_started"
 
     # (b) bounded polling — 주입 now/sleep + 상한(attempts·wall-clock). 무한 대기 0.
     start = now()
@@ -602,6 +674,7 @@ def execute_open_auth_browser_job(
     while True:
         attempts += 1
         if detect_completion(job):
+            last_detect_state = "completed"
             # (c) 사람-완료 감지 → AUTH_VERIFIED 로 작업 재개 신호를 표면화한다.
             if log is not None:
                 log(redact(f"auth verified by human (target {target_id})"))
@@ -611,6 +684,7 @@ def execute_open_auth_browser_job(
                     "auth_state": AUTH_STATE_AUTH_VERIFIED,
                 }
             )
+        last_detect_state = "not_completed"
         # 상한 점검(다음 polling 전) — attempts 우선(cheap), 그다음 wall-clock.
         if attempts >= max_attempts:
             break
@@ -628,6 +702,9 @@ def execute_open_auth_browser_job(
             "target_id": target_id,
             "auth_state": AUTH_STATE_AUTH_REQUIRED,
             "reason": REASON_AUTH_TIMEOUT,
+            "first_incomplete_stage": first_incomplete_stage,
+            "last_detect_state": last_detect_state,
+            "detect_attempts": attempts,
         },
         metrics={"auth_reason": REASON_AUTH_TIMEOUT},
     )
