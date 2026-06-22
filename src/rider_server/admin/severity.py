@@ -36,6 +36,12 @@ SEVERITY_TARGET_VALIDATION_FAILURE = "TARGET_VALIDATION_FAILURE"
 SEVERITY_KAKAO_MISDELIVERY_RISK = "KAKAO_MISDELIVERY_RISK"
 SEVERITY_OPERATOR_STOPPED = "OPERATOR_STOPPED"
 
+#: 인증이 "정상"으로 확인된 auth_state 집합. stale AUTH_REQUIRED 실패 코드보다 우선해
+#: fail-closed 인증 신호를 끈다. UNKNOWN 은 중립(미판정)이라 제외한다.
+HEALTHY_AUTH_STATES: frozenset[str] = frozenset(
+    {BaeminAuthState.ACTIVE.value, BaeminAuthState.AUTH_VERIFIED.value}
+)
+
 #: 정본 심각도 4종(낮음→높음 순). tuple 로 두어 우발적 변이를 막는다.
 SEVERITIES: tuple[str, ...] = (
     SEVERITY_NORMAL,
@@ -124,6 +130,8 @@ def failclosed_signals_from(
     lifecycle_state: str | None,
     latest_failure_code: str | None,
     auth_session_pending: bool = False,
+    last_success_at: datetime | None = None,
+    latest_failure_at: datetime | None = None,
 ) -> FailClosedSignals:
     """정본 어휘(:class:`BaeminAuthState`/:class:`CustomerLifecycleState`/:class:`FailureCategory`)
     를 fail-closed 신호로 매핑한다(순수·결정적, AC3).
@@ -137,20 +145,42 @@ def failclosed_signals_from(
 
     "어떤 enum 값이 중지를 뜻하는가"라는 정책 지식을 순수 함수 한곳에 모아 always-run 으로
     잠근다(타입별 동명 멤버 ``AUTH_REQUIRED`` 혼동 방지 — 여기선 **문자열 값**으로만 비교).
+
+    인증 후에도 묵은 실패 코드가 배지를 띄우는 회귀를 막는다(2026-06 수정):
+    - ``account_auth_state`` 가 :data:`HEALTHY_AUTH_STATES`(``ACTIVE``/``AUTH_VERIFIED``)면
+      **인증 필요 신호를 끈다** — 권위 있는 인증 상태가 묵은 ``error_code`` 보다 우선한다(실제
+      재실패 시 에이전트가 다시 ``AUTH_REQUIRED`` 로 뒤집으므로 현재 실패를 숨기지 않는다).
+    - 최신 실패 시각이 마지막 성공 시각보다 과거(``<=``)면 **stale** 로 보고 실패-코드 신호를
+      끈다. 시각이 하나라도 없으면 stale 로 보지 않는다(보수적 — 실제 실패를 숨기지 않음).
     """
 
-    auth_required = (
+    auth_verified = account_auth_state in HEALTHY_AUTH_STATES
+    # 최신 실패가 마지막 성공보다 과거(<=)면 stale — 더 최근 성공이 덮었다고 본다.
+    failure_is_stale = (
+        last_success_at is not None
+        and latest_failure_at is not None
+        and latest_failure_at <= last_success_at
+    )
+    failure_code_active = None if failure_is_stale else latest_failure_code
+
+    # 계정 인증이 정상(ACTIVE/AUTH_VERIFIED)이면 **계정 유래** 인증필요 신호(계정 상태·실패
+    # 코드)만 끈다. tenant lifecycle 의 AUTH_REQUIRED 와 진행 중 auth_session 은 계정 인증과
+    # 독립한 신호라 그대로 둔다(거짓 음성 방지).
+    account_auth_required = not auth_verified and (
         account_auth_state == BaeminAuthState.AUTH_REQUIRED.value
+        or failure_code_active == FailureCategory.AUTH_REQUIRED.value
+    )
+    auth_required = (
+        account_auth_required
         or lifecycle_state == CustomerLifecycleState.AUTH_REQUIRED.value
-        or latest_failure_code == FailureCategory.AUTH_REQUIRED.value
         or auth_session_pending
     )
     target_validation_failed = (
         account_auth_state == BaeminAuthState.CENTER_MISMATCH.value
-        or latest_failure_code == FailureCategory.TARGET_VALIDATION_FAILURE.value
+        or failure_code_active == FailureCategory.TARGET_VALIDATION_FAILURE.value
     )
     kakao_misdelivery_risk = (
-        latest_failure_code == FailureCategory.KAKAO_FAILURE.value
+        failure_code_active == FailureCategory.KAKAO_FAILURE.value
     )
     return FailClosedSignals(
         auth_required=auth_required,

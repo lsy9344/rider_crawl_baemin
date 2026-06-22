@@ -530,7 +530,7 @@
       rows.forEach(function (r) {
         var okSev = FIL.sev === "all" || r.dataset.severityClass === FIL.sev;
         var okPlat = plats.length === 0 || FIL.plats[r.dataset.platform];
-        var okAuth = !FIL.authOnly || r.dataset.severity === "AUTH_REQUIRED" || r.dataset.failcode === "AUTH_REQUIRED";
+        var okAuth = !FIL.authOnly || r.dataset.severity === "AUTH_REQUIRED";
         var okQ = !q || (r.dataset.name + " " + r.dataset.center).toLowerCase().indexOf(q) !== -1;
         var vis = okSev && okPlat && okAuth && okQ;
         r.style.display = vis ? "" : "none"; if (vis) shown++;

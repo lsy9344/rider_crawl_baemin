@@ -79,6 +79,7 @@ def _target(
     interval_minutes: int = 10,
     last_success_at: datetime | None = None,
     last_failure_code: str | None = None,
+    last_failure_at: datetime | None = None,
     account_auth_state: str | None = "ACTIVE",
     lifecycle_state: str | None = "ACTIVE",
 ) -> TargetHealthFacts:
@@ -92,6 +93,7 @@ def _target(
         last_success_at=last_success_at,
         last_delivery_at=None,
         last_failure_code=last_failure_code,
+        last_failure_at=last_failure_at,
         account_auth_state=account_auth_state,
         lifecycle_state=lifecycle_state,
     )
@@ -785,6 +787,8 @@ def test_profile_unavailable_reason_is_operator_readable() -> None:
 
 
 def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
+    # 실파이프라인이 현재 인증실패에 내는 값은 SEVERITY_AUTH_REQUIRED(STOPPED+묵은 코드 아님).
+    # 배지 구동은 severity 단일 소스이므로 fixture 도 그 값을 쓴다(2026-06).
     row = TargetRow(
         target_id="t-auth",
         tenant_id=_TENANT,
@@ -795,7 +799,7 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
         last_success_at=None,
         last_delivery_at=None,
         last_failure_code="AUTH_REQUIRED",
-        severity=SEVERITY_STOPPED,
+        severity=SEVERITY_AUTH_REQUIRED,
     )
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
@@ -824,6 +828,68 @@ def test_dashboard_counts_display_failclosed_states_as_action_required_work() ->
     assert '<span class="n">1</span><span class="lbl">중지</span>' not in body
     assert 'data-primary-action="auth-start"' in body
     assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
+
+
+# ── 인증 완료 후 묵은 AUTH_REQUIRED 실패가 배지를 띄우지 않음(2026-06 회귀) ─────────
+
+def test_auth_verified_with_stale_failure_renders_normal_not_auth_required() -> None:
+    # 인증 완료(AUTH_VERIFIED) + 마지막 성공보다 과거의 AUTH_REQUIRED 실패 → 정상으로 표시.
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-verified",
+            last_success_at=_NOW - timedelta(minutes=1),
+            last_failure_code="AUTH_REQUIRED",
+            last_failure_at=_NOW - timedelta(minutes=30),
+            account_auth_state="AUTH_VERIFIED",
+        )
+    )
+    rows = asyncio.run(
+        DashboardService().target_rows(repo, tenant_id=_TENANT, now=_NOW)
+    )
+    assert rows[0].severity == SEVERITY_NORMAL
+
+
+def test_auth_verified_with_stale_failure_hides_auth_badge_in_dashboard() -> None:
+    # 라우트는 실서버 now 를 쓰므로 최근 성공으로 보이도록 실시간 기준 시각을 쓴다(배지 부재만
+    # 단언 — 작은 시계 오차에 견고). 인증 후 정상 상태 시나리오를 엔드투엔드로 잠근다.
+    real_now = datetime.now(timezone.utc)
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-verified",
+            last_success_at=real_now - timedelta(minutes=1),
+            last_failure_code="AUTH_REQUIRED",
+            last_failure_at=real_now - timedelta(minutes=30),
+            account_auth_state="AUTH_VERIFIED",
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert "로그인 만료 · 인증 확인 필요" not in body
+    assert 'data-primary-action="auth-start"' not in body
+
+
+def test_template_normal_severity_with_stale_failure_code_shows_no_auth_badge() -> None:
+    # 템플릿 단독 락(Edit5) — severity 가 NORMAL 이면 묵은 last_failure_code 가 있어도 배지 없음.
+    row = TargetRow(
+        target_id="t-verified",
+        tenant_id=_TENANT,
+        name="가게",
+        center_name="센터",
+        platform="BAEMIN",
+        interval_minutes=10,
+        last_success_at=_NOW - timedelta(minutes=1),
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        severity=SEVERITY_NORMAL,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert "로그인 만료 · 인증 확인 필요" not in html
+    assert 'data-primary-action="auth-start"' not in html
 
 
 def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -> None:

@@ -51,6 +51,7 @@ class TargetHealthFacts:
     lifecycle_state: str | None  # tenants.status(CustomerLifecycleState 값)
     customer_name: str = ""
     auth_session_pending: bool = False  # auth_sessions 인증대기 행 존재
+    last_failure_at: datetime | None = None  # 위 last_failure_code 의 발생 시각(stale 판정용)
 
 
 @dataclass(frozen=True)
@@ -245,6 +246,8 @@ class DashboardService:
             lifecycle_state=facts.lifecycle_state,
             latest_failure_code=facts.last_failure_code,
             auth_session_pending=facts.auth_session_pending,
+            last_success_at=facts.last_success_at,
+            latest_failure_at=facts.last_failure_at,
         )
         overall = severity.overall_severity(
             freshness, severity.classify_failclosed(signals)

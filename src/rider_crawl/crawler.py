@@ -7,7 +7,11 @@ import re
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
+from .browser_launcher import (
+    BrowserActionRequiredError,
+    CdpUnavailableError,
+    ensure_local_cdp_address,
+)
 from .config import (
     DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
     DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
@@ -291,7 +295,9 @@ def fetch_page_html_via_crawl4ai_cdp(config: AppConfig) -> str:
             "playwright가 설치되어 있지 않습니다.\n"
             "pip install -e . 실행 후 다시 확인하세요."
         ) from exc
-    except CdpUnavailableError:
+    except (CdpUnavailableError, BrowserActionRequiredError):
+        # 로그인 필요(BrowserActionRequiredError)는 일시 로딩 실패가 아니므로 RuntimeError 로
+        # 뭉개지 말고 그대로 올려 크롤 워커가 AUTH_REQUIRED 로 분류하게 한다.
         raise
     except Exception as exc:
         # Chrome이 CDP 포트에 안 떠 있어 connect_over_cdp가 거부되면(ECONNREFUSED 등),
@@ -369,6 +375,9 @@ async def _ensure_baemin_center_selected_via_cdp(config: AppConfig) -> None:
         if page is None:
             page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
         if page is None:
+            # 로그인된 배민 탭이 없으면 새 로그인 탭을 열지 않고 멈춘다(난입 차단, 인증 필요).
+            if not _baemin_has_logged_in_page(pages):
+                raise BrowserActionRequiredError(_baemin_login_required_message())
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
 
@@ -397,6 +406,11 @@ async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) ->
     if page is None:
         page = _select_page_by_url(pages, _BAEMIN_CENTER_CHANGE_URL)
     if page is None:
+        # 재사용할 배민 운영 화면이 없다 — 로그인 안 된 상태에서 새 탭을 열고 report_url 로
+        # 이동하면 매 주기(~5초)마다 '배민 로그인 사이트' 탭만 쌓인다(쿠팡 전용 고객엔 난입).
+        # 로그인된 배민 탭이 하나도 없으면 새 탭을 열지 않고 fail-closed 로 멈춘다(인증 필요).
+        if not _baemin_has_logged_in_page(pages):
+            raise BrowserActionRequiredError(_baemin_login_required_message())
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
         page = await context.new_page()
 
@@ -956,6 +970,30 @@ def _browser_pages(browser: Any) -> list[Any]:
     for context in browser.contexts:
         pages.extend(context.pages)
     return pages
+
+
+#: 로그인된 배민 운영 화면은 모두 이 호스트에 있다(달성/배달현황·센터변경). 로그아웃 시
+#: 배민은 별도 로그인/회원 호스트로 redirect 하므로, 이 호스트의 페이지가 하나도 없으면
+#: "로그인 필요"로 본다.
+_BAEMIN_LOGGED_IN_HOST = "deliverycenter.baemin.com"
+
+
+def _baemin_has_logged_in_page(pages: Iterable[Any]) -> bool:
+    """열린 탭 중 로그인된 배민 운영 화면(deliverycenter 호스트)이 하나라도 있으면 True."""
+
+    for page in pages:
+        host = urlsplit(str(getattr(page, "url", ""))).netloc.casefold()
+        if host == _BAEMIN_LOGGED_IN_HOST:
+            return True
+    return False
+
+
+def _baemin_login_required_message() -> str:
+    return (
+        "배민 로그인이 만료되었거나 로그인 화면으로 이동했습니다.\n"
+        "'인증 시작'으로 배민 달성현황 페이지에 로그인해 두세요. "
+        "스케줄러는 로그인 탭을 자동으로 새로 열지 않고 멈춥니다."
+    )
 
 
 def _fetch_target_page_content(

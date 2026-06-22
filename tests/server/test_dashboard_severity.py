@@ -93,12 +93,16 @@ def test_signals_auth_required_from_account_auth_state() -> None:
 
 
 def test_signals_auth_required_from_lifecycle_and_failure_and_session() -> None:
+    # lifecycle 의 AUTH_REQUIRED 는 계정 인증과 독립 → ACTIVE 계정이어도 인증필요.
     assert failclosed_signals_from(
         account_auth_state="ACTIVE", lifecycle_state="AUTH_REQUIRED", latest_failure_code=None
     ).auth_required
+    # 실패 코드 유래 인증필요는 계정 인증이 "정상"이 아닐 때(UNKNOWN 등)만 유효(ACTIVE/
+    # AUTH_VERIFIED 면 권위 있는 정상 신호가 stale 코드를 덮는다 — 별도 테스트로 잠금).
     assert failclosed_signals_from(
-        account_auth_state="ACTIVE", lifecycle_state="ACTIVE", latest_failure_code="AUTH_REQUIRED"
+        account_auth_state="UNKNOWN", lifecycle_state="ACTIVE", latest_failure_code="AUTH_REQUIRED"
     ).auth_required
+    # 진행 중 auth_session 도 계정 인증과 독립 신호 → ACTIVE 계정이어도 인증필요.
     assert failclosed_signals_from(
         account_auth_state="ACTIVE",
         lifecycle_state="ACTIVE",
@@ -130,6 +134,84 @@ def test_signals_clean_has_no_signal() -> None:
         account_auth_state="ACTIVE", lifecycle_state="ACTIVE", latest_failure_code="CRAWL_FAILURE"
     )
     assert s.any_signal is False
+
+
+# ── 인증 후 묵은 실패 코드/AUTH_VERIFIED 억제(2026-06 회귀 수정) ─────────────────
+
+def test_auth_verified_suppresses_stale_auth_required_failure() -> None:
+    # 인증 완료(AUTH_VERIFIED) + 마지막 성공보다 과거의 AUTH_REQUIRED 실패 → 인증필요 끔.
+    s = failclosed_signals_from(
+        account_auth_state="AUTH_VERIFIED",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+        last_success_at=_NOW,
+        latest_failure_at=_ago(30),
+    )
+    assert s.auth_required is False
+    assert s.any_signal is False
+
+
+def test_auth_verified_suppresses_even_without_timestamps() -> None:
+    # 시각이 없어도 AUTH_VERIFIED 자체가 권위 있는 정상 신호라 인증필요를 끈다.
+    s = failclosed_signals_from(
+        account_auth_state="AUTH_VERIFIED",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+    )
+    assert s.auth_required is False
+
+
+def test_active_auth_state_suppresses_stale_auth_required_failure() -> None:
+    # ACTIVE 도 정상 인증 집합 — 마지막 성공보다 과거 실패면 인증필요 끔.
+    s = failclosed_signals_from(
+        account_auth_state="ACTIVE",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+        last_success_at=_NOW,
+        latest_failure_at=_ago(30),
+    )
+    assert s.auth_required is False
+
+
+def test_current_auth_required_still_flags_even_with_recent_success() -> None:
+    # 현재 계정상태가 AUTH_REQUIRED 면(권위 신호) 최근 성공이 있어도 인증필요 유지(거짓 음성 금지).
+    s = failclosed_signals_from(
+        account_auth_state="AUTH_REQUIRED",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+        last_success_at=_NOW,
+        latest_failure_at=_NOW,
+    )
+    assert s.auth_required is True
+
+
+def test_failure_newer_than_success_is_not_stale() -> None:
+    # 마지막 성공 이후(>)에 난 AUTH_REQUIRED 실패는 stale 아님 → 인증필요 유지.
+    s = failclosed_signals_from(
+        account_auth_state="UNKNOWN",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+        last_success_at=_ago(30),
+        latest_failure_at=_NOW,
+    )
+    assert s.auth_required is True
+
+
+def test_stale_failure_suppressed_for_neutral_auth_state() -> None:
+    # 정상 인증 집합이 아니어도(UNKNOWN), 실패가 마지막 성공보다 과거면 stale → 인증필요 끔.
+    s = failclosed_signals_from(
+        account_auth_state="UNKNOWN",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="AUTH_REQUIRED",
+        last_success_at=_NOW,
+        latest_failure_at=_ago(30),
+    )
+    assert s.auth_required is False
+
+
+def test_healthy_auth_states_set_is_locked() -> None:
+    # 드리프트 락 — 정상 인증 집합은 ACTIVE/AUTH_VERIFIED 둘뿐(UNKNOWN 은 중립이라 제외).
+    assert severity.HEALTHY_AUTH_STATES == frozenset({"ACTIVE", "AUTH_VERIFIED"})
 
 
 def test_classify_failclosed_returns_stopped_or_none() -> None:

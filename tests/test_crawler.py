@@ -845,6 +845,72 @@ def test_open_baemin_delivery_history_page_enforces_configured_center_before_his
     assert selected == [(crawler._BAEMIN_CENTER_CHANGE_URL, "DP123")]
 
 
+def test_baemin_has_logged_in_page_detects_deliverycenter_host():
+    logged_in = _FakePage("https://deliverycenter.baemin.com/center/change")
+    logged_out = _FakePage("https://biz-member.baemin.com/login")
+    assert crawler._baemin_has_logged_in_page([logged_in]) is True
+    assert crawler._baemin_has_logged_in_page([logged_out]) is False
+    assert crawler._baemin_has_logged_in_page([]) is False
+
+
+class _GuardContext:
+    """new_page 호출 여부를 기록하는 컨텍스트 — 로그아웃 시 새 탭이 안 열려야 함을 검증."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.new_page_calls = 0
+
+    async def new_page(self):
+        self.new_page_calls += 1
+        page = _FakeAsyncNavigationPage("about:blank")
+        self.pages.append(page)
+        return page
+
+
+class _GuardBrowser:
+    def __init__(self, pages):
+        self.contexts = [_GuardContext(pages)]
+
+
+def test_open_baemin_delivery_history_page_fails_closed_when_logged_out(tmp_path, monkeypatch):
+    # 로그인된 배민 탭(deliverycenter 호스트)이 없으면 새 로그인 탭을 열지 않고 fail-closed.
+    config = _config(tmp_path, browser_mode="cdp")
+    logged_out = _FakePage("https://biz-member.baemin.com/login")
+    browser = _GuardBrowser([logged_out])
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(TimeoutError=TimeoutError),
+    )
+
+    with pytest.raises(crawler.BrowserActionRequiredError):
+        asyncio.run(crawler._open_baemin_delivery_history_page(browser, config))
+
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_open_baemin_delivery_history_page_reuses_logged_in_tab(tmp_path, monkeypatch):
+    # 로그인된 배민 탭이 있으면(report URL 정확 일치) 새 탭을 열지 않고 그대로 재사용한다.
+    config = _config(tmp_path, browser_mode="cdp")
+    report_url = crawler._baemin_report_url(config)
+    page = _FakeAsyncNavigationPage(report_url)
+    browser = _GuardBrowser([page])
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(TimeoutError=TimeoutError),
+    )
+
+    opened = asyncio.run(crawler._open_baemin_delivery_history_page(browser, config))
+
+    assert opened is page
+    assert browser.contexts[0].new_page_calls == 0
+
+
 def test_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
     config = _config(tmp_path, browser_mode="cdp")
     browser = _FakeBrowser(

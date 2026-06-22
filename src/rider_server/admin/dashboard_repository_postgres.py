@@ -143,6 +143,9 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             for row in rows:
                 target_id = str(row.id)
+                failure_code, failed_at = latest_failure_by_target.get(
+                    target_id, (None, None)
+                )
                 facts.append(
                     TargetHealthFacts(
                         target_id=target_id,
@@ -154,7 +157,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         interval_minutes=row.interval_minutes,
                         last_success_at=last_success_by_target.get(target_id),
                         last_delivery_at=last_delivery_by_target.get(target_id),
-                        last_failure_code=latest_failure_by_target.get(target_id),
+                        last_failure_code=failure_code,
+                        last_failure_at=failed_at,
                         account_auth_state=row.auth_state,
                         lifecycle_state=row.lifecycle_state,
                         auth_session_pending=str(row.account_id) in pending_account_ids,
@@ -239,6 +243,9 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             for row in rows:
                 target_id = str(row.id)
+                failure_code, failed_at = latest_failure_by_target.get(
+                    target_id, (None, None)
+                )
                 facts.append(
                     TargetHealthFacts(
                         target_id=target_id,
@@ -250,7 +257,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         interval_minutes=row.interval_minutes,
                         last_success_at=last_success_by_target.get(target_id),
                         last_delivery_at=last_delivery_by_target.get(target_id),
-                        last_failure_code=latest_failure_by_target.get(target_id),
+                        last_failure_code=failure_code,
+                        last_failure_at=failed_at,
                         account_auth_state=row.auth_state,
                         lifecycle_state=row.lifecycle_state,
                         auth_session_pending=str(row.account_id) in pending_account_ids,
@@ -298,7 +306,7 @@ class PostgresDashboardRepository(DashboardRepository):
 
     async def _latest_failure_codes(
         self, session: AsyncSession, target_ids: list[str]
-    ) -> dict[str, str]:
+    ) -> dict[str, tuple[str, datetime | None]]:
         if not target_ids:
             return {}
         job_stmt = (
@@ -323,7 +331,7 @@ class PostgresDashboardRepository(DashboardRepository):
             _set_latest(latest, str(target_id), error_code, ts)
         for target_id, error_code, ts in (await session.execute(delivery_stmt)).all():
             _set_latest(latest, str(target_id), error_code, ts)
-        return {target_id: code for target_id, (code, _ts) in latest.items()}
+        return dict(latest)
 
     async def _auth_session_pending_account_ids(
         self, session: AsyncSession, account_ids: list[str]

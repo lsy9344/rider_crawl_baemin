@@ -299,6 +299,8 @@ def _display_severity(code: str, facts) -> str:
         lifecycle_state=facts.lifecycle_state,
         latest_failure_code=facts.last_failure_code,
         auth_session_pending=facts.auth_session_pending,
+        last_success_at=facts.last_success_at,
+        latest_failure_at=facts.last_failure_at,
     )
     if signals.auth_required:
         return SEVERITY_AUTH_REQUIRED
