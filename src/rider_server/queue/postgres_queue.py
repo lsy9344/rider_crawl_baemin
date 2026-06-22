@@ -272,8 +272,9 @@ class PostgresQueueBackend(QueueBackend):
                     and job.completion_payload_hash == completion_payload_hash
                     and job.status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED)
                 ):
+                    final_status = job.status
                     await session.rollback()
-                    return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=job.status)
+                    return CompleteOutcome(COMPLETE_ACCEPTED, job_id, final_status=final_status)
                 await session.rollback()
                 return CompleteOutcome(COMPLETE_LEASE_LOST, job_id)
             owner_mismatch = job.agent_id != _as_uuid(agent_id)
