@@ -215,7 +215,7 @@ jobs:
         run: |
           set -euo pipefail
           cd /opt/rider-server/repo
-          git fetch origin main
+          git fetch --prune origin main:refs/remotes/origin/main
           git checkout -B main -f origin/main
           set -a
           . ./.env
