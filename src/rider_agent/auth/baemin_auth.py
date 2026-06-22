@@ -24,11 +24,11 @@
 
 소유 분리(스코프 경계):
 
-* **재인증은 "사람이 한다" — 자동화·우회 절대 금지(ADD-15·ops-security-contract 76·90).** 이
-  모듈은 ``fetch_latest_verification_code``/``recover_coupang_session_with_email_2fa``(쿠팡 Gmail
-  2FA·OTP 자동입력 경로)와 ``pyautogui``/``pywinauto``/``pyperclip`` 류를 **import 도 호출도
-  하지 않는다** — 4.1 AST 부정 가드로 영구 고정한다(배민은 OTP 자동화 금지, 쿠팡 2FA 와 정반대
-  정책). 프로필을 **열고** 사람-완료를 **감지**만 한다.
+* **배민 재인증은 "사람이 한다" — 자동화·우회 절대 금지(ADD-15·ops-security-contract 76·90).**
+  배민 경로는 휴대폰 인증 코드 취득·입력·우회를 하지 않으며, ``pyautogui`` 같은 GUI 자동화도
+  쓰지 않는다. 쿠팡 경로는 기존 수집 코드의
+  로그인 탭 선택 흐름과 이메일 2FA 복구 구현(``fetch_latest_verification_code`` 포함)만
+  재사용하며, 수집/렌더/전송은 실행하지 않는다.
 * **``rider_crawl`` 0줄·서버 측 ``auth_sessions``/job 생성/queue 는 본 스토리 범위가 아니다.**
   배민 login-page 감지 로직을 ``rider_crawl`` 에 새로 넣지 않고, 기본 probe 도 기존
   ``crawl_snapshot``/``BrowserActionRequiredError`` seam 을 재사용한다.
@@ -274,13 +274,88 @@ def _drive_baemin_login_flow(config: Any) -> None:
 
 def _drive_coupang_email_2fa_flow(config: Any) -> bool:
     from rider_agent import reuse
+    from rider_crawl.platforms.coupang import crawler as coupang_crawler
 
     with _sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(config.cdp_url)
-        context = browser.contexts[0] if getattr(browser, "contexts", None) else browser.new_context()
-        page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
-        _navigate_to_auth_target(page, config)
-        return bool(reuse.recover_coupang_session_with_email_2fa(page, config))
+        target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+        timeout_errors = _playwright_timeout_errors()
+        pages = coupang_crawler._browser_pages(browser)
+        page = coupang_crawler._login_required_page(pages)
+        if page is None and target_url:
+            page = coupang_crawler._select_page_by_url(pages, target_url)
+        if page is None:
+            page = _first_browser_page(browser)
+        if page is None:
+            return False
+
+        if target_url and not coupang_crawler._page_looks_like_coupang_login_required(page):
+            try:
+                page.goto(
+                    target_url,
+                    wait_until="domcontentloaded",
+                    timeout=getattr(config, "page_timeout_seconds", _INTERACTION_TIMEOUT_MS),
+                )
+            except timeout_errors:
+                pass
+            except Exception:
+                return False
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except timeout_errors:
+                pass
+
+        try:
+            if target_url:
+                coupang_crawler._wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=target_url,
+                    timeout_errors=timeout_errors,
+                )
+                return True
+        except BrowserActionRequiredError:
+            pass
+        except Exception:
+            pass
+
+        try:
+            recovered = bool(reuse.recover_coupang_session_with_email_2fa(page, config))
+        except Exception:
+            recovered = False
+        if recovered and target_url:
+            coupang_crawler._reload_target_page(
+                page,
+                config,
+                target_url=target_url,
+                load_timeout_errors=timeout_errors,
+            )
+        return bool(recovered)
+
+
+def _first_browser_page(browser: Any) -> Any | None:
+    contexts = list(getattr(browser, "contexts", []) or [])
+    context = contexts[0] if contexts else None
+    if context is None:
+        new_context = getattr(browser, "new_context", None)
+        if not callable(new_context):
+            return None
+        context = new_context()
+    pages = list(getattr(context, "pages", []) or [])
+    if pages:
+        return pages[0]
+    new_page = getattr(context, "new_page", None)
+    if not callable(new_page):
+        return None
+    return new_page()
+
+
+def _playwright_timeout_errors() -> tuple[type[BaseException], ...]:
+    try:
+        timeout_error = importlib.import_module("playwright.sync_api").TimeoutError
+    except Exception:
+        return ()
+    return (timeout_error,)
 
 
 def _navigate_to_auth_target(page: Any, config: Any) -> None:

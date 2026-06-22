@@ -386,6 +386,11 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
     recover_calls = []
 
     class FakePage:
+        url = "about:blank"
+
+        def content(self):
+            return "<html>new tab</html>"
+
         def goto(self, url, wait_until=None, timeout=None):
             actions.append(("goto", url, wait_until, timeout))
 
@@ -470,6 +475,102 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
     assert config.verification_email_address == "mailbox-ref"
     assert config.verification_email_app_password == "mail-app-password-ref"
     assert not any(action[0] == "crawl_snapshot" for action in actions)
+
+
+def test_default_open_auth_browser_coupang_reuses_existing_login_tab(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakePage:
+        def __init__(self, url, html=""):
+            self.url = url
+            self.html = html
+            self.gotos = []
+
+        def content(self):
+            return self.html
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.gotos.append((url, wait_until, timeout))
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, _timeout):
+            return None
+
+    class FakeContext:
+        def __init__(self, pages):
+            self.pages = pages
+            self.new_page_calls = 0
+
+        def new_page(self):
+            self.new_page_calls += 1
+            page = FakePage("about:blank")
+            self.pages.append(page)
+            return page
+
+    class FakeBrowser:
+        def __init__(self, context):
+            self.contexts = [context]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    blank_page = FakePage("about:blank", "<html>new tab</html>")
+    login_page = FakePage(
+        "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate",
+        "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>",
+    )
+    context = FakeContext([blank_page, login_page])
+    browser = FakeBrowser(context)
+    recover_calls = []
+
+    def recover(page_arg, config):
+        recover_calls.append((page_arg, config))
+        return True
+
+    monkeypatch.setattr(
+        "rider_agent.reuse.prepare_chrome",
+        lambda config, *, platform_name=None: "ok",
+    )
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        recover,
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(browser),
+    )
+
+    result = default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/rider-performance",
+                "expected_display_name": "쿠팡상점A",
+                "coupang_login_id_ref": "coupang-login-id",
+                "coupang_login_password_ref": "coupang-login-password",
+                "verification_email_address_ref": "mailbox-ref",
+                "verification_email_app_password_ref": "mail-app-password-ref",
+                "coupang_auto_email_2fa_enabled": True,
+            },
+        )
+    )
+
+    assert result is True
+    assert recover_calls[0][0] is login_page
+    assert blank_page.gotos == []
+    assert context.new_page_calls == 0
 
 
 def test_phone_code_request_texts_avoid_broad_generic_buttons():

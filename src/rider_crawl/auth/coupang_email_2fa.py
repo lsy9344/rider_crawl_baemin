@@ -42,11 +42,22 @@ _PASSWORD_SIGNALS = ("비밀번호 입력",)
 _USERNAME_INPUT_SELECTORS = (
     "input[placeholder*='아이디']",
     "input[name='username']",
+    "input[name='email']",
+    "input[name='loginId']",
+    "input[name='login_id']",
+    "input[name='id']",
+    "input[id*='username']",
+    "input[id*='email']",
+    "input[id*='login']",
+    "input[autocomplete='username']",
+    "input[type='email']",
 )
 _PASSWORD_INPUT_SELECTORS = (
     "input[placeholder*='비밀번호']",
     "input[type='password']",
     "input[name='password']",
+    "input[id*='password']",
+    "input[autocomplete='current-password']",
 )
 _LOGIN_BUTTON_TEXTS = ("로그인", "login")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Za-z0-9._%*+\-]+@[A-Za-z0-9.*\-]+\.[A-Za-z]{2,})")

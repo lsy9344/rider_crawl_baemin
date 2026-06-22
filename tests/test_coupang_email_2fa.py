@@ -334,6 +334,52 @@ def test_recover_detects_primary_login_by_password_input_when_body_label_is_shor
     ]
 
 
+def test_recover_logs_in_with_common_coupang_email_login_selector(tmp_path):
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
+    )
+    page = _FakePage(
+        html=(
+            "<html>Vendor Portal login-actions/authenticate realms/eats-partner"
+            " username password 로그인</html>"
+        ),
+        role_clickable=(
+            ("button", "로그인"),
+            ("tab", "이메일로 인증"),
+            ("button", "인증코드 전송"),
+            ("button", "인증 완료"),
+        ),
+        role_click_updates={
+            ("button", "로그인"): (
+                "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+                " 인증코드를 rider@naver.com 으로 보냅니다"
+                "<input placeholder='인증코드'></html>"
+            ),
+        },
+        role_click_input_updates={
+            ("button", "로그인"): ("input[placeholder*='코드']",),
+        },
+        input_selectors=(
+            "input[name='email']",
+            "input[id*='password']",
+            "input[placeholder*='코드']",
+        ),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("667788"), now=_NOW
+    )
+
+    assert result is True
+    assert page.filled == [
+        ("input[name='email']", "worker-id"),
+        ("input[id*='password']", "worker-password"),
+        ("input[placeholder*='코드']", "667788"),
+    ]
+
+
 def test_recover_uses_resend_button_when_code_already_sent(tmp_path):
     page = _FakePage(
         html=(
