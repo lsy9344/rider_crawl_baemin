@@ -249,6 +249,10 @@
     .action-result.ok::before { content: "✓"; font-weight: 700; } .action-result.err::before { content: "!"; font-weight: 700; }
     .inline-action-status.action-result, .inline-action-status .action-result { display: inline-flex; width: fit-content; min-height: 2rem; padding: 0.36rem 0.62rem; margin: 0 0 0.5rem 0.15rem; vertical-align: middle; border-radius: 999px; white-space: nowrap; }
     .inline-action-status:empty { display: none; }
+    .schedule-group { display: inline-flex; flex-wrap: wrap; align-items: flex-end; gap: 0 0.4rem; margin: 0 0.7rem 0.75rem 0; padding: 0.55rem 0.75rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--muted) 18%, var(--card)); vertical-align: bottom; }
+    .schedule-group-label { flex-basis: 100%; font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); margin-bottom: 0.35rem; letter-spacing: 0.02em; text-transform: uppercase; }
+    .schedule-group label { margin-bottom: 0; }
+    #view-manage .schedule-toggle { flex-direction: row; align-items: center; gap: 0.4rem; }
 
     /* ── 업체 상세 드로어 ───────────────────────────────────────────────── */
     .scrim { position: fixed; inset: 0; background: hsl(0 0% 0% / 0.5); z-index: 80; display: none; }
@@ -477,6 +481,21 @@
     document.body.addEventListener("htmx:afterSwap", function (e) {
       stampUpdated();
       if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
+    });
+    function isActionResultTarget(target) {
+      return !!(target && (
+        target.id === "drawer-result" ||
+        target.id === "action-result" ||
+        target.id.indexOf("target-result-") === 0 ||
+        target.id.indexOf("auth-required-result-") === 0
+      ));
+    }
+    document.body.addEventListener("htmx:beforeSwap", function (e) {
+      var xhr = e.detail && e.detail.xhr;
+      if (xhr && xhr.status >= 400 && isActionResultTarget(e.detail.target)) {
+        e.detail.shouldSwap = true;
+        e.detail.isError = false;
+      }
     });
     document.body.addEventListener("htmx:responseError", markStale);
     document.body.addEventListener("htmx:sendError", markStale);

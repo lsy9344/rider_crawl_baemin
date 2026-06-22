@@ -60,9 +60,15 @@
         <label>관리 코드(선택) <input type="text" name="external_id"></label>
       </details>
       <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
-      <label>시작/종료 시간 사용 <input type="checkbox" name="schedule_enabled" value="true"></label>
-      <label>시작시간 <input type="time" name="start_time"></label>
-      <label>종료시간 <input type="time" name="stop_time"></label>
+      <div class="schedule-group">
+        <span class="schedule-group-label">전송 허용 시간대</span>
+        <label class="schedule-toggle">
+          <input type="checkbox" name="schedule_enabled" value="true">
+          <span>시작/종료 시간 사용</span>
+        </label>
+        <label>시작 <input type="time" name="start_time"></label>
+        <label>종료 <input type="time" name="stop_time"></label>
+      </div>
       <button type="submit" class="create" data-required-select-submit disabled>업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
     </form>
   </fieldset>
@@ -123,15 +129,19 @@
       <label>관리 코드(선택) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
-      <label>시작/종료 시간 사용
-        <select id="tgt-edit-schedule">
-          <option value="">변경 안 함</option>
-          <option value="true">사용</option>
-          <option value="false">사용 안 함</option>
-        </select>
-      </label>
-      <label>시작시간 <input type="time" id="tgt-edit-start" placeholder="비우면 유지"></label>
-      <label>종료시간 <input type="time" id="tgt-edit-stop" placeholder="비우면 유지"></label>
+      <div class="schedule-group">
+        <span class="schedule-group-label">전송 허용 시간대</span>
+        <label>
+          시간 사용
+          <select id="tgt-edit-schedule">
+            <option value="">변경 안 함</option>
+            <option value="true">사용</option>
+            <option value="false">사용 안 함</option>
+          </select>
+        </label>
+        <label>시작 <input type="time" id="tgt-edit-start" placeholder="비우면 유지"></label>
+        <label>종료 <input type="time" id="tgt-edit-stop" placeholder="비우면 유지"></label>
+      </div>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval'), schedule_enabled: cval('tgt-edit-schedule'), start_time: cval('tgt-edit-start'), stop_time: cval('tgt-edit-stop')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
