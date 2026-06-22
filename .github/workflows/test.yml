@@ -33,6 +33,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,6 +43,35 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
+  changes:
+    name: Change filter
+    runs-on: ubuntu-latest
+    outputs:
+      postgres: ${{ steps.filter.outputs.postgres }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect PostgreSQL-sensitive changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            postgres:
+              - ".github/workflows/test.yml"
+              - "migrations/**"
+              - "alembic.ini"
+              - "src/rider_server/db/**"
+              - "src/rider_server/queue/postgres_queue.py"
+              - "src/rider_server/**/*postgres*.py"
+              - "src/rider_server/**/*_postgres.py"
+              - "tests/negative/**"
+              - "tests/server/test_db_schema.py"
+              - "tests/server/test_migration.py"
+              - "tests/server/test_postgres_runtime_guards.py"
+              - "tests/server/test_queue_backend.py"
+
   local-tests:
     name: Local pytest gate
     runs-on: windows-latest
@@ -104,9 +134,30 @@ jobs:
 
   postgres-tests:
     name: PostgreSQL pytest gate
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_postgres == 'true'
+    needs: changes
+    if: >-
+      ${{
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.run_postgres == 'true') ||
+        (github.event_name == 'pull_request' && needs.changes.outputs.postgres == 'true') ||
+        (github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request')
+      }}
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rider
+          POSTGRES_PASSWORD: rider
+          POSTGRES_DB: rider_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rider -d rider_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     steps:
       - name: Checkout
@@ -126,23 +177,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --extra dev --extra server
 
-      - name: Set up PostgreSQL
-        id: postgres
-        uses: ikalnytskyi/action-setup-postgres@v8
-        with:
-          username: rider
-          password: rider
-          database: rider_test
-          port: 5432
-          postgres-version: "16"
-
       - name: Run PostgreSQL tests
+        shell: pwsh
         env:
           DATABASE_URL: postgresql+asyncpg://rider:rider@localhost:5432/rider_test
           TEST_DATABASE_URL: postgresql+asyncpg://rider:rider@localhost:5432/rider_test
         run: |
           New-Item -ItemType Directory -Force reports | Out-Null
-          .\scripts\test.ps1 postgres --junitxml reports/pytest-postgres.xml
+          ./scripts/test.ps1 postgres --junitxml reports/pytest-postgres.xml
 
       - name: Upload PostgreSQL pytest report
         if: always()
@@ -170,8 +212,18 @@ jobs:
           RIDER_TELEGRAM_BOT_TOKEN: ci_dummy_bot_token
         run: docker compose -f deploy/docker-compose.yml config
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build server Docker image
-        run: docker build -f deploy/Dockerfile.server -t rider-server:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.server
+          tags: rider-server:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Task 8-C: backend /health smoke. 무거운 DB/migration 없이 컨테이너를 띄워
       # liveness probe(/health 는 dependency-free)를 실제로 친다. fast PR 경로는 건너뛰고
@@ -251,7 +303,7 @@ jobs:
           - Deployment config gate: ${{ needs.deployment-config.result }}
           - Production deploy: ${{ needs.deploy-production.result }}
 
-          PRs automatically run the quick local gate, PostgreSQL integration tests, and deployment config gate.
+          PRs automatically run the quick local gate and deployment config gate. PostgreSQL integration tests run on PRs only when DB-sensitive files change.
           Pushes, schedules, and manual default runs use the full local gate plus PostgreSQL and deployment config gates.
           Pushes to main deploy to the EC2 production compose stack after all gates pass.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

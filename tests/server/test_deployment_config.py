@@ -97,11 +97,34 @@ def test_ci_validates_deployment_compose_and_server_image() -> None:
 
     assert "deployment-config:" in workflow
     assert "docker compose -f deploy/docker-compose.yml config" in workflow
-    assert "docker build -f deploy/Dockerfile.server -t rider-server:ci ." in workflow
+    assert "docker/build-push-action" in workflow
+    assert "cache-from: type=gha" in workflow
+    assert "cache-to: type=gha,mode=max" in workflow
     assert "RIDER_POSTGRES_PASSWORD" in workflow
     assert "RIDER_DB_MIGRATION_BACKUP_CONFIRMED" in workflow
     assert "DEPLOYMENT_RESULT" in workflow
     assert "Deployment config" in workflow
+
+
+def test_ci_postgres_gate_uses_linux_service_and_pr_path_filter() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "changes:" in workflow
+    assert "dorny/paths-filter@v3" in workflow
+    assert "postgres-tests:" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "postgres:16" in workflow
+    assert "needs: changes" in workflow
+    assert "needs.changes.outputs.postgres == 'true'" in workflow
+    assert "ikalnytskyi/action-setup-postgres" not in workflow
+
+
+def test_quick_stage_excludes_architecture_e2e_and_concurrency() -> None:
+    script = Path("scripts/test.ps1").read_text(encoding="utf-8")
+
+    assert "not architecture" in script
+    assert "not e2e" in script
+    assert "not concurrency" in script
 
 
 def test_ci_runs_backend_health_smoke_off_pr_path() -> None:

@@ -35,7 +35,7 @@ switch ($Stage) {
         $ArgsList += @(
             "-q",
             "-m",
-            "not postgres and not slow and not docs and not local_artifact"
+            "not postgres and not slow and not docs and not local_artifact and not architecture and not e2e and not concurrency"
         )
     }
     "full" {
