@@ -729,6 +729,15 @@ def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
         BaeminAuthState.ACTIVE.value,
     )
 
+    unknown_job = SimpleNamespace(
+        payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
+        result_json={"auth_state": BaeminAuthState.UNKNOWN.value},
+    )
+    assert _platform_account_auth_update(unknown_job, None) == (
+        "33333333-3333-3333-3333-333333333333",
+        BaeminAuthState.UNKNOWN.value,
+    )
+
     verified_job = SimpleNamespace(
         payload_json={"platform_account_id": "33333333-3333-3333-3333-333333333333"},
         result_json={"auth_state": BaeminAuthState.AUTH_VERIFIED.value},

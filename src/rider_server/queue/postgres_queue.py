@@ -137,6 +137,7 @@ def _platform_account_auth_update(
     result_json = job.result_json if isinstance(job.result_json, dict) else {}
     auth_state = result_json.get("auth_state")
     if auth_state in {
+        BaeminAuthState.UNKNOWN.value,
         BaeminAuthState.ACTIVE.value,
         BaeminAuthState.AUTH_REQUIRED.value,
         BaeminAuthState.AUTH_VERIFIED.value,

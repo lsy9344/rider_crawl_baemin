@@ -193,15 +193,14 @@ def execute_auth_check_job(
     now: Callable[[], float] = time.time,
     log: Callable[[str], None] | None = None,
 ) -> JobResult:
-    """``AUTH_CHECK`` job — 로그인 상태만 점검해 ``ACTIVE``/``AUTH_REQUIRED`` 를 보고한다.
+    """``AUTH_CHECK`` job — 로그인 상태만 점검해 ``ACTIVE``/``AUTH_REQUIRED``/``UNKNOWN`` 를 보고한다.
 
     주입 ``login_probe(job) -> str``(auth_state 평문 상수)로 상태를 얻어:
 
     * ``ACTIVE`` → :func:`make_success_result` ``result_json={target_id, auth_state: ACTIVE}``.
-    * 그 외(``AUTH_REQUIRED``/``UNKNOWN``/…) → **메시지 생성 없이** auth-required 를 표면화한다
+    * ``AUTH_REQUIRED``/``UNKNOWN``/… → **메시지 생성 없이** 상태를 표면화한다
       — :func:`make_success_result` ``result_json={target_id, auth_state}`` (상태 점검은
-      "실패"가 아니라 "필요 신호"라 success 결과로 일관, AUTH_CHECK 표면 정본). ``ACTIVE`` 가
-      아니면 fail-closed 로 ``AUTH_REQUIRED`` 어휘로 surfacing 한다.
+      "실패"가 아니라 "현재 상태 확인"이라 success 결과로 일관, AUTH_CHECK 표면 정본).
 
     **수집/렌더/전송을 호출하지 않는다**(``crawl_snapshot``/``render_*``/``send_*`` 미호출) — 이
     실행자는 ``login_probe`` 만 부른다(fail-closed = 인증으로 막힌 대상에 잘못된 메시지 0,
@@ -219,11 +218,18 @@ def execute_auth_check_job(
             result_json={"target_id": target_id, "auth_state": AUTH_STATE_ACTIVE}
         )
 
-    # ACTIVE 가 아니면 fail-closed: auth-required 신호로 surfacing(메시지 생성 0).
+    # UNKNOWN 은 인증 필요가 아니라 판정 불가다. 그대로 보고해야 서버가 stale
+    # AUTH_REQUIRED 를 UNKNOWN 으로 낮추고 최신 profile 오류를 계속 보여줄 수 있다.
+    if state not in {
+        AUTH_STATE_UNKNOWN,
+        AUTH_STATE_AUTH_REQUIRED,
+        AUTH_STATE_AUTH_VERIFIED,
+    }:
+        state = AUTH_STATE_AUTH_REQUIRED
     if log is not None:
-        log(redact(f"auth check: AUTH_REQUIRED (target {target_id})"))
+        log(redact(f"auth check: {state} (target {target_id})"))
     return make_success_result(
-        result_json={"target_id": target_id, "auth_state": AUTH_STATE_AUTH_REQUIRED}
+        result_json={"target_id": target_id, "auth_state": state}
     )
 
 

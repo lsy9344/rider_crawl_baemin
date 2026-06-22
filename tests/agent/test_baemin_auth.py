@@ -158,11 +158,12 @@ def test_auth_check_auth_required_surfaces_without_message_generation():
     assert result.error_code is None
 
 
-def test_auth_check_non_active_state_is_fail_closed_to_auth_required():
-    # ACTIVE 가 아니면(UNKNOWN/모호) fail-closed 로 auth-required 어휘로 surfacing.
+def test_auth_check_unknown_state_is_preserved_as_unknown():
+    # UNKNOWN/모호는 인증 필요가 아니라 판정 불가다. 서버가 최신 profile 오류 등을
+    # 그대로 보여줄 수 있게 AUTH_REQUIRED 로 덮어쓰지 않는다.
     result = execute_auth_check_job(_auth_job(), login_probe=lambda j: AUTH_STATE_UNKNOWN)
     assert result.status == JOB_STATUS_SUCCESS
-    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_UNKNOWN
 
 
 def test_auth_check_does_not_call_crawl_or_send(monkeypatch):
