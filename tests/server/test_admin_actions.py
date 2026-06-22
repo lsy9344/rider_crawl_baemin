@@ -698,7 +698,7 @@ def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
     assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
-def test_start_auth_enqueues_coupang_crawl_with_email_2fa_refs() -> None:
+def test_start_auth_enqueues_coupang_open_auth_browser_with_email_2fa_refs() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
     repo.seed_platform_account(
@@ -730,7 +730,7 @@ def test_start_auth_enqueues_coupang_crawl_with_email_2fa_refs() -> None:
         "browser_profile_ref": "profile:mt-1",
         "timeout_seconds": 60,
         "parser_version": "coupang-v1",
-        "job_type": "CRAWL_COUPANG",
+        "job_type": "OPEN_AUTH_BROWSER",
         "coupang_login_id_ref": "coupang-login-id-ref",
         "coupang_login_password_ref": "coupang-login-password-ref",
         "verification_email_address_ref": "mailbox-ref",
@@ -740,7 +740,7 @@ def test_start_auth_enqueues_coupang_crawl_with_email_2fa_refs() -> None:
         "coupang_auto_email_2fa_enabled": True,
     }
     assert repo.audits[-1].action == "AUTH_START"
-    assert repo.audits[-1].diff_redacted["job_type"] == "CRAWL_COUPANG"
+    assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
 def test_start_auth_missing_credentials_is_rejected() -> None:
@@ -870,7 +870,7 @@ def test_route_auth_start_triggers_baemin_open_auth_browser() -> None:
     assert "인증 시작" in resp.text
 
 
-def test_route_auth_start_triggers_coupang_crawl() -> None:
+def test_route_auth_start_triggers_coupang_open_auth_browser() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
     repo.seed_platform_account(

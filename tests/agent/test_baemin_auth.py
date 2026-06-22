@@ -222,6 +222,37 @@ def test_open_auth_browser_detects_human_completion_and_resumes():
     assert len(sleeps) == 1  # 1·2번째 사이 1회 대기
 
 
+def test_open_auth_browser_accepts_auth_only_open_success_without_probe():
+    detect_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(type=CAPABILITY_OPEN_AUTH_BROWSER, payload={"platform": "coupang"}),
+        open_auth_browser=lambda j: True,
+        detect_completion=lambda j: detect_calls.append(j) or False,
+        now=lambda: 0.0,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_VERIFIED
+    assert detect_calls == []
+
+
+def test_default_detect_completion_coupang_does_not_probe_with_crawl(monkeypatch):
+    crawl_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.crawl_snapshot",
+        lambda *args, **kwargs: crawl_calls.append((args, kwargs)),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(type=CAPABILITY_OPEN_AUTH_BROWSER, payload={"platform": "coupang"})
+    )
+
+    assert completed is False
+    assert crawl_calls == []
+
+
 def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
     # 인증번호(OTP) 취득·입력·우회 0(ADD-15): 실행자는 open/detect 만 받는다 — OTP/코드 입력
     # 주입점이 시그니처에 존재하지 않음을 정적으로 단언(자동입력 경로 부재).
@@ -346,6 +377,99 @@ def test_default_open_auth_browser_fills_baemin_login_and_requests_phone_code(mo
     assert ("click", "role", "button:로그인") in actions
     assert ("click", "role", "button:인증번호 요청") in actions
     assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
+
+
+def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+    recover_calls = []
+
+    class FakePage:
+        def goto(self, url, wait_until=None, timeout=None):
+            actions.append(("goto", url, wait_until, timeout))
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            actions.append(("wait_for_load_state",))
+
+        def wait_for_timeout(self, timeout):
+            actions.append(("wait_for_timeout", timeout))
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+        def new_page(self):
+            return self.pages[0]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+    browser = FakeBrowser(page)
+    prepare_calls = []
+
+    def recover(page_arg, config):
+        recover_calls.append((page_arg, config))
+        return True
+
+    monkeypatch.setattr(
+        "rider_agent.reuse.prepare_chrome",
+        lambda config, *, platform_name=None: prepare_calls.append((config, platform_name)) or "ok",
+    )
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        recover,
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(browser),
+    )
+
+    job = _auth_job(
+        type=CAPABILITY_OPEN_AUTH_BROWSER,
+        payload={
+            "tenant_id": "tenant-fake-1",
+            "target_id": FAKE_TARGET,
+            "platform": "coupang",
+            "primary_url": "https://partner.coupangeats.com/page/rider-performance",
+            "expected_display_name": "쿠팡상점A",
+            "coupang_login_id_ref": "coupang-login-id",
+            "coupang_login_password_ref": "coupang-login-password",
+            "verification_email_address_ref": "mailbox-ref",
+            "verification_email_app_password_ref": "mail-app-password-ref",
+            "verification_email_subject_keyword": "보안코드",
+            "verification_email_sender_keyword": "wing",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+    default_open_auth_browser(job)
+
+    assert len(prepare_calls) == 1
+    assert len(recover_calls) == 1
+    recovered_page, config = recover_calls[0]
+    assert recovered_page is page
+    assert config.platform_name == "coupang"
+    assert config.coupang_auto_email_2fa_enabled is True
+    assert config.coupang_login_id == "coupang-login-id"
+    assert config.coupang_login_password == "coupang-login-password"
+    assert config.verification_email_address == "mailbox-ref"
+    assert config.verification_email_app_password == "mail-app-password-ref"
+    assert not any(action[0] == "crawl_snapshot" for action in actions)
 
 
 def test_phone_code_request_texts_avoid_broad_generic_buttons():

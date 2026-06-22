@@ -302,9 +302,9 @@ def _auth_start_payload(
     ):
         raise ValueError("쿠팡 자동인증 정보가 필요합니다")
     return (
-        JOB_TYPE_CRAWL_COUPANG,
+        JOB_TYPE_OPEN_AUTH_BROWSER,
         {
-            **_target_job_payload(target, job_type=JOB_TYPE_CRAWL_COUPANG, platform=platform),
+            **_target_job_payload(target, job_type=JOB_TYPE_OPEN_AUTH_BROWSER, platform=platform),
             "coupang_login_id_ref": login_id_ref,
             "coupang_login_password_ref": login_password_ref,
             "verification_email_address_ref": verification_email_address_ref,
@@ -713,7 +713,7 @@ class AdminActionService:
         at: datetime,
         source: str | None = None,
     ) -> str:
-        """대상 인증을 시작한다. Baemin 은 ``OPEN_AUTH_BROWSER``, Coupang 은 ``CRAWL_COUPANG`` 를 쓴다."""
+        """대상 인증을 시작한다. Baemin/Coupang 모두 ``OPEN_AUTH_BROWSER`` 인증 전용 job 을 쓴다."""
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         account = await self._scoped_platform_account(target.platform_account_id, tenant_id=tenant_id)

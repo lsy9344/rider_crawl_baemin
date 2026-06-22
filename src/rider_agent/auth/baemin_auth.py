@@ -200,25 +200,33 @@ def default_open_auth_browser(
     job: ClaimedJob,
     *,
     secret_resolver: Callable[[str], str | None] | None = None,
-) -> None:
+) -> bool | None:
     """기본 프로필 브라우저 열기.
 
-    ``prepare_chrome`` 를 재사용해 프로필을 **열기만** 한다. OTP 취득·자동입력·우회는 하지 않는다.
+    ``prepare_chrome`` 를 재사용한다. Baemin 은 프로필을 열고 로그인 화면 조치만 수행하며,
+    Coupang 은 기존 이메일 2FA 복구 seam 만 실행한다. 어느 경로도 수집 job 을 실행하지 않는다.
     """
 
     from rider_agent import reuse
 
     config = _config_from_auth_job(job, secret_resolver=secret_resolver)
+    platform = str(getattr(config, "platform_name", "") or "").strip().casefold()
     try:
         reuse.prepare_chrome(config, platform_name="Windows")
     except Exception:
         return
-    if getattr(config, "platform_name", "baemin") != "baemin":
-        return
+    if platform == "coupang":
+        try:
+            return _drive_coupang_email_2fa_flow(config)
+        except Exception:
+            return False
+    if platform != "baemin":
+        return None
     try:
         _drive_baemin_login_flow(config)
     except Exception:
         return
+    return None
 
 
 def default_detect_completion(
@@ -231,6 +239,9 @@ def default_detect_completion(
     로그인 완료 여부만 다시 probe 한다. 인증번호를 읽거나 입력·제출하지 않는다.
     """
 
+    platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
+    if platform == "coupang":
+        return False
     if secret_resolver is None:
         return default_login_probe(job) == AUTH_STATE_ACTIVE
     return default_login_probe(job, secret_resolver=secret_resolver) == AUTH_STATE_ACTIVE
@@ -259,6 +270,17 @@ def _drive_baemin_login_flow(config: Any) -> None:
         _click_first_by_text(
             page, _PHONE_CODE_REQUEST_TEXTS, config, roles=("button", "link")
         )
+
+
+def _drive_coupang_email_2fa_flow(config: Any) -> bool:
+    from rider_agent import reuse
+
+    with _sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+        context = browser.contexts[0] if getattr(browser, "contexts", None) else browser.new_context()
+        page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
+        _navigate_to_auth_target(page, config)
+        return bool(reuse.recover_coupang_session_with_email_2fa(page, config))
 
 
 def _navigate_to_auth_target(page: Any, config: Any) -> None:
@@ -444,24 +466,35 @@ def execute_open_auth_browser_job(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     log: Callable[[str], None] | None = None,
 ) -> JobResult:
-    """``OPEN_AUTH_BROWSER`` job — 프로필 열기 + 사람-완료 감지 + bounded 재인증 대기.
+    """``OPEN_AUTH_BROWSER`` job — 프로필 열기 + 인증 전용 조치 + bounded 재인증 대기.
 
     흐름: (a) ``open_auth_browser(job)`` 로 프로필 브라우저를 **연다**(정확히 1회), (b)
+    인증이 즉시 완료되면 ``AUTH_VERIFIED`` 를 반환한다(Coupang 이메일 2FA 등), 아니면
     ``detect_completion(job) -> bool`` 를 **bounded** polling(주입 ``now``/``sleep``, 상한
-    ``max_attempts`` 와 ``max_wait_seconds``)으로 호출, (c) 사람-완료 감지 →
+    ``max_attempts`` 와 ``max_wait_seconds``)으로 호출, (c) 인증 완료 감지 →
     :func:`make_success_result` ``result_json={target_id, auth_state: AUTH_VERIFIED}`` (작업
     재개 신호), 상한 소진 → ``AUTH_REQUIRED`` + 사유 ``auth_timeout`` 실패 결과로 **멈춘다**
     (전송/메시지 생성 0, 무한 재시도·무한 polling 0 — 4.5 ``recover_profile`` bounded·NFR-4 동형).
 
-    **휴대폰 인증 코드(OTP)를 읽거나 입력·제출하지 않는다(ADD-15).** 프로필을 열고 사람-완료를
-    감지만 한다. 사유는 평문 상수, 로그는 고정 메시지 + :func:`redact` 통과(raw 경로/OTP/휴대폰
+    Baemin 경로는 **휴대폰 인증 코드(OTP)를 읽거나 입력·제출하지 않는다(ADD-15).** Coupang
+    경로는 기존 이메일 2FA 복구 seam 만 사용한다. 사유는 평문 상수, 로그는 고정 메시지 +
+    :func:`redact` 통과(raw 경로/OTP/휴대폰
     비노출). [Source: src/rider_agent/browser_profile.py(337-392), architecture-contract.md(118·127)]
     """
 
     target_id = job.target_id
 
-    # (a) 프로필 브라우저를 사람용으로 연다(열기만 — OTP 취득·입력·우회 0). 정확히 1회.
-    open_auth_browser(job)
+    # (a) 프로필 브라우저를 인증 전용으로 연다. 정확히 1회.
+    opened = open_auth_browser(job)
+    if opened is True:
+        if log is not None:
+            log(redact(f"auth opened and verified (target {target_id})"))
+        return make_success_result(
+            result_json={
+                "target_id": target_id,
+                "auth_state": AUTH_STATE_AUTH_VERIFIED,
+            }
+        )
 
     # (b) bounded polling — 주입 now/sleep + 상한(attempts·wall-clock). 무한 대기 0.
     start = now()
