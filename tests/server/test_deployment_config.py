@@ -121,9 +121,10 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "deploy-production:" in workflow
     assert "needs: [local-tests, postgres-tests, deployment-config]" in workflow
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
-    assert "DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}" in workflow
-    assert "DEPLOY_USER: ${{ secrets.DEPLOY_USER }}" in workflow
-    assert "DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}" in workflow
+    assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" in workflow
+    assert "Deploy local EC2 compose stack" in workflow
+    assert "cd /opt/rider-server/repo" in workflow
+    assert "ssh-keyscan" not in workflow
     assert "git checkout -B main -f origin/main" in workflow
     assert "docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans" in workflow
     assert "curl -fsS http://127.0.0.1:8000/health" in workflow

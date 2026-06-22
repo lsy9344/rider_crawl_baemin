@@ -205,36 +205,14 @@ jobs:
 
   deploy-production:
     name: Deploy production
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, rider-prod]
     timeout-minutes: 20
     needs: [local-tests, postgres-tests, deployment-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Configure SSH
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Deploy local EC2 compose stack
         run: |
-          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_SSH_KEY" ]; then
-            echo "::error::DEPLOY_HOST and DEPLOY_SSH_KEY secrets are required"
-            exit 1
-          fi
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/rider_deploy_key
-          chmod 600 ~/.ssh/rider_deploy_key
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
-
-      - name: Deploy on EC2
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          if [ -z "$DEPLOY_USER" ]; then
-            echo "::error::DEPLOY_USER secret is required"
-            exit 1
-          fi
-          ssh -i ~/.ssh/rider_deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -se' <<'REMOTE'
           set -euo pipefail
           cd /opt/rider-server/repo
           git fetch origin main
@@ -245,7 +223,6 @@ jobs:
           docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans
           docker compose -p rider -f deploy/docker-compose.yml ps
           curl -fsS http://127.0.0.1:8000/health
-          REMOTE
 
   ci-summary:
     name: CI summary
