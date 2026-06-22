@@ -27,4 +27,7 @@ class MonitoringTarget:
     external_id: str = ""  # 2.3 target_external_id
     url: str = ""  # 2.3 primary_url
     interval_minutes: int = 0
+    schedule_enabled: bool = False  # 전송 허용 시간창 사용 여부(Asia/Seoul HH:MM)
+    start_time: str = ""  # 전송 시작 HH:MM
+    stop_time: str = ""  # 전송 종료 HH:MM
     status: MonitoringTargetStatus = MonitoringTargetStatus.ACTIVE

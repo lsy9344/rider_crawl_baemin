@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from rider_server.admin.dashboard_service import InMemoryDashboardRepository
 from rider_server.domain import MonitoringTarget, MonitoringTargetStatus
 from rider_server.main import create_app
 from rider_server.queue.memory_queue import InMemoryQueueBackend
@@ -370,7 +371,7 @@ def test_admin_public_access_setting_allows_dashboard_without_external_principal
     assert TestClient(app).get("/admin?tenant=tn-1").status_code == HTTPStatus.OK
 
 
-def test_public_admin_access_rejected_in_production() -> None:
+def test_public_admin_access_without_ip_allowlist_rejected_in_production() -> None:
     settings = Settings(
         app_env="production",
         app_version="9.9.9",
@@ -382,6 +383,25 @@ def test_public_admin_access_rejected_in_production() -> None:
 
     with pytest.raises(RuntimeError, match="RIDER_ADMIN_PUBLIC_ACCESS"):
         create_app(settings)
+
+
+def test_public_admin_access_allowed_in_production_when_ip_allowlist_configured() -> None:
+    settings = Settings(
+        app_env="production",
+        app_version="9.9.9",
+        build_sha=None,
+        build_time=None,
+        database_url="postgresql+asyncpg://user:pass@db:5432/rider",
+        admin_public_access=True,
+        admin_ip_allowlist=("203.0.113.10/32",),
+    )
+    app = create_app(settings, dashboard_repository=InMemoryDashboardRepository())
+
+    allowed = TestClient(app, client=("203.0.113.10", 12345)).get("/admin/agents")
+    denied = TestClient(app, client=("203.0.113.11", 12345)).get("/admin/agents")
+
+    assert allowed.status_code == HTTPStatus.OK
+    assert denied.status_code == HTTPStatus.FORBIDDEN
 
 
 # ══════════════════════════════════════════════════════════════════════════

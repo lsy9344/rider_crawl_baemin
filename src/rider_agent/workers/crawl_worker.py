@@ -72,6 +72,8 @@ class CrawlJobPayload:
     browser_profile_ref: str
     timeout_seconds: float
     parser_version: str
+    login_id_ref: str = ""
+    login_password_ref: str = ""
     coupang_login_id_ref: str = ""
     coupang_login_password_ref: str = ""
     verification_email_address_ref: str = ""
@@ -415,6 +417,8 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
         browser_profile_ref=str(raw.get("browser_profile_ref") or "").strip(),
         timeout_seconds=timeout_seconds,
         parser_version=str(raw.get("parser_version") or f"{platform}-v1").strip(),
+        login_id_ref=_text(raw, "login_id_ref", "baemin_login_id_ref"),
+        login_password_ref=_text(raw, "login_password_ref", "baemin_login_password_ref"),
         coupang_login_id_ref=_text(raw, "coupang_login_id_ref"),
         coupang_login_password_ref=_text(raw, "coupang_login_password_ref"),
         verification_email_address_ref=_text(raw, "verification_email_address_ref"),
@@ -423,8 +427,10 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
         ),
         verification_email_subject_keyword=_text(raw, "verification_email_subject_keyword"),
         verification_email_sender_keyword=_text(raw, "verification_email_sender_keyword"),
-        coupang_auto_email_2fa_enabled=_truthy(
-            raw.get("coupang_auto_email_2fa_enabled")
+        coupang_auto_email_2fa_enabled=(
+            _truthy(raw.get("coupang_auto_email_2fa_enabled"))
+            if "coupang_auto_email_2fa_enabled" in raw
+            else False
         ),
     )
 
@@ -499,7 +505,7 @@ def _resolve_secret_ref(
 
 def _looks_like_secret_ref(value: str) -> bool:
     text = str(value or "").strip().casefold()
-    return "://" in text or text.startswith(("env:", "dpapi:", "vault:"))
+    return "://" in text or text.startswith(("env:", "dpapi:", "vault:", "local:"))
 
 
 def _safe_resolve(resolver: Callable[[str], str | None], ref: str) -> str:
@@ -540,6 +546,12 @@ def _build_config(
     coupang_login_password = _resolve_secret_ref(
         payload.coupang_login_password_ref, secret_resolver=secret_resolver
     )
+    baemin_login_id = _resolve_secret_ref(
+        payload.login_id_ref, secret_resolver=secret_resolver
+    )
+    baemin_login_password = _resolve_secret_ref(
+        payload.login_password_ref, secret_resolver=secret_resolver
+    )
     verification_email_address = _resolve_secret_ref(
         payload.verification_email_address_ref, secret_resolver=secret_resolver
     )
@@ -574,6 +586,8 @@ def _build_config(
         state_subdir=payload.target_id,
         platform_name=payload.platform,
         coupang_auto_email_2fa_enabled=enable_email_2fa,
+        baemin_login_id=baemin_login_id,
+        baemin_login_password=baemin_login_password,
         coupang_login_id=coupang_login_id,
         coupang_login_password=coupang_login_password,
         verification_email_address=verification_email_address,

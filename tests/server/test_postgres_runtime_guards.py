@@ -54,6 +54,15 @@ def test_admin_manual_enqueue_preserves_browser_profile_affinity() -> None:
     assert "assigned_agent_id=assigned_agent_id" in body
 
 
+def test_admin_manual_enqueue_active_guard_includes_retry_without_skip_locked() -> None:
+    source = _source("src/rider_server/services/admin_action_repository_postgres.py")
+    body = source[source.index("async def enqueue_manual_job") :]
+
+    assert "JOB_STATUS_RETRY" in source
+    assert "JOB_STATUS_RETRY" in body
+    assert "skip_locked=True" not in body
+
+
 def test_dashboard_target_health_requires_target_and_account_same_tenant() -> None:
     source = _source("src/rider_server/admin/dashboard_repository_postgres.py")
 
@@ -174,6 +183,21 @@ def test_snapshot_change_only_rules_skip_unchanged_delivery() -> None:
     assert "rule.send_only_on_change" in enqueue_body
     assert "_latest_message_hashes_by_channel(" in enqueue_body
     assert "if previous_hashes.get(channel.id) == message.text_hash:" in enqueue_body
+
+
+def test_snapshot_enqueue_checks_target_send_window_before_delivery_log_insert() -> None:
+    source = _source("src/rider_server/services/snapshot_repository_postgres.py")
+    enqueue_body = source[
+        source.index("async def _enqueue_dispatch_records") : source.index(
+            "def _record_scoped_to_locked_job"
+        )
+    ]
+
+    assert "MonitoringTargetRow" in source
+    assert "_send_window_allows_dispatch(" in enqueue_body
+    assert enqueue_body.index("_send_window_allows_dispatch(") < enqueue_body.index(
+        "pg_insert(DeliveryLogRow)"
+    )
 
 
 def test_queue_complete_marks_auth_required_platform_account() -> None:

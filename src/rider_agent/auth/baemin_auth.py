@@ -46,6 +46,7 @@ enum/"정확히 N개" lock 도 두지 않는다(memory: enum-member-count-locks)
 
 from __future__ import annotations
 
+import importlib
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -95,6 +96,29 @@ SEVERITY_WARNING = "warning"
 DEFAULT_MAX_WAIT_SECONDS = 180.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_ATTEMPTS = 3
+_INTERACTION_TIMEOUT_MS = 10_000
+
+_USERNAME_INPUT_SELECTORS = (
+    "input[name='username']",
+    "input[name='loginId']",
+    "input[placeholder*='아이디']",
+    "input[type='text']",
+)
+_PASSWORD_INPUT_SELECTORS = (
+    "input[name='password']",
+    "input[placeholder*='비밀번호']",
+    "input[type='password']",
+)
+_LOGIN_BUTTON_TEXTS = ("로그인", "로그인하기", "login")
+_PHONE_CODE_REQUEST_TEXTS = (
+    "인증번호 요청",
+    "인증번호 받기",
+    "인증번호 발송",
+    "인증코드 전송",
+    "문자 인증",
+    "휴대폰 인증",
+    "코드 받기",
+)
 
 
 # ── 분류기(auth-required 신호 → 평문 상태) ─────────────────────────────────────
@@ -131,7 +155,11 @@ def classify_baemin_auth_state(
 # 그대로 재사용한다.
 
 
-def _config_from_auth_job(job: ClaimedJob) -> Any:
+def _config_from_auth_job(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> Any:
     from rider_agent.workers.crawl_worker import _build_config, payload_from_job
 
     payload = payload_from_job(job)
@@ -140,10 +168,15 @@ def _config_from_auth_job(job: ClaimedJob) -> Any:
         payload,
         cdp_url=cdp_url,
         user_data_dir=Path("runtime") / "agent-browser-profiles" / payload.target_id,
+        secret_resolver=secret_resolver,
     )
 
 
-def default_login_probe(job: ClaimedJob) -> str:
+def default_login_probe(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> str:
     """기본 배민 로그인 상태 probe(reuse ``crawl_snapshot`` 기반 read-only 판정).
 
     정상 snapshot 을 얻으면 ``ACTIVE``, ``BrowserActionRequiredError`` 는 ``AUTH_REQUIRED``,
@@ -152,7 +185,7 @@ def default_login_probe(job: ClaimedJob) -> str:
 
     from rider_agent import reuse
 
-    config = _config_from_auth_job(job)
+    config = _config_from_auth_job(job, secret_resolver=secret_resolver)
     platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
     try:
         reuse.crawl_snapshot(config, platform_name=platform or "baemin")
@@ -163,7 +196,11 @@ def default_login_probe(job: ClaimedJob) -> str:
     return classify_baemin_auth_state(snapshot_ok=True)
 
 
-def default_open_auth_browser(job: ClaimedJob) -> None:
+def default_open_auth_browser(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> None:
     """기본 프로필 브라우저 열기.
 
     ``prepare_chrome`` 를 재사용해 프로필을 **열기만** 한다. OTP 취득·자동입력·우회는 하지 않는다.
@@ -171,16 +208,175 @@ def default_open_auth_browser(job: ClaimedJob) -> None:
 
     from rider_agent import reuse
 
-    reuse.prepare_chrome(_config_from_auth_job(job), platform_name="Windows")
+    config = _config_from_auth_job(job, secret_resolver=secret_resolver)
+    try:
+        reuse.prepare_chrome(config, platform_name="Windows")
+    except Exception:
+        return
+    if getattr(config, "platform_name", "baemin") != "baemin":
+        return
+    try:
+        _drive_baemin_login_flow(config)
+    except Exception:
+        return
 
 
-def default_detect_completion(job: ClaimedJob) -> bool:
+def default_detect_completion(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> bool:
     """기본 사람-완료 감지(read-only).
 
     로그인 완료 여부만 다시 probe 한다. 인증번호를 읽거나 입력·제출하지 않는다.
     """
 
-    return default_login_probe(job) == AUTH_STATE_ACTIVE
+    if secret_resolver is None:
+        return default_login_probe(job) == AUTH_STATE_ACTIVE
+    return default_login_probe(job, secret_resolver=secret_resolver) == AUTH_STATE_ACTIVE
+
+
+def _drive_baemin_login_flow(config: Any) -> None:
+    with _sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+        context = browser.contexts[0] if getattr(browser, "contexts", None) else browser.new_context()
+        page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
+        _navigate_to_auth_target(page, config)
+        _fill_first_input(
+            page,
+            _USERNAME_INPUT_SELECTORS,
+            getattr(config, "baemin_login_id", ""),
+            config,
+        )
+        _fill_first_input(
+            page,
+            _PASSWORD_INPUT_SELECTORS,
+            getattr(config, "baemin_login_password", ""),
+            config,
+        )
+        _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
+        _wait_after_action(page, config)
+        _click_first_by_text(
+            page, _PHONE_CODE_REQUEST_TEXTS, config, roles=("button", "link")
+        )
+
+
+def _navigate_to_auth_target(page: Any, config: Any) -> None:
+    url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+    if not url:
+        return
+    goto = getattr(page, "goto", None)
+    if goto is None:
+        return
+    goto(url, wait_until="domcontentloaded", timeout=_interaction_timeout(config))
+    _wait_after_action(page, config)
+
+
+def _sync_playwright() -> Any:
+    return importlib.import_module("playwright.sync_api").sync_playwright()
+
+
+def _interaction_timeout(config: Any) -> int:
+    return min(
+        int(getattr(config, "page_timeout_seconds", _INTERACTION_TIMEOUT_MS)),
+        _INTERACTION_TIMEOUT_MS,
+    )
+
+
+def _fill_first_input(
+    page: Any,
+    selectors: tuple[str, ...],
+    value: str,
+    config: Any,
+) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    timeout = _interaction_timeout(config)
+    for selector in selectors:
+        try:
+            _enter_text(page.locator(selector).first, text, timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _enter_text(locator: Any, value: str, timeout: int) -> None:
+    try:
+        locator.click(timeout=timeout)
+        try:
+            locator.press("Control+a", timeout=timeout)
+            locator.press("Delete", timeout=timeout)
+        except Exception:
+            pass
+        locator.press_sequentially(value, timeout=timeout, delay=30)
+        return
+    except (AttributeError, TypeError):
+        pass
+    locator.fill(value, timeout=timeout)
+
+
+def _click_first_by_text(
+    page: Any,
+    texts: tuple[str, ...],
+    config: Any,
+    *,
+    roles: tuple[str, ...] = ("button", "link"),
+) -> bool:
+    timeout = _interaction_timeout(config)
+    for text in texts:
+        for role in roles:
+            try:
+                locator = page.get_by_role(role, name=text, exact=False)
+            except TypeError:
+                try:
+                    locator = page.get_by_role(role, name=text)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if _click_first_visible(locator, timeout):
+                return True
+        try:
+            locator = page.get_by_text(text, exact=False)
+        except TypeError:
+            locator = page.get_by_text(text)
+        except Exception:
+            continue
+        if _click_first_visible(locator, timeout):
+            return True
+    return False
+
+
+def _click_first_visible(locator: Any, timeout: int) -> bool:
+    try:
+        visible = locator.filter(visible=True)
+    except (AttributeError, TypeError):
+        try:
+            locator.first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    try:
+        visible.first.click(timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _wait_after_action(page: Any, config: Any) -> None:
+    try:
+        page.wait_for_load_state(
+            "networkidle", timeout=min(_interaction_timeout(config), 3_000)
+        )
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 # ── AUTH_CHECK 실행자(로그인 상태만 점검·보고 — 수집/전송 0) ────────────────────
@@ -312,6 +508,7 @@ def build_auth_execute_job(
     login_probe: Callable[[ClaimedJob], str] = default_login_probe,
     open_auth_browser: Callable[[ClaimedJob], Any] = default_open_auth_browser,
     detect_completion: Callable[[ClaimedJob], bool] = default_detect_completion,
+    secret_resolver: Callable[[str], str | None] | None = None,
     fallback: Callable[[ClaimedJob], JobResult] = default_execute_job,
     now: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
@@ -335,6 +532,17 @@ def build_auth_execute_job(
     와 대조). 미합성이면 기존 ``default_execute_job`` 그대로(4.7 동작 보존, 무회귀).
     [Source: src/rider_agent/workers/kakao_sender.py(393-411), src/rider_agent/job_loop.py(763·855-857)]
     """
+
+    if secret_resolver is not None and login_probe is default_login_probe:
+        login_probe = lambda job: default_login_probe(job, secret_resolver=secret_resolver)
+    if secret_resolver is not None and open_auth_browser is default_open_auth_browser:
+        open_auth_browser = lambda job: default_open_auth_browser(
+            job, secret_resolver=secret_resolver
+        )
+    if secret_resolver is not None and detect_completion is default_detect_completion:
+        detect_completion = lambda job: default_detect_completion(
+            job, secret_resolver=secret_resolver
+        )
 
     def _execute(job: ClaimedJob) -> JobResult:
         if job.type == CAPABILITY_AUTH_CHECK:

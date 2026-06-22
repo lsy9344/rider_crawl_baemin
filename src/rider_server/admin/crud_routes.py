@@ -123,6 +123,19 @@ def _optional_bool(value: str | None) -> bool | None:
     return value.strip().lower() in {"true", "on", "1", "yes"}
 
 
+def _optional_select_bool(value: str | None) -> bool | None:
+    if value is None or not value.strip():
+        return None
+    return value.strip().lower() in {"true", "on", "1", "yes"}
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _int_or(form: dict, key: str, default: int = 0) -> int:
     try:
         return int(form.get(key, "").strip())
@@ -210,6 +223,12 @@ def _rule_label(rule) -> str:
     flags = "변경시만" if rule.send_only_on_change else "항상"
     template = rule.template_id or "기본"
     return f"{template} · {flags}"
+
+
+def _target_summary(target) -> str:
+    if target.schedule_enabled and target.start_time and target.stop_time:
+        return f"{target.name} · 전송 {target.start_time}~{target.stop_time}"
+    return target.name
 
 
 def _raise_for(exc: Exception) -> None:
@@ -322,7 +341,7 @@ async def list_monitoring_targets(
     return _entities(
         request,
         "모니터링 대상",
-        [{"id": t.id, "summary": t.name, "state": t.status.value} for t in rows],
+        [{"id": t.id, "summary": _target_summary(t), "state": t.status.value} for t in rows],
     )
 
 
@@ -684,6 +703,9 @@ async def create_monitoring_target(
             external_id=form.get("external_id", "").strip(),
             url=form.get("url", "").strip(),
             interval_minutes=_int_or(form, "interval_minutes", 0),
+            schedule_enabled=_bool(form, "schedule_enabled"),
+            start_time=form.get("start_time", "").strip(),
+            stop_time=form.get("stop_time", "").strip(),
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),
@@ -715,6 +737,9 @@ async def update_monitoring_target(
             interval_minutes=(
                 _int_or(form, "interval_minutes") if form.get("interval_minutes") else None
             ),
+            schedule_enabled=_optional_select_bool(form.get("schedule_enabled")),
+            start_time=_optional_text(form.get("start_time")),
+            stop_time=_optional_text(form.get("stop_time")),
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),

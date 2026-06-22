@@ -83,6 +83,8 @@ def compose_execute_job(
             auth_kwargs["poll_interval_seconds"] = auth_poll_interval_seconds
         if auth_max_attempts is not None:
             auth_kwargs["max_attempts"] = auth_max_attempts
+        if secret_resolver is not None:
+            auth_kwargs["secret_resolver"] = secret_resolver
         effective_execute_job = build_auth_execute_job(**auth_kwargs)
 
     crawl_worker = None

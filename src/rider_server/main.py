@@ -440,10 +440,15 @@ def _require_database_for_production(settings: Settings) -> None:
 
 
 def _require_secure_admin_for_production(settings: Settings) -> None:
-    """운영 환경에서 principal 없는 public admin 모드를 막는다."""
+    """운영 환경에서 IP 제한 없는 public admin 모드를 막는다."""
 
-    if settings.app_env.strip().lower() == "production" and settings.admin_public_access:
-        raise RuntimeError("RIDER_ADMIN_PUBLIC_ACCESS must be disabled when APP_ENV=production")
+    if settings.app_env.strip().lower() != "production" or not settings.admin_public_access:
+        return
+    if settings.admin_ip_allowlist:
+        return
+    raise RuntimeError(
+        "RIDER_ADMIN_PUBLIC_ACCESS requires RIDER_ADMIN_IP_ALLOWLIST when APP_ENV=production"
+    )
 
 
 def _resolve_public_admin_principal(request: Request) -> AdminPrincipal:

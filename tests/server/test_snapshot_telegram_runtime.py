@@ -21,6 +21,7 @@ from rider_server.services.snapshot_repository_postgres import (
     PostgresSnapshotIngestRepository,
     _attempt_telegram_delivery,
     _record_scoped_to_locked_job,
+    _send_window_allows_dispatch,
 )
 from rider_server.settings import Settings
 
@@ -128,6 +129,48 @@ def test_snapshot_record_scope_requires_server_owned_job_payload() -> None:
 
     with pytest.raises(JobResultIngestError, match="job payload tenant_id is required"):
         _record_scoped_to_locked_job(_snapshot_record(), job)
+
+
+def test_send_window_allows_dispatch_when_disabled() -> None:
+    assert _send_window_allows_dispatch(
+        _NOW,
+        schedule_enabled=False,
+        start_time="",
+        stop_time="",
+    ) is True
+
+
+def test_send_window_allows_dispatch_inside_same_day_kst_window() -> None:
+    assert _send_window_allows_dispatch(
+        datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc),
+        schedule_enabled=True,
+        start_time="09:00",
+        stop_time="22:00",
+    ) is True
+
+
+def test_send_window_blocks_dispatch_outside_same_day_kst_window() -> None:
+    assert _send_window_allows_dispatch(
+        datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc),
+        schedule_enabled=True,
+        start_time="09:00",
+        stop_time="22:00",
+    ) is False
+
+
+def test_send_window_allows_overnight_kst_window() -> None:
+    assert _send_window_allows_dispatch(
+        datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc),
+        schedule_enabled=True,
+        start_time="22:00",
+        stop_time="06:00",
+    ) is True
+    assert _send_window_allows_dispatch(
+        datetime(2026, 6, 16, 22, 0, tzinfo=timezone.utc),
+        schedule_enabled=True,
+        start_time="22:00",
+        stop_time="06:00",
+    ) is False
 
 
 def test_snapshot_telegram_attempt_success_marks_sent_and_calls_sender() -> None:

@@ -52,14 +52,17 @@ class AppConfig:
     # rider-performance depending on ``platform_name``).
     peak_dashboard_url: str = ""
     platform_name: str = DEFAULT_PLATFORM_NAME
-    # 쿠팡이츠 이메일 2차 인증 자동 복구 설정. 기본값은 비활성이며, 켜기 전까지는
-    # 기존처럼 로그인 만료를 감지하면 탭을 중지한다(BrowserActionRequiredError).
+    # 쿠팡이츠 이메일 2차 인증 자동 복구 설정. 기본값은 비활성이다. 인증 시작 같은
+    # 명시적 복구 경로에서만 payload/UI 설정으로 켠다.
     coupang_auto_email_2fa_enabled: bool = False
+    # 배민 사람 개입형 인증 시작용 로그인 자격증명(핸들 또는 평문).
+    baemin_login_id: str = field(default="", repr=False)
+    baemin_login_password: str = field(default="", repr=False)
     # UI에서 직접 입력하는 쿠팡 로그인 자격증명(JSON 파일 폴백 없음).
-    coupang_login_id: str = ""
+    coupang_login_id: str = field(default="", repr=False)
     coupang_login_password: str = field(default="", repr=False)
     # 인증 이메일 자격증명(IMAP). 공급자(naver/gmail)는 주소 도메인으로 자동 결정한다.
-    verification_email_address: str = ""
+    verification_email_address: str = field(default="", repr=False)
     verification_email_mailbox_lock_id: str = ""
     verification_email_app_password: str = field(default="", repr=False)
     verification_email_subject_keyword: str = DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD

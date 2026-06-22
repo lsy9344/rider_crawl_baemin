@@ -449,4 +449,8 @@ async def auth_required_fragment(
         rows = await _service.auth_required_rows(_repo(request), tenant_id=_tenant_id(request), now=_now())
     except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
         return _db_failure_fragment(request)
-    return templates.TemplateResponse(request, "_auth_required.html", {"auth_required": rows})
+    return templates.TemplateResponse(
+        request,
+        "_auth_required.html",
+        {"auth_required": rows, "tenant_id": _tenant_id(request)},
+    )

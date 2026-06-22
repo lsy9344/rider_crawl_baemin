@@ -212,6 +212,49 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert config.verification_email_mailbox_lock_id == "vault://mail/address"
 
 
+def test_coupang_job_local_secret_refs_are_resolved_into_email_2fa_config() -> None:
+    captured = {}
+    secrets = {
+        "local:target-1/coupang_login_id": "coupang-login-id",
+        "local:target-1/coupang_login_password": "coupang-login-password",
+        "local:target-1/verification_email_address": "mailbox@example.invalid",
+        "local:target-1/verification_email_app_password": "mail-app-password",
+    }
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "local:target-1/coupang_login_id",
+            "coupang_login_password_ref": "local:target-1/coupang_login_password",
+            "verification_email_address_ref": "local:target-1/verification_email_address",
+            "verification_email_app_password_ref": "local:target-1/verification_email_app_password",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+    worker = CrawlWorker(crawl_snapshot=fake_crawl, secret_resolver=secrets.get)
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    config = captured["config"]
+    assert config.coupang_login_id == "coupang-login-id"
+    assert config.coupang_login_password == "coupang-login-password"
+    assert config.verification_email_address == "mailbox@example.invalid"
+    assert config.verification_email_app_password == "mail-app-password"
+    assert config.coupang_auto_email_2fa_enabled is True
+
+
 def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
     # 옵션 B: 웹앱에 입력한 평문 쿠팡 ID/PW/이메일이 _ref 페이로드 키에 평문으로 실려 와도
     # 핸들 resolve 없이 그대로 config 에 채워져 자동 로그인 + IMAP 2FA 에 쓰인다.
@@ -250,6 +293,40 @@ def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
     assert config.coupang_login_password == "plain-coupang-login-password"
     assert config.verification_email_address == "myemail@gmail.com"
     assert config.verification_email_app_password == "myapppassword"
+
+
+def test_coupang_job_defaults_email_2fa_disabled_when_flag_omitted() -> None:
+    captured = {}
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["platform_name"] = platform_name
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
+        },
+    )
+    worker = CrawlWorker(crawl_snapshot=fake_crawl)
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    config = captured["config"]
+    assert captured["platform_name"] == "coupang"
+    assert config.coupang_auto_email_2fa_enabled is False
 
 
 def test_default_process_boundary_passes_plaintext_credentials(monkeypatch) -> None:

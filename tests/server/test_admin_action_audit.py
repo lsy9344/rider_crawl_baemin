@@ -14,6 +14,8 @@ from rider_crawl.redaction import REDACTED
 from rider_server.domain import (
     MonitoringTarget,
     MonitoringTargetStatus,
+    Platform,
+    PlatformAccount,
     Subscription,
     SubscriptionStatus,
 )
@@ -49,6 +51,16 @@ def _seeded_repo() -> InMemoryAdminActionRepository:
         MonitoringTarget(
             id="mt-1", tenant_id=_TENANT, platform_account_id="pa-1",
             name="가게", center_name="센터", status=MonitoringTargetStatus.ACTIVE,
+        )
+    )
+    repo.seed_platform_account(
+        PlatformAccount(
+            id="pa-1",
+            tenant_id=_TENANT,
+            platform=Platform.BAEMIN,
+            label="계정",
+            username="login-id-ref",
+            password="login-password-ref",
         )
     )
     repo.seed_job(JobRef(job_id="job-1", type="CRAWL_BAEMIN", target_id="mt-1", status="FAILED", tenant_id=_TENANT))
@@ -142,6 +154,19 @@ def test_test_crawl_and_auth_check_each_record_an_audit_row() -> None:
 
     actions = [e.action for e in repo.audits[before:]]
     assert actions == ["TEST_CRAWL", "AUTH_CHECK"]
+
+
+def test_auth_start_records_audit_row() -> None:
+    repo = _seeded_repo()
+    svc = _svc(repo)
+
+    _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    entry = repo.audits[-1]
+    assert entry.action == "AUTH_START"
+    assert entry.target_type == "monitoring_target"
+    assert entry.target_id == "mt-1"
+    assert entry.diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
 def test_dispose_held_records_audit_with_disposition() -> None:

@@ -63,7 +63,7 @@ REQUIRED_FIELDS = {
     },
     "monitoring_targets": {
         "id", "tenant_id", "platform_account_id", "name", "external_id", "url",
-        "interval_minutes", "status",
+        "interval_minutes", "schedule_enabled", "start_time", "stop_time", "status",
     },
     "browser_profiles": {"id", "agent_id", "target_id", "profile_path_ref", "cdp_port", "state"},
     "messenger_channels": {
@@ -246,6 +246,17 @@ def test_active_crawl_job_guard_index_exists():
     assert indexes["ix_jobs_active_crawl_target_type"] == ("target_id", "type", "status")
 
 
+def test_monitoring_targets_have_send_window_columns():
+    table = Base.metadata.tables["monitoring_targets"]
+
+    assert table.c.schedule_enabled.nullable is False
+    assert isinstance(table.c.schedule_enabled.type, sa.Boolean)
+    assert table.c.start_time.nullable is False
+    assert isinstance(table.c.start_time.type, sa.String)
+    assert table.c.stop_time.nullable is False
+    assert isinstance(table.c.stop_time.type, sa.String)
+
+
 def test_browser_profile_and_kakao_active_room_unique_indexes():
     browser_indexes = {
         index.name: tuple(column.name for column in index.columns)
@@ -410,6 +421,14 @@ def test_offline_upgrade_emits_jobs_completion_metadata_columns():
     assert "ALTER TABLE jobs ADD COLUMN completed_at" in sql
     assert "ALTER TABLE jobs ADD COLUMN duration_ms INTEGER" in sql
     assert "ALTER TABLE jobs ADD COLUMN result_schema_version" in sql
+
+
+def test_offline_upgrade_emits_target_send_window_columns():
+    sql = _offline_sql("upgrade")
+
+    assert "ALTER TABLE monitoring_targets ADD COLUMN schedule_enabled" in sql
+    assert "ALTER TABLE monitoring_targets ADD COLUMN start_time" in sql
+    assert "ALTER TABLE monitoring_targets ADD COLUMN stop_time" in sql
 
 
 def test_verification_email_migration_drops_backfill_server_defaults():
@@ -661,8 +680,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0020: fleet claim affinity/idempotency and scale indexes on top of profile/channel uniqueness.
-    assert heads[0] == "0020_fleet_claim_scale"
+    # 0021: per-target send window policy on top of fleet claim scale hardening.
+    assert heads[0] == "0021_target_send_window"
+    assert (
+        script.get_revision("0021_target_send_window").down_revision
+        == "0020_fleet_claim_scale"
+    )
     assert (
         script.get_revision("0020_fleet_claim_scale").down_revision
         == "0019_profile_channel_uniqueness"

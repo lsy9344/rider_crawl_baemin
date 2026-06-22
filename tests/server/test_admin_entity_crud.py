@@ -380,6 +380,74 @@ def test_create_monitoring_target_links_account_and_flags_valid_coupang_center()
     assert repo.audits[-1].action == "MONITORING_TARGET_CREATE"
 
 
+def test_create_monitoring_target_persists_send_window() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    svc = _svc(repo)
+
+    result = _run(
+        svc.create_monitoring_target(
+            entity_id="mt-new",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name="대상",
+            center_name="센터",
+            schedule_enabled=True,
+            start_time="09:00",
+            stop_time="22:00",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert result.target.schedule_enabled is True
+    assert result.target.start_time == "09:00"
+    assert result.target.stop_time == "22:00"
+    stored = _run(repo.get_monitoring_target("mt-new"))
+    assert stored is not None
+    assert stored.schedule_enabled is True
+    assert stored.start_time == "09:00"
+    assert stored.stop_time == "22:00"
+
+
+@pytest.mark.parametrize(
+    "start_time,stop_time",
+    [
+        ("", "22:00"),
+        ("09:00", ""),
+        ("25:00", "22:00"),
+        ("09:00", "09:00"),
+    ],
+)
+def test_create_monitoring_target_rejects_invalid_enabled_send_window(
+    start_time: str, stop_time: str
+) -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_monitoring_target(
+                entity_id="mt-new",
+                tenant_id=_TENANT,
+                platform_account_id="pa-1",
+                name="대상",
+                center_name="센터",
+                schedule_enabled=True,
+                start_time=start_time,
+                stop_time=stop_time,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_monitoring_target("mt-new")) is None
+    assert repo.audits == []
+
+
 def test_create_coupang_blank_center_rejected() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -521,6 +589,46 @@ def test_update_monitoring_target_records_before_after() -> None:
     assert result.target.name == "새이름"
     diff = repo.audits[-1].diff_redacted
     assert diff["from_name"] == "가게" and diff["to_name"] == "새이름"
+
+
+def test_update_monitoring_target_send_window_can_disable_and_keep_times() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="mt-1",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name="가게",
+            center_name="센터",
+            schedule_enabled=True,
+            start_time="09:00",
+            stop_time="22:00",
+        )
+    )
+    svc = _svc(repo)
+
+    result = _run(
+        svc.update_monitoring_target(
+            "mt-1",
+            tenant_id=_TENANT,
+            schedule_enabled=False,
+            start_time=None,
+            stop_time=None,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert result.target.schedule_enabled is False
+    assert result.target.start_time == "09:00"
+    assert result.target.stop_time == "22:00"
+    stored = _run(repo.get_monitoring_target("mt-1"))
+    assert stored is not None
+    assert stored.schedule_enabled is False
+    assert stored.start_time == "09:00"
+    assert stored.stop_time == "22:00"
 
 
 def test_deactivate_monitoring_target_soft_delete_inactive() -> None:
@@ -680,6 +788,84 @@ def test_route_create_target_returns_fragment_and_persists() -> None:
     assert "모니터링 대상 생성됨" in resp.text
     assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert len(_run(repo.list_monitoring_targets("tn-1"))) == 1
+
+
+def test_route_create_target_persists_send_window() -> None:
+    repo = _seeded_repo()
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/monitoring-targets?tenant=tn-1",
+        data={
+            "platform_account_id": "pa-1",
+            "name": "신규대상",
+            "center_name": "센터",
+            "schedule_enabled": "true",
+            "start_time": "09:00",
+            "stop_time": "22:00",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    target = _run(repo.list_monitoring_targets("tn-1"))[0]
+    assert target.schedule_enabled is True
+    assert target.start_time == "09:00"
+    assert target.stop_time == "22:00"
+
+
+def test_route_update_target_disables_send_window_and_keeps_blank_times() -> None:
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="mt-1",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name="가게",
+            center_name="센터",
+            schedule_enabled=True,
+            start_time="09:00",
+            stop_time="22:00",
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/monitoring-targets/mt-1?tenant=tn-1",
+        data={"schedule_enabled": "false", "start_time": "", "stop_time": ""},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    stored = _run(repo.get_monitoring_target("mt-1"))
+    assert stored is not None
+    assert stored.schedule_enabled is False
+    assert stored.start_time == "09:00"
+    assert stored.stop_time == "22:00"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"schedule_enabled": "true", "start_time": "25:00", "stop_time": "22:00"},
+        {"schedule_enabled": "true", "start_time": "", "stop_time": "22:00"},
+        {"schedule_enabled": "true", "start_time": "09:00", "stop_time": "09:00"},
+    ],
+)
+def test_route_create_target_rejects_invalid_send_window(data: dict[str, str]) -> None:
+    repo = _seeded_repo()
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/monitoring-targets?tenant=tn-1",
+        data={
+            "platform_account_id": "pa-1",
+            "name": "신규대상",
+            "center_name": "센터",
+            **data,
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_monitoring_targets("tn-1")) == []
 
 
 def test_route_create_coupang_blank_center_rejected() -> None:
@@ -903,6 +1089,12 @@ def test_entities_form_exposes_full_edit_and_delivery_rule_controls() -> None:
         'id="tgt-edit-external"',
         'id="tgt-edit-url"',
         'id="tgt-edit-interval"',
+        'name="schedule_enabled"',
+        'name="start_time"',
+        'name="stop_time"',
+        'id="tgt-edit-schedule"',
+        'id="tgt-edit-start"',
+        'id="tgt-edit-stop"',
         'id="ch-edit-thread"',
         'id="ch-edit-kakao"',
         'id="rule-list-target"',
@@ -914,6 +1106,31 @@ def test_entities_form_exposes_full_edit_and_delivery_rule_controls() -> None:
     assert "thread_id: cval('ch-edit-thread')" in body
     assert "kakao_room_name: cval('ch-edit-kakao')" in body
     assert "interval_minutes: cval('tgt-edit-interval')" in body
+    assert "schedule_enabled: cval('tgt-edit-schedule')" in body
+    assert "start_time: cval('tgt-edit-start')" in body
+    assert "stop_time: cval('tgt-edit-stop')" in body
+
+
+def test_route_list_targets_summary_includes_active_send_window() -> None:
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="mt-1",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name="가게",
+            center_name="센터",
+            schedule_enabled=True,
+            start_time="09:00",
+            stop_time="22:00",
+        )
+    )
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/monitoring-targets?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "가게 · 전송 09:00~22:00" in resp.text
 
 
 def test_entities_form_does_not_expose_raw_template_id_editor() -> None:

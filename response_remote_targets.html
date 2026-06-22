@@ -1,0 +1,55 @@
+
+<div class="tlist" id="tlist">
+  
+  
+  
+  
+  
+    
+    
+    
+  
+  <div class="trow trow--auth_required"
+       onclick="if(!event.target.closest('button'))openTargetDrawer(this, this)"
+       data-name="H&amp;J"
+       data-center="제이앤에이치플러스 의정부남부"
+       data-platform="COUPANG"
+       data-platform-label="쿠팡"
+       data-severity="AUTH_REQUIRED"
+       data-severity-label="인증 필요"
+       data-severity-class="sev-stopped"
+       data-interval="2"
+       data-failcode="PROFILE_UNAVAILABLE"
+       data-reason="오류 — 확인 필요 (PROFILE_UNAVAILABLE)"
+       data-success="3일 전"
+       data-delivery=""
+       data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+       data-tenant="864fc127-1138-40d2-b115-a24decf8a2b8"
+       data-primary-action="auth-check"
+       data-primary-label="인증 확인"
+       data-primary-style="primary">
+    <span class="sevbar" aria-hidden="true"></span>
+    <span class="t-name">
+      <span class="nm">H&amp;J</span>
+      
+      <span class="ctr">센터: 제이앤에이치플러스 의정부남부</span>
+    </span>
+    <span class="plat plat-coupang">쿠팡</span>
+    <span class="sev-badge sev-stopped">인증 필요</span>
+    <span class="t-reason">
+      <span class="rs">오류 — 확인 필요 (PROFILE_UNAVAILABLE)</span>
+      <span class="fresh fresh-dead">수집 3일 전</span>
+    </span>
+    <span class="t-act row-actions">
+      
+      <button type="button" class="btn primary" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-check?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+              hx-vals='{"confirm_action": "confirmed"}'
+              hx-target="#target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 확인</button>
+      <button type="button" class="btn ghost" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this)" aria-label="H&amp;J 상세 열기">상세</button>
+    </span>
+    <div class="row-result" id="target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf" aria-live="polite" role="status"></div>
+  </div>
+  
+  
+</div>

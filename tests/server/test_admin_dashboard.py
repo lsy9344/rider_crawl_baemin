@@ -753,8 +753,8 @@ def test_failclosed_display_severity_drives_primary_actions_without_failure_code
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
 
-    assert 'data-primary-action="auth-check"' in html
-    assert "/admin/targets/t-auth/auth-check" in html
+    assert 'data-primary-action="auth-start"' in html
+    assert "/admin/targets/t-auth/auth-start" in html
     assert 'data-primary-action="center-name"' in html
     assert "로그인 만료 · 인증 확인 필요" in html
     assert "센터/상점명 불일치" in html
@@ -777,7 +777,7 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
     assert 'role="button"' not in html
-    assert 'data-primary-action="auth-check"' in html
+    assert 'data-primary-action="auth-start"' in html
     assert 'aria-label="가게 상세 열기"' in html
     assert 'id="target-result-t-auth"' in html
     assert 'hx-target="#target-result-t-auth"' in html
@@ -798,7 +798,7 @@ def test_dashboard_counts_display_failclosed_states_as_action_required_work() ->
 
     assert '<span class="n">1</span><span class="lbl">조치 필요</span>' in body
     assert '<span class="n">1</span><span class="lbl">중지</span>' not in body
-    assert 'data-primary-action="auth-check"' in body
+    assert 'data-primary-action="auth-start"' in body
     assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
 
 
@@ -923,6 +923,43 @@ def test_auth_required_fragment_names_the_target_not_generic_label() -> None:
     assert "로그인 만료 · 인증 확인 필요" in body
     assert "인증 필요 대상</td>" not in body
     assert "ACCOUNT_AUTH_REQUIRED" not in body
+    assert "/admin/targets/t-stopped/auth-start" in body
+
+
+def test_auth_required_fragment_uses_row_tenant_for_all_tenants_action() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_OTHER_TENANT,
+                target_id="t-other",
+                profile_id="p-other",
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="타고객가게",
+            )
+        ],
+        tenant_id="all",
+    )
+
+    assert "/admin/targets/t-other/auth-start?tenant=tn-2" in html
+    assert "/admin/targets/t-other/auth-start?tenant=all" not in html
+
+
+def test_auth_required_fragment_offers_direct_status_recheck() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-stopped",
+                profile_id="p1",
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="가게",
+            )
+        ],
+        tenant_id=_TENANT,
+    )
+
+    assert "상태 재확인" in html
+    assert "/admin/targets/t-stopped/auth-check?tenant=tn-1" in html
 
 
 def test_dashboard_full_page_without_tenant_param_renders() -> None:

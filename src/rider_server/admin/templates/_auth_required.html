@@ -15,7 +15,21 @@
       <td>{{ r.reason | reason_text }}</td>
       <td>
         {% if r.target_id %}
+        {% set action_tenant = r.tenant_id or tenant_id %}
+        <button type="button"
+                class="btn primary"
+                data-target="{{ r.target_id }}"
+                hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-start?tenant={{ action_tenant | urlencode }}"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-{{ r.target_id }}">인증 시작</button>
+        <button type="button"
+                class="btn ghost"
+                data-target="{{ r.target_id }}"
+                hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-check?tenant={{ action_tenant | urlencode }}"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-{{ r.target_id }}">상태 재확인</button>
         <button type="button" class="btn ghost" data-target="{{ r.target_id }}" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
+        <div class="muted" id="auth-required-result-{{ r.target_id }}" aria-live="polite"></div>
         {% else %}
         <span class="muted">대상 없음</span>
         {% endif %}

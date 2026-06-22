@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>운영 대시보드: rider_server</title>
+  <!-- HTMX: 별도 npm/빌드 없이 CDN 정적 자산만 로드(서버 렌더 부분 갱신). -->
+  <script src="/admin/static/htmx.min.js"></script>
+  <!-- Darkmatter 테마 폰트(tweakcn darkmatter.json): Geist Mono(sans) / JetBrains Mono(mono). 한글은 시스템 고딕 폴백. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- 첫 페인트 전에 저장된 테마 적용(FOUC 방지). darkmatter 는 다크 우선. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("adm-theme");
+        var root = document.documentElement;
+        if (t === "light") root.classList.remove("dark"); else root.classList.add("dark");
+      } catch (e) {}
+    })();
+  </script>
+  <style>
+    /* ════ Darkmatter 디자인 토큰(tweakcn darkmatter.json: oklch 원값) ════ */
+    :root {
+      --background: oklch(1.0000 0 0); --foreground: oklch(0.2101 0.0318 264.6645);
+      --card: oklch(1.0000 0 0); --card-foreground: oklch(0.2101 0.0318 264.6645);
+      --popover: oklch(1.0000 0 0);
+      --primary: oklch(0.6716 0.1368 48.5130); --primary-foreground: oklch(1.0000 0 0);
+      --secondary: oklch(0.5360 0.0398 196.0280); --secondary-foreground: oklch(1.0000 0 0);
+      --muted: oklch(0.9670 0.0029 264.5419); --muted-foreground: oklch(0.5510 0.0234 264.3637);
+      --accent: oklch(0.9491 0 0); --accent-foreground: oklch(0.2101 0.0318 264.6645);
+      --border: oklch(0.9276 0.0058 264.5313); --input: oklch(0.9276 0.0058 264.5313);
+      --ring: oklch(0.6716 0.1368 48.5130); --sidebar: oklch(0.9670 0.0029 264.5419);
+      --ok: oklch(0.5200 0.1300 155); --warn: oklch(0.5300 0.1250 70);
+      --crit: oklch(0.5400 0.2200 27); --info: oklch(0.5200 0.1700 255);
+      --violet: oklch(0.5200 0.2000 295); --neutral: oklch(0.4500 0.0150 265);
+      --font-sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, "Apple SD Gothic Neo", monospace;
+      --radius: 0.75rem; --radius-sm: calc(var(--radius) - 0.35rem); --radius-lg: calc(var(--radius) + 0.25rem);
+      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.04); --shadow-sm: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 1px 2px -1px hsl(0 0% 0% / 0.05);
+      --shadow-md: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 2px 6px -1px hsl(0 0% 0% / 0.06);
+      --shadow-lg: 0 1px 4px 0 hsl(0 0% 0% / 0.05), 0 8px 20px -4px hsl(0 0% 0% / 0.10); --tracking: 0rem;
+    }
+    html.dark {
+      --background: oklch(0.1797 0.0043 308.1928); --foreground: oklch(0.8109 0 0);
+      --card: oklch(0.2150 0.0040 308); --card-foreground: oklch(0.8109 0 0); --popover: oklch(0.1822 0 0);
+      --primary: oklch(0.7214 0.1337 49.9802); --primary-foreground: oklch(0.1797 0.0043 308.1928);
+      --secondary: oklch(0.5940 0.0443 196.0233); --secondary-foreground: oklch(0.1797 0.0043 308.1928);
+      --muted: oklch(0.2520 0 0); --muted-foreground: oklch(0.6750 0 0);
+      --accent: oklch(0.3211 0 0); --accent-foreground: oklch(0.8109 0 0);
+      --border: oklch(0.2900 0 0); --input: oklch(0.2520 0 0); --ring: oklch(0.7214 0.1337 49.9802); --sidebar: oklch(0.1822 0 0);
+      --ok: oklch(0.8000 0.1500 160); --warn: oklch(0.8300 0.1400 80); --crit: oklch(0.7100 0.1900 25);
+      --info: oklch(0.7300 0.1300 250); --violet: oklch(0.7600 0.1500 300); --neutral: oklch(0.7000 0.0150 265);
+      --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.30); --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.40);
+      --shadow-md: 0 2px 8px -1px hsl(0 0% 0% / 0.45); --shadow-lg: 0 12px 30px -6px hsl(0 0% 0% / 0.55);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; font-family: var(--font-sans); letter-spacing: var(--tracking); color: var(--foreground);
+      background-color: var(--background); line-height: 1.55; font-size: 14px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+    body.drawer-open { overflow: hidden; }
+    body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background-image: radial-gradient(color-mix(in srgb, var(--muted-foreground) 22%, transparent) 0.6px, transparent 0.6px);
+      background-size: 26px 26px; opacity: 0.5; }
+    a { color: var(--primary); text-decoration: none; } a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin: 0; letter-spacing: 0; }
+    ::selection { background: color-mix(in srgb, var(--primary) 30%, transparent); }
+    ::-webkit-scrollbar { width: 11px; height: 11px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 3px solid var(--background); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+    .muted { color: var(--muted-foreground); }
+
+    /* ── 상단 바 + 모드 탭 ───────────────────────────────────────────────── */
+    .topbar { position: sticky; top: 0; z-index: 50; background: color-mix(in srgb, var(--background) 82%, transparent);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .appbar { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between;
+      max-width: 1240px; margin: 0 auto; padding: 0.7rem 1.25rem; }
+    .brand { display: flex; align-items: center; gap: 0.7rem; }
+    .brand-mark { display: grid; place-items: center; width: 2.2rem; height: 2.2rem; border-radius: var(--radius-sm);
+      background: linear-gradient(145deg, var(--primary), color-mix(in srgb, var(--primary) 65%, var(--violet)));
+      color: var(--primary-foreground); font-weight: 700; font-size: 1.25rem; box-shadow: var(--shadow-sm); }
+    .brand-title { font-size: 1.25rem; font-weight: 600; line-height: 1.15; }
+    .brand-sub { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); letter-spacing: 0.02em; }
+    .appbar-right { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+    .pill { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; font-size: 0.875rem; letter-spacing: 0.01em;
+      padding: 0.3rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); white-space: nowrap; }
+    .pill-tenant { color: var(--secondary); border-color: color-mix(in srgb, var(--secondary) 35%, var(--border)); }
+    .tenant-select { font-family: var(--font-sans); font-size: 0.875rem; color: var(--foreground); background: var(--card);
+      border: 1px solid color-mix(in srgb, var(--secondary) 35%, var(--border)); border-radius: 999px; padding: 0.32rem 0.65rem; }
+    .pill-live { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+    .pill-time { font-family: var(--font-mono); color: var(--muted-foreground); }
+    .pill-stale { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+    .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; animation: pulse 2s ease-out infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); } 70% { box-shadow: 0 0 0 0.5rem transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .theme-toggle { font-family: var(--font-sans); font-weight: 500; font-size: 0.875rem; cursor: pointer; padding: 0.34rem 0.7rem;
+      border-radius: 999px; background: var(--card); color: var(--foreground); border: 1px solid var(--border); transition: background .15s, border-color .15s; }
+    .theme-toggle:hover { background: var(--accent); border-color: var(--muted-foreground); }
+    .modetabs { display: flex; gap: 0.25rem; max-width: 1240px; margin: 0 auto; padding: 0 1.25rem; }
+    .modetab { font-family: var(--font-sans); font-weight: 600; font-size: 0.875rem; color: var(--muted-foreground); cursor: pointer;
+      padding: 0.55rem 0.95rem; border: none; background: transparent; border-bottom: 2px solid transparent; }
+    .modetab[aria-selected="true"] { color: var(--foreground); border-bottom-color: var(--primary); }
+    .modetab .cnt { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
+
+    .container { max-width: 1240px; margin: 0 auto; padding: 1.3rem 1.25rem 4rem; }
+    .lead { color: var(--muted-foreground); font-size: 0.875rem; line-height: 1.6; margin: 0.4rem 0 1.1rem; padding-left: 0.9rem; border-left: 2px solid var(--border); }
+    .lead b { color: var(--foreground); font-weight: 600; }
+
+    /* ── 요약: KPI 필터칩 + 미니 상태 ───────────────────────────────────── */
+    .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; margin-bottom: 0.4rem; }
+    .kpichip { display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: 600; font-size: 0.875rem;
+      padding: 0.5rem 0.85rem; border-radius: var(--radius-sm); background: var(--card); border: 1px solid var(--border);
+      box-shadow: var(--shadow-xs); transition: border-color .15s, transform .1s; color: var(--foreground); }
+    .kpichip:hover { transform: translateY(-1px); border-color: var(--muted-foreground); }
+    .kpichip[aria-pressed="true"] { border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 25%, transparent); }
+    .kpichip .n { font-family: var(--font-mono); font-size: 1.25rem; }
+    .kpichip .lbl { color: var(--muted-foreground); font-weight: 500; font-size: 0.875rem; text-transform: uppercase; letter-spacing: .04em; }
+    .kpichip::before { content: ""; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--neutral); }
+    .kpichip.k-ok::before { background: var(--ok); } .kpichip.k-warn::before { background: var(--warn); }
+    .kpichip.k-crit::before { background: var(--crit); } .kpichip.k-stop::before { background: var(--neutral); }
+    .kpichip.k-all { font-family: var(--font-mono); } .kpichip.k-all::before { display: none; }
+    .ministatus { margin-left: auto; display: inline-flex; align-items: center; gap: 0.9rem; flex-wrap: wrap;
+      font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
+    .ministatus b { color: var(--foreground); font-weight: 600; }
+    .ministatus .seg { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .ministatus .seg::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ok); }
+    .ministatus .seg.bad::before { background: var(--crit); }
+
+    /* ── 워크벤치 ───────────────────────────────────────────────────────── */
+    .workbench { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; padding: 0.75rem 0.9rem;
+      border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--primary) 4%, var(--card)); }
+    .search { position: relative; flex: 1 1 240px; min-width: 170px; }
+    .search input { width: 100%; font-family: var(--font-sans); font-size: 0.875rem; padding: 0.5rem 0.7rem 0.5rem 2rem; color: var(--foreground);
+      background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    .search input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
+    .search::before { content: "🔍"; position: absolute; left: 0.6rem; top: 50%; transform: translateY(-50%); font-size: 0.875rem; opacity: 0.6; }
+    .fchip { font-family: var(--font-sans); font-weight: 500; font-size: 0.875rem; cursor: pointer; padding: 0.42rem 0.7rem; border-radius: 999px;
+      background: var(--card); color: var(--muted-foreground); border: 1px solid var(--border); white-space: nowrap; }
+    .fchip[aria-pressed="true"] { color: var(--foreground); background: var(--accent); border-color: var(--muted-foreground); }
+    .sortsel { font-family: var(--font-sans); font-size: 0.875rem; padding: 0.42rem 0.6rem; color: var(--foreground); background: var(--card);
+      border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+    .toolbar-spacer { flex: 1; }
+    .count { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); white-space: nowrap; }
+
+    /* ── 대상 행(리스트): 데스크톱: 고정폭 트랙으로 행 간 정렬 일치 ──────── */
+    .tlist { display: flex; flex-direction: column; }
+    .trow { display: grid; align-items: center; column-gap: 1.15rem;
+      grid-template-columns: 0.3rem minmax(12rem, 1.5fr) 5rem 5rem minmax(13rem, 2fr) 11rem;
+      padding: 0.85rem 1.25rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+      cursor: pointer; transition: background .12s; }
+    .trow:hover { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .trow:last-child { border-bottom: 0; }
+    .trow:focus-visible { outline: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ring) 60%, transparent); }
+    .sevbar { width: 0.3rem; height: 2.3rem; border-radius: 999px; background: var(--neutral); }
+    .trow--critical .sevbar { background: var(--crit); }
+    .trow--warning .sevbar { background: var(--warn); }
+    .trow--normal .sevbar { background: var(--ok); }
+    .trow--stopped .sevbar { background: var(--neutral); }
+    .t-name { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; }
+    .t-name .nm { font-weight: 600; font-size: 0.875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-name .ctr { font-size: 0.875rem; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-name .risk { color: var(--crit); }
+    .plat { font-family: var(--font-mono); font-size: 0.875rem; font-weight: 600; padding: 0.18rem 0.5rem; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap; justify-self: start; }
+    .plat.plat-baemin { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, var(--border)); }
+    .plat.plat-coupang { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 35%, var(--border)); }
+    .sev-badge { display: inline-flex; align-items: center; gap: 0.36rem; font-weight: 600; font-size: 0.875rem; padding: 0.2rem 0.55rem;
+      border-radius: 999px; white-space: nowrap; justify-self: start; }
+    .sev-badge::before { content: ""; width: 0.46rem; height: 0.46rem; border-radius: 50%; background: currentColor; }
+    .sev-badge.sev-normal { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .sev-badge.sev-warning { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+    .sev-badge.sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
+    .sev-badge.sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
+    .t-reason { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; }
+    .t-reason .rs { font-size: 0.875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-reason .fresh { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
+    .t-reason .fresh.fresh-stale { color: var(--warn); } .t-reason .fresh.fresh-dead { color: var(--crit); }
+    .t-act { display: flex; gap: 0.3rem; justify-self: end; white-space: nowrap; }
+    .row-result { grid-column: 2 / -1; margin-top: 0.25rem; }
+    .row-result:empty { display: none; }
+    .btn { font-family: var(--font-sans); font-weight: 500; font-size: 0.875rem; cursor: pointer; padding: 0.34rem 0.6rem; color: var(--foreground);
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs); white-space: nowrap;
+      transition: background .13s, border-color .13s, transform .06s; }
+    .btn:hover { background: var(--accent); border-color: var(--muted-foreground); }
+    .btn:active { transform: translateY(1px); box-shadow: none; }
+    .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+    .btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+    .btn.primary:hover { background: color-mix(in srgb, var(--primary) 88%, black); border-color: var(--primary); }
+    .btn.danger { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); background: color-mix(in srgb, var(--crit) 8%, var(--card)); }
+    .btn.danger:hover { background: color-mix(in srgb, var(--crit) 18%, var(--card)); border-color: var(--crit); }
+    .btn.ghost { background: transparent; box-shadow: none; padding: 0.34rem 0.5rem; }
+    .allgood { padding: 1.2rem; text-align: center; color: var(--muted-foreground); font-size: 0.875rem; }
+    .filter-empty { display: none; padding: 1.1rem; text-align: center; color: var(--muted-foreground); font-size: 0.875rem; }
+    .target-notice { margin: 0.75rem 0.9rem 0; padding: 0.65rem 0.75rem; border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--warn) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+      color: var(--warn); font-size: 0.875rem; }
+    .target-notice[hidden] { display: none; }
+
+    /* ── 보조: Agent / 채널 / 인증필요(접힘) ─────────────────────────────── */
+    details.aux { margin-top: 1.2rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-xs); overflow: hidden; }
+    details.aux > summary { cursor: pointer; list-style: none; padding: 0.8rem 1rem; font-weight: 600; font-size: 0.875rem; display: flex; align-items: center; gap: 0.5rem; }
+    details.aux > summary::-webkit-details-marker { display: none; }
+    details.aux > summary::before { content: "▸"; color: var(--muted-foreground); transition: transform .15s; }
+    details.aux[open] > summary::before { transform: rotate(90deg); }
+    details.aux > summary .tag { margin-left: auto; font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
+    .aux-body { padding: 0 1rem 1rem; }
+
+    /* ── 채널 지표 타일(기존 _channels.html 호환) / 표(기존 _agents,_auth 호환) ── */
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
+    .metric { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 1rem 1.1rem; box-shadow: var(--shadow-xs); }
+    .metric-label { font-size: 0.875rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); }
+    .metric-value { font-family: var(--font-mono); font-weight: 600; font-size: 2rem; line-height: 1.1; margin-top: 0.35rem; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+    caption { text-align: left; padding: 0.6rem 0.8rem; font-weight: 500; font-size: 0.875rem; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
+    thead th { position: sticky; top: 0; background: color-mix(in srgb, var(--muted) 60%, var(--card)); color: var(--muted-foreground);
+      text-align: left; padding: 0.6rem 0.8rem; font-weight: 600; font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; border-bottom: 1px solid var(--border); }
+    tbody td { padding: 0.62rem 0.8rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+    code { font-family: var(--font-mono); font-size: 0.875rem; background: var(--muted); color: var(--foreground); padding: 0.08rem 0.36rem; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+    .sev-normal, .sev-warning, .sev-critical, .sev-stopped { display: inline-flex; align-items: center; gap: 0.36rem; font-weight: 600; font-size: 0.875rem; padding: 0.2rem 0.55rem; border-radius: 999px; white-space: nowrap; }
+    .sev-normal::before, .sev-warning::before, .sev-critical::before, .sev-stopped::before { content: ""; width: 0.46rem; height: 0.46rem; border-radius: 50%; background: currentColor; }
+    .sev-normal { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .sev-warning { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+    .sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
+    .sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
+
+    /* ── 관리 모드: 폼/폴드 ─────────────────────────────────────────────── */
+    fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 28%, var(--card)); padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem; }
+    legend { font-weight: 600; font-size: 0.875rem; padding: 0.1rem 0.5rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    #view-manage label { display: inline-flex; flex-direction: column; gap: 0.3rem; margin: 0 0.7rem 0.75rem 0; vertical-align: bottom; font-size: 0.875rem; font-weight: 500; color: var(--muted-foreground); }
+    #view-manage input[type="text"], #view-manage input[type="number"], #view-manage input[type="password"], #view-manage select { font-family: var(--font-sans); font-size: 0.875rem; padding: 0.46rem 0.6rem; min-width: 11rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    #view-manage .field-help { max-width: 13rem; font-size: 0.875rem; line-height: 1.35; color: var(--muted-foreground); }
+    #view-manage input:focus, #view-manage select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
+    #view-manage input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--primary); }
+    #view-manage button { font-family: var(--font-sans); font-weight: 500; font-size: 0.875rem; cursor: pointer; padding: 0.46rem 0.85rem; margin: 0 0.4rem 0.5rem 0; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-xs); }
+    #view-manage button:hover { background: var(--accent); border-color: var(--muted-foreground); }
+    #view-manage button.create { background: var(--primary); color: var(--primary-foreground); border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+    #view-manage button.danger { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
+    .edit-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 0.4rem; margin-top: 0.4rem; padding-top: 0.7rem; border-top: 1px dashed var(--border); }
+    .action-result { font-weight: 500; font-size: 0.875rem; padding: 0.65rem 0.85rem; margin-bottom: 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); display: flex; align-items: center; gap: 0.5rem; }
+    .action-result.muted { color: var(--muted-foreground); }
+    .action-result.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--card)); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+    .action-result.err { color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); border-color: color-mix(in srgb, var(--crit) 38%, var(--border)); }
+    .action-result.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--card)); border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); }
+    .action-result.ok::before { content: "✓"; font-weight: 700; } .action-result.err::before { content: "!"; font-weight: 700; }
+    .inline-action-status.action-result, .inline-action-status .action-result { display: inline-flex; width: fit-content; min-height: 2rem; padding: 0.36rem 0.62rem; margin: 0 0 0.5rem 0.15rem; vertical-align: middle; border-radius: 999px; white-space: nowrap; }
+    .inline-action-status:empty { display: none; }
+
+    /* ── 업체 상세 드로어 ───────────────────────────────────────────────── */
+    .scrim { position: fixed; inset: 0; background: hsl(0 0% 0% / 0.5); z-index: 80; display: none; }
+    .scrim.open { display: block; }
+    .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%); z-index: 81; background: var(--card);
+      border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column; }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 0.6rem; }
+    .drawer-head h2 { font-size: 1.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .drawer-close { margin-left: auto; cursor: pointer; background: transparent; border: none; color: var(--muted-foreground); font-size: 1.25rem; }
+    .drawer-body { padding: 1.1rem; overflow-y: auto; flex: 1; }
+    .why { display: block; padding: 0.7rem 0.85rem; border-radius: var(--radius-sm); font-size: 0.875rem; margin-bottom: 1rem; }
+    .why.sev-critical, .why.sev-stopped { background: color-mix(in srgb, var(--crit) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--crit) 30%, var(--border)); color: var(--crit); }
+    .why.sev-warning { background: color-mix(in srgb, var(--warn) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border)); color: var(--warn); }
+    .why.sev-normal { background: color-mix(in srgb, var(--ok) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--border)); color: var(--ok); }
+    .facts { display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 0.9rem; font-size: 0.875rem; margin-bottom: 1rem; }
+    .facts dt { color: var(--muted-foreground); } .facts dd { margin: 0; font-family: var(--font-mono); }
+    .deeplink { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); margin-top: 0.6rem; word-break: break-all; }
+    .drawer-edit { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+    .drawer-edit[hidden] { display: none; }
+    .drawer-edit label { display: flex; flex-direction: column; gap: 0.25rem; flex: 1 1 12rem; font-size: 0.875rem; color: var(--muted-foreground); }
+    .drawer-edit input { width: 100%; font-family: var(--font-sans); font-size: 0.875rem; padding: 0.45rem 0.55rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    .drawer-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; padding: 1rem 1.1rem; border-top: 1px solid var(--border); }
+    #drawer-result { padding: 0 1.1rem 1rem; }
+    #drawer-result:empty { display: none; }
+
+    /* ── 액션 결과 전역 토스트(항상 보임) ───────────────────────────────── */
+    #action-result { position: fixed; left: 50%; bottom: 1.1rem; transform: translateX(-50%); z-index: 70; max-width: min(560px, 92vw); }
+    #action-result:empty { display: none; }
+    .htmx-swapping { opacity: 0.55; transition: opacity 0.15s ease; }
+
+    @media (max-width: 720px) {
+      body { font-size: 14px; } .brand-sub { display: none; } .ministatus { margin-left: 0; width: 100%; }
+      .ministatus .seg, .inline-action-status, .inline-action-status .action-result { white-space: normal; overflow-wrap: anywhere; }
+      .trow { grid-template-columns: 0.4rem 1fr auto; grid-template-areas: "bar name plat" "bar badge badge" "bar reason reason" "bar act act"; gap: 0.35rem 0.6rem; padding: 0.8rem 0.85rem; }
+      .sevbar { grid-area: bar; height: 100%; } .t-name { grid-area: name; } .plat { grid-area: plat; align-self: start; }
+      .trow > .sev-badge { grid-area: badge; justify-self: start; align-self: start; } .t-reason { grid-area: reason; padding-top: 0.05rem; } .t-reason .rs { white-space: normal; }
+      .t-act { grid-area: act; justify-self: start; margin-top: 0.2rem; flex-wrap: wrap; }
+      .t-act .btn, .drawer-actions .btn, #view-manage button { min-height: 44px; }
+      #view-manage input[type="text"], #view-manage input[type="number"], #view-manage input[type="password"], #view-manage select { min-width: 8.5rem; }
+    }
+    @media (min-width: 721px) { #view-manage .trow { grid-template-columns: 0.4rem minmax(0, 1fr) 4.5rem 6rem; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body data-initial-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf">
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+  <header class="topbar">
+    <div class="appbar">
+      <div class="brand">
+        <span class="brand-mark">R</span>
+        <div><div class="brand-title">운영 대시보드</div><div class="brand-sub">rider_server · ops console</div></div>
+      </div>
+      <div class="appbar-right">
+        
+        
+        
+          
+        
+          
+        
+        <span class="pill pill-tenant" title="tenant · 864fc127-1138-40d2-b115-a24decf8a2b8">고객 · H&amp;J</span>
+        
+        <select id="tenant-switch" class="tenant-select" aria-label="고객 선택" onchange="switchTenant(this.value)">
+          <option value="">고객 선택…</option>
+          <option value="all" >전체 고객</option>
+          
+          <option value="c493f9e5-d3a5-4205-a95e-e1a0df223dc5" >표준서울마포B이츠앤홀딩스3</option>
+          
+          <option value="864fc127-1138-40d2-b115-a24decf8a2b8" selected>H&amp;J</option>
+          
+        </select>
+        
+        <span class="pill pill-live" id="live-pill"><span class="dot"></span> LIVE · 30s</span>
+        <span class="pill pill-time" title="마지막 자동 갱신 시각">갱신 <span id="last-updated">없음</span></span>
+        <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">◐ 라이트</button>
+      </div>
+    </div>
+    <nav class="modetabs" role="tablist" aria-label="모드">
+      <button class="modetab" role="tab" aria-selected="true" aria-controls="view-monitor" data-mode="monitor" onclick="switchMode('monitor', this)">모니터링 <span class="cnt">1</span></button>
+      <button class="modetab" role="tab" aria-selected="false" aria-controls="view-manage" data-mode="manage" onclick="switchMode('manage', this)">관리</button>
+    </nav>
+  </header>
+
+  
+  <main class="container" id="view-monitor" role="tabpanel">
+    <div class="summary">
+      <button class="kpichip k-all" aria-pressed="true" data-sevclass="all" onclick="setSevFilter(this)"><span class="n">1</span><span class="lbl">전체</span></button>
+      <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n">0</span><span class="lbl">정상</span></button>
+      <button class="kpichip k-warn" aria-pressed="false" data-sevclass="sev-warning" onclick="setSevFilter(this)"><span class="n">0</span><span class="lbl">주의</span></button>
+      <button class="kpichip k-crit" aria-pressed="false" data-sevclass="sev-critical" onclick="setSevFilter(this)"><span class="n">0</span><span class="lbl">위험</span></button>
+      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n">1</span><span class="lbl">조치 필요</span></button>
+      <div class="ministatus">
+        <span class="seg "><b>Agent</b> 1/1 온라인</span>
+        <span class="seg "><b>Kakao</b> 0초 지연</span>
+        <span class="seg "><b>Telegram</b> 0건 오류</span>
+      </div>
+    </div>
+    <p class="lead"><b>지금 조치할 1건</b>이 위로 정렬됩니다. 대상 표는 <b>30초마다 자동 갱신</b>되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor·시각이 audit 기록됩니다.</p>
+
+    <section class="workbench" aria-label="대상 워크벤치">
+      <div class="toolbar">
+        <div class="search"><input type="text" id="t-search" placeholder="업체명·센터명으로 검색" oninput="applyFilter()" aria-label="업체 검색"></div>
+        <button class="fchip" aria-pressed="false" data-plat="BAEMIN" onclick="togglePlat(this)">배민</button>
+        <button class="fchip" aria-pressed="false" data-plat="COUPANG" onclick="togglePlat(this)">쿠팡</button>
+        <button class="fchip" aria-pressed="false" data-authonly onclick="toggleAuthOnly(this)">인증필요</button>
+        <div class="toolbar-spacer"></div>
+        <select class="sortsel" id="t-sort" onchange="applySort()"><option value="sev">정렬: 위험순</option><option value="name">이름순</option></select>
+        <span class="count" id="t-count">1 / 1곳</span>
+      </div>
+      <div class="target-notice" id="target-notice" role="status" aria-live="polite" hidden></div>
+      <div id="targets" hx-get="/admin/targets?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">
+        
+<div class="tlist" id="tlist">
+  
+  
+  
+  
+  
+    
+    
+    
+  
+  <div class="trow trow--auth_required"
+       onclick="if(!event.target.closest('button'))openTargetDrawer(this, this)"
+       data-name="H&amp;J"
+       data-center="제이앤에이치플러스 의정부남부"
+       data-platform="COUPANG"
+       data-platform-label="쿠팡"
+       data-severity="AUTH_REQUIRED"
+       data-severity-label="인증 필요"
+       data-severity-class="sev-stopped"
+       data-interval="2"
+       data-failcode="PROFILE_UNAVAILABLE"
+       data-reason="오류 — 확인 필요 (PROFILE_UNAVAILABLE)"
+       data-success="3일 전"
+       data-delivery=""
+       data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+       data-tenant="864fc127-1138-40d2-b115-a24decf8a2b8"
+       data-primary-action="auth-check"
+       data-primary-label="인증 확인"
+       data-primary-style="primary">
+    <span class="sevbar" aria-hidden="true"></span>
+    <span class="t-name">
+      <span class="nm">H&amp;J</span>
+      
+      <span class="ctr">센터: 제이앤에이치플러스 의정부남부</span>
+    </span>
+    <span class="plat plat-coupang">쿠팡</span>
+    <span class="sev-badge sev-stopped">인증 필요</span>
+    <span class="t-reason">
+      <span class="rs">오류 — 확인 필요 (PROFILE_UNAVAILABLE)</span>
+      <span class="fresh fresh-dead">수집 3일 전</span>
+    </span>
+    <span class="t-act row-actions">
+      
+      <button type="button" class="btn primary" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-check?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+              hx-vals='{"confirm_action": "confirmed"}'
+              hx-target="#target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 확인</button>
+      <button type="button" class="btn ghost" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this)" aria-label="H&amp;J 상세 열기">상세</button>
+    </span>
+    <div class="row-result" id="target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf" aria-live="polite" role="status"></div>
+  </div>
+  
+  
+</div>
+      </div>
+      <div class="filter-empty" id="filter-empty">조건에 맞는 업체가 없습니다: 필터를 조정하세요. <button class="btn" onclick="resetFilters()">필터 초기화</button></div>
+    </section>
+
+    <details class="aux">
+      <summary>Agent fleet <span class="tag">1/1 온라인 · 30s</span></summary>
+      <div class="aux-body">
+        <div id="agents" hx-get="/admin/agents" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>버전</th>
+      <th>상태</th>
+      <th>마지막 heartbeat</th>
+      <th>현재 job</th>
+      <th>처리 가능 job type</th>
+      <th>Kakao 상태</th>
+    </tr>
+  </thead>
+  <tbody>
+    
+    <tr>
+      <td>jena-5800h</td>
+      <td>0.1.0</td>
+      <td><span class="sev-normal">online</span></td>
+      <td>2026-06-22 07:54:21.080588+00:00</td>
+      <td>CRAWL_COUPANG</td>
+      <td>CRAWL_BAEMIN, CRAWL_COUPANG, AUTH_CHECK, OPEN_AUTH_BROWSER, KAKAO_SEND, CAPTURE_DIAGNOSTIC</td>
+      <td>
+        
+          <span class="sev-normal">enabled</span>
+          
+          <span class="muted">대기 0건</span>
+          <span class="muted">지연 0초</span>
+          <span class="muted">성공 0건</span>
+          <span class="muted">실패 0건</span>
+          
+          
+          
+        
+      </td>
+    </tr>
+    
+  </tbody>
+</table>
+</div></div>
+      </div>
+    </details>
+    <details class="aux">
+      <summary>채널 상태 <span class="tag">Kakao 0s · Telegram 0건</span></summary>
+      <div class="aux-body">
+        <div id="channels" hx-get="/admin/channels?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-label">KakaoTalk queue lag</div>
+    <div class="metric-value">0초</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Telegram 전송 오류</div>
+    <div class="metric-value">0건</div>
+  </div>
+</div></div>
+      </div>
+    </details>
+    <details class="aux" open>
+      <summary>인증 필요 대상 <span class="tag">1건 · secret 비노출</span></summary>
+      <div class="aux-body">
+        <div id="auth-required" hx-get="/admin/auth-required?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>대상</th>
+      <th>사유</th>
+      <th>조치</th>
+    </tr>
+  </thead>
+  <tbody>
+    
+    <tr>
+      <td>H&amp;J</td>
+      <td>로그인 만료 · 인증 확인 필요</td>
+      <td>
+        
+        <button type="button" class="btn ghost" data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
+        
+      </td>
+    </tr>
+    
+  </tbody>
+</table>
+</div></div>
+      </div>
+    </details>
+  </main>
+
+  
+  <main class="container" id="view-manage" role="tabpanel" hidden>
+    <h2 style="font-size:1.25rem; margin-bottom:0.5rem;">엔티티 관리 <span class="muted" style="font-weight:500; font-size:0.875rem;">(생성 · 편집 · 비활성화)</span></h2>
+    <p class="lead">업체·계정·채널·전송규칙을 <b>등록·편집</b>합니다. 생성/편집/비활성화는 OPERATOR↑ 권한이며 actor·시각·변경 diff 가 audit 됩니다. 비활성화는 물리 삭제가 아닌 비활성화입니다.</p>
+    
+<div class="entity-admin" id="entity-admin">
+  <div id="entity-result" class="action-result muted">엔티티 액션 결과가 여기에 표시됩니다.</div>
+  
+  
+  <div class="edit-row" style="border-top:0; padding-top:0">
+    <label>작업 고객
+      <select id="entity-tenant-switch" onchange="switchTenant(this.value, 'manage')">
+        <option value="">고객 선택…</option>
+        
+        <option value="c493f9e5-d3a5-4205-a95e-e1a0df223dc5" >표준서울마포B이츠앤홀딩스3</option>
+        
+        <option value="864fc127-1138-40d2-b115-a24decf8a2b8" selected>H&amp;J</option>
+        
+      </select>
+    </label>
+  </div>
+  
+
+  
+
+  <section class="setup-flow" aria-label="새 고객 세팅 시작">
+    <h3 style="font-size:1rem; margin:0 0 0.55rem">새 고객 세팅 시작</h3>
+    <ol style="margin:0 0 0.8rem; padding-left:1.2rem">
+      <li>고객</li>
+      <li>플랫폼</li>
+      <li>계정</li>
+      <li>업체/센터</li>
+      <li>채널</li>
+      <li>테스트</li>
+      <li>실제 메시지 보내기</li>
+    </ol>
+    <form hx-post="/admin/customers?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+      <label>고객명 <input type="text" name="name" required></label>
+      <label>사유 <input type="text" name="reason" placeholder="신규 세팅"></label>
+      <button type="submit" class="create">고객 생성</button><span class="inline-action-status" aria-live="polite"></span>
+    </form>
+    <p class="muted" style="margin:0.2rem 0 0.9rem">수집 테스트: 미완료 · 전송 테스트: 미완료 · 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다.</p>
+  </section>
+
+  
+  <fieldset>
+    <legend>① 새 업체 추가</legend>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">계정은 등록된 것에서 고르세요. id 를 직접 입력하지 않습니다. 쿠팡은 센터/상점명이 비면 오발송 위험 경고가 뜹니다.</p>
+    <p class="inline-cta"><a href="#entity-account-form">계정 생성</a></p>
+    <form hx-post="/admin/monitoring-targets?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+      <label>플랫폼 계정
+        <select name="platform_account_id"
+                required
+                hx-get="/admin/platform-accounts/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <label>업체 표시명 <input type="text" name="name" required></label>
+      <label>센터/상점명 (쿠팡 필수) <input type="text" name="center_name"></label>
+      <label>주소(url) <input type="text" name="url"></label>
+      <details class="advanced-fields">
+        <summary>고급 설정</summary>
+        <label>관리 코드(선택) <input type="text" name="external_id"></label>
+      </details>
+      <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
+      <button type="submit" class="create" data-required-select-submit disabled>업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
+    </form>
+  </fieldset>
+
+  
+  <fieldset>
+    <legend>② 전송 연결 (업체 → 채널)</legend>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">한 업체를 여러 채널에 연결할 수 있습니다(1:N). 채널/방명은 라우팅 식별자(secret 아님).</p>
+    <p class="inline-cta"><a href="#entity-channel-form">채널 생성</a></p>
+    <form hx-post="/admin/delivery-rules?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+      <label>업체
+        <select name="target_id"
+                required
+                hx-get="/admin/monitoring-targets/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <label>전송 채널
+        <select name="channel_id"
+                required
+                hx-get="/admin/messenger-channels/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <input type="hidden" name="template_id" value="">
+      <label>변경시에만 전송 <input type="checkbox" name="send_only_on_change" value="true"></label>
+      <button type="submit" class="create" data-required-select-submit disabled>연결 생성</button><span class="inline-action-status" aria-live="polite"></span>
+    </form>
+    <div class="edit-row">
+      <label>규칙 조회 업체
+        <select id="rule-list-target"
+                hx-get="/admin/monitoring-targets/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <button type="button" data-requires="rule-list-target" onclick="loadDeliveryRules(this)">규칙 보기</button><span class="inline-action-status" aria-live="polite"></span>
+    </div>
+    <div id="delivery-rule-list" hx-swap="innerHTML"></div>
+    <div class="edit-row">
+      <label>규칙 선택
+        <select id="rule-edit-id"><option value="">업체 선택 후 규칙 보기</option></select>
+      </label>
+      <label>변경시에만 전송 <input type="checkbox" id="rule-edit-change-only" value="true"></label>
+      <button type="button" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" class="danger" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+    </div>
+  </fieldset>
+
+  
+  <fieldset>
+    <legend>③ 등록된 업체: 편집 / 비활성화</legend>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">바꿀 칸만 입력하세요. 비운 칸은 기존 값을 유지합니다. 현재 값은 아래 업체 목록이나 상세에서 확인할 수 있습니다.</p>
+    <div class="edit-row" style="border-top:0; padding-top:0">
+      <label>업체 선택
+        <select id="tgt-edit-id"
+                hx-get="/admin/monitoring-targets/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+      </label>
+      <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
+      <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
+      <label>관리 코드(선택) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
+      <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
+      <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
+      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+    </div>
+    <div hx-get="/admin/monitoring-targets?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+  </fieldset>
+
+  
+  <details class="aux">
+    <summary>계정 · 채널 · 고객 · 구독 관리 <span class="tag">새로 만들 때만</span></summary>
+    <div class="aux-body">
+
+      <fieldset id="entity-subscription-form">
+        <legend>구독 관리</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">구독 상태를 결제 활성으로 두면 결제 완료 고객처럼 처리합니다. 수집 실행은 고객 상태도 운영 또는 결제 활성이어야 열립니다.</p>
+        <form hx-post="/admin/subscriptions?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+          <label>고객
+            <select name="tenant_id"
+                    required
+                    hx-get="/admin/customers/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>플랜 <input type="text" name="plan" value="basic"></label>
+          <label>구독 상태
+            <select name="status">
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">결제 유예</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="CANCELLED">해지</option>
+            </select>
+          </label>
+          <button type="submit" class="create" data-required-select-submit disabled>구독 생성</button><span class="inline-action-status" aria-live="polite"></span>
+        </form>
+        <div class="edit-row">
+          <label>구독 선택
+            <select id="sub-edit-id"
+                    hx-get="/admin/subscriptions/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>구독 상태
+            <select id="sub-edit-status">
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="PAYMENT_FAILED_GRACE">결제 유예</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="CANCELLED">해지</option>
+            </select>
+          </label>
+          <button type="button" data-requires="sub-edit-id" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
+        </div>
+        <div hx-get="/admin/subscriptions?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      <fieldset id="entity-account-form">
+        <legend>플랫폼 계정</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 로그인 ID/비밀번호와 2차인증 이메일 주소·앱 비밀번호를 <strong>실제 값 그대로</strong> 입력하세요. 에이전트가 이 값으로 자동 로그인하고 IMAP 2차인증을 처리합니다. (값은 DB에 저장되므로 DB 접근/백업을 민감정보로 관리하세요. <code>vault://</code>·<code>env:</code> 같은 핸들을 넣으면 에이전트가 로컬 저장소에서 resolve 합니다.)</p>
+        <form hx-post="/admin/platform-accounts?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+          <label>플랫폼
+            <select name="platform"><option value="BAEMIN">배민</option><option value="COUPANG">쿠팡이츠</option></select>
+          </label>
+          <label>라벨 <input type="text" name="label"></label>
+          <label>로그인 ID <input type="text" name="username" placeholder="쿠팡 로그인 ID"></label>
+          <label>로그인 비밀번호 <input type="text" name="password" autocomplete="off" placeholder="쿠팡 로그인 비밀번호"></label>
+          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" placeholder="example@gmail.com / @naver.com"></label>
+          <label>이메일 앱 비밀번호 <input type="text" name="verification_email_app_password" autocomplete="off" placeholder="IMAP 앱 비밀번호"></label>
+          <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
+          <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
+          <button type="submit" class="create" >계정 생성</button><span class="inline-action-status" aria-live="polite"></span>
+          
+        </form>
+        <div class="edit-row">
+          <label>계정 선택
+            <select id="acc-edit-id"
+                    hx-get="/admin/platform-accounts/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>새 라벨 <input type="text" id="acc-edit-label"></label>
+          <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
+          <label>로그인 비밀번호 <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>2차인증 이메일 <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
+          <label>앱 비밀번호 <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
+          <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
+          <button type="button" data-requires="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+        </div>
+        <div hx-get="/admin/platform-accounts?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      <fieldset id="entity-channel-form">
+        <legend>메시지 채널 (라우팅 식별자, secret 아님)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">Kakao 는 방명 입력 시 바로 ACTIVE 됩니다. 방명이 비면 PENDING 상태로 생성됩니다. Telegram 은 항상 PENDING 으로 시작합니다.</p>
+        <form hx-post="/admin/messenger-channels?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-target="find .inline-action-status" hx-swap="innerHTML">
+          <label>메신저
+            <select name="messenger" id="channel-messenger" onchange="syncChannelCreateFields()"><option value="TELEGRAM">텔레그램</option><option value="KAKAO">카카오톡</option></select>
+          </label>
+          <label>텔레그램 채팅 ID <input type="text" name="telegram_chat_id" data-channel-messenger="TELEGRAM"></label>
+          <label>텔레그램 토픽 ID <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
+          <label>카카오톡 방 이름 <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
+          <label>등록 코드 <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
+          <button type="submit" class="create">채널 생성</button><span class="inline-action-status" aria-live="polite"></span>
+        </form>
+        <div class="edit-row">
+          <label>채널 선택
+            <select id="ch-edit-id"
+                    hx-get="/admin/messenger-channels/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                    onchange="populateChannelFields(this)"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>텔레그램 채팅 ID <input type="text" id="ch-edit-chat"></label>
+          <label>텔레그램 토픽 ID <input type="text" id="ch-edit-thread"></label>
+          <label>카카오톡 방 이름 <input type="text" id="ch-edit-kakao"></label>
+          <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
+            <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/activate', {}, '선택한 채널을 수동 활성화할까요? 라우팅 정보를 확인했나요?')">수동 활성화</button><span class="inline-action-status" aria-live="polite"></span>
+            <button type="button" class="danger" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+          </div>
+        </div>
+        <div hx-get="/admin/messenger-channels?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>고객</legend>
+        <div class="edit-row">
+          <label>고객 선택
+            <select id="cust-edit-id"
+                    hx-get="/admin/customers/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>새 고객명 <input type="text" id="cust-edit-name"></label>
+          <label>고객 상태
+            <select id="cust-edit-status">
+              <option value="">변경 안 함</option>
+              <option value="ACTIVE">운영</option>
+              <option value="PAYMENT_ACTIVE">결제 활성</option>
+              <option value="SETUP_PENDING">세팅 중</option>
+              <option value="SUSPENDED">정지</option>
+              <option value="LEAD">문의 단계</option>
+            </select>
+          </label>
+          <button type="button" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" class="danger" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '/delete', {}, '선택한 고객을 완전히 삭제할까요? 연결 데이터가 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
+        </div>
+        <div hx-get="/admin/customers?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+      
+      <fieldset>
+        <legend>고객별 텔레그램 설정 (봇 토큰 · 텔레그램 webhook 보안키 · 실제 메시지 보내기)</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">선택한 고객에만 적용됩니다. 토큰/보안키는 비워두면 기존 값을 유지하고, 입력하면 교체합니다. 실발송 게이트는 기본 차단입니다.</p>
+        <div class="edit-row" style="border-top:0; padding-top:0">
+          <label>고객 선택
+            <select id="tg-edit-id"
+                    hx-get="/admin/customers/options?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+          </label>
+          <label>텔레그램 봇 토큰 <input type="password" id="tg-edit-token" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>텔레그램 webhook 보안키 <input type="password" id="tg-edit-secret" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>실제 메시지 보내기
+            <select id="tg-edit-sending">
+              <option value="">변경 안 함</option>
+              <option value="true" disabled>ON: 테스트 완료 후 허용</option>
+              <option value="false">OFF: 기본 차단</option>
+            </select>
+          </label>
+          <button type="button" data-requires="tg-edit-id" onclick="saveTelegramSettings(this)">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <span class="action-result warn" style="display:inline-block; margin-left:0.5rem">수집 테스트와 전송 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다.</span>
+        </div>
+        <div hx-get="/admin/telegram-settings?tenant=864fc127-1138-40d2-b115-a24decf8a2b8" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
+      </fieldset>
+
+    </div>
+  </details>
+  
+</div>
+
+<script>
+  // 편집/비활성화는 id 가 URL path 라 JS 로 조립해 HTMX 로 POST 한다(생성은 hx-post 폼이 직렬화).
+  // 드롭다운(<select>)도 input 과 동일하게 .value 를 읽으므로 cval 이 그대로 동작한다(raw-id 입력 제거).
+  var CRUD_TENANT = "864fc127-1138-40d2-b115-a24decf8a2b8";
+  function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
+  function cchecked(id) { var el = document.getElementById(id); return el && el.checked ? "true" : ""; }
+  function filledValues(values) {
+    var out = {};
+    Object.keys(values).forEach(function(key) {
+      if (values[key] !== "" && values[key] !== null && values[key] !== undefined) {
+        out[key] = values[key];
+      }
+    });
+    return out;
+  }
+  function switchTenant(value, mode) {
+    if (!value) { return; }
+    var url = new URL("/admin", window.location.origin);
+    url.searchParams.set("tenant", value);
+    if (mode) {
+      url.searchParams.set("mode", mode);
+      url.hash = mode;
+    }
+    window.location.href = url.pathname + url.search + url.hash;
+  }
+  function syncChannelCreateFields() {
+    var select = document.getElementById('channel-messenger');
+    var messenger = select ? select.value : "TELEGRAM";
+    document.querySelectorAll('#entity-channel-form [data-channel-messenger]').forEach(function(field) {
+      field.disabled = field.dataset.channelMessenger !== messenger;
+    });
+  }
+  function populateChannelFields(select) {
+    var option = select.selectedOptions[0];
+    if (!option || !option.value) { return; }
+    document.getElementById('ch-edit-chat').value = option.dataset.chat || '';
+    document.getElementById('ch-edit-thread').value = option.dataset.thread || '';
+    document.getElementById('ch-edit-kakao').value = option.dataset.kakao || '';
+    var row = select.closest('.edit-row');
+    if (row) {
+      row.querySelectorAll('.inline-action-status').forEach(function(s) {
+        s.className = 'inline-action-status'; s.textContent = '';
+      });
+    }
+  }
+  function syncEntityFormButtons() {
+    var root = document.getElementById('entity-admin');
+    if (!root) { return; }
+    root.querySelectorAll('button[data-required-select-submit]').forEach(function(button) {
+      var form = button.closest('form');
+      var missing = form && Array.prototype.some.call(form.querySelectorAll('select[required]'), function(select) {
+        return !select.value;
+      });
+      button.disabled = !!missing;
+    });
+    root.querySelectorAll('button[data-requires]').forEach(function(button) {
+      var ids = (button.dataset.requires || '').split(',');
+      var missing = ids.some(function(id) {
+        var field = document.getElementById(id.trim());
+        return !field || !field.value;
+      });
+      button.disabled = missing;
+    });
+  }
+  function responseErrorMessage(xhr) {
+    var fallback = "요청 실패 · 입력을 확인하세요";
+    if (!xhr || !xhr.responseText) { return fallback; }
+    try {
+      var data = JSON.parse(xhr.responseText);
+      if (data && data.detail) { return data.detail; }
+    } catch (e) {}
+    return xhr.responseText.length > 120 ? fallback : xhr.responseText;
+  }
+  function inlineStatusForEvent(event) {
+    var detail = event.detail || {};
+    var target = detail.target;
+    if (target && target.classList && target.classList.contains('inline-action-status')) {
+      return target;
+    }
+    var elt = detail.elt;
+    var scope = elt && elt.closest ? elt.closest('form, .edit-row') : null;
+    return scope ? scope.querySelector('.inline-action-status') : null;
+  }
+  document.addEventListener('DOMContentLoaded', syncChannelCreateFields);
+  document.addEventListener('DOMContentLoaded', syncEntityFormButtons);
+  document.addEventListener('change', function(event) {
+    if (event.target.closest && event.target.closest('#entity-admin')) {
+      syncEntityFormButtons();
+    }
+  });
+  document.addEventListener('input', function(event) {
+    if (event.target.closest && event.target.closest('#entity-admin')) {
+      syncEntityFormButtons();
+    }
+  });
+  document.body.addEventListener('htmx:afterSwap', function(event) {
+    if (event.target && event.target.classList && event.target.classList.contains('inline-action-status')) {
+      event.target.className = 'inline-action-status';
+    }
+    syncEntityFormButtons();
+  });
+  document.body.addEventListener("htmx:responseError", function(event) {
+    var status = inlineStatusForEvent(event);
+    if (!status) { return; }
+    status.className = "inline-action-status action-result err";
+    status.textContent = responseErrorMessage(event.detail && event.detail.xhr);
+  });
+  function buttonStatus(button) {
+    var next = button ? button.nextElementSibling : null;
+    return next && next.classList.contains("inline-action-status") ? next : document.getElementById('entity-result');
+  }
+  function setInlineError(button, message) {
+    var target = buttonStatus(button);
+    target.className = "inline-action-status action-result err";
+    target.textContent = message;
+  }
+  function crudButton(button, prefix, idField, suffix, values, confirmMsg) {
+    var id = cval(idField);
+    if (!id) { setInlineError(button, "대상 선택 필요"); return; }
+    if (confirmMsg && !window.confirm(confirmMsg)) { return; }
+    var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + CRUD_TENANT;
+    htmx.ajax('POST', url, { target: buttonStatus(button), swap: 'innerHTML', values: values });
+  }
+  function saveTelegramSettings(button) {
+    var values = filledValues({
+      telegram_bot_token: cval('tg-edit-token'),
+      telegram_webhook_secret: cval('tg-edit-secret')
+    });
+    values["sending" + "_enabled"] = cval('tg-edit-sending');
+    crudButton(button, '/admin/customers/', 'tg-edit-id', '', filledValues(values));
+  }
+  function loadDeliveryRules(button) {
+    var target = cval('rule-list-target');
+    if (!target) { setInlineError(button, "업체 선택 필요"); return; }
+    var qs = "?tenant=" + CRUD_TENANT + "&target_id=" + encodeURIComponent(target);
+    var status = buttonStatus(button);
+    status.className = "inline-action-status action-result warn";
+    status.textContent = "조회 중";
+    Promise.all([
+      htmx.ajax('GET', '/admin/delivery-rules' + qs, { target: '#delivery-rule-list', swap: 'innerHTML' }),
+      htmx.ajax('GET', '/admin/delivery-rules/options' + qs, { target: '#rule-edit-id', swap: 'innerHTML' })
+    ]).then(function () {
+      status.className = "inline-action-status action-result ok";
+      status.textContent = "조회 완료";
+    }).catch(function () {
+      status.className = "inline-action-status action-result err";
+      status.textContent = "조회 실패 · 재시도하세요";
+    });
+  }
+</script>
+    
+  </main>
+
+  
+  <div class="scrim" id="scrim" hidden onclick="closeDrawer()"></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-label="업체 상세" aria-modal="true" hidden inert aria-hidden="true">
+    <div class="drawer-head">
+      <span class="sev-badge sev-normal" id="d-sev">정상</span>
+      <h2 id="d-name">업체</h2>
+      <button class="drawer-close" onclick="closeDrawer()" aria-label="닫기">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="why sev-normal" id="d-why">정상 동작 중입니다.</div>
+      <dl class="facts">
+        <dt>플랫폼</dt><dd id="d-platform">없음</dd>
+        <dt>센터/상점</dt><dd id="d-center">없음</dd>
+        <dt>수집 주기</dt><dd id="d-interval">없음</dd>
+        <dt>마지막 수집 성공</dt><dd id="d-success">없음</dd>
+        <dt>마지막 전송 성공</dt><dd id="d-delivery">없음</dd>
+      </dl>
+      <p class="deeplink" id="d-deeplink"></p>
+      <div class="drawer-edit" id="d-center-edit" hidden>
+        <label>센터/상점명 <input type="text" id="d-center-input" autocomplete="off"></label>
+        <button type="button" class="btn primary" onclick="drawerUpdateCenterName()">저장</button>
+      </div>
+    </div>
+    <div id="drawer-result" aria-live="polite" role="status"></div>
+    <div class="drawer-actions" id="drawer-actions"></div>
+  </aside>
+
+  
+  <div id="action-result" aria-live="polite" role="status"></div>
+
+  <script>
+    // ── 테마 토글(신규 deps 0: localStorage). darkmatter 는 다크 우선. ──
+    function toggleTheme() { var dark = document.documentElement.classList.toggle("dark");
+      try { localStorage.setItem("adm-theme", dark ? "dark" : "light"); } catch (e) {} syncThemeLabel(); }
+    function syncThemeLabel() { var b = document.getElementById("theme-toggle");
+      if (b) b.textContent = document.documentElement.classList.contains("dark") ? "◐ 라이트" : "☀ 다크"; }
+
+    // ── 모드 전환 ──
+    function initialMode() {
+      return location.hash === "#manage" || new URLSearchParams(location.search).get("mode") === "manage" ? "manage" : "monitor";
+    }
+    function switchMode(mode, btn, opts) {
+      document.querySelectorAll(".modetab").forEach(function (t) { t.setAttribute("aria-selected", "false"); });
+      btn = btn || document.querySelector('.modetab[data-mode="' + mode + '"]');
+      if (btn) btn.setAttribute("aria-selected", "true");
+      document.getElementById("view-monitor").hidden = (mode !== "monitor");
+      document.getElementById("view-manage").hidden = (mode !== "manage");
+      if (mode === "manage") history.replaceState(null, "", "#manage");
+      else if (location.hash === "#manage") history.replaceState(null, "", location.pathname + location.search);
+      if (!opts || !opts.preserveScroll) window.scrollTo({ top: 0 });
+    }
+
+    // ── 갱신 시각 stamp + 폴링 실패 표시(라이브 신뢰 보호) ──
+    function stampUpdated() { var el = document.getElementById("last-updated"); if (!el) return;
+      var d = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; };
+      el.textContent = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      var pill = document.getElementById("live-pill"); if (pill) { pill.classList.remove("pill-stale"); pill.firstChild && (pill.childNodes[1].nodeValue = " LIVE · 30s"); } }
+    document.body.addEventListener("htmx:afterSwap", function (e) {
+      stampUpdated();
+      if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
+    });
+    document.body.addEventListener("htmx:responseError", markStale);
+    document.body.addEventListener("htmx:sendError", markStale);
+    function markStale() { var pill = document.getElementById("live-pill");
+      if (pill) { pill.classList.add("pill-stale"); pill.childNodes[1].nodeValue = " 갱신 실패 · 재시도 중"; } }
+
+    // ── 클라이언트 검색/필터(≈100행: 서버 왕복 0, 30초 swap 후 재적용) ──
+    var FIL = { sev: "all", plats: {}, authOnly: false };
+    function setSevFilter(chip) { document.querySelectorAll(".kpichip").forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      chip.setAttribute("aria-pressed", "true"); FIL.sev = chip.dataset.sevclass; applyFilter(); }
+    function togglePlat(chip) { var p = chip.dataset.plat, on = chip.getAttribute("aria-pressed") === "true";
+      chip.setAttribute("aria-pressed", on ? "false" : "true"); if (on) delete FIL.plats[p]; else FIL.plats[p] = 1; applyFilter(); }
+    function toggleAuthOnly(chip) { FIL.authOnly = chip.getAttribute("aria-pressed") !== "true";
+      chip.setAttribute("aria-pressed", FIL.authOnly ? "true" : "false"); applyFilter(); }
+    function resetFilters() {
+      FIL = { sev: "all", plats: {}, authOnly: false };
+      document.querySelectorAll(".kpichip").forEach(function (c) { c.setAttribute("aria-pressed", c.dataset.sevclass === "all" ? "true" : "false"); });
+      document.querySelectorAll(".fchip").forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      var s = document.getElementById("t-search"); if (s) s.value = ""; applyFilter();
+    }
+    function applyFilter() {
+      var q = (document.getElementById("t-search") || {}).value || "";
+      q = q.trim().toLowerCase();
+      var rows = document.querySelectorAll("#tlist .trow"), shown = 0, plats = Object.keys(FIL.plats);
+      rows.forEach(function (r) {
+        var okSev = FIL.sev === "all" || r.dataset.severityClass === FIL.sev;
+        var okPlat = plats.length === 0 || FIL.plats[r.dataset.platform];
+        var okAuth = !FIL.authOnly || r.dataset.severity === "AUTH_REQUIRED" || r.dataset.failcode === "AUTH_REQUIRED";
+        var okQ = !q || (r.dataset.name + " " + r.dataset.center).toLowerCase().indexOf(q) !== -1;
+        var vis = okSev && okPlat && okAuth && okQ;
+        r.style.display = vis ? "" : "none"; if (vis) shown++;
+      });
+      var cnt = document.getElementById("t-count"); if (cnt) cnt.textContent = shown + " / " + rows.length + "곳";
+      var fe = document.getElementById("filter-empty"); if (fe) fe.style.display = (rows.length > 0 && shown === 0) ? "block" : "none";
+    }
+    function applySort() {
+      var mode = (document.getElementById("t-sort") || {}).value, list = document.getElementById("tlist");
+      if (!list) return; var rows = Array.prototype.slice.call(list.querySelectorAll(".trow"));
+      var rank = { "sev-critical": 0, "sev-stopped": 1, "sev-warning": 2, "sev-normal": 3 };
+      rows.sort(function (a, b) {
+        if (mode === "name") return a.dataset.name.localeCompare(b.dataset.name, "ko");
+        return (rank[a.dataset.severityClass] || 9) - (rank[b.dataset.severityClass] || 9);
+      });
+      rows.forEach(function (r) { list.appendChild(r); });
+    }
+    function showTargetNotice(message) {
+      var notice = document.getElementById("target-notice");
+      if (!notice) return;
+      notice.textContent = message;
+      notice.hidden = false;
+    }
+    function clearTargetNotice() {
+      var notice = document.getElementById("target-notice");
+      if (!notice) return;
+      notice.textContent = "";
+      notice.hidden = true;
+    }
+
+    // ── 업체 상세 드로어(행 data-* 로 서버 왕복 없이 채움) ──
+    var ADM = { target: "", tenant: "", platform: "", name: "", opener: null };
+    function openTargetDrawer(row, opener, opts) {
+      clearTargetNotice();
+      var d = row.dataset;
+      opts = opts || {};
+      ADM = { target: d.target, tenant: d.tenant, platform: d.platform, name: d.name, opener: opener || ADM.opener || document.activeElement };
+      document.getElementById("d-name").textContent = d.name || "업체";
+      var sev = document.getElementById("d-sev"); sev.className = "sev-badge " + (d.severityClass || "sev-normal"); sev.textContent = d.severityLabel || "";
+      var why = document.getElementById("d-why"); why.className = "why " + (d.severityClass || "sev-normal");
+      why.textContent = d.reason || (d.severity === "STOPPED" ? "운영자가 비활성한 대상입니다: 필요 시 활성화하세요." : d.severity === "NORMAL" ? "정상 동작 중입니다." : "관찰이 필요한 상태입니다.");
+      document.getElementById("d-platform").textContent = d.platformLabel || d.platform || "없음";
+      document.getElementById("d-center").textContent = d.center || "⚠ 센터 미설정";
+      document.getElementById("d-interval").textContent = (d.interval && d.interval !== "0") ? (d.interval + "분") : "미설정";
+      document.getElementById("d-success").textContent = d.success || "수집 기록 없음";
+      document.getElementById("d-delivery").textContent = d.delivery || "전송 기록 없음";
+      document.getElementById("d-deeplink").textContent = "딥링크(텔레그램 알림): /admin/t/" + encodeURIComponent(d.target) + "?tenant=" + encodeURIComponent(d.tenant);
+      if (!opts.preserveState) {
+        document.getElementById("d-center-input").value = d.center || "";
+        document.getElementById("d-center-edit").hidden = true;
+        document.getElementById("drawer-result").textContent = "";
+      }
+      renderDrawerActions(d);
+      var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+      drawer.hidden = false; drawer.inert = false; drawer.setAttribute("aria-hidden", "false");
+      scrim.hidden = false;
+      drawer.classList.add("open"); scrim.classList.add("open"); document.body.classList.add("drawer-open");
+      if (!opts.keepUrl && d.target) {
+        var nextUrl = "/admin/t/" + encodeURIComponent(d.target) + "?tenant=" + encodeURIComponent(d.tenant || "");
+        if (opts.replaceUrl) history.replaceState(null, "", nextUrl);
+        else history.pushState(null, "", nextUrl);
+      }
+      if (!opts.keepFocus) { var close = drawer.querySelector(".drawer-close"); if (close) close.focus(); }
+    }
+    function closeDrawer() {
+      var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim");
+      var active = document.activeElement;
+      var restore = ADM.opener && !drawer.contains(ADM.opener) && document.documentElement.contains(ADM.opener) && typeof ADM.opener.focus === "function" ? ADM.opener : null;
+      if (restore) restore.focus();
+      else if (active && drawer.contains(active) && typeof active.blur === "function") active.blur();
+      drawer.classList.remove("open"); scrim.classList.remove("open"); document.body.classList.remove("drawer-open");
+      drawer.hidden = true; drawer.inert = true; drawer.setAttribute("aria-hidden", "true"); scrim.hidden = true;
+      if (ADM.target) history.pushState(null, "", "/admin?tenant=" + encodeURIComponent(ADM.tenant || ""));
+    }
+    function makeDrawerButton(label, className, onClick) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "btn" + (className ? " " + className : "");
+      b.textContent = label; b.onclick = onClick; return b;
+    }
+    function renderDrawerActions(d) {
+      var box = document.getElementById("drawer-actions"); box.textContent = "";
+      var action = d.primaryAction || "details";
+      if (action === "auth-check") box.appendChild(makeDrawerButton(d.primaryLabel || "인증 확인", "primary", function () { drawerPost("/auth-check"); }));
+      else if (action === "center-name") box.appendChild(makeDrawerButton(d.primaryLabel || "센터명 설정", "primary", focusCenterNameEdit));
+      else if (action === "activate") box.appendChild(makeDrawerButton(d.primaryLabel || "활성화", "", function () { drawerPost("/activate", {}, drawerConfirm("활성화")); }));
+      else if (action === "test-crawl") box.appendChild(makeDrawerButton(d.primaryLabel || "지금 수집", d.primaryStyle || "", function () { drawerPost("/test-crawl", {platform: ADM.platform}); }));
+      box.appendChild(makeDrawerButton("미리보기", "", function () { drawerPost("/dry-run"); }));
+      var canPause = ["NORMAL", "WARNING", "CRITICAL"].indexOf(d.severity) !== -1;
+      if (canPause) box.appendChild(makeDrawerButton("비활성화", "danger", function () { drawerPost("/pause", {}, drawerConfirm("비활성화")); }));
+    }
+    function drawerConfirm(action) {
+      return "대상 '" + ADM.name + "'을(를) " + action + "할까요?";
+    }
+    function focusCenterNameEdit() {
+      var edit = document.getElementById("d-center-edit"), input = document.getElementById("d-center-input");
+      edit.hidden = false;
+      input.focus();
+      input.select();
+    }
+    function drawerUpdateCenterName() {
+      if (!ADM.target) return;
+      var value = document.getElementById("d-center-input").value;
+      var url = "/admin/monitoring-targets/" + encodeURIComponent(ADM.target) + "?tenant=" + encodeURIComponent(ADM.tenant);
+      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: {center_name: value} });
+    }
+    function drawerPost(suffix, vals, confirmMessage) {
+      if (confirmMessage && !window.confirm(confirmMessage)) return;
+      if (!ADM.target) return;
+      var url = "/admin/targets/" + encodeURIComponent(ADM.target) + suffix + "?tenant=" + encodeURIComponent(ADM.tenant);
+      vals = Object.assign({}, vals || {}, { confirm_action: "confirmed" });
+      htmx.ajax("POST", url, { target: "#drawer-result", swap: "innerHTML", values: vals });
+    }
+    function findTargetRow(targetId) {
+      var rows = document.querySelectorAll("#tlist .trow");
+      for (var i = 0; i < rows.length; i++) if (rows[i].dataset.target === targetId) return rows[i];
+      return null;
+    }
+    function openAuthRequiredTarget(targetId) {
+      var row = findTargetRow(targetId);
+      if (row) openTargetDrawer(row, row);
+      else showTargetNotice("업체를 찾지 못했습니다.");
+    }
+    function syncOpenDrawerFromRows() {
+      if (!ADM.target) return;
+      var drawer = document.getElementById("drawer");
+      if (drawer.hidden) return;
+      var row = findTargetRow(ADM.target);
+      if (row) openTargetDrawer(row, ADM.opener, {keepFocus: true, keepUrl: true, preserveState: true});
+      else {
+        document.getElementById("d-why").textContent = "이 업체는 현재 목록에 없습니다.";
+        showTargetNotice("업체를 찾지 못했습니다.");
+      }
+    }
+    function openInitialTarget() {
+      var id = document.body.dataset.initialTarget;
+      if (!id) return;
+      var row = findTargetRow(id);
+      if (row) openTargetDrawer(row, row, {replaceUrl: true});
+      else showTargetNotice("업체를 찾지 못했습니다.");
+    }
+    function trapDrawerFocus(e) {
+      var drawer = document.getElementById("drawer");
+      if (drawer.hidden || e.key !== "Tab") return;
+      var focusable = drawer.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); trapDrawerFocus(e); });
+
+    syncThemeLabel(); stampUpdated(); switchMode(initialMode(), document.querySelector('.modetab[data-mode="' + initialMode() + '"]'), {preserveScroll: true}); openInitialTarget();
+  </script>
+</body>
+</html>
+

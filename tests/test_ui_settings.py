@@ -341,8 +341,7 @@ def test_ui_settings_to_app_config_uses_ui_2fa_fields():
 
 
 def test_ui_settings_to_app_config_2fa_does_not_read_env(monkeypatch):
-    # 정책 변경: to_app_config는 더 이상 환경변수/.env를 읽지 않는다. env가 켜져 있어도
-    # UI 설정이 비활성이면 비활성이어야 한다.
+    # 정책 변경: to_app_config는 더 이상 환경변수/.env를 읽지 않는다.
     monkeypatch.setenv("COUPANG_AUTO_EMAIL_2FA_ENABLED", "true")
     monkeypatch.setenv("G" + "MAIL_2FA_QUERY", "from:(env@coupang.com)")
 

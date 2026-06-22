@@ -54,7 +54,7 @@ class UiSettings:
     run_lock_timeout_seconds: int
     page_timeout_seconds: int
     # 쿠팡이츠 로그인 만료 시 자동복구(이메일 2FA) 설정. .env가 아니라 UI에서 입력받아
-    # 탭별로 저장한다. 기본은 비활성이며, 켜기 전까지는 기존처럼 로그인 만료 시 탭이 멈춘다.
+    # 탭별로 저장한다. 기본은 비활성이다.
     coupang_auto_email_2fa_enabled: bool = False
     coupang_login_id: str = ""
     coupang_login_password: str = ""

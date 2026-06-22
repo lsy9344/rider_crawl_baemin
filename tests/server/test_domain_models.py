@@ -125,6 +125,9 @@ def test_model_field_sets_match_contract() -> None:
         "external_id",
         "url",
         "interval_minutes",
+        "schedule_enabled",
+        "start_time",
+        "stop_time",
         "status",
     }
     assert _fields(BrowserProfile) == {
@@ -336,6 +339,9 @@ def test_optional_field_defaults_match_contract() -> None:
     assert target.external_id == ""
     assert target.url == ""
     assert target.interval_minutes == 0
+    assert target.schedule_enabled is False
+    assert target.start_time == ""
+    assert target.stop_time == ""
     assert target.status is MonitoringTargetStatus.ACTIVE
 
     rule = DeliveryRule(id="dr-1", target_id="mt-1", channel_id="ch-1")

@@ -913,8 +913,8 @@ def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_and_suc
 
 
 def test_coupang_login_required_stops_tab_when_auto_2fa_disabled(tmp_path):
-    # 자동 2FA가 꺼져 있으면(기본값) 로그인 만료 시 기존처럼 탭을 중지한다.
-    config = _config(tmp_path)
+    # 자동 2FA를 명시적으로 끄면 로그인 만료 시 기존처럼 탭을 중지한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=False)
     assert config.coupang_auto_email_2fa_enabled is False
     browser = _FakeBrowser(
         [

@@ -10,7 +10,7 @@ dataclass 가 없어 data-api-contract Required fields 에서 직접 정의하�
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKeyConstraint, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKeyConstraint, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -47,6 +47,9 @@ class MonitoringTarget(Base):
     external_id: Mapped[str] = mapped_column(String, nullable=False, default="")
     url: Mapped[str] = mapped_column(String, nullable=False, default="")
     interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    start_time: Mapped[str] = mapped_column(String, nullable=False, default="")
+    stop_time: Mapped[str] = mapped_column(String, nullable=False, default="")
     status: Mapped[str] = mapped_column(String, nullable=False)  # MonitoringTargetStatus 값
     # ── 5.4 스케줄링 컬럼(additive, 0003 마이그레이션) ──────────────────────────
     # due 질의/멱등 전진용. null=즉시 due 또는 미초기화(5.4 scheduler 가 conditional UPDATE 로 전진).

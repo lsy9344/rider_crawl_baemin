@@ -8,8 +8,8 @@
   {% set is_target_validation = t.severity == 'TARGET_VALIDATION_FAILURE' or t.last_failure_code == 'TARGET_VALIDATION_FAILURE' %}
   {% set is_operator_stopped = t.severity in ('STOPPED', 'OPERATOR_STOPPED') and not is_auth_required and not is_target_validation %}
   {% if is_auth_required %}
-    {% set primary_action = 'auth-check' %}
-    {% set primary_label = '인증 확인' %}
+    {% set primary_action = 'auth-start' %}
+    {% set primary_label = '인증 시작' %}
     {% set primary_style = 'primary' %}
   {% elif is_target_validation %}
     {% set primary_action = 'center-name' %}
@@ -75,9 +75,9 @@
       {# 상황 맞춤 1차 액션 + 보조. event.stopPropagation 으로 행 클릭(드로어)과 분리. 위험 액션은 이름 박은 confirm. #}
       {%- if is_auth_required %}
       <button type="button" class="btn primary" onclick="event.stopPropagation()"
-              hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-start?tenant={{ t.tenant_id | urlencode }}"
               hx-vals='{"confirm_action": "confirmed"}'
-              hx-target="#target-result-{{ t.target_id }}">인증 확인</button>
+              hx-target="#target-result-{{ t.target_id }}">인증 시작</button>
       {%- elif is_target_validation %}
       <button type="button" class="btn primary" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this); focusCenterNameEdit()">센터명 설정</button>
       {%- elif is_operator_stopped %}

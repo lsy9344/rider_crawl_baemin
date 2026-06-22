@@ -22,7 +22,7 @@
       "timezone": "Asia/Seoul",
       "run_lock_timeout_seconds": 60,
       "page_timeout_seconds": 60000,
-      "coupang_auto_email_2fa_enabled": false,
+      "coupang_auto_email_2fa_enabled": true,
       "coupang_login_id": "",
       "coupang_login_password": "",
       "verification_email_address": "",

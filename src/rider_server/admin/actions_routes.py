@@ -235,6 +235,26 @@ async def auth_check(
     return _fragment(request, f"인증 확인(AUTH_CHECK) 트리거됨 (job {job_id})")
 
 
+@router.post("/targets/{target_id}/auth-start", response_class=HTMLResponse)
+async def auth_start(
+    request: Request, target_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    _require_confirmation(await _form(request))
+    try:
+        job_id = await _service(request).start_auth(
+            target_id=target_id,
+            tenant_id=_tenant_id(request),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            at=_now(),
+        )
+    except AdminActionNotFound as exc:
+        _raise_for(exc)
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+    return _fragment(request, f"인증 시작됨 (job {job_id})")
+
+
 @router.post("/targets/{target_id}/dry-run", response_class=HTMLResponse)
 async def dry_run(
     request: Request, target_id: str, _principal=Depends(require_operator)

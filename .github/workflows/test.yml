@@ -220,8 +220,8 @@ jobs:
           set -a
           . ./.env
           set +a
-          docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans
-          docker compose -p rider -f deploy/docker-compose.yml ps
+          docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up --build -d --remove-orphans
+          docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml ps
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8000/health; then
               echo "production health ok after ${i}s"
@@ -229,8 +229,8 @@ jobs:
             fi
             sleep 2
           done
-          docker compose -p rider -f deploy/docker-compose.yml ps
-          docker compose -p rider -f deploy/docker-compose.yml logs --tail=80 backend-api
+          docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml ps
+          docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml logs --tail=80 backend-api
           exit 1
 
   ci-summary:

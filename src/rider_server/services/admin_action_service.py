@@ -40,6 +40,8 @@ from rider_server.domain import (
     DeliveryStatus,
     MonitoringTarget,
     MonitoringTargetStatus,
+    Platform,
+    PlatformAccount,
     Subscription,
     SubscriptionStatus,
 )
@@ -48,6 +50,7 @@ from rider_server.queue.states import (
     JOB_TYPE_AUTH_CHECK,
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
     JOB_STATUS_PENDING,
     JOB_TYPES,
     assert_transition,
@@ -60,6 +63,10 @@ from rider_server.services.subscription_gate import (
     HeldDisposition,
     SubscriptionGate,
 )
+from rider_crawl.config import (
+    DEFAULT_EMAIL_2FA_SENDER_KEYWORD,
+    DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD,
+)
 
 #: 미해결(미인증/익명) actor 의 명시적 sentinel — 5.8 이 MFA/실 사용자/역할로 교체(AC3).
 UNAUTHENTICATED_ACTOR = "UNAUTHENTICATED_ADMIN"
@@ -71,6 +78,7 @@ ACTION_AGENT_ASSIGN = "AGENT_ASSIGN"
 ACTION_JOB_RETRY = "JOB_RETRY"
 ACTION_TEST_CRAWL = "TEST_CRAWL"
 ACTION_AUTH_CHECK = "AUTH_CHECK"
+ACTION_AUTH_START = "AUTH_START"
 ACTION_DRY_RUN_RENDER = "DRY_RUN_RENDER"
 ACTION_TEST_SEND = "TEST_SEND"
 ACTION_SUBSCRIPTION_SUSPEND = "SUBSCRIPTION_SUSPEND"
@@ -86,6 +94,7 @@ ACTION_BREAK_GLASS_OVERRIDE = "BREAK_GLASS_OVERRIDE"
 
 # ── target_type 코드(audit_logs.target_type) ─────────────────────────────────────
 TARGET_TYPE_TARGET = "monitoring_target"
+TARGET_TYPE_PLATFORM_ACCOUNT = "platform_account"
 TARGET_TYPE_JOB = "job"
 TARGET_TYPE_SUBSCRIPTION = "subscription"
 TARGET_TYPE_DISPATCH = "dispatch"
@@ -189,6 +198,8 @@ class AdminActionRepository(Protocol):
 
     async def get_target_platform(self, target_id: str) -> str | None: ...
 
+    async def get_platform_account(self, account_id: str) -> PlatformAccount | None: ...
+
     async def get_job(self, job_id: str) -> JobRef | None: ...
 
     async def get_held_dispatch(self, dispatch_id: str) -> HeldDispatchRef | None: ...
@@ -252,6 +263,62 @@ def _auth_check_payload(target: MonitoringTarget, *, platform: str) -> dict[str,
         target,
         job_type=JOB_TYPE_AUTH_CHECK,
         platform=_platform_registry_key(platform),
+    )
+
+
+def _auth_start_payload(
+    target: MonitoringTarget,
+    account: PlatformAccount,
+) -> tuple[str, dict[str, object]]:
+    platform = _platform_registry_key(account.platform.value)
+    base_payload = _target_job_payload(target, job_type=JOB_TYPE_OPEN_AUTH_BROWSER, platform=platform)
+    if platform == "baemin":
+        login_id_ref = str(account.username or "").strip()
+        login_password_ref = str(account.password or "").strip()
+        if not login_id_ref or not login_password_ref:
+            raise ValueError("배민 로그인 ID/PW가 필요합니다")
+        return (
+            JOB_TYPE_OPEN_AUTH_BROWSER,
+            {
+                **base_payload,
+                "login_id_ref": login_id_ref,
+                "login_password_ref": login_password_ref,
+            },
+        )
+
+    login_id_ref = str(account.username or "").strip()
+    login_password_ref = str(account.password or "").strip()
+    verification_email_address_ref = str(
+        account.verification_email_address or ""
+    ).strip()
+    verification_email_app_password_ref = str(
+        account.verification_email_app_password or ""
+    ).strip()
+    if (
+        not login_id_ref
+        or not login_password_ref
+        or not verification_email_address_ref
+        or not verification_email_app_password_ref
+    ):
+        raise ValueError("쿠팡 자동인증 정보가 필요합니다")
+    return (
+        JOB_TYPE_CRAWL_COUPANG,
+        {
+            **_target_job_payload(target, job_type=JOB_TYPE_CRAWL_COUPANG, platform=platform),
+            "coupang_login_id_ref": login_id_ref,
+            "coupang_login_password_ref": login_password_ref,
+            "verification_email_address_ref": verification_email_address_ref,
+            "verification_email_app_password_ref": verification_email_app_password_ref,
+            "verification_email_subject_keyword": (
+                str(account.verification_email_subject_keyword or "").strip()
+                or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+            ),
+            "verification_email_sender_keyword": (
+                str(account.verification_email_sender_keyword or "").strip()
+                or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+            ),
+            "coupang_auto_email_2fa_enabled": True,
+        },
     )
 
 
@@ -391,6 +458,16 @@ class AdminActionService:
         if target.tenant_id != tenant_id:
             raise TenantScopeViolation(TARGET_TYPE_TARGET, target_id)
         return target
+
+    async def _scoped_platform_account(
+        self, account_id: str, *, tenant_id: str
+    ) -> PlatformAccount:
+        account = await self._repo.get_platform_account(account_id)
+        if account is None:
+            raise AdminActionNotFound(TARGET_TYPE_PLATFORM_ACCOUNT, account_id)
+        if account.tenant_id != tenant_id:
+            raise TenantScopeViolation(TARGET_TYPE_PLATFORM_ACCOUNT, account_id)
+        return account
 
     async def _scoped_subscription(
         self, subscription_id: str, *, tenant_id: str
@@ -622,6 +699,59 @@ class AdminActionService:
             target_id=target_id,
             at=at,
             diff={"job_id": job_id},
+            source=source,
+        )
+        await self._repo.record_audit(audit)
+        return job_id
+
+    async def start_auth(
+        self,
+        *,
+        target_id: str,
+        tenant_id: str,
+        actor_id: str | None,
+        at: datetime,
+        source: str | None = None,
+    ) -> str:
+        """대상 인증을 시작한다. Baemin 은 ``OPEN_AUTH_BROWSER``, Coupang 은 ``CRAWL_COUPANG`` 를 쓴다."""
+
+        target = await self._scoped_target(target_id, tenant_id=tenant_id)
+        account = await self._scoped_platform_account(target.platform_account_id, tenant_id=tenant_id)
+        job_type, payload = _auth_start_payload(target, account)
+        enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
+        if callable(enqueue_manual_job):
+            job_id = str(uuid.uuid4())
+            audit = self._audit(
+                actor_id=actor_id,
+                action=ACTION_AUTH_START,
+                target_type=TARGET_TYPE_TARGET,
+                target_id=target_id,
+                at=at,
+                diff={"job_id": job_id, "job_type": job_type, "platform": account.platform.value},
+                source=source,
+            )
+            await enqueue_manual_job(
+                job_id=job_id,
+                job_type=job_type,
+                target_id=target_id,
+                payload_json=payload,
+                audit=audit,
+                now=at,
+            )
+            return job_id
+        job_id = await self._queue.enqueue(
+            job_type=job_type,
+            target_id=target_id,
+            payload_json=payload,
+            now=at,
+        )
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_AUTH_START,
+            target_type=TARGET_TYPE_TARGET,
+            target_id=target_id,
+            at=at,
+            diff={"job_id": job_id, "job_type": job_type, "platform": account.platform.value},
             source=source,
         )
         await self._repo.record_audit(audit)
@@ -885,6 +1015,7 @@ class InMemoryAdminActionRepository:
     def __init__(self) -> None:
         self._subscriptions: dict[str, Subscription] = {}
         self._targets: dict[str, MonitoringTarget] = {}
+        self._platform_accounts: dict[str, PlatformAccount] = {}
         self._target_platforms: dict[str, str] = {}
         self._jobs: dict[str, JobRef] = {}
         self._held: dict[str, HeldDispatchRef] = {}
@@ -898,6 +1029,9 @@ class InMemoryAdminActionRepository:
     def seed_target(self, target: MonitoringTarget) -> None:
         self._targets[target.id] = target
         self._target_platforms.setdefault(target.id, "BAEMIN")
+
+    def seed_platform_account(self, account: PlatformAccount) -> None:
+        self._platform_accounts[account.id] = account
 
     def seed_target_platform(self, target_id: str, platform: str) -> None:
         self._target_platforms[target_id] = platform
@@ -922,6 +1056,9 @@ class InMemoryAdminActionRepository:
         if target_id not in self._targets:
             return None
         return self._target_platforms.get(target_id, "BAEMIN")
+
+    async def get_platform_account(self, account_id: str) -> PlatformAccount | None:
+        return self._platform_accounts.get(account_id)
 
     async def get_job(self, job_id: str) -> JobRef | None:
         return self._jobs.get(job_id)

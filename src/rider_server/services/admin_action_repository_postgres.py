@@ -34,13 +34,20 @@ from rider_server.db.models.tenancy import Subscription as SubscriptionRow
 from rider_server.domain import (
     MonitoringTarget,
     MonitoringTargetStatus,
+    Platform,
+    PlatformAccount,
     Subscription,
     SubscriptionStatus,
 )
 
 from .admin_action_service import AuditEntry, HeldDispatchRef, JobRef
 from .admin_action_service import AdminActionNotFound
-from rider_server.queue.states import JOB_STATUS_CLAIMED, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
+from rider_server.queue.states import (
+    JOB_STATUS_CLAIMED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RETRY,
+    JOB_STATUS_RUNNING,
+)
 
 
 def _sub_to_domain(row: SubscriptionRow) -> Subscription:
@@ -64,6 +71,9 @@ def _target_to_domain(row: MonitoringTargetRow) -> MonitoringTarget:
         external_id=row.external_id,
         url=row.url,
         interval_minutes=row.interval_minutes,
+        schedule_enabled=row.schedule_enabled,
+        start_time=row.start_time,
+        stop_time=row.stop_time,
         status=MonitoringTargetStatus(row.status),
     )
 
@@ -128,6 +138,25 @@ class PostgresAdminActionRepository:
         async with self._session_factory() as session:
             platform = (await session.execute(stmt)).scalar_one_or_none()
         return None if platform is None else str(platform)
+
+    async def get_platform_account(self, account_id: str) -> PlatformAccount | None:
+        stmt = select(PlatformAccountRow).where(PlatformAccountRow.id == account_id)
+        async with self._session_factory() as session:
+            row = (await session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        return PlatformAccount(
+            id=str(row.id),
+            tenant_id=str(row.tenant_id),
+            platform=Platform(str(row.platform)),
+            label=row.label,
+            username=row.username,
+            password=row.password,
+            verification_email_address=row.verification_email_address,
+            verification_email_app_password=row.verification_email_app_password,
+            verification_email_subject_keyword=row.verification_email_subject_keyword,
+            verification_email_sender_keyword=row.verification_email_sender_keyword,
+        )
 
     async def get_job(self, job_id: str) -> JobRef | None:
         # tenant scope 는 job→target→tenant 조인으로 도출(jobs 엔 tenant_id 컬럼 없음).
@@ -232,10 +261,24 @@ class PostgresAdminActionRepository:
         audit: AuditEntry,
         now,
     ) -> str:
-        active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+        active_statuses = (
+            JOB_STATUS_PENDING,
+            JOB_STATUS_CLAIMED,
+            JOB_STATUS_RUNNING,
+            JOB_STATUS_RETRY,
+        )
         job_uuid = uuid.UUID(str(job_id))
         target_uuid = uuid.UUID(str(target_id))
         async with self._session_factory() as session:
+            locked_target = (
+                await session.execute(
+                    select(MonitoringTargetRow.id)
+                    .where(MonitoringTargetRow.id == target_uuid)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if locked_target is None:
+                raise AdminActionNotFound("monitoring_target", target_id)
             assigned_agent_id = (
                 await session.execute(
                     select(BrowserProfileRow.agent_id)
@@ -253,7 +296,7 @@ class PostgresAdminActionRepository:
                         JobRow.status.in_(active_statuses),
                     )
                     .limit(1)
-                    .with_for_update(skip_locked=True)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
             if existing is not None:

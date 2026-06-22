@@ -241,6 +241,219 @@ def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
     assert forbidden.isdisjoint(params)
 
 
+def test_default_open_auth_browser_fills_baemin_login_and_requests_phone_code(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeLocator:
+        def __init__(self, kind, name):
+            self.kind = kind
+            self.name = name
+            self.first = self
+
+        def click(self, timeout=None):
+            actions.append(("click", self.kind, self.name))
+
+        def press(self, key, timeout=None):
+            actions.append(("press", self.kind, self.name, key))
+
+        def press_sequentially(self, value, timeout=None, delay=None):
+            actions.append(("type", self.kind, self.name, value))
+
+        def fill(self, value, timeout=None):
+            actions.append(("fill", self.kind, self.name, value))
+
+        def filter(self, visible=True):
+            return self
+
+    class FakePage:
+        def goto(self, url, wait_until=None, timeout=None):
+            actions.append(("goto", url, wait_until, timeout))
+
+        def locator(self, selector):
+            return FakeLocator("locator", selector)
+
+        def get_by_role(self, role, name, exact=False):
+            return FakeLocator("role", f"{role}:{name}")
+
+        def get_by_text(self, text, exact=False):
+            return FakeLocator("text", text)
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            actions.append(("wait_for_load_state",))
+
+        def wait_for_timeout(self, timeout):
+            actions.append(("wait_for_timeout", timeout))
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+        def new_page(self):
+            return self.pages[0]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+    browser = FakeBrowser(page)
+    prepare_calls = []
+
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: prepare_calls.append((config, platform_name)) or "ok")
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(browser),
+    )
+
+    job = _auth_job(
+        type=CAPABILITY_OPEN_AUTH_BROWSER,
+        payload={
+            "tenant_id": "tenant-fake-1",
+            "target_id": FAKE_TARGET,
+            "platform": "baemin",
+            "primary_url": "https://self.baemin.example/stats",
+            "expected_display_name": "배민센터A",
+            "login_id_ref": "baemin-login-id",
+            "login_password_ref": "baemin-login-password",
+        },
+    )
+    default_open_auth_browser(job)
+
+    assert len(prepare_calls) == 1
+    config, platform_name = prepare_calls[0]
+    assert platform_name == "Windows"
+    assert config.baemin_login_id == "baemin-login-id"
+    assert config.baemin_login_password == "baemin-login-password"
+    assert actions[0][0] == "goto"
+    assert actions[0][1] == "https://self.baemin.example/stats"
+    assert ("type", "locator", "input[name='username']", "baemin-login-id") in actions
+    assert ("type", "locator", "input[name='password']", "baemin-login-password") in actions
+    assert ("click", "role", "button:로그인") in actions
+    assert ("click", "role", "button:인증번호 요청") in actions
+    assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
+
+
+def test_phone_code_request_texts_avoid_broad_generic_buttons():
+    from rider_agent.auth.baemin_auth import _PHONE_CODE_REQUEST_TEXTS
+
+    assert "send" not in _PHONE_CODE_REQUEST_TEXTS
+    assert "resend" not in _PHONE_CODE_REQUEST_TEXTS
+
+
+def test_auth_worker_resolves_baemin_local_refs_from_secret_resolver(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeLocator:
+        def __init__(self, kind, name):
+            self.kind = kind
+            self.name = name
+            self.first = self
+
+        def click(self, timeout=None):
+            actions.append(("click", self.kind, self.name))
+
+        def press(self, key, timeout=None):
+            actions.append(("press", self.kind, self.name, key))
+
+        def press_sequentially(self, value, timeout=None, delay=None):
+            actions.append(("type", self.kind, self.name, value))
+
+        def filter(self, visible=True):
+            return self
+
+    class FakePage:
+        def goto(self, url, wait_until=None, timeout=None):
+            actions.append(("goto", url))
+
+        def locator(self, selector):
+            return FakeLocator("locator", selector)
+
+        def get_by_role(self, role, name, exact=False):
+            return FakeLocator("role", f"{role}:{name}")
+
+        def get_by_text(self, text, exact=False):
+            return FakeLocator("text", text)
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            pass
+
+        def wait_for_timeout(self, _timeout):
+            pass
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+        def new_page(self):
+            return self.pages[0]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(FakeBrowser(FakePage())),
+    )
+
+    execute = build_auth_execute_job(
+        secret_resolver={
+            "local:target-fake-1/baemin_login_id": "resolved-login-id",
+            "local:target-fake-1/baemin_login_password": "resolved-login-password",
+        }.get,
+        detect_completion=lambda job: True,
+    )
+    job = _auth_job(
+        type=CAPABILITY_OPEN_AUTH_BROWSER,
+        payload={
+            "tenant_id": "tenant-fake-1",
+            "target_id": FAKE_TARGET,
+            "platform": "baemin",
+            "primary_url": "https://self.baemin.example/stats",
+            "expected_display_name": "배민센터A",
+            "login_id_ref": "local:target-fake-1/baemin_login_id",
+            "login_password_ref": "local:target-fake-1/baemin_login_password",
+        },
+    )
+
+    result = execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert ("type", "locator", "input[name='username']", "resolved-login-id") in actions
+    assert ("type", "locator", "input[name='password']", "resolved-login-password") in actions
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC3 — bounded 유지: AUTH_REQUIRED/auth_timeout, 전송 0, 무한 재시도 금지
 # ══════════════════════════════════════════════════════════════════════════

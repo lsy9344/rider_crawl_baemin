@@ -284,6 +284,9 @@ class PostgresAdminEntityRepository:
             "external_id": target.external_id,
             "url": target.url,
             "interval_minutes": target.interval_minutes,
+            "schedule_enabled": target.schedule_enabled,
+            "start_time": target.start_time,
+            "stop_time": target.stop_time,
             "status": target.status.value,
         }
         await self._insert_with_audit(MonitoringTargetRow, values, audit)
@@ -393,6 +396,9 @@ class PostgresAdminEntityRepository:
                 "external_id": target.external_id,
                 "url": target.url,
                 "interval_minutes": target.interval_minutes,
+                "schedule_enabled": target.schedule_enabled,
+                "start_time": target.start_time,
+                "stop_time": target.stop_time,
                 "status": target.status.value,  # soft delete = INACTIVE 포함
             },
             audit,

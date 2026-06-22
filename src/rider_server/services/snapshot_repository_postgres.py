@@ -8,7 +8,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,6 +21,7 @@ from rider_crawl.models import (
     PerformanceSnapshot,
 )
 from rider_crawl.redaction import redact
+from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
 from rider_server.db.models.agent import Job as JobRow
 from rider_server.db.models.messaging import (
     DeliveryLog as DeliveryLogRow,
@@ -64,6 +65,7 @@ from .job_result_ingest_service import (
 )
 
 TelegramSender = Callable[[MessengerChannel, DispatchJob, str], None]
+_KST = timezone(timedelta(hours=9), "Asia/Seoul")
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,37 @@ class _PendingTelegramDelivery:
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
     return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+def _parse_hhmm(value: str) -> time | None:
+    parts = (value or "").split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return time(hour=hour, minute=minute)
+
+
+def _send_window_allows_dispatch(
+    now: datetime,
+    *,
+    schedule_enabled: bool,
+    start_time: str,
+    stop_time: str,
+) -> bool:
+    if not schedule_enabled:
+        return True
+    start = _parse_hhmm(start_time)
+    stop = _parse_hhmm(stop_time)
+    if start is None or stop is None or start == stop:
+        return False
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    current = aware_now.astimezone(_KST).time().replace(second=0, microsecond=0)
+    if start < stop:
+        return start <= current < stop
+    return current >= start or current < stop
 
 
 def _snapshot_id_for_job(job_id: str) -> uuid.UUID:
@@ -240,6 +273,28 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         message_id: uuid.UUID,
         now: datetime,
     ) -> None:
+        window = (
+            await session.execute(
+                select(
+                    MonitoringTargetRow.schedule_enabled,
+                    MonitoringTargetRow.start_time,
+                    MonitoringTargetRow.stop_time,
+                ).where(
+                    MonitoringTargetRow.id == _uuid(record.target_id),
+                    MonitoringTargetRow.tenant_id == _uuid(record.tenant_id),
+                )
+            )
+        ).first()
+        if window is None:
+            return
+        if not _send_window_allows_dispatch(
+            now,
+            schedule_enabled=bool(window[0]),
+            start_time=window[1] or "",
+            stop_time=window[2] or "",
+        ):
+            return
+
         rows = (
             await session.execute(
                 select(DeliveryRuleRow, MessengerChannelRow)

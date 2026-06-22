@@ -25,6 +25,8 @@ from rider_server.domain import (
     Messenger,
     MonitoringTarget,
     MonitoringTargetStatus,
+    Platform,
+    PlatformAccount,
     Subscription,
     SubscriptionStatus,
 )
@@ -91,6 +93,32 @@ def _target(status=MonitoringTargetStatus.ACTIVE, *, tenant=_TENANT) -> Monitori
         url="https://example.invalid/mt-1",
         interval_minutes=10,
         status=status,
+    )
+
+
+def _platform_account(
+    *,
+    tenant=_TENANT,
+    platform=Platform.BAEMIN,
+    account_id="pa-1",
+    username="login-id-ref",
+    password="login-password-ref",
+    verification_email_address="",
+    verification_email_app_password="",
+    verification_email_subject_keyword="인증번호",
+    verification_email_sender_keyword="coupang",
+) -> PlatformAccount:
+    return PlatformAccount(
+        id=account_id,
+        tenant_id=tenant,
+        platform=platform,
+        label="계정",
+        username=username,
+        password=password,
+        verification_email_address=verification_email_address,
+        verification_email_app_password=verification_email_app_password,
+        verification_email_subject_keyword=verification_email_subject_keyword,
+        verification_email_sender_keyword=verification_email_sender_keyword,
     )
 
 
@@ -640,6 +668,95 @@ def test_auth_check_uses_target_platform_account_platform() -> None:
     assert job.payload_json["parser_version"] == "coupang-v1"
 
 
+def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account())
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    assert queue.job_status(job_id) == JOB_STATUS_PENDING
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json == {
+        "target_id": "mt-1",
+        "tenant_id": _TENANT,
+        "platform": "baemin",
+        "platform_account_id": "pa-1",
+        "primary_url": "https://example.invalid/mt-1",
+        "expected_display_name": "센터",
+        "browser_profile_ref": "profile:mt-1",
+        "timeout_seconds": 60,
+        "parser_version": "baemin-v1",
+        "job_type": "OPEN_AUTH_BROWSER",
+        "login_id_ref": "login-id-ref",
+        "login_password_ref": "login-password-ref",
+    }
+    assert repo.audits[-1].action == "AUTH_START"
+    assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
+
+
+def test_start_auth_enqueues_coupang_crawl_with_email_2fa_refs() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-login-id-ref",
+            password="coupang-login-password-ref",
+            verification_email_address="mailbox-ref",
+            verification_email_app_password="mail-app-password-ref",
+            verification_email_subject_keyword="보안코드",
+            verification_email_sender_keyword="wing",
+        )
+    )
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    assert queue.job_status(job_id) == JOB_STATUS_PENDING
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json == {
+        "target_id": "mt-1",
+        "tenant_id": _TENANT,
+        "platform": "coupang",
+        "platform_account_id": "pa-1",
+        "primary_url": "https://example.invalid/mt-1",
+        "expected_display_name": "센터",
+        "browser_profile_ref": "profile:mt-1",
+        "timeout_seconds": 60,
+        "parser_version": "coupang-v1",
+        "job_type": "CRAWL_COUPANG",
+        "coupang_login_id_ref": "coupang-login-id-ref",
+        "coupang_login_password_ref": "coupang-login-password-ref",
+        "verification_email_address_ref": "mailbox-ref",
+        "verification_email_app_password_ref": "mail-app-password-ref",
+        "verification_email_subject_keyword": "보안코드",
+        "verification_email_sender_keyword": "wing",
+        "coupang_auto_email_2fa_enabled": True,
+    }
+    assert repo.audits[-1].action == "AUTH_START"
+    assert repo.audits[-1].diff_redacted["job_type"] == "CRAWL_COUPANG"
+
+
+def test_start_auth_missing_credentials_is_rejected() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account(password=""))
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    with pytest.raises(ValueError, match="배민 로그인 ID/PW가 필요합니다"):
+        _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    assert queue.events == []
+    assert repo.audits == []
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (1-QA) tenant scope — retry/dispose 도 cross-tenant 차단(누출/변경 0)
 # ══════════════════════════════════════════════════════════════════════════
@@ -738,6 +855,54 @@ def test_route_auth_check_triggers() -> None:
     assert resp.status_code == HTTPStatus.OK
     assert resp.headers["HX-Trigger"] == "admin-entity-changed"
     assert "AUTH_CHECK" in resp.text
+
+
+def test_route_auth_start_triggers_baemin_open_auth_browser() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
+    assert "인증 시작" in resp.text
+
+
+def test_route_auth_start_triggers_coupang_crawl() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-login-id-ref",
+            password="coupang-login-password-ref",
+            verification_email_address="mailbox-ref",
+            verification_email_app_password="mail-app-password-ref",
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "인증 시작" in resp.text
+
+
+def test_route_auth_start_missing_credentials_is_400() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account(password=""))
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "배민 로그인 ID/PW가 필요합니다" in resp.text
+    assert repo.audits == []
+    assert queue.events == []
 
 
 def test_route_dry_run_returns_preview_without_send() -> None:

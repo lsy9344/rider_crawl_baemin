@@ -127,7 +127,9 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "git fetch origin main" in workflow
     assert "ssh-keyscan" not in workflow
     assert "git checkout -B main -f FETCH_HEAD" in workflow
-    assert "docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans" in workflow
+    compose_files = "-f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml"
+    assert f"docker compose -p rider {compose_files} up --build -d --remove-orphans" in workflow
+    assert f"docker compose -p rider {compose_files} ps" in workflow
     assert "for i in $(seq 1 60)" in workflow
     assert "production health ok after ${i}s" in workflow
     assert "logs --tail=80 backend-api" in workflow
@@ -226,6 +228,14 @@ def test_backend_api_env_does_not_enable_public_admin_by_default() -> None:
 
     assert "RIDER_ADMIN_PUBLIC_ACCESS=1" not in env
     assert "RIDER_ADMIN_PUBLIC_ACCESS=true" not in env.lower()
+
+
+def test_public_admin_override_limits_access_to_owner_ip() -> None:
+    env = Path("deploy/env/backend-api.dev-public-admin.env").read_text(encoding="utf-8")
+
+    assert "RIDER_ADMIN_PUBLIC_ACCESS=1" in env
+    assert "RIDER_ADMIN_IP_ALLOWLIST=175.196.151.158/32" in env
+    assert "APP_ENV=development" not in env
 
 
 def test_compose_passes_telegram_env_ref_values_to_backend() -> None:

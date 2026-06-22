@@ -140,14 +140,20 @@ def test_app_config_repr_masks_secret_values():
     config = replace(
         _config_with_log_dir("logs"),
         telegram_bot_token="telegram-secret",
+        baemin_login_id="baemin-login-id-secret",
         coupang_login_password="coupang-secret",
+        coupang_login_id="coupang-login-id-secret",
+        verification_email_address="rider@example.invalid",
         verification_email_app_password="imap-secret",
     )
 
     rendered = repr(config)
 
     assert "telegram-secret" not in rendered
+    assert "baemin-login-id-secret" not in rendered
     assert "coupang-secret" not in rendered
+    assert "coupang-login-id-secret" not in rendered
+    assert "rider@example.invalid" not in rendered
     assert "imap-secret" not in rendered
 
 
