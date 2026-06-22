@@ -15,3 +15,30 @@ secrets/google/credentials*
 build/
 # 작업지시서/요구사항 PDF 등 외부 문서는 코드 저장소에 두지 않는다.
 *.pdf
+
+# Local agent/tooling artifacts
+.agents/
+.claude/
+.codegraph/
+.codex/
+.playwright-cli/
+agent-run.lock
+
+# Local agent configuration
+_bmad/custom/config.user.toml
+
+# Local deployment secrets/state/artifacts
+backups/
+deploy/backups/
+deploy/terraform/.secrets/
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate
+deploy/terraform/*.tfstate.*
+deploy/terraform/*.tfvars
+
+# Local diagnostics/captured responses
+deploy/docker-compose.dev-admin-view.yml
+scripts/_api_*.json
+scripts/dashboard_current.html
+scripts/diagnose_auth_btn*.py
+scripts/test_admin_dashboard_current.py
