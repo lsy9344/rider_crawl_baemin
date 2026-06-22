@@ -87,12 +87,12 @@ _SECRET_REF_PREFIXES = ("vault://", "local:", "env:", "dpapi:")
 
 
 def _secret_ref_or_empty(value: str | None, field_name: str) -> str:
-    normalized = (value or "").strip()
-    if not normalized:
-        return ""
-    if "://" in normalized or normalized.startswith(_SECRET_REF_PREFIXES):
-        return normalized
-    raise ValueError(f"{field_name}은 secret ref 핸들만 허용됩니다")
+    # 운영 결정(옵션 B): 플랫폼 계정 자격증명은 secret ref 핸들뿐 아니라 평문 실값도 그대로
+    # 저장한다. 에이전트는 핸들이면 로컬 store 에서 resolve 하고, 평문이면 그대로 사용한다.
+    # 평문이 DB/잡 페이로드에 흐르므로 DB 접근/백업/로그를 민감정보로 취급해야 한다(보안 최소화 수용).
+    # field_name 은 호출부 호환을 위해 유지한다(현재 분기 없음).
+    _ = field_name
+    return (value or "").strip()
 
 
 def _secret_change_label(old: str, new: str) -> str:

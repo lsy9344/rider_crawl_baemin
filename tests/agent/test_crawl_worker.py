@@ -19,6 +19,7 @@ from rider_agent.job_loop import (
     JOB_STATUS_FAILED,
     JOB_STATUS_SUCCESS,
     make_failure_result,
+    make_success_result,
     run_agent,
 )
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
@@ -29,7 +30,6 @@ from rider_agent.workers.crawl_worker import (
     ERROR_AUTH_REQUIRED,
     ERROR_CENTER_MISMATCH,
     ERROR_CRAWL_TIMEOUT,
-    ERROR_PLAINTEXT_SECRET_NOT_ALLOWED,
     ERROR_TARGET_VALIDATION_FAILURE,
     ERROR_PROFILE_UNAVAILABLE,
     CrawlWorker,
@@ -212,11 +212,14 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert config.verification_email_mailbox_lock_id == "vault://mail/address"
 
 
-def test_coupang_job_plaintext_secret_fields_are_rejected() -> None:
-    calls: list[str | None] = []
+def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
+    # 옵션 B: 웹앱에 입력한 평문 쿠팡 ID/PW/이메일이 _ref 페이로드 키에 평문으로 실려 와도
+    # 핸들 resolve 없이 그대로 config 에 채워져 자동 로그인 + IMAP 2FA 에 쓰인다.
+    captured = {}
 
     def fake_crawl(config, *, platform_name=None):
-        calls.append(platform_name)
+        captured["platform_name"] = platform_name
+        captured["config"] = config
         return _coupang_snapshot()
 
     base_job = _crawl_job(
@@ -229,12 +232,10 @@ def test_coupang_job_plaintext_secret_fields_are_rejected() -> None:
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "username": "plain-login-id",
-            "password": "plain-login-password",
-            "coupang_login_id": "plain-coupang-login-id",
-            "coupang_login_password": "plain-coupang-login-password",
-            "verification_email_address": "myemail@gmail.com",
-            "verification_email_app_password": "myapppassword",
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
             "coupang_auto_email_2fa_enabled": True,
         },
     )
@@ -242,18 +243,26 @@ def test_coupang_job_plaintext_secret_fields_are_rejected() -> None:
 
     result = worker.execute(job)
 
-    assert result.status == JOB_STATUS_FAILED
-    assert result.error_code == ERROR_PLAINTEXT_SECRET_NOT_ALLOWED
-    assert calls == []
+    assert result.status == JOB_STATUS_SUCCESS
+    config = captured["config"]
+    assert config.coupang_auto_email_2fa_enabled is True
+    assert config.coupang_login_id == "plain-coupang-login-id"
+    assert config.coupang_login_password == "plain-coupang-login-password"
+    assert config.verification_email_address == "myemail@gmail.com"
+    assert config.verification_email_app_password == "myapppassword"
 
 
-def test_default_process_boundary_rejects_plaintext_before_subprocess(monkeypatch) -> None:
-    def fail_subprocess(*args, **kwargs):
-        raise AssertionError("plaintext payload must not cross process boundary")
+def test_default_process_boundary_passes_plaintext_credentials(monkeypatch) -> None:
+    # 옵션 B: 평문 자격증명도 process boundary 를 정상 통과해 subprocess crawl 로 넘어간다.
+    crossed = {}
+
+    def fake_subprocess(child_job, **kwargs):
+        crossed["payload"] = dict(child_job.payload)
+        return make_success_result(result_json={"target_id": child_job.target_id})
 
     monkeypatch.setattr(
         "rider_agent.workers.crawl_process.run_crawl_in_subprocess",
-        fail_subprocess,
+        fake_subprocess,
     )
 
     base_job = _crawl_job(
@@ -266,14 +275,14 @@ def test_default_process_boundary_rejects_plaintext_before_subprocess(monkeypatc
         lease_expires_at=base_job.lease_expires_at,
         payload={
             **base_job.payload,
-            "password": "plain-login-password",
+            "coupang_login_password_ref": "plain-login-password",
         },
     )
 
     result = CrawlWorker().execute(job)
 
-    assert result.status == JOB_STATUS_FAILED
-    assert result.error_code == ERROR_PLAINTEXT_SECRET_NOT_ALLOWED
+    assert result.status == JOB_STATUS_SUCCESS
+    assert crossed["payload"]["coupang_login_password_ref"] == "plain-login-password"
 
 
 def test_coupang_unresolved_secret_ref_fails_before_crawl() -> None:

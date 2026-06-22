@@ -303,52 +303,57 @@ def test_create_platform_account_with_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_create_platform_account_plaintext_password_rejected() -> None:
+def test_create_platform_account_plaintext_password_stored() -> None:
+    # 옵션 B: 평문 자격증명을 그대로 저장한다(핸들 강제 없음).
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    with pytest.raises(ValueError, match="ref"):
-        _run(
-            svc.create_platform_account(
-                entity_id="pa-plain",
-                tenant_id=_TENANT,
-                platform=Platform.BAEMIN,
-                label="plain",
-                username="myuser",
-                password="mypass",
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
+    _run(
+        svc.create_platform_account(
+            entity_id="pa-plain",
+            tenant_id=_TENANT,
+            platform=Platform.BAEMIN,
+            label="plain",
+            username="myuser",
+            password="mypass",
+            at=_NOW,
+            actor_id=_ACTOR,
         )
+    )
 
-    assert _run(repo.get_platform_account("pa-plain")) is None
-    assert repo.audits == []
+    stored = _run(repo.get_platform_account("pa-plain"))
+    assert stored is not None
+    assert stored.username == "myuser"
+    assert stored.password == "mypass"
 
 
-def test_create_platform_account_plaintext_email_secret_rejected() -> None:
+def test_create_platform_account_plaintext_email_secret_stored() -> None:
+    # 옵션 B: 핸들과 평문을 섞어도 모두 그대로 저장한다.
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     svc = _svc(repo)
 
-    with pytest.raises(ValueError, match="ref"):
-        _run(
-            svc.create_platform_account(
-                entity_id="pa-mail-plain",
-                tenant_id=_TENANT,
-                platform=Platform.COUPANG,
-                label="mail",
-                username="vault://coupang/user",
-                password="vault://coupang/password",
-                verification_email_address="mail@example.test",
-                verification_email_app_password="plain-app-password",
-                at=_NOW,
-                actor_id=_ACTOR,
-            )
+    _run(
+        svc.create_platform_account(
+            entity_id="pa-mail-plain",
+            tenant_id=_TENANT,
+            platform=Platform.COUPANG,
+            label="mail",
+            username="vault://coupang/user",
+            password="vault://coupang/password",
+            verification_email_address="mail@example.test",
+            verification_email_app_password="plain-app-password",
+            at=_NOW,
+            actor_id=_ACTOR,
         )
+    )
 
-    assert _run(repo.get_platform_account("pa-mail-plain")) is None
-    assert repo.audits == []
+    stored = _run(repo.get_platform_account("pa-mail-plain"))
+    assert stored is not None
+    assert stored.username == "vault://coupang/user"
+    assert stored.verification_email_address == "mail@example.test"
+    assert stored.verification_email_app_password == "plain-app-password"
 
 
 def test_create_monitoring_target_links_account_and_flags_valid_coupang_center() -> None:
@@ -744,7 +749,8 @@ def test_route_cross_tenant_update_404() -> None:
     assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
-def test_entity_admin_form_guides_secret_ref_storage() -> None:
+def test_entity_admin_form_guides_plaintext_credential_storage() -> None:
+    # 옵션 B: 폼은 실제 값 입력을 안내하고, DB 저장 민감성을 경고한다.
     template = Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
         encoding="utf-8"
     )
@@ -753,13 +759,14 @@ def test_entity_admin_form_guides_secret_ref_storage() -> None:
         template.index('<div hx-get="/admin/platform-accounts?tenant=')
     ]
 
-    assert "SecretRef" in account_form
-    assert "DB에 그대로 저장" not in account_form
+    assert "실제 값 그대로" in account_form
+    assert "DB" in account_form  # DB 저장 민감성 안내
     assert "로그인 비밀번호" in account_form
     assert "이메일 앱 비밀번호" in account_form
     assert 'name="password"' in account_form
     assert 'name="verification_email_app_password"' in account_form
-    assert "vault://platform-account/" in account_form
+    # 핸들도 여전히 허용된다는 안내가 남아 있다(에이전트 로컬 resolve 경로).
+    assert "vault://" in account_form
 
 
 def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
@@ -780,7 +787,8 @@ def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
     assert "document.addEventListener('DOMContentLoaded', syncChannelCreateFields);" in template
 
 
-def test_route_platform_account_plaintext_password_rejected() -> None:
+def test_route_platform_account_plaintext_password_stored() -> None:
+    # 옵션 B: 라우트로 들어온 평문 자격증명도 정상 저장된다.
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -795,8 +803,10 @@ def test_route_platform_account_plaintext_password_rejected() -> None:
         },
     )
 
-    assert resp.status_code == HTTPStatus.BAD_REQUEST
-    assert _run(repo.list_platform_accounts("tn-1")) == []
+    assert resp.status_code == HTTPStatus.OK
+    accounts = _run(repo.list_platform_accounts("tn-1"))
+    assert len(accounts) == 1
+    assert accounts[0].password == "mypass"
 
 
 def test_route_deactivate_channel_soft_delete() -> None:
@@ -1274,26 +1284,24 @@ def test_update_platform_account_verification_email() -> None:
     assert "verification_email_app_password" not in diff
 
 
-def test_update_platform_account_plaintext_password_rejected() -> None:
-    """G3 — 평문 자격증명을 update 로 주면 저장하지 않고 거절한다."""
+def test_update_platform_account_plaintext_password_stored() -> None:
+    """G3(옵션 B) — 평문 자격증명을 update 로 주면 그대로 저장한다."""
     repo = InMemoryAdminEntityRepository()
     repo.seed_platform_account(_account())
     svc = _svc(repo)
 
-    with pytest.raises(ValueError, match="ref"):
-        _run(
-            svc.update_platform_account(
-                "pa-1", tenant_id=_TENANT,
-                password="my-new-password",
-                verification_email_app_password="my-new-app-password",
-                at=_NOW, actor_id=_ACTOR,
-            )
+    _run(
+        svc.update_platform_account(
+            "pa-1", tenant_id=_TENANT,
+            password="my-new-password",
+            verification_email_app_password="my-new-app-password",
+            at=_NOW, actor_id=_ACTOR,
         )
+    )
 
     stored = _run(repo.get_platform_account("pa-1"))
-    assert stored.password == _REF
-    assert stored.verification_email_app_password == ""
-    assert repo.audits == []
+    assert stored.password == "my-new-password"
+    assert stored.verification_email_app_password == "my-new-app-password"
 
 
 def test_update_messenger_channel_routing_fields_no_transition() -> None:
@@ -1716,7 +1724,8 @@ def test_route_create_platform_account_unknown_platform_400() -> None:
     assert resp.status_code == HTTPStatus.BAD_REQUEST
 
 
-def test_route_create_platform_account_plaintext_password_rejected() -> None:
+def test_route_create_platform_account_plaintext_password_stored() -> None:
+    # 옵션 B: 평문 password/이메일 앱비번이 라우트로 들어와도 저장된다.
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
     client = TestClient(_app_with(repo))
@@ -1732,9 +1741,11 @@ def test_route_create_platform_account_plaintext_password_rejected() -> None:
         },
     )
 
-    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert resp.status_code == HTTPStatus.OK
     accounts = _run(repo.list_platform_accounts("tn-1"))
-    assert accounts == []
+    assert len(accounts) == 1
+    assert accounts[0].password == "plain-password"
+    assert accounts[0].verification_email_app_password == "mail-app-password"
 
 
 def test_route_create_telegram_messenger_channel_pending() -> None:

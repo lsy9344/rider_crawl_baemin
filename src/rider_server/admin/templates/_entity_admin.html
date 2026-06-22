@@ -173,17 +173,17 @@
       </fieldset>
 
       <fieldset id="entity-account-form">
-        <legend>플랫폼 계정 (SecretRef)</legend>
-        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 ID/PW/이메일 앱 비밀번호와 이메일 주소는 SecretRef 핸들만 입력하세요. 예: vault://platform-account/coupang-login-id</p>
+        <legend>플랫폼 계정</legend>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 로그인 ID/비밀번호와 2차인증 이메일 주소·앱 비밀번호를 <strong>실제 값 그대로</strong> 입력하세요. 에이전트가 이 값으로 자동 로그인하고 IMAP 2차인증을 처리합니다. (값은 DB에 저장되므로 DB 접근/백업을 민감정보로 관리하세요. <code>vault://</code>·<code>env:</code> 같은 핸들을 넣으면 에이전트가 로컬 저장소에서 resolve 합니다.)</p>
         <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>플랫폼
             <select name="platform"><option value="BAEMIN">배민</option><option value="COUPANG">쿠팡이츠</option></select>
           </label>
           <label>라벨 <input type="text" name="label"></label>
-          <label>로그인 ID ref <input type="text" name="username" placeholder="vault://platform-account/coupang-login-id"></label>
-          <label>로그인 비밀번호 ref <input type="text" name="password" autocomplete="off" placeholder="vault://platform-account/coupang-login-password"></label>
-          <label>2차인증 이메일 주소 ref <input type="text" name="verification_email_address" placeholder="vault://platform-account/mail-address"></label>
-          <label>이메일 앱 비밀번호 ref <input type="text" name="verification_email_app_password" autocomplete="off" placeholder="vault://platform-account/mail-app-password"></label>
+          <label>로그인 ID <input type="text" name="username" placeholder="쿠팡 로그인 ID"></label>
+          <label>로그인 비밀번호 <input type="text" name="password" autocomplete="off" placeholder="쿠팡 로그인 비밀번호"></label>
+          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" placeholder="example@gmail.com / @naver.com"></label>
+          <label>이메일 앱 비밀번호 <input type="text" name="verification_email_app_password" autocomplete="off" placeholder="IMAP 앱 비밀번호"></label>
           <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
           <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
           <button type="submit" class="create" {% if not tenant_id %}disabled{% endif %}>{% if tenant_id %}계정 생성{% else %}계정 생성 불가{% endif %}</button><span class="inline-action-status" aria-live="polite"></span>
@@ -196,10 +196,10 @@
                     hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 라벨 <input type="text" id="acc-edit-label"></label>
-          <label>로그인 ID ref <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
-          <label>로그인 비밀번호 ref <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>2차인증 이메일 ref <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
-          <label>앱 비밀번호 ref <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
+          <label>로그인 비밀번호 <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>2차인증 이메일 <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
+          <label>앱 비밀번호 <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
           <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
           <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
           <button type="button" data-requires="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
