@@ -826,7 +826,7 @@ def test_targets_refresh_on_entity_change_event() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
     assert 'id="targets" hx-get="/admin/targets?tenant=tn-1"' in body
-    assert 'hx-trigger="admin-entity-changed from:body, every 30s"' in body
+    assert 'hx-trigger="admin-entity-changed from:body delay:2s, every 30s"' in body
 
 
 def test_target_deeplink_route_seeds_initial_drawer_target() -> None:
@@ -1177,3 +1177,4 @@ def test_dashboard_repository_port_exposes_only_read_methods() -> None:
         "channel_health",
         "auth_required",
     }
+
