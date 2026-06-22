@@ -203,10 +203,54 @@ jobs:
             exit 1
           fi
 
+  deploy-production:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [local-tests, postgres-tests, deployment-config]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_SSH_KEY" ]; then
+            echo "::error::DEPLOY_HOST and DEPLOY_SSH_KEY secrets are required"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/rider_deploy_key
+          chmod 600 ~/.ssh/rider_deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on EC2
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          if [ -z "$DEPLOY_USER" ]; then
+            echo "::error::DEPLOY_USER secret is required"
+            exit 1
+          fi
+          ssh -i ~/.ssh/rider_deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /opt/rider-server/repo
+          git fetch origin main
+          git checkout -B main -f origin/main
+          set -a
+          . ./.env
+          set +a
+          docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans
+          docker compose -p rider -f deploy/docker-compose.yml ps
+          curl -fsS http://127.0.0.1:8000/health
+          REMOTE
+
   ci-summary:
     name: CI summary
     runs-on: windows-latest
-    needs: [local-tests, postgres-tests, deployment-config]
+    needs: [local-tests, postgres-tests, deployment-config, deploy-production]
     if: always()
 
     steps:
@@ -219,9 +263,11 @@ jobs:
           - Local pytest gate: ${{ needs.local-tests.result }}
           - PostgreSQL pytest gate: ${{ needs.postgres-tests.result }}
           - Deployment config gate: ${{ needs.deployment-config.result }}
+          - Production deploy: ${{ needs.deploy-production.result }}
 
           PRs automatically run the quick local gate, PostgreSQL integration tests, and deployment config gate.
           Pushes, schedules, and manual default runs use the full local gate plus PostgreSQL and deployment config gates.
+          Pushes to main deploy to the EC2 production compose stack after all gates pass.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Notify Slack
@@ -238,6 +284,7 @@ jobs:
           LOCAL_RESULT: ${{ needs.local-tests.result }}
           POSTGRES_RESULT: ${{ needs.postgres-tests.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment-config.result }}
+          PRODUCTION_DEPLOY_RESULT: ${{ needs.deploy-production.result }}
         run: |
           if (-not $env:SLACK_WEBHOOK_URL) {
             Write-Warning "SLACK_WEBHOOK_URL secret is not configured; skipping Slack notification."
@@ -247,7 +294,8 @@ jobs:
           $localPassed = $env:LOCAL_RESULT -eq "success"
           $postgresPassed = $env:POSTGRES_RESULT -in @("success", "skipped")
           $deploymentPassed = $env:DEPLOYMENT_RESULT -eq "success"
-          $passed = $localPassed -and $postgresPassed -and $deploymentPassed
+          $deployPassed = $env:PRODUCTION_DEPLOY_RESULT -in @("success", "skipped")
+          $passed = $localPassed -and $postgresPassed -and $deploymentPassed -and $deployPassed
           $icon = if ($passed) { "✅" } else { "❌" }
           $statusText = if ($passed) { "CI passed" } else { "CI failed" }
           $commitShort = $env:COMMIT_SHA.Substring(0, [Math]::Min(7, $env:COMMIT_SHA.Length))
@@ -297,6 +345,10 @@ jobs:
                       @{
                         type = "mrkdwn"
                         text = "*Deployment config*`n$($env:DEPLOYMENT_RESULT)"
+                      },
+                      @{
+                        type = "mrkdwn"
+                        text = "*Production deploy*`n$($env:PRODUCTION_DEPLOY_RESULT)"
                       }
                     )
                   }
