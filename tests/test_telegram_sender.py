@@ -4,6 +4,7 @@ from urllib.parse import parse_qs
 
 import pytest
 
+from rider_crawl import sender as sender_module
 from rider_crawl.config import AppConfig
 from rider_crawl.sender import TelegramSendError, get_telegram_updates, send_telegram_text
 
@@ -54,6 +55,26 @@ def test_send_telegram_text_can_override_message_thread_id_for_replies(tmp_path)
 
     payload = parse_qs(calls[0][1].decode("utf-8"))
     assert payload["message_thread_id"] == ["88"]
+
+
+def test_send_telegram_text_rate_limits_local_direct_sends_by_route(monkeypatch, tmp_path):
+    calls: list[tuple[str, bytes]] = []
+    sleeps: list[float] = []
+    monotonic_values = iter([100.0, 100.25, 101.0])
+    monkeypatch.setattr(sender_module, "_LAST_TELEGRAM_SEND_AT_BY_ROUTE", {})
+    monkeypatch.setattr(sender_module.time, "monotonic", lambda: next(monotonic_values))
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.data))
+        return _FakeResponse({"ok": True, "result": {"message_id": 10}})
+
+    config = _config(tmp_path)
+
+    send_telegram_text(config, "first", urlopen=fake_urlopen, sleep=sleeps.append, local_rate_limit_seconds=1.0)
+    send_telegram_text(config, "second", urlopen=fake_urlopen, sleep=sleeps.append, local_rate_limit_seconds=1.0)
+
+    assert len(calls) == 2
+    assert sleeps == [0.75]
 
 
 def test_send_telegram_text_retries_after_telegram_rate_limit(tmp_path):

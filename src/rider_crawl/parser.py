@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from .models import CurrentScreenSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class MissingPerformanceDataError(ValueError):
@@ -106,6 +109,14 @@ class _AchievementRow:
         )
 
 
+@dataclass(frozen=True)
+class _TodayDeliveryStatus:
+    lunch_peak: _AchievementPeriod
+    afternoon_non_peak: _AchievementPeriod
+    dinner_peak: _AchievementPeriod
+    dinner_non_peak: _AchievementPeriod
+
+
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -125,11 +136,12 @@ class _HtmlTableParser(HTMLParser):
         super().__init__()
         self.tables: list[list[list[str]]] = []
         self._table_depth = 0
-        self._current_table: list[list[str]] | None = None
-        self._current_row: list[str] | None = None
+        self._current_table: list[list[tuple[str, int, int]]] | None = None
+        self._current_row: list[tuple[str, int, int]] | None = None
         self._current_cell: list[str] | None = None
+        self._current_span: tuple[int, int] = (1, 1)
 
-    def handle_starttag(self, tag: str, _attrs) -> None:
+    def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
         if tag == "table":
             self._table_depth += 1
@@ -139,6 +151,8 @@ class _HtmlTableParser(HTMLParser):
             self._current_row = []
         elif self._table_depth and tag in {"th", "td"}:
             self._current_cell = []
+            attrs_dict = {name.lower(): (value or "") for name, value in attrs}
+            self._current_span = (_span_value(attrs_dict.get("colspan")), _span_value(attrs_dict.get("rowspan")))
 
     def handle_data(self, data: str) -> None:
         if self._current_cell is not None:
@@ -148,17 +162,60 @@ class _HtmlTableParser(HTMLParser):
         tag = tag.lower()
         if tag in {"th", "td"} and self._current_cell is not None:
             if self._current_row is not None:
-                self._current_row.append(_normalize_cell_text("".join(self._current_cell)))
+                text = _normalize_cell_text("".join(self._current_cell))
+                colspan, rowspan = self._current_span
+                self._current_row.append((text, colspan, rowspan))
             self._current_cell = None
         elif tag == "tr" and self._current_row is not None:
-            if self._current_table is not None and any(cell for cell in self._current_row):
+            if self._current_table is not None:
                 self._current_table.append(self._current_row)
             self._current_row = None
         elif tag == "table" and self._table_depth:
             if self._table_depth == 1 and self._current_table is not None:
-                self.tables.append(self._current_table)
+                self.tables.append(_expand_table_grid(self._current_table))
                 self._current_table = None
             self._table_depth -= 1
+
+
+def _span_value(raw: str | None) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+def _expand_table_grid(raw_rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:
+    grid: list[list[str]] = []
+    active: dict[int, list] = {}
+    for raw in raw_rows:
+        out: list[str] = []
+        col = 0
+        i = 0
+        n = len(raw)
+        while i < n or any(remaining > 0 and c >= col for c, (_text, remaining) in active.items()):
+            if col in active and active[col][1] > 0:
+                text, remaining = active[col]
+                out.append(text)
+                remaining -= 1
+                if remaining > 0:
+                    active[col][1] = remaining
+                else:
+                    del active[col]
+                col += 1
+                continue
+            if i < n:
+                text, colspan, rowspan = raw[i]
+                i += 1
+                for _ in range(colspan):
+                    out.append(text)
+                    if rowspan > 1:
+                        active[col] = [text, rowspan - 1]
+                    col += 1
+            else:
+                col += 1
+        grid.append(out)
+    return [row for row in grid if any(cell for cell in row)]
 
 
 def html_to_text(html: str) -> str:
@@ -194,6 +251,15 @@ def parse_achievement_report_text(
     current_time = now or datetime.now()
     row = _select_achievement_row(rows, today=current_time.date())
     reject_rate = max(0, min(100, round(100 - row.acceptance_rate, 2)))
+    today = _parse_today_delivery_status(text, center_id=center_id)
+    lunch_peak = _combine_today_and_weekly(row.lunch_peak, today.lunch_peak if today else None)
+    afternoon_non_peak = _combine_today_and_weekly(
+        row.afternoon_non_peak, today.afternoon_non_peak if today else None
+    )
+    dinner_peak = _combine_today_and_weekly(row.dinner_peak, today.dinner_peak if today else None)
+    dinner_non_peak = _combine_today_and_weekly(
+        row.dinner_non_peak, today.dinner_non_peak if today else None
+    )
 
     return CurrentScreenSnapshot(
         center_name=center_name.strip() or row.center_label,
@@ -210,19 +276,19 @@ def parse_achievement_report_text(
         cancelled_count=0,
         completed_count=0,
         sequence_violation_count=0,
-        lunch_peak_count=row.lunch_peak.done,
-        lunch_peak_goal=row.lunch_peak.goal,
-        lunch_peak_rate=row.lunch_peak.rate,
-        afternoon_non_peak_count=row.afternoon_non_peak.done,
-        afternoon_non_peak_goal=row.afternoon_non_peak.goal,
-        afternoon_non_peak_rate=row.afternoon_non_peak.rate,
-        dinner_peak_count=row.dinner_peak.done,
-        dinner_peak_goal=row.dinner_peak.goal,
-        dinner_peak_rate=row.dinner_peak.rate,
-        dinner_non_peak_count=row.dinner_non_peak.done,
-        dinner_non_peak_goal=row.dinner_non_peak.goal,
-        dinner_non_peak_rate=row.dinner_non_peak.rate,
-        non_peak_count=row.afternoon_non_peak.done + row.dinner_non_peak.done,
+        lunch_peak_count=lunch_peak.done,
+        lunch_peak_goal=lunch_peak.goal,
+        lunch_peak_rate=lunch_peak.rate,
+        afternoon_non_peak_count=afternoon_non_peak.done,
+        afternoon_non_peak_goal=afternoon_non_peak.goal,
+        afternoon_non_peak_rate=afternoon_non_peak.rate,
+        dinner_peak_count=dinner_peak.done,
+        dinner_peak_goal=dinner_peak.goal,
+        dinner_peak_rate=dinner_peak.rate,
+        dinner_non_peak_count=dinner_non_peak.done,
+        dinner_non_peak_goal=dinner_non_peak.goal,
+        dinner_non_peak_rate=dinner_non_peak.rate,
+        non_peak_count=afternoon_non_peak.done + dinner_non_peak.done,
         active_riders=0,
         reject_rate=reject_rate,
     )
@@ -378,16 +444,15 @@ def _parse_achievement_rows(text: str, *, center_id: str) -> list[_AchievementRo
 
 def _select_achievement_row(rows: list[_AchievementRow], *, today: date) -> _AchievementRow:
     today_rows = [row for row in rows if row.row_date == today]
-    completed_today = [row for row in today_rows if row.has_delivery_count]
-    if completed_today:
-        return completed_today[-1]
+    if today_rows:
+        completed_today = [row for row in today_rows if row.has_delivery_count]
+        if completed_today:
+            return completed_today[-1]
+        return today_rows[-1]
 
     completed_rows = [row for row in rows if row.row_date <= today and row.has_delivery_count]
     if completed_rows:
         return max(completed_rows, key=lambda row: row.row_date)
-
-    if today_rows:
-        return today_rows[-1]
 
     past_rows = [row for row in rows if row.row_date <= today]
     if past_rows:
@@ -411,6 +476,52 @@ def _parse_achievement_period(raw: str) -> _AchievementPeriod:
     )
 
 
+_PERIOD_CELL_PATTERN = re.compile(
+    r"\d+(?:,\d{3})*\s*/\s*\d+(?:,\d{3})*\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)"
+)
+
+
+def _is_period_cell(raw: str) -> bool:
+    return bool(_PERIOD_CELL_PATTERN.fullmatch(raw.strip()))
+
+
+def _parse_today_delivery_status(text: str, *, center_id: str) -> _TodayDeliveryStatus | None:
+    expected_id = center_id.strip().upper()
+    if not expected_id:
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if expected_id not in line.upper():
+            continue
+        cells = lines[index + 1 : index + 5]
+        if len(cells) < 4 or not all(_is_period_cell(cell) for cell in cells):
+            continue
+        try:
+            return _TodayDeliveryStatus(
+                lunch_peak=_parse_achievement_period(cells[0]),
+                afternoon_non_peak=_parse_achievement_period(cells[1]),
+                dinner_peak=_parse_achievement_period(cells[2]),
+                dinner_non_peak=_parse_achievement_period(cells[3]),
+            )
+        except (MissingPerformanceDataError, ValueError):
+            continue
+    return None
+
+
+def has_today_delivery_status(text: str, *, center_id: str) -> bool:
+    return _parse_today_delivery_status(text, center_id=center_id) is not None
+
+
+def _combine_today_and_weekly(
+    weekly: _AchievementPeriod, today: _AchievementPeriod | None
+) -> _AchievementPeriod:
+    if today is None:
+        return weekly
+    goal = weekly.goal if weekly.goal else today.goal
+    return _AchievementPeriod(done=today.done, goal=goal, rate=today.rate)
+
+
 def _looks_like_achievement_date(raw: str) -> bool:
     return bool(re.fullmatch(r"\d{2}-\d{2}-\d{2}", raw.strip()))
 
@@ -419,7 +530,14 @@ def _scrapling_text(html: str) -> str:
     try:
         from scrapling.parser import Selector
     except ImportError:
-        return ""
+        try:
+            from scrapling.parser import Adaptor
+        except ImportError:
+            return ""
+
+        page = Adaptor(html)
+        text = page.get_all_text()
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
     page = Selector(html)
     chunks = page.css("body *::text").getall()
@@ -452,15 +570,22 @@ def _parse_baemin_table(table: list[list[str]]) -> BaeminDeliveryHistoryTable | 
         headers = row
         summary: dict[str, str] | None = None
         riders: list[dict[str, str]] = []
+        skipped_malformed_rows = 0
         for data_row in table[index + 1 :]:
             mapped = _map_row_by_headers(headers, data_row)
             name = mapped.get("이름", "").strip()
             if not name:
+                if any(cell.strip() for cell in data_row):
+                    skipped_malformed_rows += 1
+                continue
+            if name in {"이름", "운행상태", "수행상태"}:
                 continue
             if name == "합계":
                 summary = mapped
             else:
                 riders.append(mapped)
+        if skipped_malformed_rows:
+            logger.debug("skipped %s malformed Baemin delivery rows", skipped_malformed_rows)
         return BaeminDeliveryHistoryTable(headers=headers, summary=summary, riders=riders)
     return None
 

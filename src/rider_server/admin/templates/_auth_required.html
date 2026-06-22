@@ -1,0 +1,29 @@
+{# 인증 필요 대상 필터 fragment(AC4). secret/OTP/토큰 비노출: reason 은 기계가독 코드. #}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>대상</th>
+      <th>사유</th>
+      <th>조치</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in auth_required %}
+    <tr>
+      <td>{{ r.target_name or "대상명 없음" }}</td>
+      <td>{{ r.reason | reason_text }}</td>
+      <td>
+        {% if r.target_id %}
+        <button type="button" class="btn ghost" data-target="{{ r.target_id }}" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
+        {% else %}
+        <span class="muted">대상 없음</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">인증 필요 대상이 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

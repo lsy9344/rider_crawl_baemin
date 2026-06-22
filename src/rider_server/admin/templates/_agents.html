@@ -1,0 +1,45 @@
+{# Agent fleet 부분 fragment(HTMX swap 대상). online/offline·버전·현재 job·capability. #}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>버전</th>
+      <th>상태</th>
+      <th>마지막 heartbeat</th>
+      <th>현재 job</th>
+      <th>처리 가능 job type</th>
+      <th>Kakao 상태</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td>{{ a.name }}</td>
+      <td>{{ a.version }}</td>
+      <td>{% if a.online %}<span class="sev-normal">online</span>{% else %}<span class="sev-critical">offline</span>{% endif %}</td>
+      <td>{% if a.last_heartbeat_at %}{{ a.last_heartbeat_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
+      <td>{% if a.current_job_type %}{{ a.current_job_type }}{% else %}<span class="muted">유휴</span>{% endif %}</td>
+      <td>{{ a.capabilities | join(", ") }}</td>
+      <td>
+        {% if a.kakao_enabled is not none or a.kakao_state or a.kakao_queue_depth is not none or a.kakao_queue_lag_seconds is not none or a.kakao_sent is not none or a.kakao_failed is not none or a.kakao_last_success_at or a.kakao_last_error_code or a.kakao_interactive_session_available is not none %}
+          {% if a.kakao_enabled is not none %}{% if a.kakao_enabled %}<span class="sev-normal">enabled</span>{% else %}<span class="sev-stopped">disabled</span>{% endif %}{% endif %}
+          {% if a.kakao_state %}<span class="muted">{{ a.kakao_state }}</span>{% endif %}
+          {% if a.kakao_queue_depth is not none %}<span class="muted">대기 {{ a.kakao_queue_depth }}건</span>{% endif %}
+          {% if a.kakao_queue_lag_seconds is not none %}<span class="muted">지연 {{ a.kakao_queue_lag_seconds }}초</span>{% endif %}
+          {% if a.kakao_sent is not none %}<span class="muted">성공 {{ a.kakao_sent }}건</span>{% endif %}
+          {% if a.kakao_failed is not none %}<span class="muted">실패 {{ a.kakao_failed }}건</span>{% endif %}
+          {% if a.kakao_last_success_at %}<span class="muted">마지막 성공 {{ a.kakao_last_success_at }}</span>{% endif %}
+          {% if a.kakao_interactive_session_available is not none %}{% if a.kakao_interactive_session_available %}<span class="sev-normal">세션 OK</span>{% else %}<span class="sev-stopped">세션 없음</span>{% endif %}{% endif %}
+          {% if a.kakao_last_error_code %}<span class="sev-warning">{{ a.kakao_last_error_code }}</span>{% endif %}
+        {% else %}
+          <span class="muted">없음</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">등록된 Agent 가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

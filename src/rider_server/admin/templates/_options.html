@@ -1,0 +1,6 @@
+{# 드롭다운 <option> 목록 fragment(HTMX 로 <select> 안에 swap): raw-id 직접 입력 제거용.
+   options = [{id, label, data[*]}]. placeholder 가 있으면 빈 선택지를 맨 앞에 둔다.
+   data dict 가 있으면 data-* 속성으로 렌더링한다(JS onchange 에서 읽기용). autoescape 유지. #}
+{%- if placeholder %}<option value="">{{ placeholder }}</option>{% endif -%}
+{%- for o in options %}<option value="{{ o.id }}"{%- if o.data %}{% for k, v in o.data.items() %} data-{{ k }}="{{ v }}"{% endfor %}{% endif %}>{{ o.label }}</option>
+{%- else %}<option value="" disabled>등록된 항목이 없습니다: 먼저 생성하세요</option>{% endfor -%}

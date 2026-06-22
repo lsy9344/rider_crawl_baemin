@@ -1,0 +1,11 @@
+{# 채널 상태 부분 fragment. KakaoTalk queue lag 와 Telegram 전송 오류를 별도로 표시(혼합 금지). #}
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-label">KakaoTalk queue lag</div>
+    <div class="metric-value">{{ channels.kakao_queue_lag_seconds }}초</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Telegram 전송 오류</div>
+    <div class="metric-value">{{ channels.telegram_error_count }}건</div>
+  </div>
+</div>

@@ -1,5 +1,6 @@
 .venv/
 .pytest_cache/
+.codegraph/
 __pycache__/
 *.py[cod]
 runtime/
@@ -13,13 +14,14 @@ secrets/google/token*
 secrets/google/credentials*
 # PyInstaller rebuild artifacts (the shipped exe in dist/ is tracked via LFS).
 build/
+# 기준선/설정 백업 zip은 실제 secret(.env, runtime/state/ui_settings.json 등)을 포함하므로 절대 커밋하지 않는다.
+backups/
 # 작업지시서/요구사항 PDF 등 외부 문서는 코드 저장소에 두지 않는다.
 *.pdf
 
 # Local agent/tooling artifacts
 .agents/
 .claude/
-.codegraph/
 .codex/
 .playwright-cli/
 agent-run.lock
@@ -28,7 +30,6 @@ agent-run.lock
 _bmad/custom/config.user.toml
 
 # Local deployment secrets/state/artifacts
-backups/
 deploy/backups/
 deploy/terraform/.secrets/
 deploy/terraform/.terraform/

@@ -69,6 +69,128 @@ def test_parse_coupang_current_screen_reads_center_and_shift_from_heading_not_ha
     assert snapshot.online_riders == 5
 
 
+def test_parse_coupang_current_screen_uses_online_count_for_active_riders():
+    text = "\n".join(
+        [
+            "제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중 라이더 현황",
+            "6.14 오늘)",
+            "01:05 업데이트",
+            "밤논피크 참여 가능",
+            "0 / 15 명",
+            "대기",
+            "0명",
+            "활성 라이더",
+            "이름 / 연락처",
+            "총 4명",
+            "상태",
+            "온라인 0명",
+            "거절/무시: 5.8건",
+            "취소: 1건",
+            "완료: 78.8건",
+            "순서 미준수: 0건",
+            "점심피크: 21.6건",
+            "저녁피크: 15.8건",
+            "논피크: 41.4건",
+            "비활성 라이더",
+            "이름 / 연락처",
+            "총 0명",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.online_riders == 0
+    assert snapshot.active_riders == 0
+
+
+def test_parse_coupang_current_screen_accepts_scrapling_split_available_pair():
+    text = "\n".join(
+        [
+            "제이앤에이치플러스 의정부남부",
+            "밤논피크(20:00~06:00)",
+            "할당량 소진 중",
+            "라이더 현황",
+            "01:05 업데이트",
+            "밤논피크 참여 가능",
+            "0/15",
+            "대기",
+            "0",
+            "활성 라이더",
+            "이름 / 연락처",
+            "총 4명",
+            "상태",
+            "온라인 0명",
+            "거절/무시",
+            "5.8건",
+            "취소",
+            "1건",
+            "완료",
+            "78.8건",
+            "순서 미준수",
+            "0건",
+            "점심피크",
+            "21.6건",
+            "저녁피크",
+            "15.8건",
+            "논피크",
+            "41.4건",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.available_current == 0
+    assert snapshot.available_total == 15
+    assert snapshot.active_riders == 0
+
+
+def test_parse_coupang_current_screen_falls_back_to_record_table_online_count():
+    text = "\n".join(
+        [
+            "해운대이로움 남구중앙",
+            "6.13",
+            "6:00",
+            "~",
+            "6.14",
+            "5:59",
+            "해운대이로움 남구중앙",
+            "6월 13일(토)",
+            "라이더 현황",
+            "신규 라이더 등록",
+            "10:51 업데이트",
+            "이름 / 연락처",
+            "총 60명",
+            "상태",
+            "온라인 18명",
+            "거절/무시",
+            "161.4건",
+            "취소",
+            "28건",
+            "완료",
+            "1772건",
+            "순서 미준수",
+            "0건",
+            "점심피크",
+            "416.4건",
+            "저녁피크",
+            "458건",
+            "논피크",
+            "897.6건",
+        ]
+    )
+
+    snapshot = parse_current_screen_text(text)
+
+    assert snapshot.center_name == "해운대이로움 남구중앙"
+    assert snapshot.updated_at == "10:51"
+    assert snapshot.available_current == 0
+    assert snapshot.available_total == 0
+    assert snapshot.online_riders == 18
+    assert snapshot.active_riders == 18
+    assert snapshot.completed_count == 1772
+    assert snapshot.lunch_peak_count == 416.4
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -159,3 +281,79 @@ def test_parse_coupang_peak_dashboard_text_extracts_format_metrics():
     assert snapshot.dinner_peak.total == 120
     assert snapshot.dinner_non_peak.done == 0
     assert snapshot.dinner_non_peak.total == 78
+
+
+def test_coupang_parser_accepts_goal_done_label_variants():
+    snapshot = parse_peak_dashboard_text(
+        "\n".join(
+            [
+                "20:38 업데이트",
+                "배정 물량",
+                "1건",
+                "처리 물량",
+                "1건",
+                "거절률",
+                "0%",
+                "피크타임별 현황",
+                "아침",
+                "목표 / 완료",
+                "9 / 1",
+                "점심 피크",
+                "목표 / 완료",
+                "45 / 2",
+                "점심 논피크",
+                "목표 / 완료",
+                "57 / 3",
+                "저녁 피크",
+                "목표 / 완료",
+                "120 / 4",
+                "저녁 논피크",
+                "목표 / 완료",
+                "78 / 5",
+                "시간대별 기록",
+            ]
+        )
+    )
+
+    assert snapshot.morning.total == 9
+    assert snapshot.morning.done == 1
+    assert snapshot.dinner_non_peak.done == 5
+
+
+def test_coupang_parser_accepts_comma_and_unit_numbers_in_peak_pairs():
+    snapshot = parse_peak_dashboard_text(
+        "\n".join(
+            [
+                "20:38 업데이트",
+                "배정 물량",
+                "1,234건",
+                "처리 물량",
+                "1,111건",
+                "거절률",
+                "0%",
+                "피크타임별 현황",
+                "아침",
+                "목표/완료",
+                "1,000건 / 999건",
+                "점심 피크",
+                "목표/완료",
+                "2,000건 / 1,999건",
+                "점심 논피크",
+                "목표/완료",
+                "3,000건 / 2,999건",
+                "저녁 피크",
+                "목표/완료",
+                "4,000건 / 3,999건",
+                "저녁 논피크",
+                "목표/완료",
+                "5,000건 / 4,999건",
+                "시간대별 기록",
+            ]
+        )
+    )
+
+    assert snapshot.assigned_count == 1234
+    assert snapshot.morning.total == 1000
+    assert snapshot.morning.done == 999
+    assert snapshot.dinner_non_peak.total == 5000
+    assert snapshot.dinner_non_peak.done == 4999

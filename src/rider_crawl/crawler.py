@@ -1,33 +1,266 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 import re
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .browser_launcher import CdpUnavailableError, ensure_local_cdp_address
-from .config import DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL, AppConfig
+from .config import (
+    DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL,
+    DEFAULT_BAEMIN_DELIVERY_HISTORY_URL,
+    AppConfig,
+)
 from .models import CurrentScreenSnapshot
-from .parser import parse_achievement_report_text, parse_current_screen_html
+from .parser import (
+    BaeminDeliveryHistoryTable,
+    MissingPerformanceDataError,
+    baemin_delivery_history_to_snapshot,
+    has_today_delivery_status,
+    parse_achievement_report_text,
+    parse_baemin_delivery_history_html,
+    parse_current_screen_html,
+)
 
 
 def crawl_current_screen(
     config: AppConfig,
     *,
     fetch_html: Callable[[AppConfig], str] | None = None,
+    fetch_cancel_summary: Callable[[AppConfig], CurrentScreenSnapshot | None] | None = None,
 ) -> CurrentScreenSnapshot:
     content = (fetch_html or fetch_page_html)(config)
     if _looks_like_baemin_achievement_report(content):
-        return parse_achievement_report_text(
+        snapshot = parse_achievement_report_text(
             content,
             center_id=config.baemin_center_id,
             center_name=config.baemin_center_name,
         )
+        if fetch_cancel_summary is not None:
+            cancel = fetch_cancel_summary(config)
+        elif fetch_html is None:
+            cancel = crawl_baemin_cancel_summary(config)
+        else:
+            cancel = None
+        if cancel is not None:
+            snapshot = _merge_cancel_rate(snapshot, cancel)
+        return snapshot
     if fetch_html is not None:
         _validate_baemin_center_in_html(config, content, require_evidence=True)
     return parse_current_screen_html(content)
+
+
+def _merge_cancel_rate(
+    snapshot: CurrentScreenSnapshot, cancel: CurrentScreenSnapshot
+) -> CurrentScreenSnapshot:
+    return replace(
+        snapshot,
+        cancel_rate=cancel.reject_rate,
+        active_riders=cancel.active_riders,
+    )
+
+
+_BAEMIN_HISTORY_PAGE_SIZE = 100
+_BAEMIN_HISTORY_MAX_PAGES = 20
+
+
+def _baemin_history_base_url(config: AppConfig) -> str:
+    # 운영 환경이 BAEMIN_DELIVERY_HISTORY_URL(=coupang_eats_url)로 프록시/스테이징 등
+    # 커스텀 host/쿼리를 쓸 수 있으므로, 설정값의 path가 배달현황(/delivery/history)을
+    # 가리키면 host/path/쿼리를 그대로 보존해 base로 쓴다(쿠팡 _peak_dashboard_url과
+    # 동일하게 path 기준 판단). 주 URL은 보통 달성현황 /delivery/report라, 배달현황
+    # 경로가 아니면 기본 URL로 둔다.
+    configured = config.coupang_eats_url.strip()
+    if configured and _normalize_path(urlsplit(configured).path) == "/delivery/history":
+        return configured
+    return DEFAULT_BAEMIN_DELIVERY_HISTORY_URL
+
+
+def _baemin_history_page_url(config: AppConfig, page_index: int) -> str:
+    return _delivery_history_page_url(
+        _baemin_history_base_url(config), page_index, _BAEMIN_HISTORY_PAGE_SIZE
+    )
+
+
+def crawl_baemin_cancel_summary(config: AppConfig) -> CurrentScreenSnapshot | None:
+    try:
+        tables = _fetch_baemin_delivery_history_tables(config)
+        if not tables:
+            return None
+        return baemin_delivery_history_to_snapshot(_combine_history_page_tables(tables))
+    except Exception:
+        return None
+
+
+def _combine_history_page_tables(
+    tables: list[BaeminDeliveryHistoryTable],
+) -> BaeminDeliveryHistoryTable:
+    return BaeminDeliveryHistoryTable(
+        headers=tables[0].headers,
+        summary=tables[0].summary,
+        riders=[rider for table in tables for rider in table.riders],
+    )
+
+
+def _fetch_baemin_delivery_history_tables(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
+    if config.browser_mode == "cdp":
+        return _fetch_baemin_history_tables_via_cdp(config)
+    if config.browser_mode == "persistent":
+        return _fetch_baemin_history_tables_via_persistent_context(config)
+    raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
+
+
+def _fetch_baemin_history_tables_via_cdp(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
+    ensure_local_cdp_address(config.cdp_url)
+    return asyncio.run(_fetch_baemin_history_tables_via_cdp_async(config))
+
+
+async def _fetch_baemin_history_tables_via_cdp_async(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.connect_over_cdp(config.cdp_url)
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await context.new_page()
+        try:
+            return await _collect_baemin_history_tables(page, config)
+        finally:
+            await page.close()
+
+
+def _baemin_history_page_count(total_count: int, served_page_size: int) -> int:
+    # 총건수(서버가 노출하는 '총 N건')를 '첫 페이지가 실제로 내려준 라이더 수'로 나눠
+    # 페이지 수를 정한다. 요청 size=100을 서버가 무시하고 20/50으로 떨어뜨려도, 실제
+    # 응답 행수를 분모로 쓰므로 끝까지 읽는다(예: 총109/응답20 → 6페이지). 첫 페이지가
+    # 빈 응답(0행)이면 더 읽어도 의미 없으니 1페이지로 둔다.
+    # 여기선 '필요한' 페이지 수를 그대로 돌려주고, 상한(_BAEMIN_HISTORY_MAX_PAGES) 초과
+    # 여부는 호출 측이 판단한다 — 상한을 넘으면 조용히 자르지 않고 보조 수집 전체를 폐기한다.
+    if total_count <= 0 or served_page_size <= 0:
+        return 1
+    return max(1, (total_count + served_page_size - 1) // served_page_size)
+
+
+def _ensure_baemin_history_page_count_within_cap(page_count: int) -> None:
+    # 상한을 넘는 초대형 센터는 일부만 읽고 정상 스냅샷처럼 보내면 active_riders가 누락된다.
+    # 조용히 자르는 대신 예외로 보조 수집 전체를 폐기한다(crawl_baemin_cancel_summary가 None).
+    if page_count > _BAEMIN_HISTORY_MAX_PAGES:
+        raise MissingPerformanceDataError(
+            f"배민 배달현황 페이지 수가 상한({_BAEMIN_HISTORY_MAX_PAGES})을 초과했습니다: {page_count}"
+        )
+
+
+def _ensure_baemin_history_total_count_available(
+    total_count: int, served_page_size: int
+) -> None:
+    if total_count <= 0 and served_page_size > 0:
+        raise MissingPerformanceDataError(
+            "배민 배달현황 총건수를 확인하지 못해 전체 페이지 수를 계산할 수 없습니다"
+        )
+
+
+def _parse_validated_history_table(html: str, config: AppConfig) -> BaeminDeliveryHistoryTable:
+    # 배달현황 HTML이 설정 센터(A)가 아니라 다른 센터(B) 데이터면, 달성현황(A)에 B의
+    # 취소율/수행중인원을 섞어 보내게 된다. 파싱 전에 센터 일치를 강제해 그걸 막는다.
+    # require_evidence=True: 센터가 설정돼 있는데 화면에서 센터 단서를 못 찾으면 '검증 불가'도
+    # RuntimeError로 폐기한다(fetch_page_html의 주 페이지 검증과 동일 기준). 센터가 미설정이면
+    # _validate_baemin_center_in_html이 곧장 통과시킨다.
+    _validate_baemin_center_in_html(config, html, require_evidence=True)
+    return parse_baemin_delivery_history_html(html)
+
+
+async def _collect_baemin_history_tables(
+    page: Any, config: AppConfig
+) -> list[BaeminDeliveryHistoryTable]:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    tables: list[BaeminDeliveryHistoryTable] = []
+    page_count = 1
+    page_index = 0
+    while page_index < page_count:
+        url = _baemin_history_page_url(config, page_index)
+        await _goto_page(page, url, config)
+        if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+            await _select_baemin_center(page, config)
+            await _goto_page(page, url, config)
+        try:
+            await page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+        except PlaywrightTimeoutError:
+            pass
+        # 첫 페이지의 파싱 실패는 보조 수집을 그냥 건너뛰면 되지만(None), 둘째 페이지부터의
+        # 실패는 일부 데이터만 정상값처럼 흘려보내는 셈이라 더 위험하다. 그래서 첫 페이지
+        # 이후의 어떤 실패도 예외를 그대로 올려(crawl_baemin_cancel_summary가 None 반환)
+        # 보조 수집 전체를 폐기한다.
+        if page_index == 0:
+            try:
+                table = _parse_validated_history_table(await page.content(), config)
+            except MissingPerformanceDataError:
+                break
+            total_count = await _delivery_history_total_count(page)
+            _ensure_baemin_history_total_count_available(total_count, len(table.riders))
+            # 페이지 수는 '첫 페이지가 실제로 내려준 행수'로 나눈다(요청 size가 아님).
+            page_count = _baemin_history_page_count(total_count, len(table.riders))
+            _ensure_baemin_history_page_count_within_cap(page_count)
+        else:
+            table = _parse_validated_history_table(await page.content(), config)
+        tables.append(table)
+        page_index += 1
+    return tables
+
+
+def _fetch_baemin_history_tables_via_persistent_context(
+    config: AppConfig,
+) -> list[BaeminDeliveryHistoryTable]:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+
+    config.browser_user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            str(config.browser_user_data_dir),
+            headless=config.headless,
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            tables: list[BaeminDeliveryHistoryTable] = []
+            page_count = 1
+            page_index = 0
+            while page_index < page_count:
+                url = _baemin_history_page_url(config, page_index)
+                page.goto(url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+                if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
+                    _select_baemin_center_sync(page, config)
+                    page.goto(url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+                try:
+                    page.locator("table").first.wait_for(timeout=config.page_timeout_seconds)
+                except PlaywrightTimeoutError:
+                    pass
+                # 첫 페이지 이후의 파싱/검증 실패는 예외를 그대로 올려 보조 수집 전체를
+                # 폐기한다(부분 데이터를 정상값처럼 보내지 않기 위해. async 경로와 동일 정책).
+                if page_index == 0:
+                    try:
+                        table = _parse_validated_history_table(page.content(), config)
+                    except MissingPerformanceDataError:
+                        break
+                    total_count = _delivery_history_total_count_sync(page)
+                    _ensure_baemin_history_total_count_available(total_count, len(table.riders))
+                    page_count = _baemin_history_page_count(total_count, len(table.riders))
+                    _ensure_baemin_history_page_count_within_cap(page_count)
+                else:
+                    table = _parse_validated_history_table(page.content(), config)
+                tables.append(table)
+                page_index += 1
+            return tables
+        finally:
+            context.close()
 
 
 def fetch_page_html(config: AppConfig) -> str:
@@ -228,17 +461,23 @@ async def _collect_baemin_achievement_report_text(page: Any, config: AppConfig) 
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while loop.time() < deadline:
         await _scroll_baemin_report(page)
         for text in await _baemin_report_text_candidates(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         await page.wait_for_timeout(1_000)
 
     if last_report_text:
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
@@ -271,12 +510,21 @@ async def _scroll_baemin_report(page: Any) -> None:
             continue
 
 
-async def _delivery_history_total_count(page: Any) -> int:
-    text = await page.locator("body").inner_text(timeout=10_000)
-    match = re.search(r"총\s*(?P<count>\d+)\s*건", text)
+def _parse_delivery_history_total_count(text: str) -> int:
+    match = re.search(r"총\s*(?P<count>\d[\d,]*)\s*건", text)
     if not match:
         return 0
-    return int(match.group("count"))
+    return int(match.group("count").replace(",", ""))
+
+
+async def _delivery_history_total_count(page: Any) -> int:
+    text = await page.locator("body").inner_text(timeout=10_000)
+    return _parse_delivery_history_total_count(text)
+
+
+def _delivery_history_total_count_sync(page: Any) -> int:
+    text = page.locator("body").inner_text(timeout=10_000)
+    return _parse_delivery_history_total_count(text)
 
 
 def _delivery_history_page_size(url: str) -> int:
@@ -329,6 +577,49 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
         await page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
         pass
+
+
+def _select_baemin_center_sync(page: Any, config: AppConfig) -> None:
+    target_labels = _baemin_center_labels(config)
+
+    select = page.locator("select").first
+    if select.count():
+        if config.baemin_center_id.strip():
+            try:
+                select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
+                page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+                return
+            except Exception:
+                pass
+        for label in target_labels:
+            try:
+                select.select_option(label=label, timeout=config.page_timeout_seconds)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError("배민 협력사 드롭다운에서 목표 센터를 찾지 못했습니다")
+    else:
+        _click_first_visible_text_sync(page, *target_labels)
+
+    page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except Exception:
+        pass
+
+
+def _click_first_visible_text_sync(page: Any, *texts: str) -> None:
+    for text in texts:
+        locator = page.get_by_text(text, exact=True).first
+        if locator.count():
+            locator.click(timeout=5_000)
+            return
+    raise RuntimeError("배민 협력사 드롭다운에서 목표 센터를 찾지 못했습니다")
 
 
 def _has_configured_baemin_center(config: AppConfig) -> bool:
@@ -611,17 +902,23 @@ def _collect_baemin_achievement_report_text_sync(page: Any, config: AppConfig) -
     expected_id = config.baemin_center_id.strip().upper()
     last_report_text = ""
 
+    saw_weekly_without_id = False
     while time.monotonic() < deadline:
         _scroll_baemin_report_sync(page)
         for text in _baemin_report_text_candidates_sync(page):
             if "주간 배달 현황" not in text:
                 continue
+            if expected_id and expected_id not in text.upper():
+                saw_weekly_without_id = True
+                continue
             last_report_text = text
-            if not expected_id or expected_id in text.upper():
+            if not expected_id or has_today_delivery_status(text, center_id=expected_id):
                 return text
         page.wait_for_timeout(1_000)
 
     if last_report_text:
+        return last_report_text
+    if saw_weekly_without_id:
         raise RuntimeError(
             "배민 달성현황은 열렸지만 설정한 센터 ID 행을 찾지 못했습니다.\n"
             f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"

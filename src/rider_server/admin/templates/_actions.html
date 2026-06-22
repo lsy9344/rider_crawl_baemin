@@ -1,0 +1,57 @@
+{# Story 5.7 수동 운영 액션 패널(구독/Dispatch/Agent/job: id 직접 입력). HTMX JS API 사용(신규 npm/빌드 0). #}
+{# 위험 액션(중지/복구/폐기/재개)은 confirm 후 실행되며 actor/시각/사유가 audit 에 기록된다. autoescape 유지. #}
+<div class="actions" id="action-panel">
+  <p class="muted">수동 운영 액션: 대상별 버튼은 위 표에 있고, 아래는 구독/Dispatch/Agent/job 액션입니다.</p>
+
+  <fieldset>
+    <legend>구독 (subscription) · 위험</legend>
+    <label>subscription_id <input type="text" id="act-sub-id"></label>
+    <label>사유 <input type="text" id="act-sub-reason"></label>
+    <button type="button" class="danger"
+            onclick="admPost('/admin/subscriptions/', 'act-sub-id', '/suspend', {reason: val('act-sub-reason')}, '구독을 중지하시겠습니까?')">중지</button>
+    <button type="button"
+            onclick="admPost('/admin/subscriptions/', 'act-sub-id', '/resume', {reason: val('act-sub-reason')}, '구독을 복구하시겠습니까? (HELD 는 자동 발송 안 됨)')">복구</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>보류 Dispatch (HELD) · 위험</legend>
+    <label>dispatch_id <input type="text" id="act-dispatch-id"></label>
+    <button type="button" class="danger"
+            onclick="admPost('/admin/dispatch/', 'act-dispatch-id', '/dispose', {disposition: 'DISCARD'}, '보류 Dispatch 를 폐기하시겠습니까?')">폐기(DISCARD)</button>
+    <button type="button"
+            onclick="admPost('/admin/dispatch/', 'act-dispatch-id', '/dispose', {disposition: 'RESUME'}, '보류 Dispatch 를 재개(발송 후보)하시겠습니까?')">재개(RESUME)</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>job retry · Agent 배정</legend>
+    <label>job_id <input type="text" id="act-job-id"></label>
+    <button type="button"
+            onclick="admPost('/admin/jobs/', 'act-job-id', '/retry', {}, 'job 을 재시도하시겠습니까?')">retry</button>
+    <label>target_id <input type="text" id="act-assign-target"></label>
+    <label>agent_id <input type="text" id="act-assign-agent"></label>
+    <button type="button" class="create"
+            onclick="admAssign()">Agent 배정</button>
+  </fieldset>
+
+  <div class="muted">구독/Dispatch/job 액션 결과는 화면 하단 토스트에 표시됩니다.</div>
+</div>
+
+<script>
+  // 입력값 + tenant 로 액션 URL 을 구성해 HTMX 로 POST 한다(신규 deps 0: htmx.ajax JS API).
+  var ADM_TENANT = "{{ tenant_id | urlencode }}";
+  function val(id) { var el = document.getElementById(id); return el ? el.value : ""; }
+  function admPost(prefix, idField, suffix, values, confirmMsg) {
+    var id = val(idField);
+    if (!id) { document.getElementById('action-result').textContent = "id 를 입력하세요."; return; }
+    if (confirmMsg && !window.confirm(confirmMsg)) { return; }
+    var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + ADM_TENANT;
+    values = Object.assign({}, values || {}, { confirm_action: "confirmed" });
+    htmx.ajax('POST', url, { target: '#action-result', swap: 'innerHTML', values: values });
+  }
+  function admAssign() {
+    if (!window.confirm("Agent 배정을 변경하시겠습니까?")) { return; }
+    var values = { target_id: val('act-assign-target'), agent_id: val('act-assign-agent'), confirm_action: "confirmed" };
+    var url = "/admin/agents/assign?tenant=" + ADM_TENANT;
+    htmx.ajax('POST', url, { target: '#action-result', swap: 'innerHTML', values: values });
+  }
+</script>

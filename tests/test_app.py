@@ -279,6 +279,62 @@ def test_run_once_blocks_parallel_cdp_runs_even_when_profile_paths_differ(tmp_pa
     assert blocked is True
 
 
+def test_last_message_path_follows_target_id_not_tab_order(tmp_path):
+    # AC1: state_subdir=targets/<id>면 last_message dedup 경로가 안정 ID를 따른다. 탭을
+    # 재정렬해 config 순서가 바뀌어도(같은 id) 같은 경로를 쓰고, 다른 id는 분리된다.
+    from rider_crawl.app import _last_message_hash_path
+
+    base = _config(tmp_path)
+    tab_a_pos1 = replace(base, state_subdir="targets/id-a")
+    tab_a_pos2 = replace(base, state_subdir="targets/id-a")
+    tab_b = replace(base, state_subdir="targets/id-b")
+
+    assert _last_message_hash_path(tab_a_pos1) == _last_message_hash_path(tab_a_pos2)
+    assert _last_message_hash_path(tab_a_pos1) != _last_message_hash_path(tab_b)
+    # 경로가 실제로 runtime/state/targets/<id> 아래에 떨어진다(슬래시가 중첩 폴더가 됨).
+    assert tab_a_pos1.state_dir.parts[-2:] == ("targets", "id-a")
+
+
+def test_run_lock_path_is_browser_scoped_independent_of_state_subdir(tmp_path):
+    # AC1 #3: state_subdir를 targets/<id>로 바꿔도 run_lock은 건드리지 않는다. run_lock은
+    # 브라우저 스코프(같은 cdp_url)로 묶이므로 state_subdir이 달라도 같은 경로여야 하고, 절대
+    # targets/<id> 아래로 내려가면 안 된다(같은 브라우저 동시 실행 차단 의미 보존).
+    from rider_crawl.app import _run_lock_path
+
+    base = _config(tmp_path)
+    tab_a = replace(base, state_subdir="targets/id-a")
+    tab_b = replace(base, state_subdir="targets/id-b")
+
+    # 같은 브라우저 스코프 → state_subdir이 달라도 동일 run_lock 경로.
+    assert _run_lock_path(tab_a) == _run_lock_path(tab_b)
+    # run_lock은 run_locks 폴더 아래에 있고 state_subdir(targets/<id>)을 경로에 포함하지 않는다.
+    lock_parts = _run_lock_path(tab_a).parts
+    assert "run_locks" in lock_parts
+    assert "targets" not in lock_parts and "id-a" not in lock_parts
+
+
+def test_run_lock_path_is_independent_from_log_dir_for_same_cdp_profile(tmp_path, monkeypatch):
+    from rider_crawl import app
+
+    monkeypatch.setenv("RIDER_CRAWL_STATE_ROOT", str(tmp_path / "state-root"))
+    first = replace(
+        _config(tmp_path),
+        log_dir=tmp_path / "acct-a" / "logs",
+        cdp_url="http://localhost:9222",
+        browser_user_data_dir=tmp_path / "shared-profile",
+    )
+    second = replace(
+        _config(tmp_path),
+        log_dir=tmp_path / "acct-b" / "logs",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "shared-profile",
+    )
+
+    assert app._run_lock_path(first) == app._run_lock_path(second)
+    assert tmp_path / "acct-a" not in app._run_lock_path(first).parents
+    assert tmp_path / "acct-b" not in app._run_lock_path(second).parents
+
+
 def _config(
     tmp_path,
     *,
@@ -384,3 +440,31 @@ def test_message_scope_key_includes_platform_and_peak_dashboard_url(tmp_path):
     )
 
     assert app._message_scope_key(baemin) != app._message_scope_key(coupang)
+
+
+def test_message_scope_key_unchanged_by_secret_store_roundtrip(tmp_path):
+    # Story 2.4 AC3: 평문 token을 store로 빼고 ref→resolve로 되돌려도 dedup 정본인
+    # _message_scope_key 결과가 store 도입 전과 바이트 동일해야 한다(중복 판단 회귀 0).
+    import rider_crawl.app as app
+    from rider_crawl.secret_store import LocalFileSecretStore
+    from rider_crawl.ui_settings import UiSettings, UiSettingsStore
+
+    backend = LocalFileSecretStore(tmp_path / "store.json")
+    store = UiSettingsStore(tmp_path / "settings.json", backend)
+    settings = UiSettings.defaults()
+    settings.performance_url = "https://example.test/x"
+    settings.monitoring_target_id = "mt-1"
+    settings.telegram_bot_token = "tok-fake"
+    settings.telegram_chat_id = "-100123"
+    store.save(settings)
+
+    # 평문→ref→resolve 왕복을 거친 config
+    roundtrip_config = store.load().to_app_config()
+
+    # store 도입 전처럼 평문을 직접 가진 동일 config
+    direct = UiSettings.defaults()
+    direct.performance_url = "https://example.test/x"
+    direct.telegram_bot_token = "tok-fake"
+    direct.telegram_chat_id = "-100123"
+
+    assert app._message_scope_key(roundtrip_config) == app._message_scope_key(direct.to_app_config())

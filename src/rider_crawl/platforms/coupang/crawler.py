@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import re
+from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from rider_crawl.browser_launcher import BrowserActionRequiredError, CdpUnavailableError, ensure_local_cdp_address
-from rider_crawl.config import AppConfig
+from rider_crawl.config import DEFAULT_COUPANG_RIDER_PERFORMANCE_URL, AppConfig
+from rider_crawl.lock import RunLock
 from rider_crawl.models import CurrentScreenSnapshot, PerformanceSnapshot
 
-from .parser import parse_current_screen_html, parse_peak_dashboard_html
+from .parser import MissingPerformanceDataError, parse_current_screen_html, parse_peak_dashboard_html
+
+
+class CoupangCenterValidationError(RuntimeError):
+    """Raised when a Coupang page cannot be proven to match the expected center."""
 
 
 def crawl_current_screen(
@@ -26,25 +34,79 @@ def crawl_current_screen(
 def crawl_performance_snapshot(
     config: AppConfig,
     *,
+    fetch_current_screen_html: Callable[[AppConfig], str] | None = None,
     fetch_peak_dashboard_html: Callable[[AppConfig], str] | None = None,
 ) -> PerformanceSnapshot:
-    # 쿠팡 탭은 로그인 직후 열리는 peak-dashboard 한 페이지만 읽는다. 주 URL
-    # (``coupang_eats_url``, UI의 '실적/달성현황 URL')에 peak-dashboard가 들어온다.
-    # rider-performance 페이지는 더 이상 요구하지 않으므로(그 탭이 없어도 오류가 나지
-    # 않는다) ``current_screen``은 ``None``으로 둔다. '수행중인인원' 줄만 그 페이지에서
-    # 왔는데, peak-only로 바꾸면서 메시지에서도 그 줄을 생략한다.
+    current_screen = None
+    if fetch_current_screen_html is not None:
+        current_screen_html = fetch_current_screen_html(config)
+        current_screen = parse_current_screen_html(current_screen_html)
+        _validate_coupang_center(config, current_screen)
+    elif fetch_peak_dashboard_html is None:
+        # rider-performance는 수행중 인원을 채우는 보조 페이지다. 실패해도 peak-dashboard
+        # 수집은 계속하고, stale 화면이면 같은 세션의 임시 탭에서 한 번 더 읽는다.
+        # 보조 페이지의 '탭 부재/로그인 만료'(BrowserActionRequiredError)·'파싱 실패'
+        # (MissingPerformanceDataError)·'준비 지연/CDP 불가'(RuntimeError)는 best-effort로
+        # 흡수해 '수행중인원'만 생략한다 — 보조 timeout 하나로 권위 페이지(peak-dashboard)
+        # 수집까지 막지 않기 위해서다. 다만 '센터 불일치'(CoupangCenterValidationError)는
+        # 다른 계정 데이터를 정상처럼 흘려보내면 안 되므로 흡수하지 않고 그대로 올린다.
+        try:
+            rider_url = _rider_performance_url(config)
+            current_screen_html = fetch_page_html(config, target_url=rider_url)
+            try:
+                current_screen = parse_current_screen_html(current_screen_html)
+            except MissingPerformanceDataError:
+                current_screen_html = fetch_page_html(config, target_url=rider_url, force_new_tab=True)
+                current_screen = parse_current_screen_html(current_screen_html)
+            _validate_coupang_center(config, current_screen)
+        except CoupangCenterValidationError:
+            raise
+        except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
+            current_screen = None
+
     peak_dashboard_html = (
         fetch_peak_dashboard_html(config)
         if fetch_peak_dashboard_html
-        else fetch_page_html(config, target_url=config.coupang_eats_url)
+        else fetch_page_html(config, target_url=_peak_dashboard_url(config))
     )
     # 피크 대시보드 헤딩에 기대 센터가 노출되면 그것으로 다른 계정/오래된 탭을 막는다.
-    # 헤딩이 없으면(피크 페이지가 센터를 노출하지 않으면) 기존처럼 검증을 건너뛴다.
+    # 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면(미노출 포함)
+    # 검증을 건너뛰지 않고 CoupangCenterValidationError를 던져 잘못된 계정 전송을 막는다.
+    # (기대 센터명이 비어 있을 때만 검증을 건너뛴다.)
     _validate_coupang_center_in_peak_html(config, peak_dashboard_html)
     return PerformanceSnapshot(
-        current_screen=None,
+        current_screen=current_screen,
         peak_dashboard=parse_peak_dashboard_html(peak_dashboard_html),
     )
+
+
+def _rider_performance_url(config: AppConfig) -> str:
+    primary = config.coupang_eats_url.strip()
+    if _path_is(primary, "/page/rider-performance"):
+        return primary
+    if _path_is(primary, "/page/peak-dashboard"):
+        return _replace_url_path(primary, "/page/rider-performance")
+    return DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+
+
+def _peak_dashboard_url(config: AppConfig) -> str:
+    if config.peak_dashboard_url.strip():
+        return config.peak_dashboard_url.strip()
+    primary = config.coupang_eats_url.strip()
+    if _path_is(primary, "/page/peak-dashboard"):
+        return primary
+    if _path_is(primary, "/page/rider-performance"):
+        return _replace_url_path(primary, "/page/peak-dashboard")
+    return primary
+
+
+def _path_is(url: str, path: str) -> bool:
+    return _normalize_path(urlsplit(url).path).casefold() == path.casefold()
+
+
+def _replace_url_path(url: str, path: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _validate_coupang_center(config: AppConfig, snapshot: CurrentScreenSnapshot) -> None:
@@ -68,13 +130,13 @@ def _validate_coupang_center(config: AppConfig, snapshot: CurrentScreenSnapshot)
     actual_raw = snapshot.center_name.strip()
     actual = _normalize_coupang_center(actual_raw)
     if not actual:
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 화면에서 센터명을 확인하지 못했습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}"
         )
 
     if actual not in expected_aliases:
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 설정한 센터와 화면에서 확인된 센터가 다릅니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}\n"
             f"화면 센터명: {actual_raw}"
@@ -89,7 +151,8 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
     값 같은 부수 텍스트(예: ``<option>강남센터</option>``)에 기대 센터명이 있으면
     잘못 통과한다. 그래서 헤딩(``h1``~``h3``)만 보고, 헤딩에 ``센터명 시프트(시간)…``
     형태로 시프트가 붙어 있으면 앞쪽 센터명만 떼어내 비교한다.
-    피크 페이지에 센터 헤딩이 노출되지 않으면 실적 페이지 검증만 사용한다.
+    피크 페이지는 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면
+    (미노출 포함) CoupangCenterValidationError를 던진다.
     기대 센터가 비어 있으면 검증을 건너뛴다(기존 동작 유지).
     """
 
@@ -99,10 +162,13 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
 
     heading_centers = _coupang_peak_heading_centers(peak_html)
     if not heading_centers:
-        return
+        raise CoupangCenterValidationError(
+            "쿠팡 센터 검증 실패: 피크 대시보드 화면에서 센터명을 확인하지 못했습니다.\n"
+            f"설정 센터명: {config.baemin_center_name.strip()}"
+        )
 
     if not (heading_centers & expected_aliases):
-        raise RuntimeError(
+        raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 설정한 센터가 피크 대시보드 화면 헤딩과 일치하지 않습니다. "
             "다른 계정이거나 오래된 피크 탭이 열려 있을 수 있습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}\n"
@@ -322,11 +388,11 @@ def _select_coupang_center(page: Any, config: AppConfig, *, timeout_errors: tupl
     return True
 
 
-def fetch_page_html(config: AppConfig, *, target_url: str | None = None) -> str:
+def fetch_page_html(config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False) -> str:
     if config.browser_mode == "cdp":
         if target_url is None:
-            return fetch_page_html_via_cdp(config)
-        return fetch_page_html_via_cdp(config, target_url=target_url)
+            return fetch_page_html_via_cdp(config, force_new_tab=force_new_tab)
+        return fetch_page_html_via_cdp(config, target_url=target_url, force_new_tab=force_new_tab)
     if config.browser_mode == "persistent":
         if target_url is None:
             return fetch_page_html_via_persistent_context(config)
@@ -334,7 +400,9 @@ def fetch_page_html(config: AppConfig, *, target_url: str | None = None) -> str:
     raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
 
 
-def fetch_page_html_via_cdp(config: AppConfig, *, target_url: str | None = None) -> str:
+def fetch_page_html_via_cdp(
+    config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False
+) -> str:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -359,6 +427,7 @@ def fetch_page_html_via_cdp(config: AppConfig, *, target_url: str | None = None)
             config,
             target_url=target_url or config.coupang_eats_url,
             load_timeout_errors=(PlaywrightTimeoutError,),
+            force_new_tab=force_new_tab,
         )
 
 
@@ -436,9 +505,21 @@ def _fetch_target_page_content(
     target_url: str | None = None,
     load_timeout_errors: tuple[type[BaseException], ...] = (),
     recover_session: Callable[[Any, AppConfig], bool] | None = None,
+    force_new_tab: bool = False,
 ) -> str:
     target_url = target_url or config.coupang_eats_url
     pages = _browser_pages(browser)
+    if force_new_tab:
+        opened = _open_target_in_new_tab(
+            browser,
+            pages,
+            config,
+            target_url=target_url,
+            load_timeout_errors=load_timeout_errors,
+            allow_existing=True,
+        )
+        if opened is not None:
+            return opened
     page = _select_page_by_url(pages, target_url)
     if page is None:
         # 대상 탭을 못 찾았다. 로그인 만료로 대상 탭의 URL이 login/xauth로 바뀐 경우가
@@ -453,6 +534,16 @@ def _fetch_target_page_content(
             load_timeout_errors=load_timeout_errors,
         )
         if page is None:
+            opened = _open_target_in_new_tab(
+                browser,
+                pages,
+                config,
+                target_url=target_url,
+                load_timeout_errors=load_timeout_errors,
+            )
+            if opened is not None:
+                return opened
+            _log_page_selection_failure(browser, pages, config, target_url=target_url)
             _raise_coupang_page_action_required(pages, target_url)
     try:
         page.wait_for_load_state("networkidle", timeout=10_000)
@@ -515,6 +606,58 @@ def _recover_login_page_to_target(
     return None
 
 
+def _open_target_in_new_tab(
+    browser: Any,
+    pages: list[Any],
+    config: AppConfig,
+    *,
+    target_url: str,
+    load_timeout_errors: tuple[type[BaseException], ...],
+    allow_existing: bool = False,
+) -> str | None:
+    """Open a temporary tab in the logged-in Coupang context and read target content."""
+
+    if not (_path_is(target_url, "/page/rider-performance") or _path_is(target_url, "/page/peak-dashboard")):
+        return None
+    if _login_required_page(pages) is not None:
+        return None
+    if not allow_existing and any(_url_matches(str(page.url), target_url) for page in pages):
+        return None
+
+    context = _coupang_logged_in_context(browser)
+    if context is None:
+        return None
+
+    page = context.new_page()
+    try:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=config.page_timeout_seconds)
+        except load_timeout_errors:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        except load_timeout_errors:
+            pass
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+        if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+            _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+        return page.content()
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def _coupang_logged_in_context(browser: Any) -> Any | None:
+    for context in getattr(browser, "contexts", []) or []:
+        for page in getattr(context, "pages", []) or []:
+            host = (urlsplit(str(getattr(page, "url", ""))).hostname or "").casefold()
+            if host == "partner.coupangeats.com":
+                return context
+    return None
+
+
 def _try_recover_coupang_session(
     page: Any,
     config: AppConfig,
@@ -533,11 +676,114 @@ def _try_recover_coupang_session(
 
     recover = recover_session or _default_recover_coupang_session
     try:
-        return bool(recover(page, config))
-    except Exception:
-        # 복구 실패(Gmail 미도착, 입력칸 못 찾음 등)는 자동 복구 불가로 본다. 상위에서
-        # 기존 BrowserActionRequiredError를 다시 던져 탭을 중지한다.
+        lock_id = _mailbox_lock_id(config)
+        if lock_id:
+            with RunLock(
+                _mailbox_lock_path(config),
+                stale_timeout_seconds=config.run_lock_timeout_seconds,
+            ):
+                succeeded = bool(recover(page, config))
+        else:
+            succeeded = bool(recover(page, config))
+    except Exception as exc:
+        # 복구 실패는 자동 복구 불가로 본다. 단, 왜 실패했는지 안전한 범위에서 로그에 남긴다.
+        _log_recovery_failure(config, exc)
         return False
+    if not succeeded:
+        _log_recovery_failure(config, RuntimeError("자동복구 불가 화면(로그인 제출 실패 또는 비대상 화면)"))
+    return succeeded
+
+
+def _mailbox_lock_id(config: AppConfig) -> str:
+    value = (
+        getattr(config, "verification_email_mailbox_lock_id", "")
+        or config.verification_email_address
+    )
+    value = str(value or "").strip()
+    return value.casefold() if "@" in value else value
+
+
+def _mailbox_lock_path(config: AppConfig) -> Path:
+    lock_id = _mailbox_lock_id(config)
+    handle = hashlib.sha256(lock_id.encode("utf-8")).hexdigest()[:16]
+    return config.runtime_dir / "state" / "mailbox_locks" / f"mailbox.{handle}.lock"
+
+
+_EMAIL_PROVIDER_BY_DOMAIN = {
+    "naver.com": "naver",
+    "mail.naver.com": "naver",
+    "gmail.com": "gmail",
+    "googlemail.com": "gmail",
+}
+
+
+def _email_domain(address: str) -> str:
+    return address.rsplit("@", 1)[-1].strip().casefold() if "@" in (address or "") else ""
+
+
+def _mask_email_address(address: str) -> str:
+    address = str(address or "")
+    if "@" not in address:
+        return "?"
+    local, _, domain = address.partition("@")
+    head = local[:1] if local else ""
+    return f"{head}***@{domain}"
+
+
+def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:
+    """Write a safe one-line email 2FA recovery failure diagnostic."""
+
+    try:
+        log_dir = getattr(config, "log_dir", None) or Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        address = str(getattr(config, "verification_email_address", "") or "")
+        provider = _EMAIL_PROVIDER_BY_DOMAIN.get(_email_domain(address), "unknown")
+        masked = _mask_email_address(address)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = (
+            f"[{ts}] 쿠팡 이메일 2FA 자동복구 실패 "
+            f"(provider={provider}, email={masked}): 인증 이메일 설정 또는 메일 수신 상태 확인 필요\n"
+            "----------------------------------------\n"
+        )
+        with (log_dir / "run_errors.log").open("a", encoding="utf-8") as file:
+            file.write(line)
+    except Exception:
+        pass
+
+
+def _url_host_path(url: str) -> str:
+    parsed = urlsplit(str(url or ""))
+    host = parsed.hostname or ""
+    path = _normalize_path(parsed.path) if parsed.path else ""
+    return f"{host}{path}" if (host or path) else (str(url or "") or "?")
+
+
+def _log_page_selection_failure(
+    browser: Any, pages: Iterable[Any], config: AppConfig, *, target_url: str
+) -> None:
+    """Log target page lookup diagnostics without URL query strings."""
+
+    try:
+        pages_list = list(pages)
+        open_paths = [_url_host_path(str(getattr(page, "url", ""))) for page in pages_list]
+        exact = sum(1 for page in pages_list if _url_matches_exact(str(getattr(page, "url", "")), target_url))
+        path = sum(1 for page in pages_list if _url_matches(str(getattr(page, "url", "")), target_url))
+        login_page = _login_required_page(pages_list) is not None
+        logged_in_context = _coupang_logged_in_context(browser) is not None
+        log_dir = getattr(config, "log_dir", None) or Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = (
+            f"[{ts}] 쿠팡 대상 탭 탐색 실패 "
+            f"(cdp={getattr(config, 'cdp_url', '?')}, target={_url_host_path(target_url)}): "
+            f"open_tabs={open_paths}, exact_match={exact}, path_match={path}, "
+            f"login_page={login_page}, logged_in_context={logged_in_context}\n"
+            "----------------------------------------\n"
+        )
+        with (log_dir / "run_errors.log").open("a", encoding="utf-8") as file:
+            file.write(line)
+    except Exception:
+        pass
 
 
 def _default_recover_coupang_session(page: Any, config: AppConfig) -> bool:
@@ -671,6 +917,20 @@ def _wait_for_target_page_ready(
     except timeout_errors as exc:
         if _page_looks_like_coupang_login_required(page):
             raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
+        if path == "/page/peak-dashboard":
+            try:
+                _reload_target_page(
+                    page,
+                    config,
+                    target_url=target_url,
+                    load_timeout_errors=timeout_errors,
+                )
+                page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
+                return
+            except timeout_errors as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from retry_exc
+                exc = retry_exc
         seconds = max(1, config.page_timeout_seconds // 1000)
         raise RuntimeError(
             f"{label}가 {seconds}초 안에 준비되지 않았습니다. "

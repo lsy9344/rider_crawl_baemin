@@ -21,6 +21,7 @@ from rider_crawl.ui import (
     telegram_configs_by_token,
     validate_active_tab_isolation,
 )
+from rider_crawl.ui_settings import UiSettings
 
 
 def test_ui_defaults_leave_more_vertical_room_for_preview_log():
@@ -60,12 +61,24 @@ def test_coerce_settings_builds_coupang_ui_settings_from_form_values(tmp_path):
             "headless": False,
             "send_enabled": True,
             "send_only_on_change": False,
+            "coupang_auto_email_2fa_enabled": True,
+            "coupang_login_id": " rider-login ",
+            "coupang_login_password": " pass with space ",
+            "verification_email_address": " rider@naver.com ",
+            "verification_email_app_password": " imap app password ",
+            "verification_email_subject_keyword": " 이메일 인증번호 ",
         }
     )
 
     assert settings.platform_name == "coupang"
     assert settings.baemin_center_name == ""
     assert settings.baemin_center_id == ""
+    assert settings.coupang_auto_email_2fa_enabled is True
+    assert settings.coupang_login_id == "rider-login"
+    assert settings.coupang_login_password == " pass with space "
+    assert settings.verification_email_address == "rider@naver.com"
+    assert settings.verification_email_app_password == " imap app password "
+    assert settings.verification_email_subject_keyword == "이메일 인증번호"
 
 
 def test_validate_active_tab_isolation_allows_coupang_with_expected_center(tmp_path):
@@ -160,6 +173,114 @@ def test_validate_active_tab_isolation_rejects_coupang_primary_url_with_http_sch
 
     with pytest.raises(ValueError, match="실적/달성현황 URL"):
         validate_active_tab_isolation([settings])
+
+
+def test_validate_coupang_auto_2fa_credentials_accepts_complete_supported_email(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+    )
+    settings.baemin_center_name = "쿠팡강남센터"
+    settings.coupang_auto_email_2fa_enabled = True
+    settings.coupang_login_id = "rider-id"
+    settings.coupang_login_password = "rider-pw"
+    settings.verification_email_address = "rider@gmail.com"
+    settings.verification_email_app_password = "imap-pw"
+
+    ui._validate_coupang_auto_2fa_credentials(0, settings)
+
+
+def test_validate_coupang_auto_2fa_credentials_rejects_missing_active_app_password(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+    )
+    settings.baemin_center_name = "쿠팡강남센터"
+    settings.coupang_auto_email_2fa_enabled = True
+    settings.coupang_login_id = "rider-id"
+    settings.coupang_login_password = "rider-pw"
+    settings.verification_email_address = "rider@naver.com"
+    settings.verification_email_app_password = ""
+
+    with pytest.raises(ValueError, match="앱 비밀번호"):
+        ui._validate_coupang_auto_2fa_credentials(0, settings)
+
+
+def test_validate_coupang_auto_2fa_credentials_rejects_unsupported_email_domain(tmp_path):
+    settings = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+    )
+    settings.baemin_center_name = "쿠팡강남센터"
+    settings.coupang_auto_email_2fa_enabled = True
+    settings.coupang_login_id = "rider-id"
+    settings.coupang_login_password = "rider-pw"
+    settings.verification_email_address = "rider@example.com"
+    settings.verification_email_app_password = "imap-pw"
+
+    with pytest.raises(ValueError, match="naver.com 또는 gmail.com"):
+        ui._validate_coupang_auto_2fa_credentials(1, settings)
+
+
+def test_validate_coupang_auto_2fa_credentials_ignores_non_target_tabs(tmp_path):
+    target = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+    )
+    target.baemin_center_name = "쿠팡강남센터"
+    target.coupang_auto_email_2fa_enabled = False
+    broken_other_tab = UiSettings.default_for_tab(2)
+    broken_other_tab.platform_name = "coupang"
+    broken_other_tab.performance_url = "https://partner.coupangeats.com/page/peak-dashboard"
+    broken_other_tab.baemin_center_name = "쿠팡다른센터"
+    broken_other_tab.coupang_auto_email_2fa_enabled = True
+    broken_other_tab.coupang_login_id = ""
+    broken_other_tab.coupang_login_password = ""
+    broken_other_tab.verification_email_address = ""
+    broken_other_tab.verification_email_app_password = ""
+
+    ui._validate_coupang_auto_2fa_credentials(0, target)
+
+
+def test_validate_active_tab_isolation_validates_coupang_auto_2fa_for_all_active_tabs(tmp_path):
+    selected = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+        cdp_url="http://127.0.0.1:9222",
+        browser_user_data_dir=tmp_path / "browser1",
+        telegram_chat_id="-100111",
+    )
+    selected.baemin_center_name = "쿠팡강남센터"
+    selected.coupang_auto_email_2fa_enabled = False
+
+    unselected = _settings(
+        tmp_path,
+        platform_name="coupang",
+        performance_url="https://partner.coupangeats.com/page/peak-dashboard",
+        peak_dashboard_url="",
+        cdp_url="http://127.0.0.1:9223",
+        browser_user_data_dir=tmp_path / "browser2",
+        telegram_chat_id="-100222",
+    )
+    unselected.baemin_center_name = "쿠팡서초센터"
+    unselected.coupang_auto_email_2fa_enabled = True
+    unselected.coupang_login_id = "rider-id"
+    unselected.coupang_login_password = "rider-pw"
+    unselected.verification_email_address = "rider@naver.com"
+    unselected.verification_email_app_password = ""
+
+    with pytest.raises(ValueError, match="크롤링2.*앱 비밀번호"):
+        validate_active_tab_isolation([selected, unselected])
 
 
 def test_messenger_field_states_enable_only_telegram_inputs_for_telegram():
@@ -1512,6 +1633,47 @@ def test_app_configs_from_settings_names_tabs_and_skips_blank_urls(tmp_path):
     assert configs[0].state_subdir == "crawling1"
     assert configs[0].telegram_bot_token == "token"
     assert configs[0].telegram_chat_id == "-100123"
+
+
+def test_state_subdir_uses_monitoring_target_id_when_present():
+    # AC1: 상태 경로의 주 식별자는 안정 ID다 — 탭 표시 순번(index)이 달라도 같은 경로.
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = "abc123"
+
+    assert ui._state_subdir_for(settings, 0) == "targets/abc123"
+    assert ui._state_subdir_for(settings, 4) == "targets/abc123"
+
+
+def test_state_subdir_falls_back_to_crawling_index_when_id_blank():
+    # AC1 #2: 미발급(=ID 빈값) 탭만 legacy 폴백 crawling{n}을 쓴다(주 식별 스킴 아님).
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = ""
+
+    assert ui._state_subdir_for(settings, 0) == "crawling1"
+    assert ui._state_subdir_for(settings, 1) == "crawling2"
+
+
+def test_state_subdir_blank_id_does_not_collapse_to_targets_slash():
+    # AC1 #2: 빈 id(공백뿐 포함)면 strip 후 폴백 — 절대 targets/(슬래시만)로 전탭 충돌하지 않는다.
+    settings = ui.UiSettings.defaults()
+    settings.monitoring_target_id = "   "
+
+    result = ui._state_subdir_for(settings, 2)
+
+    assert result == "crawling3"
+    assert not result.startswith("targets/")
+
+
+def test_app_configs_from_settings_uses_target_id_state_subdir_when_issued(tmp_path):
+    # AC1 #1: ID가 발급된 활성 탭은 state_subdir이 targets/<id>로 나가고, crawl_name(표시명)은 유지.
+    settings = _settings(tmp_path)
+    settings.monitoring_target_id = "mt-stable-1"
+
+    active = active_crawling_settings([settings])
+    configs = app_configs_from_settings(active)
+
+    assert configs[0].state_subdir == "targets/mt-stable-1"
+    assert configs[0].crawl_name == "크롤링1"
 
 
 def _settings(

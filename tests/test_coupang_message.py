@@ -35,21 +35,28 @@ def test_render_coupang_performance_message_matches_original_format():
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
-            "점심 피크 : 완료 (10:54~12:59)",
+            "██████████",
+            "점심 피크 : 완료 (10:55~12:59)",
+            "██████████",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
+            "█████░░░░░",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
+            "████░░░░░░",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
+            "█░░░░░░░░░",
             "",
             "배정 103건 / 처리 67건",
-            "🚨거절률: 6.5%🚨",
-            "🌇수행중인인원 : 3명",
+            "거절률: 7.5%",
+            "수행중인원: 3명",
         ]
     )
+    message = render_current_screen_message(snapshot, now=WEEKDAY)
+    assert "수행중인인원" not in message
 
 
 def test_render_coupang_performance_message_omits_active_riders_when_current_screen_missing():
-    # 쿠팡 탭은 peak-dashboard 한 페이지만 크롤링하므로 current_screen이 없다(None).
-    # 이때 '수행중인인원' 줄은 생략하고, 나머지 peak 지표는 그대로 보낸다.
+    # current_screen이 없으면 온라인 수행중 인원 줄은 생략하고,
+    # 나머지 peak 지표는 그대로 보낸다.
     snapshot = PerformanceSnapshot(
         current_screen=None,
         peak_dashboard=PeakDashboardSnapshot(
@@ -71,19 +78,45 @@ def test_render_coupang_performance_message_omits_active_riders_when_current_scr
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
-            "점심 피크 : 완료 (10:54~12:59)",
+            "██████████",
+            "점심 피크 : 완료 (10:55~12:59)",
+            "██████████",
             "점심 논피크 : 10건/19건 (13:00~16:54)",
+            "█████░░░░░",
             "저녁 피크 : 17건/39건 (16:55~19:59)",
+            "████░░░░░░",
             "저녁 논피크 : 2건/27건 (20:00~03:59)",
+            "█░░░░░░░░░",
             "",
             "배정 103건 / 처리 67건",
-            "🚨거절률: 6.5%🚨",
+            "거절률: 7.5%",
         ]
     )
-    assert "수행중인인원" not in render_current_screen_message(snapshot, now=WEEKDAY)
+    message = render_current_screen_message(snapshot, now=WEEKDAY)
+    assert "수행중인원" not in message
+    assert "수행중인인원" not in message
 
 
-def test_render_coupang_performance_message_uses_weekend_times_on_weekend():
+def test_render_coupang_performance_message_caps_adjusted_reject_rate_at_100_percent():
+    snapshot = PerformanceSnapshot(
+        current_screen=None,
+        peak_dashboard=PeakDashboardSnapshot(
+            updated_at="20:38",
+            assigned_count=103,
+            processed_count=67,
+            reject_rate=99.4,
+            morning=PeakPeriodSnapshot(done=18, total=9),
+            lunch_peak=PeakPeriodSnapshot(done=45, total=45),
+            lunch_non_peak=PeakPeriodSnapshot(done=10, total=19),
+            dinner_peak=PeakPeriodSnapshot(done=17, total=39),
+            dinner_non_peak=PeakPeriodSnapshot(done=2, total=27),
+        ),
+    )
+
+    assert "거절률: 100%" in render_current_screen_message(snapshot, now=WEEKDAY)
+
+
+def test_render_coupang_performance_message_uses_weekend_times_through_next_day_dawn():
     snapshot = PerformanceSnapshot(
         current_screen=_current_screen(active_riders=3),
         peak_dashboard=PeakDashboardSnapshot(
@@ -102,7 +135,7 @@ def test_render_coupang_performance_message_uses_weekend_times_on_weekend():
     message = render_current_screen_message(snapshot, now=WEEKEND)
 
     assert "아침 : 완료 (06:00~10:54)" in message
-    assert "점심 피크 : 완료 (10:54~01:59)" in message
+    assert "점심 피크 : 완료 (10:55~01:59)" in message
     assert "점심 논피크 : 10건/19건 (02:00~04:54)" in message
     assert "저녁 피크 : 17건/39건 (04:55~07:59)" in message
     assert "저녁 논피크 : 2건/27건 (20:00~03:59)" in message
@@ -128,6 +161,27 @@ def test_render_coupang_performance_message_keeps_current_tab_label_when_present
 
     assert message.splitlines()[0:2] == ["[실시간 실적봇]", "[크롤링2]"]
     assert "점심 논피크 : 완료 (13:00~16:54)" in message
+
+
+def test_render_coupang_performance_message_fills_gauge_for_zero_total_done():
+    snapshot = PerformanceSnapshot(
+        current_screen=None,
+        peak_dashboard=PeakDashboardSnapshot(
+            updated_at="19:44",
+            assigned_count=204,
+            processed_count=190,
+            reject_rate=6.2,
+            morning=PeakPeriodSnapshot(done=0, total=0),
+            lunch_peak=PeakPeriodSnapshot(done=28, total=28),
+            lunch_non_peak=PeakPeriodSnapshot(done=57, total=57),
+            dinner_peak=PeakPeriodSnapshot(done=84, total=90),
+            dinner_non_peak=PeakPeriodSnapshot(done=0, total=48),
+        ),
+    )
+
+    lines = render_current_screen_message(snapshot, now=WEEKDAY).splitlines()
+    morning_idx = lines.index("아침 : 완료 (06:00~10:54)")
+    assert lines[morning_idx + 1] == "██████████"
 
 
 def _current_screen(*, active_riders: int) -> CurrentScreenSnapshot:

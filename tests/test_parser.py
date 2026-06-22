@@ -63,7 +63,8 @@ def test_parse_current_screen_html_raises_when_required_data_is_missing():
         parse_current_screen_html("<html><body>로그인이 필요합니다</body></html>")
 
 
-def test_parse_achievement_report_text_extracts_latest_completed_row_for_center():
+def test_parse_achievement_report_text_prefers_today_even_when_today_has_no_counts():
+    # 오늘 행의 배달건수가 아직 0이어도 어제 완료 행으로 내려가지 않는다.
     text = "\n".join(
         [
             "달성현황",
@@ -104,21 +105,113 @@ def test_parse_achievement_report_text_extracts_latest_completed_row_for_center(
     )
 
     assert snapshot.center_name == "표준서울마포B이츠앤홀딩스3"
-    assert snapshot.date_label == "26-06-10"
+    assert snapshot.date_label == "26-06-11"
     assert snapshot.updated_at == "00:37"
-    assert snapshot.lunch_peak_count == 323
-    assert snapshot.lunch_peak_goal == 231
-    assert snapshot.lunch_peak_rate == 100
-    assert snapshot.afternoon_non_peak_count == 296
-    assert snapshot.afternoon_non_peak_goal == 220
-    assert snapshot.afternoon_non_peak_rate == 100
-    assert snapshot.dinner_peak_count == 433
-    assert snapshot.dinner_peak_goal == 330
-    assert snapshot.dinner_peak_rate == 100
-    assert snapshot.dinner_non_peak_count == 374
-    assert snapshot.dinner_non_peak_goal == 319
-    assert snapshot.dinner_non_peak_rate == 100
-    assert snapshot.reject_rate == 11.82
+    assert snapshot.lunch_peak_count == 0
+    assert snapshot.afternoon_non_peak_count == 0
+    assert snapshot.dinner_peak_count == 0
+    assert snapshot.dinner_non_peak_count == 0
+    assert snapshot.reject_rate == 100
+
+
+def test_parse_achievement_report_text_merges_today_counts_with_weekly_goal_for_matching_center():
+    text = "\n".join(
+        [
+            "달성현황",
+            "협력사 아이디",
+            "날짜",
+            "요일",
+            "아침점심",
+            "오후논피",
+            "저녁피크",
+            "심야논피",
+            "수락률",
+            "표준서울마포B - DP2406141285",
+            "26-06-14",
+            "일",
+            "0/231 (0%)",
+            "0/154 (0%)",
+            "0/245 (0%)",
+            "0/210 (0%)",
+            "0.00%",
+            "표준서울마포B - DP2605181318",
+            "26-06-14",
+            "일",
+            "0/363 (0%)",
+            "0/242 (0%)",
+            "0/385 (0%)",
+            "0/330 (0%)",
+            "0.00%",
+            "오늘 배달현황",
+            "협력사아이디",
+            "아침점심",
+            "오후논피",
+            "저녁피크",
+            "심야논피",
+            "표준서울마포B - DP2605181318",
+            "471/341 (100%)",
+            "295/242 (100%)",
+            "494/396 (100%)",
+            "489/341 (100%)",
+            "주간 배달 현황",
+            "* 수행건수 / 목표건수 (달성률)",
+        ]
+    )
+
+    snapshot = parse_achievement_report_text(
+        text,
+        center_id="DP2605181318",
+        center_name="표준서울마포B이츠앤홀딩스3",
+        now=datetime(2026, 6, 14, 1, 50),
+    )
+
+    assert snapshot.date_label == "26-06-14"
+    assert (snapshot.lunch_peak_count, snapshot.lunch_peak_goal, snapshot.lunch_peak_rate) == (471, 363, 100)
+    assert (snapshot.afternoon_non_peak_count, snapshot.afternoon_non_peak_goal, snapshot.afternoon_non_peak_rate) == (
+        295,
+        242,
+        100,
+    )
+    assert (snapshot.dinner_peak_count, snapshot.dinner_peak_goal, snapshot.dinner_peak_rate) == (494, 385, 100)
+    assert (snapshot.dinner_non_peak_count, snapshot.dinner_non_peak_goal, snapshot.dinner_non_peak_rate) == (
+        489,
+        330,
+        100,
+    )
+
+
+def test_parse_achievement_report_text_falls_back_to_latest_past_when_no_today_row():
+    text = "\n".join(
+        [
+            "주간 배달 현황",
+            "표준서울마포B - DP2605181318",
+            "26-06-10",
+            "수",
+            "323/231 (100%)",
+            "296/220 (100%)",
+            "433/330 (100%)",
+            "374/319 (100%)",
+            "88.18%",
+            "표준서울마포B - DP2605181318",
+            "26-06-11",
+            "목",
+            "98/231 (42%)",
+            "1/220 (1%)",
+            "2/330 (1%)",
+            "3/319 (1%)",
+            "90.00%",
+        ]
+    )
+
+    snapshot = parse_achievement_report_text(
+        text,
+        center_id="DP2605181318",
+        center_name="표준서울마포B이츠앤홀딩스3",
+        now=datetime(2026, 6, 12, 9, 0),
+    )
+
+    assert snapshot.date_label == "26-06-11"
+    assert snapshot.lunch_peak_count == 98
 
 
 def test_parse_achievement_report_text_prefers_today_when_today_has_counts():

@@ -1,0 +1,37 @@
+# rider_server Cloud 백엔드 이미지 — Story 5.1.
+#
+# pyproject wheel target 은 rider_crawl/rider_server/rider_agent 를 모두 패키징한다.
+# 이 이미지는 server extra 만 설치하는 lean runtime 을 유지하기 위해 프로젝트 wheel 대신
+# 필요한 src/ 하위 패키지만 복사하고 PYTHONPATH=/app/src 로 import 경로를 맞춘다
+# (pytest pythonpath=["src"] 미러). rider_crawl.redaction 은 stdlib 만 쓰므로
+# crawl4ai/playwright 등 무거운 base deps 는 이미지에 넣지 않는다.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUTF8=1 \
+    PYTHONPATH=/app/src \
+    APP_ENV=production
+
+WORKDIR /app
+
+# 서버 런타임 의존성만 설치. 버전은 pyproject.toml [project.optional-dependencies].server
+# 와 일치시킨다(정본은 pyproject — 여기는 lean 이미지를 위해 server extra 만 직접 설치).
+RUN pip install --no-cache-dir \
+    "fastapi>=0.136.0,<0.137.0" \
+    "uvicorn[standard]>=0.30.0" \
+    "sqlalchemy[asyncio]>=2.0,<2.1" \
+    "alembic>=1.18,<1.19" \
+    "asyncpg>=0.29" \
+    "jinja2>=3.1,<4"
+
+# rider_server(앱) + rider_crawl(redaction import 대상) 소스만 복사.
+COPY src/rider_server /app/src/rider_server
+COPY src/rider_crawl /app/src/rider_crawl
+COPY migrations /app/migrations
+COPY alembic.ini /app/alembic.ini
+
+EXPOSE 8000
+
+# 운영 정본 기동 커맨드(uvicorn). module-level app 객체(rider_server.main:app) 사용.
+CMD ["uvicorn", "rider_server.main:app", "--host", "0.0.0.0", "--port", "8000"]

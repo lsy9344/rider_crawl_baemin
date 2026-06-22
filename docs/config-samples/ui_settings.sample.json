@@ -1,0 +1,43 @@
+{
+  "crawlings": [
+    {
+      "performance_url": "https://deliverycenter.baemin.com/delivery/history?page=0&size=20&orderName=name&orderBy=asc&name=&userId=&phoneNumber=&riderStatus=",
+      "peak_dashboard_url": "",
+      "platform_name": "baemin",
+      "baemin_center_name": "<BAEMIN_CENTER_NAME>",
+      "baemin_center_id": "<BAEMIN_CENTER_ID>",
+      "browser_mode": "cdp",
+      "cdp_url": "http://127.0.0.1:9222",
+      "browser_user_data_dir": "runtime\\browser-profile",
+      "headless": false,
+      "kakao_chat_name": "<KAKAO_CHAT_NAME>",
+      "telegram_bot_token": "<TELEGRAM_BOT_TOKEN>",
+      "telegram_chat_id": "<TELEGRAM_CHAT_ID>",
+      "telegram_message_thread_id": "<TELEGRAM_MESSAGE_THREAD_ID>",
+      "messenger_name": "telegram",
+      "log_dir": "logs",
+      "send_enabled": true,
+      "send_only_on_change": false,
+      "interval_minutes": 3,
+      "timezone": "Asia/Seoul",
+      "run_lock_timeout_seconds": 60,
+      "page_timeout_seconds": 60000,
+      "coupang_auto_email_2fa_enabled": false,
+      "coupang_login_id": "",
+      "coupang_login_password": "",
+      "verification_email_address": "",
+      "verification_email_app_password": "",
+      "verification_email_subject_keyword": "인증번호",
+      "verification_email_sender_keyword": "coupang",
+      "customer_id": "",
+      "customer_name": "",
+      "platform_account_id": "",
+      "monitoring_target_id": "",
+      "legacy_alias": "크롤링1",
+      "telegram_bot_token_ref": "",
+      "coupang_login_password_ref": "",
+      "coupang_login_id_ref": "",
+      "verification_email_app_password_ref": ""
+    }
+  ]
+}

@@ -122,6 +122,66 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_config(tmp_pa
     assert sent[1] == ("-100222", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.", None)
 
 
+def test_telegram_command_logs_do_not_include_raw_text_for_rider_lookup(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
+        <th>배차취소</th><th>배달취소(라이더귀책)</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>100</td><td>20</td><td>3</td><td>2</td></tr>
+      </tbody>
+    </table>
+    """
+    logs: list[str] = []
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")],
+        fetch_html=lambda _config: html,
+        send_text=lambda *_args, **_kwargs: None,
+        log_event=logs.append,
+    )
+
+    processor.handle_text("-100123", "!홍길동1234")
+
+    joined = "\n".join(logs)
+    assert "!홍길동1234" not in joined
+    assert "홍길동" not in joined
+    assert "1234" not in joined
+    assert "rider_lookup" in joined
+
+
+def test_telegram_command_handler_uses_single_routing_snapshot_per_update(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
+        <th>배차취소</th><th>배달취소(라이더귀책)</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>100</td><td>20</td><td>3</td><td>2</td></tr>
+      </tbody>
+    </table>
+    """
+    original = _config(tmp_path, crawl_name="크롤링1", chat_id="-100123")
+    replacement = _config(tmp_path, crawl_name="크롤링2", chat_id="-100999")
+    sent: list[str] = []
+    processor: TelegramCommandProcessor
+
+    def fetch_html(_config):
+        processor.update_routing([replacement])
+        return html
+
+    processor = TelegramCommandProcessor(
+        [original],
+        fetch_html=fetch_html,
+        send_text=lambda config, message, **_kwargs: sent.append(f"{config.crawl_name}:{message}"),
+    )
+
+    assert processor.handle_text("-100123", "!홍길동1234") is True
+    assert sent[-1].startswith("크롤링1:")
+
+
 def test_telegram_command_processor_routes_lookup_to_matching_chat_thread(tmp_path):
     html = """
     <table>
@@ -823,6 +883,32 @@ def test_keyword_auto_reply_retries_after_send_failure(tmp_path):
     # 두 번째 메시지: 쿨다운에 막히지 않고 다시 응답해 전송에 성공한다.
     assert processor.handle_text("-100123", "사고") is True
     assert attempts["n"] == 2
+
+
+def test_keyword_auto_reply_is_not_blocked_by_lookup_lock(tmp_path):
+    configs = [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")]
+    lookup_lock = threading.Lock()
+    sent: list[str] = []
+    processor = TelegramCommandProcessor(
+        configs,
+        locks_by_target={("-100123", ""): lookup_lock},
+        send_text=lambda _config, message, **_kwargs: sent.append(message),
+        keyword_responder=_keyword_responder(tmp_path, auto_message="자동응답"),
+    )
+    lookup_lock.acquire()
+    finished = threading.Event()
+    try:
+        worker = threading.Thread(
+            target=lambda: (processor.handle_text("-100123", "사고"), finished.set()),
+            daemon=True,
+        )
+        worker.start()
+        assert finished.wait(0.3) is True
+    finally:
+        lookup_lock.release()
+        worker.join(1)
+
+    assert sent == ["자동응답"]
 
 
 def test_keyword_auto_reply_does_not_double_send_on_concurrent_batch(tmp_path):

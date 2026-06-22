@@ -15,9 +15,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .app import RunResult, run_once
+from .auth.imap_2fa import IMAP_HOST_BY_DOMAIN
 from .browser_launcher import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError, prepare_chrome
 from .config import DEFAULT_BAEMIN_CENTER_NAME, DEFAULT_COUPANG_PEAK_DASHBOARD_URL, AppConfig
 from .keyword_responder import KeywordResponder
+from .log_rotation import rotate_if_needed
 from .messengers import dispatch_text_message
 from .scheduler import BotScheduler
 from .sender import KakaoSendError, TelegramSendError
@@ -67,6 +69,7 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     _validate_active_cdp_local(active_settings)
     _validate_active_baemin_center_identity(active_settings)
     _validate_active_coupang_urls(active_settings)
+    _validate_active_coupang_auto_2fa_credentials(active_settings)
     _validate_active_telegram_required(active_settings)
     _validate_active_kakao_required(active_settings)
     _validate_unique_active_value(
@@ -91,9 +94,21 @@ def validate_active_tab_isolation(settings_list: list[UiSettings]) -> None:
     )
 
 
+def _state_subdir_for(settings: UiSettings, index: int) -> str:
+    # 상태 경로(last_message dedup 등)의 주 식별자는 안정 ID(monitoring_target_id)다. 탭을
+    # 재정렬해도 ID가 따라가므로 다른 대상의 상태와 섞이지 않는다. crawlingN 순번은 2.1
+    # 마이그레이션 전/미저장(=ID 빈값)인 탭에 한해서만 충돌 없는 legacy 폴백으로 쓰고,
+    # 다음 load_all이 안정 ID를 발급·영속화하면 자동 치유된다(주 식별 스킴 아님).
+    # 빈 id를 그대로 쓰면 모든 탭이 ``targets/``(슬래시만)로 충돌하므로 strip 검사 필수.
+    target_id = settings.monitoring_target_id.strip()
+    if target_id:
+        return f"targets/{target_id}"
+    return f"crawling{index + 1}"
+
+
 def app_configs_from_settings(indexed_settings: list[tuple[int, UiSettings]]):
     return [
-        settings.to_app_config(crawl_name=f"크롤링{index + 1}", state_subdir=f"crawling{index + 1}")
+        settings.to_app_config(crawl_name=f"크롤링{index + 1}", state_subdir=_state_subdir_for(settings, index))
         for index, settings in indexed_settings
     ]
 
@@ -149,14 +164,17 @@ def coerce_settings(values: dict[str, Any]) -> UiSettings:
         coupang_login_id=str(values.get("coupang_login_id", "")).strip(),
         # 비밀번호는 앞뒤 공백도 의미가 있을 수 있어 strip하지 않는다.
         coupang_login_password=str(values.get("coupang_login_password", "")),
-        gmail_2fa_query=str(values.get("gmail_2fa_query", defaults.gmail_2fa_query)).strip()
-        or defaults.gmail_2fa_query,
-        gmail_credentials_path=str(
-            values.get("gmail_credentials_path", defaults.gmail_credentials_path)
+        verification_email_address=str(values.get("verification_email_address", "")).strip(),
+        # 앱 비밀번호는 Gmail 공백 붙여넣기를 IMAP 계층에서 처리하므로 UI 수집 시 strip하지 않는다.
+        verification_email_app_password=str(values.get("verification_email_app_password", "")),
+        verification_email_subject_keyword=str(
+            values.get("verification_email_subject_keyword", defaults.verification_email_subject_keyword)
         ).strip()
-        or defaults.gmail_credentials_path,
-        gmail_token_path=str(values.get("gmail_token_path", defaults.gmail_token_path)).strip()
-        or defaults.gmail_token_path,
+        or defaults.verification_email_subject_keyword,
+        verification_email_sender_keyword=str(
+            values.get("verification_email_sender_keyword", defaults.verification_email_sender_keyword)
+        ).strip()
+        or defaults.verification_email_sender_keyword,
     )
 
 
@@ -233,9 +251,10 @@ class RiderBotUi:
             "run_lock_timeout_seconds": StringVar(value=str(settings.run_lock_timeout_seconds)),
             "coupang_login_id": StringVar(value=settings.coupang_login_id),
             "coupang_login_password": StringVar(value=settings.coupang_login_password),
-            "gmail_2fa_query": StringVar(value=settings.gmail_2fa_query),
-            "gmail_credentials_path": StringVar(value=settings.gmail_credentials_path),
-            "gmail_token_path": StringVar(value=settings.gmail_token_path),
+            "verification_email_address": StringVar(value=settings.verification_email_address),
+            "verification_email_app_password": StringVar(value=settings.verification_email_app_password),
+            "verification_email_subject_keyword": StringVar(value=settings.verification_email_subject_keyword),
+            "verification_email_sender_keyword": StringVar(value=settings.verification_email_sender_keyword),
             "headless": BooleanVar(value=settings.headless),
             "send_enabled": BooleanVar(value=settings.send_enabled),
             "send_only_on_change": BooleanVar(value=settings.send_only_on_change),
@@ -336,17 +355,17 @@ class RiderBotUi:
             ("락 타임아웃(초)", "run_lock_timeout_seconds"),
             ("쿠팡 로그인 아이디(자동복구)", "coupang_login_id"),
             ("쿠팡 로그인 비밀번호(자동복구)", "coupang_login_password"),
-            ("Gmail 인증메일 검색식(2FA)", "gmail_2fa_query"),
-            ("Gmail 자격증명 파일 경로", "gmail_credentials_path"),
-            ("Gmail 토큰 파일 경로", "gmail_token_path"),
+            ("인증 이메일 주소(naver/gmail)", "verification_email_address"),
+            ("인증 이메일 비밀번호(앱 비밀번호)", "verification_email_app_password"),
+            ("인증 메일 제목 키워드(기본 인증번호)", "verification_email_subject_keyword"),
+            ("인증 메일 발신자 키워드(기본 coupang)", "verification_email_sender_keyword"),
         ]
         entry_widgets = {}
         for row, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
             entry_kwargs: dict[str, Any] = {"textvariable": tab_vars[key]}
-            if key == "coupang_login_password":
-                # 비밀번호는 화면에 가린다. UI 입력값이 ui_settings.json에 평문 저장되는
-                # 점은 텔레그램 토큰 등 기존 비밀값과 동일한 한계다.
+            if key in ("coupang_login_password", "verification_email_app_password"):
+                # 비밀번호는 화면에 가린다. 저장 시 설정 JSON에는 ref만 남고 평문은 local store로 분리된다.
                 entry_kwargs["show"] = "*"
             entry = ttk.Entry(frame, **entry_kwargs)
             entry.grid(row=row, column=1, sticky="ew", pady=4)
@@ -448,8 +467,9 @@ class RiderBotUi:
                 "(쿠팡은 배민 기본값 그대로 두면 저장이 거부됩니다).\n"
                 "4. 기본값은 원격 디버깅 포트로 실행한 Chrome에 연결합니다.\n"
                 "5. 쿠팡이츠는 '쿠팡 로그인 만료 시 자동복구'를 켜면 입력한 아이디·비밀번호와 "
-                "Gmail 인증메일(2FA)로 자동 재로그인을 시도합니다(아이디·비밀번호·Gmail 자격증명/토큰 파일 필요). "
-                "꺼져 있으면 로그인 만료 시 직접 다시 로그인하세요.\n"
+                "인증 이메일을 IMAP으로 읽어 자동 재로그인을 시도합니다. Gmail/Naver 공급자는 이메일 주소 도메인으로 "
+                "자동 선택되고, Gmail 앱 비밀번호는 공백 포함 형태로 붙여넣어도 됩니다. "
+                "자동복구는 탭별 설정이며 CLI --once는 이메일 자동복구를 지원하지 않습니다.\n"
                 "6. 전송 방식(텔레그램/카카오톡)은 플랫폼 선택과 무관하게 따로 고르세요.\n"
                 "7. 텔레그램은 봇 토큰과 그룹방 chat_id를 입력하고, 토픽 그룹이면 토픽 ID도 입력하세요.\n"
                 "8. 카카오톡은 채팅방명을 입력하고 PC 앱 채팅방 창을 열어두세요.\n"
@@ -496,6 +516,7 @@ class RiderBotUi:
     def save_settings(self) -> UiSettings | None:
         try:
             settings_tabs = self._read_all_settings()
+            selected_index = self._selected_tab_index()
             validate_active_tab_isolation(settings_tabs)
         except ValueError as exc:
             messagebox.showerror("설정 오류", str(exc))
@@ -508,7 +529,6 @@ class RiderBotUi:
 
         self.store.save_all(settings_tabs)
         self.settings_tabs = settings_tabs
-        selected_index = self._selected_tab_index()
         self.settings = settings_tabs[selected_index]
         self.status_var.set("설정 저장됨")
         return self.settings
@@ -521,7 +541,7 @@ class RiderBotUi:
             return
 
         try:
-            message = prepare_chrome(settings.to_app_config(crawl_name=f"크롤링{selected_index + 1}", state_subdir=f"crawling{selected_index + 1}"))
+            message = prepare_chrome(settings.to_app_config(crawl_name=f"크롤링{selected_index + 1}", state_subdir=_state_subdir_for(settings, selected_index)))
         except BrowserLaunchError as exc:
             self.status_var.set("준비 오류")
             self._append_preview(f"[준비 오류]\n{exc}\n")
@@ -611,7 +631,7 @@ class RiderBotUi:
                 self.messages.put(("status", f"{label} 중지됨"))
                 return False
             result = run_once(
-                settings.to_app_config(crawl_name=label, state_subdir=f"crawling{tab_index + 1}"),
+                settings.to_app_config(crawl_name=label, state_subdir=_state_subdir_for(settings, tab_index)),
                 send_message=self._send_message_with_kakao_lock,
             )
         except CdpUnavailableError as exc:
@@ -805,7 +825,7 @@ class RiderBotUi:
 
     def _start_telegram_listener(self, tab_index: int, settings: UiSettings) -> None:
         config = settings.to_app_config(
-            crawl_name=f"크롤링{tab_index + 1}", state_subdir=f"crawling{tab_index + 1}"
+            crawl_name=f"크롤링{tab_index + 1}", state_subdir=_state_subdir_for(settings, tab_index)
         )
         if not telegram_configs_by_token([config]):
             self._append_preview(
@@ -968,6 +988,9 @@ class RiderBotUi:
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             path = target_dir / "run_errors.log"
+            # append 직전 크기 기준 rotation(무한 증가 방지, NFR-10). 이미 감싼 try/except
+            # 안이라 rotation 실패도 None 반환으로 흡수되고, 헬퍼 자체도 best-effort다.
+            rotate_if_needed(path)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             message = (
                 f"[{ts}] {prefix}\n"
@@ -1177,6 +1200,28 @@ def _validate_coupang_expected_center(index: int, settings: UiSettings) -> None:
         )
 
 
+def _validate_coupang_auto_2fa_credentials(index: int, settings: UiSettings) -> None:
+    if settings.platform_name != "coupang" or not settings.coupang_auto_email_2fa_enabled:
+        return
+    if not settings.coupang_login_id.strip():
+        raise ValueError(f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 아이디를 입력하세요.")
+    if not settings.coupang_login_password:
+        raise ValueError(f"크롤링{index + 1} 자동복구를 켜려면 쿠팡 로그인 비밀번호를 입력하세요.")
+    address = settings.verification_email_address.strip()
+    if not address:
+        raise ValueError(f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 주소를 입력하세요.")
+    if not settings.verification_email_app_password:
+        raise ValueError(f"크롤링{index + 1} 자동복구를 켜려면 인증 이메일 앱 비밀번호를 입력하세요.")
+    domain = address.rsplit("@", 1)[-1].strip().casefold() if "@" in address else ""
+    if domain not in IMAP_HOST_BY_DOMAIN:
+        raise ValueError(f"크롤링{index + 1} 인증 이메일은 naver.com 또는 gmail.com 주소여야 합니다.")
+
+
+def _validate_active_coupang_auto_2fa_credentials(indexed_settings: list[tuple[int, UiSettings]]) -> None:
+    for index, settings in indexed_settings:
+        _validate_coupang_auto_2fa_credentials(index, settings)
+
+
 def _is_coupang_path_url(url: str, path: str) -> bool:
     parsed = urlsplit(url.strip())
     host = (parsed.hostname or "").casefold()
@@ -1249,8 +1294,8 @@ def _send_failure_requests_retry(exc: Exception) -> bool:
 
     ``False`` asks the scheduler for a fast (5s) retry; ``True`` lets it wait the
     full interval. Non-ambiguous failures (message visibly not delivered) take the
-    fast path. Ambiguous failures — the message may already have been sent and the
-    last hash was not recorded — must skip the fast retry to avoid double-sending.
+    fast path. Ambiguous failures: the message may already have been sent and the
+    last hash was not recorded, so they must skip the fast retry to avoid double-sending.
     """
 
     return bool(getattr(exc, "ambiguous", False))

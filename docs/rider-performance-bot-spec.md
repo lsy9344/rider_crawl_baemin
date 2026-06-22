@@ -27,7 +27,7 @@
 - 크롤링, 메시지 생성, UI 미리보기, 텔레그램 전송은 macOS와 Windows에서 실행할 수 있다.
 - 카카오톡 자동 전송은 Windows PC에서만 실행한다(PC 앱 UI 자동화).
 - 대상 파트너/센터 사이트 로그인은 사용자가 미리 완료하고, 대상 페이지는 열린 상태로 둔다.
-- 쿠팡이츠 파트너 사이트는 로그인 시 2차 인증이 있으므로 자동 로그인은 구현하지 않는다(쿠팡 Gmail 로그인 복구 보조 절차는 별도).
+- 쿠팡이츠 파트너 사이트는 로그인 시 2차 인증이 있으므로 기본 자동 로그인은 하지 않는다(선택 기능으로 인증 이메일 IMAP 자동복구를 지원).
 - 텔레그램 전송 시: 봇 토큰과 그룹방 chat_id를 사용자가 발급·확인해 UI에 입력한다. 봇은 대상 그룹방에 초대되어 있어야 하며, 그룹방 메시지를 읽어 명령/키워드를 처리하려면 BotFather에서 **Privacy Mode를 꺼야** 한다.
 - 카카오톡 전송 시: Windows용 카카오톡 PC 앱을 사용자가 미리 로그인하고, 메시지를 받을 단체 채팅방이 준비되어 있다. 카카오톡 입력창에 붙여넣어 전송하므로 운영 중에는 화면 세션이 유지되어야 한다.
 - 사용자는 UI에서 필요한 설정값을 입력하고 탭별로 `시작`을 누른다.
@@ -64,7 +64,7 @@
 | 텍스트 클립보드 | `pyperclip` | `>=1.9.0` | 카카오톡 입력창에 붙여넣을 메시지 복사 | PyPI |
 | Windows 자동화 | `pyautogui` | `>=0.9.54` | 카카오톡 PC 앱 포커스, 채팅방 검색, 붙여넣기, Enter 전송 | PyPI |
 | Windows 창 제어 | `pywinauto` | `>=0.6.8` (Windows) | 카카오톡 창 찾기와 활성화 보조 | PyPI |
-| 쿠팡 Gmail 로그인 복구 | `google-api-python-client`, `google-auth-oauthlib` | `pyproject.toml` 참조 | 쿠팡 로그인 인증 코드 수신 보조 | PyPI |
+| 쿠팡 이메일 로그인 복구 | `IMAPClient` | `pyproject.toml` 참조 | Gmail/Naver IMAP 인증 코드 수신 보조 | PyPI |
 | 환경설정 | `python-dotenv` | `>=1.1.0` | 선택적 `.env` 로딩 | PyPI |
 | UI | Python `tkinter` | 표준 라이브러리 | 설정 입력, 시작/중지, 상태 확인 | Python |
 | 설정 저장 | JSON | 표준 라이브러리 | UI 설정값(`runtime/state/ui_settings.json`)·키워드 설정(`config.json`) 저장 | Python |

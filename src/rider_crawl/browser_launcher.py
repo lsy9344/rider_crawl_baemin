@@ -4,12 +4,14 @@ import platform
 import shutil
 import subprocess
 import time
+import hashlib
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 from urllib.request import urlopen as default_urlopen
 
-from .config import AppConfig
+from .config import AppConfig, app_state_root
+from .lock import RunLock
 
 
 class BrowserLaunchError(RuntimeError):
@@ -45,23 +47,24 @@ def prepare_chrome(
     cdp_probe: CdpProbe | None = None,
     cdp_timeout_seconds: float = 10.0,
 ) -> str:
-    current_platform = platform_name or platform.system()
-    if current_platform == "Darwin":
-        return prepare_mac_chrome(
-            config,
-            platform_name=current_platform,
-            run_command=run_command,
-            cdp_probe=cdp_probe,
-            cdp_timeout_seconds=cdp_timeout_seconds,
-        )
-    if current_platform == "Windows":
-        return prepare_windows_chrome(
-            config,
-            platform_name=current_platform,
-            run_command=run_command,
-            cdp_probe=cdp_probe,
-            cdp_timeout_seconds=cdp_timeout_seconds,
-        )
+    with RunLock(_browser_resource_lock_path(config), stale_timeout_seconds=config.run_lock_timeout_seconds):
+        current_platform = platform_name or platform.system()
+        if current_platform == "Darwin":
+            return prepare_mac_chrome(
+                config,
+                platform_name=current_platform,
+                run_command=run_command,
+                cdp_probe=cdp_probe,
+                cdp_timeout_seconds=cdp_timeout_seconds,
+            )
+        if current_platform == "Windows":
+            return prepare_windows_chrome(
+                config,
+                platform_name=current_platform,
+                run_command=run_command,
+                cdp_probe=cdp_probe,
+                cdp_timeout_seconds=cdp_timeout_seconds,
+            )
     raise BrowserLaunchError("Chrome 실행 준비는 Windows와 macOS에서만 지원합니다.")
 
 
@@ -256,6 +259,24 @@ def _profile_dir_key(path: Path) -> str:
     except OSError:
         resolved = path
     return str(resolved).casefold()
+
+
+def _browser_resource_lock_path(config: AppConfig) -> Path:
+    key = "\n".join([_cdp_endpoint_key(config.cdp_url), _profile_dir_key(_chrome_profile_dir(config))])
+    scope_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return app_state_root() / "runtime" / "state" / "browser_locks" / f"chrome.{scope_hash}.lock"
+
+
+def _cdp_endpoint_key(cdp_url: str) -> str:
+    value = cdp_url.strip()
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").casefold()
+    if host == "localhost":
+        host = "127.0.0.1"
+    if parsed.port is None:
+        return value.casefold()
+    scheme = (parsed.scheme or "http").casefold()
+    return f"{scheme}://{host}:{parsed.port}"
 
 
 def _ensure_cdp_endpoint_unused(cdp_url: str, *, probe: CdpProbe) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
-from .config import AppConfig
+from .config import AppConfig, app_state_root
 from .lock import RunLock
 from .message import render_current_screen_message
 from .models import CrawlSnapshotResult
@@ -67,7 +67,7 @@ def _last_message_hash_path(config: AppConfig) -> Path:
 
 def _run_lock_path(config: AppConfig) -> Path:
     scope_hash = hashlib.sha256(_run_scope_key(config).encode("utf-8")).hexdigest()[:16]
-    return config.runtime_dir / "state" / "run_locks" / f"run.{scope_hash}.lock"
+    return app_state_root() / "runtime" / "state" / "run_locks" / f"run.{scope_hash}.lock"
 
 
 def _run_scope_key(config: AppConfig) -> str:
