@@ -124,9 +124,9 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" in workflow
     assert "Deploy local EC2 compose stack" in workflow
     assert "cd /opt/rider-server/repo" in workflow
-    assert "git fetch --prune origin main:refs/remotes/origin/main" in workflow
+    assert "git fetch origin main" in workflow
     assert "ssh-keyscan" not in workflow
-    assert "git checkout -B main -f origin/main" in workflow
+    assert "git checkout -B main -f FETCH_HEAD" in workflow
     assert "docker compose -p rider -f deploy/docker-compose.yml up --build -d --remove-orphans" in workflow
     assert "curl -fsS http://127.0.0.1:8000/health" in workflow
     assert "Production deploy" in workflow
