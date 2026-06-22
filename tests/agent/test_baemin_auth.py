@@ -90,6 +90,30 @@ def _auth_job(job_id="job-fake-1", *, type=CAPABILITY_AUTH_CHECK, target_id=FAKE
     )
 
 
+def test_auth_job_config_uses_profile_assignment_from_payload(tmp_path):
+    from rider_agent.auth import baemin_auth
+
+    profile_dir = tmp_path / "assigned-profile"
+    config = baemin_auth._config_from_auth_job(
+        _auth_job(
+            payload={
+                "target_id": FAKE_TARGET,
+                "tenant_id": "tenant-fake-1",
+                "platform": "coupang",
+                "platform_account_id": "account-fake-1",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                "expected_display_name": "쿠팡상점A",
+                "browser_profile_ref": f"profile:{FAKE_TARGET}",
+                "cdp_url": "http://127.0.0.1:9450",
+                "browser_user_data_dir": str(profile_dir),
+            }
+        )
+    )
+
+    assert str(config.cdp_url) == "http://127.0.0.1:9450"
+    assert config.browser_user_data_dir == profile_dir
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC1 — 분류기: BrowserActionRequiredError→AUTH_REQUIRED, 비-auth 예외 오분류 금지
 # ══════════════════════════════════════════════════════════════════════════

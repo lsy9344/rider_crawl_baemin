@@ -14,8 +14,22 @@
       <td>H&amp;J</td>
       <td>로그인 만료 · 인증 확인 필요</td>
       <td>
-        
+
+
+        <button type="button"
+                class="btn primary"
+                data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+                hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-start?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 시작</button>
+        <button type="button"
+                class="btn ghost"
+                data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+                hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-check?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">상태 재확인</button>
         <button type="button" class="btn ghost" data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
+        <div class="muted" id="auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf" aria-live="polite"></div>
         
       </td>
     </tr>

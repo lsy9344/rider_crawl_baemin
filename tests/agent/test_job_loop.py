@@ -204,6 +204,82 @@ def test_compose_execute_job_keeps_fallback_for_unknown_job_type():
     assert composition.close_callbacks == ()
 
 
+def test_compose_auth_worker_uses_crawl_profile_assignment_for_auth_jobs(tmp_path):
+    from types import SimpleNamespace
+
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_COUPANG, CAPABILITY_OPEN_AUTH_BROWSER
+    from rider_agent.worker_composition import compose_execute_job
+
+    class Profiles:
+        def __init__(self) -> None:
+            self.calls = []
+            self.configs = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            self.calls.append((tenant_id, target_id))
+            profile_dir = tmp_path / "profiles" / tenant_id / target_id
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9450",
+                user_data_dir=profile_dir,
+            )
+            self.configs.append(config)
+            return SimpleNamespace(
+                cdp_url=config.cdp_url,
+                profile_dir=config.browser_user_data_dir,
+            )
+
+        def browser_profiles(self):
+            return []
+
+    profiles = Profiles()
+    opened_payloads = []
+
+    def open_auth_browser(job):
+        opened_payloads.append(dict(job.payload))
+        return True
+
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[CAPABILITY_OPEN_AUTH_BROWSER, CAPABILITY_CRAWL_COUPANG],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_auth_worker=True,
+        auth_open_auth_browser=open_auth_browser,
+        start_crawl_worker=True,
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+    )
+
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="job-auth-1",
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            target_id="target-1",
+            lease_expires_at=FUTURE_LEASE,
+            payload={
+                "target_id": "target-1",
+                "tenant_id": "tenant-1",
+                "platform": "coupang",
+                "platform_account_id": "account-1",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                "expected_display_name": "쿠팡상점A",
+                "browser_profile_ref": "profile:target-1",
+            },
+        )
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert profiles.calls == [("tenant-1", "target-1")]
+    assert opened_payloads[0]["cdp_url"] == "http://127.0.0.1:9450"
+    assert opened_payloads[0]["browser_user_data_dir"] == str(
+        tmp_path / "profiles" / "tenant-1" / "target-1"
+    )
+
+
 def _runner(transport, **kwargs):
     """JobRunner 생성 헬퍼 — stop/sleep 기본 배선 + 주입 override."""
 

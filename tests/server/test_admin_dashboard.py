@@ -760,6 +760,30 @@ def test_failclosed_display_severity_drives_primary_actions_without_failure_code
     assert "센터/상점명 불일치" in html
 
 
+def test_auth_required_reason_takes_precedence_over_latest_profile_failure() -> None:
+    row = TargetRow(
+        target_id="t-auth",
+        tenant_id=_TENANT,
+        name="인증가게",
+        center_name="센터",
+        platform="COUPANG",
+        interval_minutes=10,
+        last_success_at=None,
+        last_delivery_at=None,
+        last_failure_code="PROFILE_UNAVAILABLE",
+        severity=SEVERITY_AUTH_REQUIRED,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert 'data-reason="로그인 만료 · 인증 확인 필요"' in html
+    assert "브라우저 프로필 준비 실패" not in html
+
+
+def test_profile_unavailable_reason_is_operator_readable() -> None:
+    assert admin_routes._reason_text("PROFILE_UNAVAILABLE") == "브라우저 프로필 준비 실패 — Agent/Chrome 확인 필요"
+
+
 def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
     row = TargetRow(
         target_id="t-auth",
@@ -828,7 +852,17 @@ def test_targets_refresh_on_entity_change_event() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
     assert 'id="targets" hx-get="/admin/targets?tenant=tn-1"' in body
-    assert 'hx-trigger="admin-entity-changed from:body delay:2s, every 30s"' in body
+    assert 'hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s"' in body
+
+
+def test_dashboard_bursts_refresh_after_admin_action() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'admin-action-refresh from:body' in body
+    assert 'triggerAdminRefreshBurst' in body
+    assert "setTimeout(function () { htmx.trigger(document.body, \"admin-action-refresh\"); }, delay);" in body
+    assert 'id="auth-required" hx-get="/admin/auth-required?tenant=tn-1" hx-trigger="admin-action-refresh from:body, every 30s"' in body
+    assert 'id="agents" hx-get="/admin/agents" hx-trigger="admin-action-refresh from:body, every 30s"' in body
 
 
 def test_target_deeplink_route_seeds_initial_drawer_target() -> None:

@@ -921,6 +921,23 @@ def test_route_auth_start_missing_coupang_credentials_returns_action_fragment() 
     assert queue.events == []
 
 
+def test_route_auth_start_duplicate_returns_operator_message() -> None:
+    class DuplicateManualJobRepository(InMemoryAdminActionRepository):
+        async def enqueue_manual_job(self, **_kwargs):
+            raise ValueError("active manual job already exists")
+
+    repo = DuplicateManualJobRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "이미 진행 중인 인증 작업이 있습니다" in resp.text
+    assert "active manual job already exists" not in resp.text
+
+
 def test_route_dry_run_returns_preview_without_send() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())

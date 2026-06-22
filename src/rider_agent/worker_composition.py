@@ -7,7 +7,7 @@ shutdown order; this module owns only worker chaining.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -23,6 +23,49 @@ class WorkerComposition:
     close_callbacks: tuple[Callable[[], None], ...] = ()
     kakao_worker: Any = None
     crawl_worker: Any = None
+
+
+def _with_profile_assignment(
+    job: Any,
+    *,
+    profile_manager: Any,
+    secret_resolver: Callable[[Any], str | None] | None,
+) -> Any:
+    from rider_agent.workers.crawl_worker import _build_config, payload_from_job
+
+    payload = payload_from_job(job)
+
+    def build_config(
+        *,
+        tenant_id: str,
+        target_id: str,
+        cdp_url: str,
+        user_data_dir: Path,
+    ) -> Any:
+        return _build_config(
+            payload,
+            cdp_url=cdp_url,
+            user_data_dir=user_data_dir,
+            secret_resolver=secret_resolver,
+        )
+
+    assignment = profile_manager.ensure_profile(
+        payload.tenant_id,
+        payload.target_id,
+        build_config=build_config,
+    )
+    raw_payload = dict(getattr(job, "payload", {}) or {})
+    raw_payload["cdp_url"] = str(
+        getattr(assignment, "cdp_url", "http://127.0.0.1:9222")
+    )
+    raw_payload["browser_user_data_dir"] = str(
+        getattr(
+            assignment,
+            "profile_dir",
+            Path("runtime") / "agent-browser-profiles" / payload.target_id,
+        )
+    )
+    return replace(job, payload=raw_payload)
 
 
 def compose_execute_job(
@@ -59,11 +102,24 @@ def compose_execute_job(
     effective_browser_profiles = browser_profiles_provider
     effective_kakao_status = kakao_status_provider
     close_callbacks: list[Callable[[], None]] = []
+    should_start_crawl_worker = start_crawl_worker and (
+        "CRAWL_BAEMIN" in capabilities or "CRAWL_COUPANG" in capabilities
+    )
+
+    if should_start_crawl_worker and crawl_profile_manager is None and crawl_snapshot is None:
+        from rider_agent.browser_profile import BrowserProfileManager
+
+        crawl_profile_manager = BrowserProfileManager(
+            profiles_root=app_state_root() / "runtime" / "agent-browser-profiles",
+            agent_id=identity.agent_id,
+            max_profiles=max_profiles,
+            log=log,
+        )
 
     if start_auth_worker and (
         "AUTH_CHECK" in capabilities or "OPEN_AUTH_BROWSER" in capabilities
     ):
-        from rider_agent.auth.baemin_auth import build_auth_execute_job
+        from rider_agent.auth import baemin_auth
 
         auth_kwargs: dict[str, Any] = {
             "fallback": effective_execute_job,
@@ -71,35 +127,62 @@ def compose_execute_job(
             "sleep": sleep,
             "log": log,
         }
-        if auth_login_probe is not None:
-            auth_kwargs["login_probe"] = auth_login_probe
-        if auth_open_auth_browser is not None:
-            auth_kwargs["open_auth_browser"] = auth_open_auth_browser
-        if auth_detect_completion is not None:
-            auth_kwargs["detect_completion"] = auth_detect_completion
+        if crawl_profile_manager is not None:
+            login_probe = auth_login_probe or (
+                lambda job: baemin_auth.default_login_probe(
+                    job, secret_resolver=secret_resolver
+                )
+            )
+            open_auth_browser = auth_open_auth_browser or (
+                lambda job: baemin_auth.default_open_auth_browser(
+                    job, secret_resolver=secret_resolver
+                )
+            )
+            detect_completion = auth_detect_completion or (
+                lambda job: baemin_auth.default_detect_completion(
+                    job, secret_resolver=secret_resolver
+                )
+            )
+            auth_kwargs["login_probe"] = lambda job: login_probe(
+                _with_profile_assignment(
+                    job,
+                    profile_manager=crawl_profile_manager,
+                    secret_resolver=secret_resolver,
+                )
+            )
+            auth_kwargs["open_auth_browser"] = lambda job: open_auth_browser(
+                _with_profile_assignment(
+                    job,
+                    profile_manager=crawl_profile_manager,
+                    secret_resolver=secret_resolver,
+                )
+            )
+            auth_kwargs["detect_completion"] = lambda job: detect_completion(
+                _with_profile_assignment(
+                    job,
+                    profile_manager=crawl_profile_manager,
+                    secret_resolver=secret_resolver,
+                )
+            )
+        else:
+            if auth_login_probe is not None:
+                auth_kwargs["login_probe"] = auth_login_probe
+            if auth_open_auth_browser is not None:
+                auth_kwargs["open_auth_browser"] = auth_open_auth_browser
+            if auth_detect_completion is not None:
+                auth_kwargs["detect_completion"] = auth_detect_completion
+            if secret_resolver is not None:
+                auth_kwargs["secret_resolver"] = secret_resolver
         if auth_max_wait_seconds is not None:
             auth_kwargs["max_wait_seconds"] = auth_max_wait_seconds
         if auth_poll_interval_seconds is not None:
             auth_kwargs["poll_interval_seconds"] = auth_poll_interval_seconds
         if auth_max_attempts is not None:
             auth_kwargs["max_attempts"] = auth_max_attempts
-        if secret_resolver is not None:
-            auth_kwargs["secret_resolver"] = secret_resolver
-        effective_execute_job = build_auth_execute_job(**auth_kwargs)
+        effective_execute_job = baemin_auth.build_auth_execute_job(**auth_kwargs)
 
     crawl_worker = None
-    if start_crawl_worker and (
-        "CRAWL_BAEMIN" in capabilities or "CRAWL_COUPANG" in capabilities
-    ):
-        if crawl_profile_manager is None and crawl_snapshot is None:
-            from rider_agent.browser_profile import BrowserProfileManager
-
-            crawl_profile_manager = BrowserProfileManager(
-                profiles_root=app_state_root() / "runtime" / "agent-browser-profiles",
-                agent_id=identity.agent_id,
-                max_profiles=max_profiles,
-                log=log,
-            )
+    if should_start_crawl_worker:
         from rider_agent.workers.crawl_worker import (
             CrawlWorker,
             build_execute_job as build_crawl_execute_job,

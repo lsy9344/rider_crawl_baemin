@@ -382,7 +382,7 @@
         <span class="count" id="t-count">{{ tg_total }} / {{ tg_total }}곳</span>
       </div>
       <div class="target-notice" id="target-notice" role="status" aria-live="polite" hidden></div>
-      <div id="targets" hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">
+      <div id="targets" hx-get="/admin/targets?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">
         {% include "_targets.html" %}
       </div>
       <div class="filter-empty" id="filter-empty">조건에 맞는 업체가 없습니다: 필터를 조정하세요. <button class="btn" onclick="resetFilters()">필터 초기화</button></div>
@@ -391,19 +391,19 @@
     <details class="aux">
       <summary>Agent fleet <span class="tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>
       <div class="aux-body">
-        <div id="agents" hx-get="/admin/agents" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_agents.html" %}</div>
+        <div id="agents" hx-get="/admin/agents" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_agents.html" %}</div>
       </div>
     </details>
     <details class="aux">
       <summary>채널 상태 <span class="tag">Kakao {{ channels.kakao_queue_lag_seconds }}s · Telegram {{ channels.telegram_error_count }}건</span></summary>
       <div class="aux-body">
-        <div id="channels" hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_channels.html" %}</div>
+        <div id="channels" hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_channels.html" %}</div>
       </div>
     </details>
     <details class="aux" {% if auth_n %}open{% endif %}>
       <summary>인증 필요 대상 <span class="tag">{{ auth_n }}건 · secret 비노출</span></summary>
       <div class="aux-body">
-        <div id="auth-required" hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}" hx-trigger="every 30s" hx-swap="innerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
+        <div id="auth-required" hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
       </div>
     </details>
   </main>
@@ -481,7 +481,14 @@
     document.body.addEventListener("htmx:afterSwap", function (e) {
       stampUpdated();
       if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
+      if (isActionResultTarget(e.target)) triggerAdminRefreshBurst();
     });
+    function triggerAdminRefreshBurst() {
+      if (!window.htmx) return;
+      [1000, 4000, 9000, 16000].forEach(function (delay) {
+        setTimeout(function () { htmx.trigger(document.body, "admin-action-refresh"); }, delay);
+      });
+    }
     function isActionResultTarget(target) {
       return !!(target && (
         target.id === "drawer-result" ||

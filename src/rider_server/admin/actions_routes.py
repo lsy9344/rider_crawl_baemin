@@ -153,6 +153,13 @@ def _raise_for(exc: Exception) -> None:
     raise exc
 
 
+def _operator_action_message(exc: ValueError) -> str:
+    message = str(exc)
+    if message == "active manual job already exists":
+        return "이미 진행 중인 인증 작업이 있습니다. 잠시 후 상태를 확인하세요."
+    return message
+
+
 def _require_confirmation(form: dict) -> None:
     if str(form.get(_CONFIRM_ACTION_FIELD) or "").strip() != _CONFIRM_ACTION_VALUE:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "서버 확인값이 필요합니다")
@@ -264,7 +271,7 @@ async def auth_start(
     except ValueError as exc:
         return _fragment(
             request,
-            str(exc),
+            _operator_action_message(exc),
             ok=False,
             status_code=HTTPStatus.BAD_REQUEST,
             trigger_changed=False,

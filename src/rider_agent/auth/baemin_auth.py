@@ -169,11 +169,16 @@ def _config_from_auth_job(
     from rider_agent.workers.crawl_worker import _build_config, payload_from_job
 
     payload = payload_from_job(job)
-    cdp_url = str((job.payload or {}).get("cdp_url") or "http://127.0.0.1:9222")
+    raw_payload = job.payload or {}
+    cdp_url = str(raw_payload.get("cdp_url") or "http://127.0.0.1:9222")
+    user_data_dir = Path(
+        str(raw_payload.get("browser_user_data_dir") or "")
+        or str(Path("runtime") / "agent-browser-profiles" / payload.target_id)
+    )
     return _build_config(
         payload,
         cdp_url=cdp_url,
-        user_data_dir=Path("runtime") / "agent-browser-profiles" / payload.target_id,
+        user_data_dir=user_data_dir,
         secret_resolver=secret_resolver,
     )
 

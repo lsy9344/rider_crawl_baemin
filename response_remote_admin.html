@@ -249,6 +249,10 @@
     .action-result.ok::before { content: "✓"; font-weight: 700; } .action-result.err::before { content: "!"; font-weight: 700; }
     .inline-action-status.action-result, .inline-action-status .action-result { display: inline-flex; width: fit-content; min-height: 2rem; padding: 0.36rem 0.62rem; margin: 0 0 0.5rem 0.15rem; vertical-align: middle; border-radius: 999px; white-space: nowrap; }
     .inline-action-status:empty { display: none; }
+    .schedule-group { display: inline-flex; flex-wrap: wrap; align-items: flex-end; gap: 0 0.4rem; margin: 0 0.7rem 0.75rem 0; padding: 0.55rem 0.75rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--muted) 18%, var(--card)); vertical-align: bottom; }
+    .schedule-group-label { flex-basis: 100%; font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); margin-bottom: 0.35rem; letter-spacing: 0.02em; text-transform: uppercase; }
+    .schedule-group label { margin-bottom: 0; }
+    #view-manage .schedule-toggle { flex-direction: row; align-items: center; gap: 0.4rem; }
 
     /* ── 업체 상세 드로어 ───────────────────────────────────────────────── */
     .scrim { position: fixed; inset: 0; background: hsl(0 0% 0% / 0.5); z-index: 80; display: none; }
@@ -315,8 +319,8 @@
         <div><div class="brand-title">운영 대시보드</div><div class="brand-sub">rider_server · ops console</div></div>
       </div>
       <div class="appbar-right">
-        
-        
+
+
         
           
         
@@ -394,14 +398,14 @@
        data-severity-label="인증 필요"
        data-severity-class="sev-stopped"
        data-interval="2"
-       data-failcode="PROFILE_UNAVAILABLE"
-       data-reason="오류 — 확인 필요 (PROFILE_UNAVAILABLE)"
+       data-failcode="CDP_UNREACHABLE"
+       data-reason="오류 — 확인 필요 (CDP_UNREACHABLE)"
        data-success="3일 전"
        data-delivery=""
        data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
        data-tenant="864fc127-1138-40d2-b115-a24decf8a2b8"
-       data-primary-action="auth-check"
-       data-primary-label="인증 확인"
+       data-primary-action="auth-start"
+       data-primary-label="인증 시작"
        data-primary-style="primary">
     <span class="sevbar" aria-hidden="true"></span>
     <span class="t-name">
@@ -412,15 +416,15 @@
     <span class="plat plat-coupang">쿠팡</span>
     <span class="sev-badge sev-stopped">인증 필요</span>
     <span class="t-reason">
-      <span class="rs">오류 — 확인 필요 (PROFILE_UNAVAILABLE)</span>
+      <span class="rs">오류 — 확인 필요 (CDP_UNREACHABLE)</span>
       <span class="fresh fresh-dead">수집 3일 전</span>
     </span>
     <span class="t-act row-actions">
       
       <button type="button" class="btn primary" onclick="event.stopPropagation()"
-              hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-check?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+              hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-start?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
               hx-vals='{"confirm_action": "confirmed"}'
-              hx-target="#target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 확인</button>
+              hx-target="#target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 시작</button>
       <button type="button" class="btn ghost" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this)" aria-label="H&amp;J 상세 열기">상세</button>
     </span>
     <div class="row-result" id="target-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf" aria-live="polite" role="status"></div>
@@ -455,7 +459,7 @@
       <td>jena-5800h</td>
       <td>0.1.0</td>
       <td><span class="sev-normal">online</span></td>
-      <td>2026-06-22 07:54:21.080588+00:00</td>
+      <td>2026-06-22 10:16:45.828392+00:00</td>
       <td><span class="muted">유휴</span></td>
       <td>CRAWL_BAEMIN, CRAWL_COUPANG, AUTH_CHECK, OPEN_AUTH_BROWSER, KAKAO_SEND, CAPTURE_DIAGNOSTIC</td>
       <td>
@@ -513,8 +517,22 @@
       <td>H&amp;J</td>
       <td>로그인 만료 · 인증 확인 필요</td>
       <td>
-        
+
+
+        <button type="button"
+                class="btn primary"
+                data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+                hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-start?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">인증 시작</button>
+        <button type="button"
+                class="btn ghost"
+                data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf"
+                hx-post="/admin/targets/6b8fd18e-1799-4d39-9c13-f49794a6b5cf/auth-check?tenant=864fc127-1138-40d2-b115-a24decf8a2b8"
+                hx-vals='{"confirm_action": "confirmed"}'
+                hx-target="#auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf">상태 재확인</button>
         <button type="button" class="btn ghost" data-target="6b8fd18e-1799-4d39-9c13-f49794a6b5cf" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
+        <div class="muted" id="auth-required-result-6b8fd18e-1799-4d39-9c13-f49794a6b5cf" aria-live="polite"></div>
         
       </td>
     </tr>
@@ -590,6 +608,15 @@
         <label>관리 코드(선택) <input type="text" name="external_id"></label>
       </details>
       <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
+      <div class="schedule-group">
+        <span class="schedule-group-label">전송 허용 시간대</span>
+        <label class="schedule-toggle">
+          <input type="checkbox" name="schedule_enabled" value="true">
+          <span>시작/종료 시간 사용</span>
+        </label>
+        <label>시작 <input type="time" name="start_time"></label>
+        <label>종료 <input type="time" name="stop_time"></label>
+      </div>
       <button type="submit" class="create" data-required-select-submit disabled>업체 추가</button><span class="inline-action-status" aria-live="polite"></span>
     </form>
   </fieldset>
@@ -650,7 +677,20 @@
       <label>관리 코드(선택) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
-      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <div class="schedule-group">
+        <span class="schedule-group-label">전송 허용 시간대</span>
+        <label>
+          시간 사용
+          <select id="tgt-edit-schedule">
+            <option value="">변경 안 함</option>
+            <option value="true">사용</option>
+            <option value="false">사용 안 함</option>
+          </select>
+        </label>
+        <label>시작 <input type="time" id="tgt-edit-start" placeholder="비우면 유지"></label>
+        <label>종료 <input type="time" id="tgt-edit-stop" placeholder="비우면 유지"></label>
+      </div>
+      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval'), schedule_enabled: cval('tgt-edit-schedule'), start_time: cval('tgt-edit-start'), stop_time: cval('tgt-edit-stop')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
@@ -1038,6 +1078,21 @@
       stampUpdated();
       if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
     });
+    function isActionResultTarget(target) {
+      return !!(target && (
+        target.id === "drawer-result" ||
+        target.id === "action-result" ||
+        target.id.indexOf("target-result-") === 0 ||
+        target.id.indexOf("auth-required-result-") === 0
+      ));
+    }
+    document.body.addEventListener("htmx:beforeSwap", function (e) {
+      var xhr = e.detail && e.detail.xhr;
+      if (xhr && xhr.status >= 400 && isActionResultTarget(e.detail.target)) {
+        e.detail.shouldSwap = true;
+        e.detail.isError = false;
+      }
+    });
     document.body.addEventListener("htmx:responseError", markStale);
     document.body.addEventListener("htmx:sendError", markStale);
     function markStale() { var pill = document.getElementById("live-pill");
@@ -1147,7 +1202,12 @@
     function renderDrawerActions(d) {
       var box = document.getElementById("drawer-actions"); box.textContent = "";
       var action = d.primaryAction || "details";
-      if (action === "auth-check") box.appendChild(makeDrawerButton(d.primaryLabel || "인증 확인", "primary", function () { drawerPost("/auth-check"); }));
+      if (action === "auth-start") {
+        box.appendChild(makeDrawerButton(d.primaryLabel || "인증 시작", "primary", function () { drawerPost("/auth-start"); }));
+        box.appendChild(makeDrawerButton("상태 재확인", "", function () { drawerPost("/auth-check"); }));
+      } else if (action === "auth-check") {
+        box.appendChild(makeDrawerButton(d.primaryLabel || "상태 재확인", "primary", function () { drawerPost("/auth-check"); }));
+      }
       else if (action === "center-name") box.appendChild(makeDrawerButton(d.primaryLabel || "센터명 설정", "primary", focusCenterNameEdit));
       else if (action === "activate") box.appendChild(makeDrawerButton(d.primaryLabel || "활성화", "", function () { drawerPost("/activate", {}, drawerConfirm("활성화")); }));
       else if (action === "test-crawl") box.appendChild(makeDrawerButton(d.primaryLabel || "지금 수집", d.primaryStyle || "", function () { drawerPost("/test-crawl", {platform: ADM.platform}); }));
