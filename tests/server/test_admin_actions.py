@@ -905,6 +905,22 @@ def test_route_auth_start_missing_credentials_is_400() -> None:
     assert queue.events == []
 
 
+def test_route_auth_start_missing_coupang_credentials_returns_action_fragment() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account(platform=Platform.COUPANG))
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert 'class="action-result err"' in resp.text
+    assert "쿠팡 자동인증 정보가 필요합니다" in resp.text
+    assert repo.audits == []
+    assert queue.events == []
+
+
 def test_route_dry_run_returns_preview_without_send() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())

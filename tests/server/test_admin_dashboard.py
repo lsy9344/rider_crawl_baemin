@@ -810,6 +810,8 @@ def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -
     assert 'id="drawer-result"' in body
     assert 'id="drawer-actions"' in body
     assert 'renderDrawerActions' in body
+    assert 'htmx:beforeSwap' in body
+    assert 'isActionResultTarget' in body
     assert 'syncOpenDrawerFromRows' in body
     assert 'trapDrawerFocus' in body
 

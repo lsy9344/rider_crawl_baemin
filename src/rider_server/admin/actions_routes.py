@@ -120,11 +120,22 @@ async def _form(request: Request) -> dict:
     return {key: values[-1] for key, values in parsed.items()}
 
 
-def _fragment(request: Request, message: str, *, ok: bool = True) -> HTMLResponse:
+def _fragment(
+    request: Request,
+    message: str,
+    *,
+    ok: bool = True,
+    status_code: int = HTTPStatus.OK,
+    trigger_changed: bool = True,
+) -> HTMLResponse:
     response = templates.TemplateResponse(
-        request, "_action_result.html", {"message": message, "ok": ok}
+        request,
+        "_action_result.html",
+        {"message": message, "display_message": message, "ok": ok},
+        status_code=status_code,
     )
-    response.headers["HX-Trigger"] = "admin-entity-changed"
+    if trigger_changed:
+        response.headers["HX-Trigger"] = "admin-entity-changed"
     return response
 
 
@@ -251,7 +262,13 @@ async def auth_start(
     except AdminActionNotFound as exc:
         _raise_for(exc)
     except ValueError as exc:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+        return _fragment(
+            request,
+            str(exc),
+            ok=False,
+            status_code=HTTPStatus.BAD_REQUEST,
+            trigger_changed=False,
+        )
     return _fragment(request, f"인증 시작됨 (job {job_id})")
 
 
