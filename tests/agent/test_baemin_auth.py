@@ -379,6 +379,138 @@ def test_default_open_auth_browser_fills_baemin_login_and_requests_phone_code(mo
     assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
 
 
+def test_default_open_auth_browser_handles_actual_baemin_auth_screen(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeLocator:
+        def __init__(self, page, kind, name, *, usable=True):
+            self.page = page
+            self.kind = kind
+            self.name = name
+            self.usable = usable
+            self.first = self
+
+        def click(self, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            if self.name == "button:인증번호 받기" and not self.page.phone_ready:
+                raise TimeoutError(self.name)
+            actions.append(("click", self.kind, self.name))
+
+        def press(self, key, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("press", self.kind, self.name, key))
+
+        def press_sequentially(self, value, timeout=None, delay=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("type", self.kind, self.name, value))
+
+        def fill(self, value, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("fill", self.kind, self.name, value))
+
+        def filter(self, visible=True):
+            return self
+
+    class FakePage:
+        phone_ready = False
+
+        def goto(self, url, wait_until=None, timeout=None):
+            actions.append(("goto", url, wait_until, timeout))
+
+        def locator(self, selector):
+            if selector in {
+                "input[name='id']",
+                "input[name='password']",
+                "button:has-text('인증번호 받기')",
+            }:
+                return FakeLocator(self, "locator", selector)
+            return FakeLocator(self, "locator", selector, usable=False)
+
+        def get_by_role(self, role, name, exact=False):
+            if role == "button" and name == "로그인":
+                return FakeLocator(self, "role", "button:로그인")
+            if role == "button" and name == "인증번호 받기":
+                return FakeLocator(self, "role", "button:인증번호 받기")
+            return FakeLocator(self, "role", f"{role}:{name}", usable=False)
+
+        def get_by_text(self, text, exact=False):
+            return FakeLocator(self, "text", text, usable=False)
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            actions.append(("wait_for_load_state",))
+
+        def wait_for_timeout(self, timeout):
+            actions.append(("wait_for_timeout", timeout))
+
+        def wait_for_selector(self, selector, timeout=None):
+            actions.append(("wait_for_selector", selector, timeout))
+            if selector == "button:has-text('인증번호 받기')":
+                self.phone_ready = True
+                return True
+            raise TimeoutError(selector)
+
+    class FakeContext:
+        def __init__(self, page):
+            self.pages = [page]
+
+        def new_page(self):
+            return self.pages[0]
+
+    class FakeBrowser:
+        def __init__(self, page):
+            self.contexts = [FakeContext(page)]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+    browser = FakeBrowser(page)
+    monkeypatch.setattr(
+        "rider_agent.reuse.prepare_chrome",
+        lambda config, *, platform_name=None: "ok",
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(browser),
+    )
+
+    default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "배민센터A",
+                "login_id_ref": "baemin-login-id",
+                "login_password_ref": "baemin-login-password",
+            },
+        )
+    )
+
+    assert ("type", "locator", "input[name='id']", "baemin-login-id") in actions
+    assert ("wait_for_selector", "button:has-text('인증번호 받기')", 10_000) in actions
+    assert ("click", "role", "button:인증번호 받기") in actions
+    assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
+
+
 def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl(monkeypatch):
     from types import SimpleNamespace
 

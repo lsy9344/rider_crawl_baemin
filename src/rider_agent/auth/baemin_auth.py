@@ -101,6 +101,7 @@ _INTERACTION_TIMEOUT_MS = 10_000
 _USERNAME_INPUT_SELECTORS = (
     "input[name='username']",
     "input[name='loginId']",
+    "input[name='id']",
     "input[placeholder*='아이디']",
     "input[type='text']",
 )
@@ -118,6 +119,11 @@ _PHONE_CODE_REQUEST_TEXTS = (
     "문자 인증",
     "휴대폰 인증",
     "코드 받기",
+)
+_BAEMIN_PHONE_CODE_READY_SELECTORS = (
+    "button:has-text('인증번호 받기')",
+    "button:has-text('인증번호 요청')",
+    "input[name='verificationCode']",
 )
 
 
@@ -267,9 +273,23 @@ def _drive_baemin_login_flow(config: Any) -> None:
         )
         _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
         _wait_after_action(page, config)
+        _wait_for_baemin_phone_code_request(page, config)
         _click_first_by_text(
             page, _PHONE_CODE_REQUEST_TEXTS, config, roles=("button", "link")
         )
+
+
+def _wait_for_baemin_phone_code_request(page: Any, config: Any) -> None:
+    timeout = _interaction_timeout(config)
+    wait_for_selector = getattr(page, "wait_for_selector", None)
+    if not callable(wait_for_selector):
+        return
+    for selector in _BAEMIN_PHONE_CODE_READY_SELECTORS:
+        try:
+            wait_for_selector(selector, timeout=timeout)
+            return
+        except Exception:
+            continue
 
 
 def _drive_coupang_email_2fa_flow(config: Any) -> bool:
