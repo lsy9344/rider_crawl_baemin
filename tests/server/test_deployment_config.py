@@ -97,6 +97,8 @@ def test_ci_validates_deployment_compose_and_server_image() -> None:
 
     assert "deployment-config:" in workflow
     assert "docker compose -f deploy/docker-compose.yml config" in workflow
+    assert "Pre-pull BuildKit image" in workflow
+    assert "docker pull moby/buildkit:buildx-stable-1" in workflow
     assert "docker/build-push-action" in workflow
     assert "cache-from: type=gha" in workflow
     assert "cache-to: type=gha,mode=max" in workflow
