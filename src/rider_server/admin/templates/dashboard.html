@@ -231,6 +231,14 @@
     .sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
     .sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
 
+    /* ── 실시간 큐 뷰: job 상태 배지 / 멈춘 행 강조 ─────────────────────────── */
+    .job-badge { display: inline-flex; align-items: center; font-weight: 600; font-size: 0.8125rem; padding: 0.14rem 0.5rem; border-radius: 999px; white-space: nowrap; }
+    .job-pending { color: var(--muted-foreground); background: color-mix(in srgb, var(--neutral) 14%, transparent); }
+    .job-running { color: var(--info); background: color-mix(in srgb, var(--info) 14%, transparent); }
+    .job-retry { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+    .job-stuck-badge { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); margin-left: 0.3rem; }
+    tbody tr.job-stuck td { background: color-mix(in srgb, var(--crit) 7%, transparent); }
+
     /* ── 관리 모드: 폼/폴드 ─────────────────────────────────────────────── */
     fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 28%, var(--card)); padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem; }
     legend { font-weight: 600; font-size: 0.875rem; padding: 0.1rem 0.5rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
@@ -323,6 +331,8 @@
   {% set ag_offline = ag_total - ag_online %}
   {% set auth_n = auth_required | list | length %}
   {% set auth_targetless = auth_required | selectattr('target_id', 'none') | list | length %}
+  {% set jobs_n = (jobs | default([])) | list | length %}
+  {% set jobs_stuck = (jobs | default([])) | selectattr('stuck') | list | length %}
   {% set attention = tg_critical + tg_stopped + ag_offline + auth_targetless %}
 
   <header class="topbar">
@@ -407,6 +417,14 @@
       <summary>인증 필요 대상 <span class="tag">{{ auth_n }}건 · secret 비노출</span></summary>
       <div class="aux-body">
         <div id="auth-required" hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
+      </div>
+    </details>
+    {# 실시간 큐: active(대기/배정/실행/재시도) job 을 5초 주기로 갱신. 멈춘(stuck) job 이 있으면
+       펼친 상태로 둬 "왜 진행 중이라고 뜨는지"를 운영자가 바로 본다. #}
+    <details class="aux" {% if jobs_stuck %}open{% endif %}>
+      <summary>실시간 큐 <span class="tag">{{ jobs_n }}건 처리 중{% if jobs_stuck %} · ⚠ 멈춤 {{ jobs_stuck }}{% endif %} · 5s</span></summary>
+      <div class="aux-body">
+        <div id="jobs-queue" hx-get="/admin/jobs?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% with jobs = jobs | default([]) %}{% include "_jobs_queue.html" %}{% endwith %}</div>
       </div>
     </details>
   </main>

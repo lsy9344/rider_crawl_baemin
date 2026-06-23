@@ -133,6 +133,30 @@ class AuthRequiredRow:
     target_name: str | None = None
 
 
+@dataclass(frozen=True)
+class JobQueueRow:
+    """실시간 큐 뷰의 active(처리 전/처리 중) job 한 건. secret 0(분류 코드/이름/시각만).
+
+    운영자가 "왜 '이미 진행 중인 수집 작업이 있습니다'가 뜨는지" 큐를 직접 보고 판단하게 한다.
+    ``stuck`` 은 claim 됐는데 lease 가 만료됐거나(처리 중 멈춤), 배정 Agent 가 오프라인이라 아무도
+    집어가지 못하는 상태로, 운영자가 회수/재시도를 판단하는 신호다(stale recovery 가 곧 닫는다).
+    """
+
+    job_id: str
+    job_type: str
+    status: str
+    target_id: str | None
+    target_name: str | None
+    center_name: str | None
+    tenant_id: str | None
+    attempts: int
+    agent_name: str | None
+    agent_online: bool | None  # 배정 Agent heartbeat 신선도(미배정이면 None)
+    run_after: datetime | None  # 이 시각 이후에야 claim 가능(retry 대기 등)
+    claimed_at: datetime | None  # claim 된 시각(PENDING 은 None) — 처리 경과 표시용
+    stuck: bool
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # repository 포트(읽기 전용) — in-memory fake / PostgreSQL 공용
 # ══════════════════════════════════════════════════════════════════════════
@@ -195,6 +219,16 @@ class DashboardRepository(abc.ABC):
     @abc.abstractmethod
     async def auth_required(self, *, tenant_id: str) -> list[AuthRequiredRow]:
         """tenant 의 인증 필요 고객/대상/프로필 목록(AC4)."""
+
+    @abc.abstractmethod
+    async def active_jobs(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[JobQueueRow]:
+        """tenant 의 active(PENDING/CLAIMED/RUNNING/RETRY) job 목록(실시간 큐 뷰).
+
+        ``tenant_id == ALL_TENANTS`` 면 전 tenant 를 합친다. target 미연결 job(fleet job)은
+        ``tenant_id`` scope 밖이라 ALL_TENANTS 일 때만 보인다. 읽기 전용(상태 변경 0).
+        """
 
 
 def _optional_int(value: Any) -> int | None:
@@ -336,6 +370,29 @@ class DashboardService:
             for row in rows
         ]
 
+    async def job_queue_rows(
+        self, repo: DashboardRepository, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[JobQueueRow]:
+        """실시간 큐 뷰 행. stuck/online 판정은 lease·heartbeat 가 있는 repository 가 한다.
+
+        run_after(대기) → created_at(오래된 순)으로 정렬해 가장 막혀 있는 job 을 위로 올린다.
+        """
+
+        rows = await repo.active_jobs(tenant_id=tenant_id, now=now, limit=limit)
+        # stuck(멈춘/배정 Agent 오프라인) job 을 가장 위로, 그다음 run_after(대기) → claimed_at
+        # (오래된 순). None 은 항상 뒤로 보낸다(naive datetime.max 와 tz-aware 비교 회피 — 키를
+        # (has_value 불리언, 값)으로 구성해 None 끼리는 값 비교 자체를 하지 않는다).
+        return sorted(
+            rows,
+            key=lambda r: (
+                not r.stuck,
+                r.run_after is None,
+                r.run_after or now,
+                r.claimed_at is None,
+                r.claimed_at or now,
+            ),
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # in-memory 구현(무-DB 기본값 + 테스트 fake — InMemoryQueueBackend 선례)
@@ -353,6 +410,7 @@ class InMemoryDashboardRepository(DashboardRepository):
         self._agents: list[AgentHealthFacts] = []
         self._channels: dict[str, ChannelHealthRow] = {}
         self._auth_required: dict[str, list[AuthRequiredRow]] = {}
+        self._active_jobs: list[JobQueueRow] = []
 
     # ── seed(테스트 전용 — 런타임 read 경로 아님) ──────────────────────────────
     def seed_target(self, facts: TargetHealthFacts) -> None:
@@ -366,6 +424,9 @@ class InMemoryDashboardRepository(DashboardRepository):
 
     def seed_auth_required(self, row: AuthRequiredRow) -> None:
         self._auth_required.setdefault(row.tenant_id, []).append(row)
+
+    def seed_active_job(self, row: JobQueueRow) -> None:
+        self._active_jobs.append(row)
 
     # ── read 포트(런타임 경로) ────────────────────────────────────────────────
     async def target_health(
@@ -429,3 +490,12 @@ class InMemoryDashboardRepository(DashboardRepository):
         if tenant_id == ALL_TENANTS:
             return [row for rows in self._auth_required.values() for row in rows]
         return list(self._auth_required.get(tenant_id, []))
+
+    async def active_jobs(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[JobQueueRow]:
+        if tenant_id == ALL_TENANTS:
+            rows = list(self._active_jobs)
+        else:
+            rows = [row for row in self._active_jobs if row.tenant_id == tenant_id]
+        return rows[: max(0, limit)]

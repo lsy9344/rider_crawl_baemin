@@ -1,0 +1,46 @@
+{# 실시간 큐(active job) 부분 fragment(HTMX swap 대상). 읽기 전용 — 상태 변경 없음.
+   "이미 진행 중인 수집 작업이 있습니다"의 실체를 운영자가 직접 본다: 어떤 job 이 어떤 상태로
+   막혀 있고, 배정 Agent 가 살아있는지, 멈춘(stuck) job 인지. secret 0(분류 코드/이름/시각만). #}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>작업</th>
+      <th>상태</th>
+      <th>대상 / 센터</th>
+      <th>Agent</th>
+      <th>시도</th>
+      <th>대기 / 경과</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for j in jobs %}
+    <tr{% if j.stuck %} class="job-stuck"{% endif %}>
+      <td>{{ j.job_type | job_type_label }}</td>
+      <td>
+        <span class="job-badge {{ j.status | job_status_class }}">{{ j.status | job_status_label }}</span>
+        {% if j.stuck %}<span class="job-badge job-stuck-badge">멈춤</span>{% endif %}
+      </td>
+      <td>
+        {% if j.target_name %}{{ j.target_name }}{% else %}<span class="muted">대상 없음</span>{% endif %}
+        {% if j.center_name %}<span class="muted"> · {{ j.center_name }}</span>{% endif %}
+      </td>
+      <td>
+        {% if j.agent_name %}{{ j.agent_name }}
+          {% if j.agent_online is true %}<span class="sev-normal">online</span>
+          {% elif j.agent_online is false %}<span class="sev-critical">offline</span>{% endif %}
+        {% else %}<span class="muted">미배정</span>{% endif %}
+      </td>
+      <td>{{ j.attempts }}</td>
+      <td>
+        {% if j.run_after %}<span class="muted">대기 {{ j.run_after | relative_time }}</span>
+        {% elif j.claimed_at %}<span class="muted">{{ j.claimed_at | relative_time }} 시작</span>
+        {% else %}<span class="muted">방금</span>{% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">처리 중인 작업이 없습니다(큐 비어 있음).</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

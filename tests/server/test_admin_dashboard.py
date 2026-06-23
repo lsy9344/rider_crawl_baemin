@@ -33,6 +33,7 @@ from rider_server.admin.dashboard_service import (
     DashboardRepository,
     DashboardService,
     InMemoryDashboardRepository,
+    JobQueueRow,
     TargetHealthFacts,
     TargetRow,
 )
@@ -253,6 +254,64 @@ def test_auth_required_rows_are_tenant_scoped() -> None:
     assert all(r.tenant_id == _TENANT for r in rows)
 
 
+# ── 실시간 큐 뷰(active job) ─────────────────────────────────────────────────────
+
+
+def _job(
+    *,
+    job_id: str,
+    status: str = "PENDING",
+    job_type: str = "CRAWL_COUPANG",
+    tenant_id: str = _TENANT,
+    stuck: bool = False,
+    run_after: datetime | None = None,
+    claimed_at: datetime | None = None,
+    agent_name: str | None = None,
+    agent_online: bool | None = None,
+) -> JobQueueRow:
+    return JobQueueRow(
+        job_id=job_id,
+        job_type=job_type,
+        status=status,
+        target_id=f"tgt-{job_id}",
+        target_name=f"가게-{job_id}",
+        center_name="센터",
+        tenant_id=tenant_id,
+        attempts=0,
+        agent_name=agent_name,
+        agent_online=agent_online,
+        run_after=run_after,
+        claimed_at=claimed_at,
+        stuck=stuck,
+    )
+
+
+def test_job_queue_rows_put_stuck_first_then_run_after() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(_job(job_id="wait-late", run_after=_NOW + timedelta(minutes=10)))
+    repo.seed_active_job(_job(job_id="wait-soon", run_after=_NOW + timedelta(minutes=1)))
+    repo.seed_active_job(_job(job_id="stuck", status="CLAIMED", stuck=True))
+
+    rows = asyncio.run(
+        DashboardService().job_queue_rows(repo, tenant_id=_TENANT, now=_NOW)
+    )
+
+    # stuck 이 가장 위, 그다음 run_after 가 가까운 순.
+    assert [r.job_id for r in rows] == ["stuck", "wait-soon", "wait-late"]
+
+
+def test_job_queue_rows_are_tenant_scoped() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(_job(job_id="mine", tenant_id=_TENANT))
+    repo.seed_active_job(_job(job_id="theirs", tenant_id=_OTHER_TENANT))
+
+    mine = asyncio.run(DashboardService().job_queue_rows(repo, tenant_id=_TENANT, now=_NOW))
+    assert [r.job_id for r in mine] == ["mine"]
+
+    all_rows = asyncio.run(DashboardService().job_queue_rows(repo, tenant_id="all", now=_NOW))
+    assert {r.job_id for r in all_rows} == {"mine", "theirs"}
+
+
 def test_in_memory_dashboard_all_tenants_returns_targets_and_aggregates_channels() -> None:
     repo = InMemoryDashboardRepository()
     repo.seed_target(
@@ -335,6 +394,53 @@ def test_admin_db_failure_returns_operator_html_without_secret() -> None:
     assert "DB 실행 상태" in r.text
     assert "재시도" in r.text
     assert "super-secret" not in r.text
+
+
+def test_jobs_fragment_route_renders_korean_labels_and_stuck() -> None:
+    repo = _seeded_repo()
+    repo.seed_active_job(
+        _job(
+            job_id="j-stuck",
+            status="CLAIMED",
+            job_type="CRAWL_COUPANG",
+            stuck=True,
+            agent_name="agent-pc",
+            agent_online=False,
+        )
+    )
+    repo.seed_active_job(_job(job_id="j-wait", status="PENDING", job_type="CRAWL_BAEMIN"))
+
+    r = _client(repo).get(f"/admin/jobs?tenant={_TENANT}")
+
+    assert r.status_code == 200
+    body = r.text
+    # job type/status 한글 라벨 + 멈춤(stuck) + offline Agent 표시.
+    assert "쿠팡 수집" in body and "배민 수집" in body
+    assert "배정됨" in body and "대기" in body
+    assert "멈춤" in body and "offline" in body
+    assert 'class="job-stuck"' in body
+
+
+def test_jobs_fragment_route_is_tenant_scoped() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(_job(job_id="mine", tenant_id=_TENANT, job_type="CRAWL_COUPANG"))
+    repo.seed_active_job(_job(job_id="theirs", tenant_id=_OTHER_TENANT, job_type="CRAWL_COUPANG"))
+
+    body = _client(repo).get(f"/admin/jobs?tenant={_TENANT}").text
+    assert "가게-mine" in body
+    assert "가게-theirs" not in body
+
+
+def test_dashboard_full_page_includes_realtime_queue_section() -> None:
+    repo = _seeded_repo()
+    repo.seed_active_job(_job(job_id="j1", status="RUNNING", job_type="CRAWL_COUPANG"))
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    # 모니터링 화면에 실시간 큐 섹션 + 5초 폴링 + job fragment 가 들어간다.
+    assert "실시간 큐" in body
+    assert "/admin/jobs?tenant=" in body
+    assert "every 5s" in body
 
 
 def test_targets_fragment_db_failure_returns_safe_partial() -> None:
@@ -1319,5 +1425,6 @@ def test_dashboard_repository_port_exposes_only_read_methods() -> None:
         "agent_health",
         "channel_health",
         "auth_required",
+        "active_jobs",  # 실시간 큐 뷰(select 전용 읽기 — write/전이 아님)
     }
 

@@ -130,6 +130,48 @@ def _platform_class(code: str | None) -> str:
     return _PLATFORM_CLASSES.get((code or "").upper(), "")
 
 
+# ── 실시간 큐 뷰 표시 라벨(job type/status → 한글) ──────────────────────────────────
+_JOB_TYPE_LABELS: dict[str, str] = {
+    "CRAWL_BAEMIN": "배민 수집",
+    "CRAWL_COUPANG": "쿠팡 수집",
+    "AUTH_CHECK": "인증 확인",
+    "OPEN_AUTH_BROWSER": "인증 브라우저 열기",
+    "AUTH_COUPANG_2FA": "쿠팡 2차인증",
+    "KAKAO_SEND": "카카오 전송",
+    "CAPTURE_DIAGNOSTIC": "진단 캡처",
+}
+_JOB_STATUS_LABELS: dict[str, str] = {
+    "PENDING": "대기",
+    "CLAIMED": "배정됨",
+    "RUNNING": "실행 중",
+    "RETRY": "재시도 대기",
+    "SUCCEEDED": "완료",
+    "FAILED": "실패",
+}
+_JOB_STATUS_CLASSES: dict[str, str] = {
+    "PENDING": "job-pending",
+    "CLAIMED": "job-running",
+    "RUNNING": "job-running",
+    "RETRY": "job-retry",
+}
+
+
+def _job_type_label(code: str | None) -> str:
+    if not code:
+        return ""
+    return _JOB_TYPE_LABELS.get(code, code)
+
+
+def _job_status_label(code: str | None) -> str:
+    if not code:
+        return ""
+    return _JOB_STATUS_LABELS.get(code, code)
+
+
+def _job_status_class(code: str | None) -> str:
+    return _JOB_STATUS_CLASSES.get(code or "", "job-pending")
+
+
 def _relative_time(value: datetime | None) -> str:
     """datetime → '3분 전' 상대시간(읽기 전용 표시라 실 now 기준 — jobs.py 선례)."""
     if value is None:
@@ -169,6 +211,9 @@ templates.env.filters["platform_label"] = _platform_label
 templates.env.filters["platform_class"] = _platform_class
 templates.env.filters["relative_time"] = _relative_time
 templates.env.filters["freshness_class"] = _freshness_class
+templates.env.filters["job_type_label"] = _job_type_label
+templates.env.filters["job_status_label"] = _job_status_label
+templates.env.filters["job_status_class"] = _job_status_class
 
 
 # ── 인증 seam(5.8 이 MFA/4역할/세션으로 교체) ───────────────────────────────────────
@@ -350,6 +395,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
         agents = await _service.agent_rows(repo, now=now)
         channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
         auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
+        jobs = await _service.job_queue_rows(repo, tenant_id=tenant_id, now=now, limit=100)
     except Exception:  # noqa: BLE001 - Admin UI returns operator-safe HTML instead of JSON 500.
         return templates.TemplateResponse(
             request,
@@ -367,6 +413,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
             "agents": agents,
             "channels": channels,
             "auth_required": auth_required,
+            "jobs": jobs,
             "initial_target_id": initial_target_id,
             "show_debug_actions": False,
         },
@@ -459,4 +506,28 @@ async def auth_required_fragment(
         request,
         "_auth_required.html",
         {"auth_required": rows, "tenant_id": _tenant_id(request)},
+    )
+
+
+@router.get("/jobs", response_class=HTMLResponse)
+async def jobs_queue_fragment(
+    request: Request,
+    _auth: None = Depends(require_admin_session),
+) -> HTMLResponse:
+    """``GET /admin/jobs`` — 실시간 큐(active job) fragment.
+
+    운영자가 "이미 진행 중인 수집 작업이 있습니다"의 실체(어떤 job 이 어떤 상태로 막혀 있는지,
+    배정 Agent 가 살아있는지)를 직접 보게 한다. 읽기 전용(상태 변경 0).
+    """
+
+    try:
+        rows = await _service.job_queue_rows(
+            _repo(request), tenant_id=_tenant_id(request), now=_now(), limit=100
+        )
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
+    return templates.TemplateResponse(
+        request,
+        "_jobs_queue.html",
+        {"jobs": rows, "tenant_id": _tenant_id(request)},
     )

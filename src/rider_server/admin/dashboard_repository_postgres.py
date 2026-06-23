@@ -47,6 +47,7 @@ from rider_server.domain import (
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
     JOB_TYPE_KAKAO_SEND,
 )
@@ -57,14 +58,28 @@ from .dashboard_service import (
     AuthRequiredRow,
     ChannelHealthRow,
     DashboardRepository,
+    JobQueueRow,
     TargetHealthFacts,
 )
+from .severity import is_agent_online
 
 #: Telegram 전송 오류 집계 윈도(최근 10분 — ops-contract 정합, 정밀화는 5.9).
 _TELEGRAM_ERROR_WINDOW = timedelta(minutes=10)
 
 #: 활성(현재 처리 중) job status — Agent 현재 job 판정 스코프.
 _ACTIVE_JOB_STATUSES = (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+
+#: 큐에 남아 있는(아직 안 끝난) job status — 실시간 큐 뷰 스코프. enqueue_manual_job 의
+#: 중복 차단(admin_action_repository)과 같은 집합이라, 큐 뷰가 "왜 막혔는지"를 그대로 보여준다.
+_QUEUE_JOB_STATUSES = (
+    JOB_STATUS_PENDING,
+    JOB_STATUS_CLAIMED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_RETRY,
+)
+
+#: claim 됐는데 lease 가 만료된(처리 중 멈춤) 상태로 보는 job status.
+_LEASED_JOB_STATUSES = (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
 
 #: auth_sessions 인증대기로 보는 상태(BaeminAuthState 값).
 _AUTH_SESSION_PENDING_STATES = (
@@ -571,6 +586,77 @@ class PostgresDashboardRepository(DashboardRepository):
                     )
                 )
         return rows
+
+    async def active_jobs(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[JobQueueRow]:
+        if not tenant_id.strip():
+            return []
+        # claim 후 실행 Agent 는 agent_id, claim 전 사전배정은 assigned_agent_id 에 있다.
+        # 둘 중 있는 쪽을 Agent 조인 키로 쓴다(claim 된 job 은 실행 Agent, PENDING 은 배정 Agent).
+        effective_agent_id = func.coalesce(Job.agent_id, Job.assigned_agent_id)
+        conditions = [Job.status.in_(_QUEUE_JOB_STATUSES)]
+        if tenant_id != ALL_TENANTS:
+            # jobs 엔 tenant 컬럼이 없다 — target 을 통해 scope 한다. tenant 지정이면 target 없는
+            # fleet job 은 제외된다(ALL_TENANTS 에서만 보임).
+            conditions.append(MonitoringTarget.tenant_id == tenant_id)
+        stmt = (
+            select(
+                Job.id,
+                Job.type,
+                Job.status,
+                Job.target_id,
+                Job.attempts,
+                Job.run_after,
+                Job.claimed_at,
+                Job.lease_expires_at,
+                MonitoringTarget.tenant_id.label("tenant_id"),
+                MonitoringTarget.name.label("target_name"),
+                MonitoringTarget.center_name.label("center_name"),
+                Agent.name.label("agent_name"),
+                Agent.last_heartbeat_at.label("agent_heartbeat"),
+            )
+            .select_from(Job)
+            .join(MonitoringTarget, Job.target_id == MonitoringTarget.id, isouter=True)
+            .join(Agent, effective_agent_id == Agent.id, isouter=True)
+            .where(*conditions)
+            .order_by(Job.run_after.asc().nullsfirst(), Job.claimed_at.asc().nullslast())
+            .limit(max(0, limit))
+        )
+        result: list[JobQueueRow] = []
+        async with self._session_factory() as session:
+            for row in (await session.execute(stmt)).all():
+                agent_online = (
+                    is_agent_online(row.agent_heartbeat, now)
+                    if row.agent_name is not None
+                    else None
+                )
+                # stuck: claim 됐는데 lease 만료(처리 중 멈춤) 또는 배정 Agent 오프라인이라 아무도
+                # 집어가지 못함. stale recovery 가 곧 회수/종료하지만, 운영자가 먼저 보고 판단한다.
+                lease_expired = (
+                    row.status in _LEASED_JOB_STATUSES
+                    and row.lease_expires_at is not None
+                    and row.lease_expires_at <= now
+                )
+                stuck = bool(lease_expired or agent_online is False)
+                result.append(
+                    JobQueueRow(
+                        job_id=str(row.id),
+                        job_type=row.type,
+                        status=row.status,
+                        target_id=str(row.target_id) if row.target_id else None,
+                        target_name=str(row.target_name) if row.target_name else None,
+                        center_name=str(row.center_name) if row.center_name else None,
+                        tenant_id=str(row.tenant_id) if row.tenant_id else None,
+                        attempts=int(row.attempts or 0),
+                        agent_name=str(row.agent_name) if row.agent_name else None,
+                        agent_online=agent_online,
+                        run_after=row.run_after,
+                        claimed_at=row.claimed_at,
+                        stuck=stuck,
+                    )
+                )
+        return result
 
 
 def _pick_latest_code(job_row, delivery_row) -> str | None:
