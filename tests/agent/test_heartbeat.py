@@ -418,6 +418,17 @@ def test_default_capabilities_include_six_job_types_as_superset():
     assert _SIX_JOB_TYPES <= set(DEFAULT_CAPABILITIES)
 
 
+def test_default_capabilities_include_auth_coupang_2fa():
+    # crawl-coupang-auth-separation Task 1: 쿠팡 email 2FA 자동복구 capability 가 기본 보고에
+    # 들어간다(서버 JOB_TYPE_AUTH_COUPANG_2FA 와 같은 문자열).
+    from rider_agent.heartbeat import CAPABILITY_AUTH_COUPANG_2FA
+
+    assert CAPABILITY_AUTH_COUPANG_2FA == "AUTH_COUPANG_2FA"
+    payload = build_heartbeat_payload(_IDENTITY)
+    assert CAPABILITY_AUTH_COUPANG_2FA in set(payload["capabilities"])
+    assert CAPABILITY_AUTH_COUPANG_2FA in set(DEFAULT_CAPABILITIES)
+
+
 def test_injected_capabilities_reflected_including_future_types():
     payload = build_heartbeat_payload(
         _IDENTITY, capabilities=("CRAWL_BAEMIN", "EXTRA_FUTURE")

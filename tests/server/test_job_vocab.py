@@ -48,8 +48,8 @@ _LEGACY_NAMES = {"CRAWL", "RENDER", "DISPATCH_TELEGRAM", "BAEMIN_AUTH_OPEN"}
 
 def test_job_types_mirror_agent_default_capabilities():
     # 문자열 값이 1:1 일치(import 강결합이 아니라 값 미러 — 같은 문자열이어야 claim 매칭됨).
+    # count-lock 은 두지 않는다(superset 허용) — 후속 type 확장 시 이 단언만 같이 자란다.
     assert set(JOB_TYPES) == set(DEFAULT_CAPABILITIES)
-    assert len(JOB_TYPES) == 6
 
 
 def test_canonical_job_types_exact_set():
@@ -58,9 +58,23 @@ def test_canonical_job_types_exact_set():
         "CRAWL_COUPANG",
         "AUTH_CHECK",
         "OPEN_AUTH_BROWSER",
+        "AUTH_COUPANG_2FA",
         "KAKAO_SEND",
         "CAPTURE_DIAGNOSTIC",
     }
+
+
+def test_auth_coupang_2fa_vocabulary_is_mirrored_between_server_and_agent():
+    # crawl-coupang-auth-separation Task 1: 서버 job type 과 Agent capability 가 같은 문자열로
+    # AUTH_COUPANG_2FA 를 이해해야 claim 매칭이 된다(import 강결합 금지 — 값만 미러).
+    from rider_agent.heartbeat import CAPABILITY_AUTH_COUPANG_2FA
+    from rider_server.queue.states import JOB_TYPE_AUTH_COUPANG_2FA
+
+    assert JOB_TYPE_AUTH_COUPANG_2FA == "AUTH_COUPANG_2FA"
+    assert CAPABILITY_AUTH_COUPANG_2FA == "AUTH_COUPANG_2FA"
+    assert JOB_TYPE_AUTH_COUPANG_2FA == CAPABILITY_AUTH_COUPANG_2FA
+    assert "AUTH_COUPANG_2FA" in JOB_TYPES
+    assert "AUTH_COUPANG_2FA" in DEFAULT_CAPABILITIES
 
 
 def test_no_legacy_job_type_names():

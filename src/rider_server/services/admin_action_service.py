@@ -48,6 +48,7 @@ from rider_server.domain import (
 from rider_server.queue.backend import QueueBackend
 from rider_server.queue.states import (
     JOB_TYPE_AUTH_CHECK,
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_OPEN_AUTH_BROWSER,
@@ -76,6 +77,10 @@ UNAUTHENTICATED_ACTOR = "UNAUTHENTICATED_ADMIN"
 #: job 이 무제한 재실행되지 않도록, payload 에 ``requested_at``/``expires_at`` 를 실어 stale 판정의
 #: 단일 시간 기준을 준다(10~15분 사이). [근거 문서: queue-backlog-handling-policy.md]
 OPEN_AUTH_BROWSER_TTL = timedelta(minutes=12)
+
+#: 쿠팡 email 2FA 자동복구 mode 식별자(crawl payload 가 아니라 auth job payload 에만 둔다 —
+#: crawl-coupang-auth-separation Decision 6). ``AUTH_COUPANG_2FA`` job payload 의 ``recovery_mode``.
+RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = "coupang_auto_email_2fa"
 
 
 def _iso_utc(dt: datetime) -> str:
@@ -325,6 +330,13 @@ def _auth_start_payload(
             },
         )
 
+    # ── 쿠팡 ──────────────────────────────────────────────────────────────────────
+    # crawl-coupang-auth-separation Task 5 / Decision 1:
+    #   * 자동 email 2FA 정보(로그인 ID/PW + 이메일 주소/앱비번)가 모두 있으면 전용 인증 job
+    #     ``AUTH_COUPANG_2FA`` 를 만든다(자동 OTP 입력). ``OPEN_AUTH_BROWSER`` 가 아니다.
+    #   * 로그인 ID/PW 는 있으나 email 2FA 정보가 부족하면 **수동 브라우저 열기**
+    #     (``OPEN_AUTH_BROWSER``)로 폴백한다(사람이 직접 조치 — 자동 2FA 미동작).
+    #   * 로그인 ID/PW 자체가 없으면 인증 자체가 불가하므로 거부한다.
     login_id_ref = str(account.username or "").strip()
     login_password_ref = str(account.password or "").strip()
     verification_email_address_ref = str(
@@ -333,30 +345,47 @@ def _auth_start_payload(
     verification_email_app_password_ref = str(
         account.verification_email_app_password or ""
     ).strip()
-    if (
-        not login_id_ref
-        or not login_password_ref
-        or not verification_email_address_ref
-        or not verification_email_app_password_ref
-    ):
-        raise ValueError("쿠팡 자동인증 정보가 필요합니다")
+    if not login_id_ref or not login_password_ref:
+        raise ValueError("쿠팡 로그인 ID/PW가 필요합니다")
+
+    coupang_login_refs = {
+        "coupang_login_id_ref": login_id_ref,
+        "coupang_login_password_ref": login_password_ref,
+    }
+    auto_2fa_complete = bool(
+        verification_email_address_ref and verification_email_app_password_ref
+    )
+    if not auto_2fa_complete:
+        # 수동 폴백: 브라우저만 열고 사람이 조치(자동 OTP 0). 자동 2FA 플래그/recovery_mode 미포함.
+        return (
+            JOB_TYPE_OPEN_AUTH_BROWSER,
+            {
+                **base_payload,
+                **coupang_login_refs,
+            },
+        )
+
+    email_refs = {
+        "verification_email_address_ref": verification_email_address_ref,
+        "verification_email_app_password_ref": verification_email_app_password_ref,
+        "verification_email_subject_keyword": (
+            str(account.verification_email_subject_keyword or "").strip()
+            or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+        ),
+        "verification_email_sender_keyword": (
+            str(account.verification_email_sender_keyword or "").strip()
+            or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+        ),
+    }
+    # 자동복구: 전용 인증 job. base_payload 의 job_type(OPEN_AUTH_BROWSER)을 덮어쓴다.
     return (
-        JOB_TYPE_OPEN_AUTH_BROWSER,
+        JOB_TYPE_AUTH_COUPANG_2FA,
         {
             **base_payload,
-            "coupang_login_id_ref": login_id_ref,
-            "coupang_login_password_ref": login_password_ref,
-            "verification_email_address_ref": verification_email_address_ref,
-            "verification_email_app_password_ref": verification_email_app_password_ref,
-            "verification_email_subject_keyword": (
-                str(account.verification_email_subject_keyword or "").strip()
-                or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
-            ),
-            "verification_email_sender_keyword": (
-                str(account.verification_email_sender_keyword or "").strip()
-                or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
-            ),
-            "coupang_auto_email_2fa_enabled": True,
+            "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+            **coupang_login_refs,
+            **email_refs,
+            "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
         },
     )
 

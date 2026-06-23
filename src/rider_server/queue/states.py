@@ -25,15 +25,21 @@ JOB_TYPE_CRAWL_BAEMIN = "CRAWL_BAEMIN"
 JOB_TYPE_CRAWL_COUPANG = "CRAWL_COUPANG"
 JOB_TYPE_AUTH_CHECK = "AUTH_CHECK"
 JOB_TYPE_OPEN_AUTH_BROWSER = "OPEN_AUTH_BROWSER"
+# 쿠팡 email 2FA 자동복구 전용 인증 job. ``OPEN_AUTH_BROWSER`` 는 "사람이 브라우저에서 직접
+# 조치하는 job" 으로 남기고, 쿠팡 자동 OTP 입력은 이 type 이 담당한다(Agent capability
+# ``CAPABILITY_AUTH_COUPANG_2FA`` 와 **문자열로 일치**하되 import 하지 않는다 — 값만 미러).
+JOB_TYPE_AUTH_COUPANG_2FA = "AUTH_COUPANG_2FA"
 JOB_TYPE_KAKAO_SEND = "KAKAO_SEND"
 JOB_TYPE_CAPTURE_DIAGNOSTIC = "CAPTURE_DIAGNOSTIC"
 
-#: 정본 job type 6종. tuple 로 두어 우발적 변이를 막는다(후속이 늘려도 count-lock 없음).
+#: 정본 job type. tuple 로 두어 우발적 변이를 막는다(후속이 늘려도 count-lock 없음 — superset
+#: 허용. Agent ``DEFAULT_CAPABILITIES`` 와 같은 문자열 집합이어야 claim 매칭이 된다).
 JOB_TYPES: tuple[str, ...] = (
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_AUTH_CHECK,
     JOB_TYPE_OPEN_AUTH_BROWSER,
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_KAKAO_SEND,
     JOB_TYPE_CAPTURE_DIAGNOSTIC,
 )

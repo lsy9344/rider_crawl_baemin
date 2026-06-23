@@ -280,6 +280,96 @@ def test_compose_auth_worker_uses_crawl_profile_assignment_for_auth_jobs(tmp_pat
     )
 
 
+def test_compose_routes_auth_coupang_2fa_to_dedicated_worker(tmp_path):
+    # crawl-coupang-auth-separation Task 3: AUTH_COUPANG_2FA capability 가 있으면 전용 worker 로
+    # 라우팅되고(자동 email 2FA), AUTH_CHECK/OPEN_AUTH_BROWSER 는 baemin auth 라우터로 흐른다.
+    from types import SimpleNamespace
+
+    from rider_agent.heartbeat import (
+        CAPABILITY_AUTH_COUPANG_2FA,
+        CAPABILITY_CRAWL_COUPANG,
+        CAPABILITY_OPEN_AUTH_BROWSER,
+    )
+    from rider_agent.worker_composition import compose_execute_job
+
+    class Profiles:
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            profile_dir = tmp_path / "profiles" / tenant_id / target_id
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9450",
+                user_data_dir=profile_dir,
+            )
+            return SimpleNamespace(cdp_url=config.cdp_url, profile_dir=config.browser_user_data_dir)
+
+        def browser_profiles(self):
+            return []
+
+    recover_calls = []
+
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[
+            CAPABILITY_OPEN_AUTH_BROWSER,
+            CAPABILITY_AUTH_COUPANG_2FA,
+            CAPABILITY_CRAWL_COUPANG,
+        ],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_auth_worker=True,
+        start_crawl_worker=True,
+        crawl_profile_manager=Profiles(),
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+        secret_resolver={
+            "mailbox-ref": "operator@example.com",
+            "mail-app-password-ref": "fake app password",
+        }.get,
+    )
+
+    # AUTH_COUPANG_2FA 는 전용 worker 로 — recover 가 실제로 호출되는지 monkeypatch 로 가로채기는
+    # 어렵지만, result_json 형태가 전용 worker 의 것(auth_recovery_state 포함)임을 확인한다.
+    import rider_agent.auth.coupang_gmail_2fa as cg2fa
+
+    original = cg2fa.execute_auth_coupang_2fa_job
+
+    def spy(job, **kwargs):
+        recover_calls.append(job.type)
+        kwargs["recover"] = lambda: True
+        return original(job, **kwargs)
+
+    cg2fa.execute_auth_coupang_2fa_job = spy
+    try:
+        result = composition.execute_job(
+            ClaimedJob(
+                job_id="job-auth-2fa-1",
+                type=CAPABILITY_AUTH_COUPANG_2FA,
+                target_id="target-1",
+                lease_expires_at=FUTURE_LEASE,
+                payload={
+                    "target_id": "target-1",
+                    "tenant_id": "tenant-1",
+                    "platform": "coupang",
+                    "platform_account_id": "account-1",
+                    "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                    "expected_display_name": "쿠팡상점A",
+                    "browser_profile_ref": "profile:target-1",
+                    "verification_email_address_ref": "mailbox-ref",
+                    "verification_email_app_password_ref": "mail-app-password-ref",
+                },
+            )
+        )
+    finally:
+        cg2fa.execute_auth_coupang_2fa_job = original
+
+    assert recover_calls == [CAPABILITY_AUTH_COUPANG_2FA]
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_recovery_state"] == "ACTIVE"
+    assert result.result_json["auth_state"] == "ACTIVE"
+
+
 def _runner(transport, **kwargs):
     """JobRunner 생성 헬퍼 — stop/sleep 기본 배선 + 주입 override."""
 

@@ -23,6 +23,7 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
 )
+from rider_agent.reuse import BrowserActionRequiredError
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
 from rider_agent.workers.crawl_worker import (
     AUTH_STATE_ACTIVE,
@@ -278,7 +279,9 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert result.status == JOB_STATUS_SUCCESS
     config = captured["config"]
     assert captured["platform_name"] == "coupang"
-    assert config.coupang_auto_email_2fa_enabled is True
+    # crawl-coupang-auth-separation Task 4: 크롤 job 은 inline 2FA 를 하지 않는다. 자격 ref 는
+    # 여전히 해소돼 config 에 채워지지만(로컬 호환·센터 검증), 자동 email 2FA 는 강제로 꺼진다.
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "coupang-login-id"
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
@@ -328,7 +331,8 @@ def test_coupang_job_local_secret_refs_are_resolved_into_email_2fa_config() -> N
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
     assert config.verification_email_app_password == "mail-app-password"
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: 크롤 job 의 자동 email 2FA 는 강제 비활성(자격 ref 해소는 유지).
+    assert config.coupang_auto_email_2fa_enabled is False
 
 
 def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
@@ -364,7 +368,8 @@ def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
 
     assert result.status == JOB_STATUS_SUCCESS
     config = captured["config"]
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: 평문 자격은 그대로 config 에 흘러들지만 자동 email 2FA 는 강제 비활성.
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "plain-coupang-login-id"
     assert config.coupang_login_password == "plain-coupang-login-password"
     assert config.verification_email_address == "myemail@gmail.com"
@@ -403,6 +408,86 @@ def test_coupang_job_defaults_email_2fa_disabled_when_flag_omitted() -> None:
     config = captured["config"]
     assert captured["platform_name"] == "coupang"
     assert config.coupang_auto_email_2fa_enabled is False
+
+
+def test_crawl_coupang_job_does_not_enable_email_2fa_from_payload(monkeypatch) -> None:
+    """Crawl jobs never run automatic Coupang email recovery.
+
+    crawl-coupang-auth-separation Task 4: payload 에 ``coupang_auto_email_2fa_enabled=True`` 가
+    있어도 ``AppConfig.coupang_auto_email_2fa_enabled`` 는 False 이고,
+    ``recover_coupang_session_with_email_2fa`` 는 호출되지 않는다.
+    """
+    captured = {}
+    recover_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda *a, **k: recover_calls.append((a, k)) or True,
+    )
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["config"].coupang_auto_email_2fa_enabled is False
+    assert recover_calls == []  # 크롤 경로는 자동 email 2FA 복구를 호출하지 않는다
+
+
+def test_crawl_coupang_login_screen_returns_auth_required_without_recovery(monkeypatch) -> None:
+    """Login screen in crawl path is surfaced to server as AUTH_REQUIRED (no auto recovery)."""
+    recover_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda *a, **k: recover_calls.append((a, k)) or True,
+    )
+
+    def fake_crawl(config, *, platform_name=None):
+        raise BrowserActionRequiredError("coupang login required")
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert recover_calls == []  # 로그인 화면을 만나도 자동 2FA 복구 시도 0
 
 
 def test_default_process_boundary_passes_plaintext_credentials(monkeypatch) -> None:
@@ -978,7 +1063,9 @@ def test_run_agent_passes_store_resolver_to_crawl_worker(tmp_path) -> None:
 
     config = captured["config"]
     assert summary.started is True
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: store resolver 는 여전히 자격 ref 를 config 에 채우지만, 크롤 job 의 자동 email
+    # 2FA 는 강제 비활성(자동복구는 별도 AUTH_COUPANG_2FA job).
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "coupang-login-id"
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"

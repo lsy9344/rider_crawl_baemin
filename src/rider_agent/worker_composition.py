@@ -117,7 +117,9 @@ def compose_execute_job(
         )
 
     if start_auth_worker and (
-        "AUTH_CHECK" in capabilities or "OPEN_AUTH_BROWSER" in capabilities
+        "AUTH_CHECK" in capabilities
+        or "OPEN_AUTH_BROWSER" in capabilities
+        or "AUTH_COUPANG_2FA" in capabilities
     ):
         from rider_agent.auth import baemin_auth
 
@@ -180,6 +182,39 @@ def compose_execute_job(
         if auth_max_attempts is not None:
             auth_kwargs["max_attempts"] = auth_max_attempts
         effective_execute_job = baemin_auth.build_auth_execute_job(**auth_kwargs)
+
+        # AUTH_COUPANG_2FA 는 별도 worker(coupang_gmail_2fa)로 라우팅한다. baemin auth 라우터
+        # (AUTH_CHECK/OPEN_AUTH_BROWSER) 바깥에 합성해 그 둘은 그대로 흐르게 한다. profile
+        # assignment 가 필요하므로(브라우저 page 획득) crawl_profile_manager 가 있을 때 wrap.
+        if "AUTH_COUPANG_2FA" in capabilities:
+            from rider_agent.auth import coupang_gmail_2fa
+
+            inner_execute = effective_execute_job
+            if crawl_profile_manager is not None:
+                def _coupang_2fa_execute(job: Any, _inner=inner_execute) -> Any:
+                    assigned = _with_profile_assignment(
+                        job,
+                        profile_manager=crawl_profile_manager,
+                        secret_resolver=secret_resolver,
+                    )
+                    router = coupang_gmail_2fa.build_coupang_auth_execute_job(
+                        secret_resolver=secret_resolver,
+                        fallback=lambda _j: _inner(job),
+                        now=now,
+                        sleep=sleep,
+                        log=log,
+                    )
+                    return router(assigned)
+
+                effective_execute_job = _coupang_2fa_execute
+            else:
+                effective_execute_job = coupang_gmail_2fa.build_coupang_auth_execute_job(
+                    secret_resolver=secret_resolver,
+                    fallback=inner_execute,
+                    now=now,
+                    sleep=sleep,
+                    log=log,
+                )
 
     crawl_worker = None
     if should_start_crawl_worker:
