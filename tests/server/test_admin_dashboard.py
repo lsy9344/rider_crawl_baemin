@@ -46,7 +46,18 @@ from rider_server.admin.severity import (
     SEVERITY_TARGET_VALIDATION_FAILURE,
     SEVERITY_WARNING,
 )
-from rider_server.domain import CustomerLifecycleState, Tenant
+from rider_server.domain import (
+    CustomerLifecycleState,
+    DeliveryRule,
+    Messenger,
+    MessengerChannel,
+    MessengerChannelState,
+    MonitoringTarget,
+    MonitoringTargetStatus,
+    Platform,
+    PlatformAccount,
+    Tenant,
+)
 from rider_server.main import create_app
 from rider_server.security import AdminPrincipal, AdminRole
 from rider_server.services.admin_entity_service import (
@@ -83,6 +94,7 @@ def _target(
     last_failure_at: datetime | None = None,
     account_auth_state: str | None = "ACTIVE",
     lifecycle_state: str | None = "ACTIVE",
+    auth_session_pending: bool = False,
 ) -> TargetHealthFacts:
     return TargetHealthFacts(
         target_id=target_id,
@@ -97,6 +109,7 @@ def _target(
         last_failure_at=last_failure_at,
         account_auth_state=account_auth_state,
         lifecycle_state=lifecycle_state,
+        auth_session_pending=auth_session_pending,
     )
 
 
@@ -252,6 +265,47 @@ def test_auth_required_rows_are_tenant_scoped() -> None:
     rows = asyncio.run(DashboardService().auth_required_rows(_seeded_repo(), tenant_id=_TENANT))
     assert [r.target_id for r in rows] == ["t-stopped"]
     assert all(r.tenant_id == _TENANT for r in rows)
+
+
+def test_auth_required_rows_collapse_duplicate_target_and_prefer_pending_session() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(_target(target_id="t-pending", name="가게", auth_session_pending=True))
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="t-pending",
+            profile_id="p-old",
+            reason="ACCOUNT_AUTH_REQUIRED",
+            target_name="가게",
+        )
+    )
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="t-pending",
+            profile_id="p-ready",
+            reason="AUTH_SESSION_PENDING",
+        )
+    )
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="t-pending",
+            profile_id="p-duplicate",
+            reason="AUTH_SESSION_PENDING",
+        )
+    )
+
+    rows = asyncio.run(DashboardService().auth_required_rows(repo, tenant_id=_TENANT, now=_NOW))
+
+    assert len(rows) == 1
+    assert rows[0] == AuthRequiredRow(
+        tenant_id=_TENANT,
+        target_id="t-pending",
+        profile_id="p-ready",
+        reason="AUTH_SESSION_PENDING",
+        target_name="가게",
+    )
 
 
 # ── 실시간 큐 뷰(active job) ─────────────────────────────────────────────────────
@@ -695,7 +749,13 @@ def test_admin_routes_registered_under_admin_prefix_not_v1() -> None:
     app = create_app(_FAKE_SETTINGS, dashboard_repository=_seeded_repo())
     paths = {getattr(route, "path", None) for route in app.routes}
     assert "/admin" in paths
-    assert {"/admin/targets", "/admin/agents", "/admin/channels", "/admin/auth-required"} <= paths
+    assert {
+        "/admin/targets",
+        "/admin/agents",
+        "/admin/channels",
+        "/admin/registered-settings",
+        "/admin/auth-required",
+    } <= paths
     # /v1/ 운영 가드와 무관(admin 은 HTML).
     assert "/v1/admin" not in paths
 
@@ -727,7 +787,7 @@ def test_main_dependencies_still_exactly_seven() -> None:
 
 def test_readmodel_dtos_have_no_secret_shaped_fields() -> None:
     forbidden = ("token", "secret", "password", "otp", "passwd", "_ref")
-    for dto in (TargetRow, AgentRow, ChannelHealthRow, AuthRequiredRow):
+    for dto in (TargetRow, AgentRow, ChannelHealthRow, AuthRequiredRow, admin_routes.SettingsRow):
         for field in fields(dto):
             lowered = field.name.lower()
             assert not any(bad in lowered for bad in forbidden), f"{dto.__name__}.{field.name}"
@@ -773,6 +833,7 @@ def test_all_fragments_also_require_admin_session() -> None:
         f"/admin/targets?tenant={_TENANT}",
         "/admin/agents",
         f"/admin/channels?tenant={_TENANT}",
+        f"/admin/registered-settings?tenant={_TENANT}",
         f"/admin/auth-required?tenant={_TENANT}",
     ):
         assert c.get(path).status_code == 401, path
@@ -936,6 +997,36 @@ def test_auth_required_reason_takes_precedence_over_latest_profile_failure() -> 
 
     assert 'data-reason="로그인 만료 · 인증 확인 필요"' in html
     assert "브라우저 프로필 준비 실패" not in html
+
+
+def test_auth_session_pending_target_prompts_user_to_enter_code_and_recheck() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-pending",
+            last_success_at=_NOW - timedelta(minutes=1),
+            account_auth_state="ACTIVE",
+            lifecycle_state="ACTIVE",
+            auth_session_pending=True,
+        )
+    )
+
+    rows = asyncio.run(DashboardService().target_rows(repo, tenant_id=_TENANT, now=_NOW))
+    display_rows = [
+        admin_routes._target_row_for_display(facts, _NOW)
+        for facts in asyncio.run(repo.target_health(tenant_id=_TENANT, now=_NOW))
+    ]
+    html = admin_routes.templates.env.get_template("_targets.html").render(
+        targets=display_rows,
+        tenant_id=_TENANT,
+    )
+
+    assert rows[0].severity == SEVERITY_STOPPED
+    assert display_rows[0].severity == SEVERITY_AUTH_REQUIRED
+    assert "인증번호 입력 필요" in html
+    assert 'data-primary-action="auth-check"' in html
+    assert "/admin/targets/t-pending/auth-check" in html
+    assert "/admin/targets/t-pending/auth-start" not in html
 
 
 def test_profile_unavailable_reason_is_operator_readable() -> None:
@@ -1220,6 +1311,27 @@ def test_auth_required_fragment_offers_direct_status_recheck() -> None:
     assert "/admin/targets/t-stopped/auth-check?tenant=tn-1" in html
 
 
+def test_auth_required_fragment_names_auth_session_pending_action() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-pending",
+                profile_id="p1",
+                reason="AUTH_SESSION_PENDING",
+                target_name="가게",
+            )
+        ],
+        tenant_id=_TENANT,
+    )
+
+    assert "가게" in html
+    assert "인증번호 입력 필요" in html
+    assert "오류 — 확인 필요" not in html
+    assert "/admin/targets/t-pending/auth-check?tenant=tn-1" in html
+    assert "/admin/targets/t-pending/auth-start?tenant=tn-1" not in html
+
+
 def test_dashboard_full_page_without_tenant_param_renders() -> None:
     # ?tenant 미지정(빈 tenant seam) 이어도 200 — 대상은 빈 안내문, agent fleet 은 전역 표시.
     r = _client(_seeded_repo()).get("/admin")
@@ -1473,4 +1585,167 @@ def test_dashboard_repository_port_exposes_only_read_methods() -> None:
         "auth_required",
         "active_jobs",  # 실시간 큐 뷰(select 전용 읽기 — write/전이 아님)
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# "등록된 설정" 카드 — 등록 config(AdminEntityService) + 라이브 램프 조립(읽기 전용)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _settings_app(
+    *,
+    sending_enabled: bool = True,
+    seed_health: bool = True,
+    seed_entities: bool = True,
+) -> TestClient:
+    """"등록된 설정" 카드용 app — dashboard repo(라이브 램프) + 엔티티 repo(등록 config) 동시 seed.
+
+    tenant ``tn-1`` 에 BAEMIN/COUPANG 계정, 대상 2건(tg-a ACTIVE·예약 09:00~22:00,
+    tg-b PAUSED·예약 off), TELEGRAM/KAKAO 채널, 전송규칙(tg-a→두 채널 enabled · tg-b→tel disabled)을
+    심는다. tg-a 는 최근 수집 성공 health 를 심어 램프가 NORMAL 로 떨어지게 한다.
+    """
+
+    entity_repo = InMemoryAdminEntityRepository()
+    if seed_entities:
+        entity_repo.seed_tenant(
+            Tenant(
+                id=_TENANT,
+                name="고객",
+                status=CustomerLifecycleState.ACTIVE,
+                created_at=_NOW,
+                sending_enabled=sending_enabled,
+            )
+        )
+        entity_repo.seed_platform_account(
+            PlatformAccount(id="acc-b", tenant_id=_TENANT, platform=Platform.BAEMIN, label="배민계정")
+        )
+        entity_repo.seed_platform_account(
+            PlatformAccount(id="acc-c", tenant_id=_TENANT, platform=Platform.COUPANG, label="쿠팡계정")
+        )
+        entity_repo.seed_monitoring_target(
+            MonitoringTarget(
+                id="tg-a",
+                tenant_id=_TENANT,
+                platform_account_id="acc-b",
+                name="강남점",
+                center_name="강남센터",
+                interval_minutes=10,
+                schedule_enabled=True,
+                start_time="09:00",
+                stop_time="22:00",
+                status=MonitoringTargetStatus.ACTIVE,
+            )
+        )
+        entity_repo.seed_monitoring_target(
+            MonitoringTarget(
+                id="tg-b",
+                tenant_id=_TENANT,
+                platform_account_id="acc-c",
+                name="역삼점",
+                center_name="역삼센터",
+                interval_minutes=5,
+                schedule_enabled=False,
+                status=MonitoringTargetStatus.PAUSED,
+            )
+        )
+        entity_repo.seed_messenger_channel(
+            MessengerChannel(
+                id="ch-t",
+                tenant_id=_TENANT,
+                messenger=Messenger.TELEGRAM,
+                telegram_chat_id="100",
+                state=MessengerChannelState.ACTIVE,
+            )
+        )
+        entity_repo.seed_messenger_channel(
+            MessengerChannel(
+                id="ch-k",
+                tenant_id=_TENANT,
+                messenger=Messenger.KAKAO,
+                kakao_room_name="강남방",
+                state=MessengerChannelState.ACTIVE,
+            )
+        )
+        # tg-a 는 두 채널로 fan-out(메신저 뱃지 2개), tg-b 는 비활성 규칙뿐(전송 OFF 검증).
+        entity_repo.seed_delivery_rule(DeliveryRule(id="r-1", target_id="tg-a", channel_id="ch-t", enabled=True))
+        entity_repo.seed_delivery_rule(DeliveryRule(id="r-2", target_id="tg-a", channel_id="ch-k", enabled=True))
+        entity_repo.seed_delivery_rule(DeliveryRule(id="r-3", target_id="tg-b", channel_id="ch-t", enabled=False))
+
+    repo = InMemoryDashboardRepository()
+    if seed_health:
+        # 라우트 fragment 는 실 now() 로 severity 를 합성하므로(주입 now 아님) 신선도가 NORMAL 로
+        # 떨어지려면 실시간 기준 최근 성공이어야 한다(_NOW 는 2026 고정이라 stale 처리됨).
+        recent = datetime.now(timezone.utc) - timedelta(minutes=2)
+        repo.seed_target(_target(target_id="tg-a", name="강남점", last_success_at=recent))
+    app = _allow_viewer(
+        create_app(
+            _FAKE_SETTINGS,
+            dashboard_repository=repo,
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_registered_settings_fragment_renders_assembled_rows() -> None:
+    r = _settings_app().get(f"/admin/registered-settings?tenant={_TENANT}")
+
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    body = r.text
+    # 대상/센터·시간·주기.
+    assert "강남점" in body and "역삼점" in body
+    assert "강남센터" in body
+    assert "09:00 ~ 22:00" in body  # tg-a 예약 시간창
+    assert "상시" in body  # tg-b 예약 off → 상시
+    assert "10분" in body  # tg-a 주기
+    # 수집(크롤링) ON/OFF: tg-a ACTIVE → ON, tg-b PAUSED → OFF(둘 다 한 표에 존재).
+    assert "toggle-pill on" in body and "toggle-pill off" in body
+    # 메신저 fan-out: tg-a 가 텔레그램+카카오 둘 다.
+    assert "텔레그램" in body and "카카오" in body
+    # 플랫폼: 배민(tg-a)·쿠팡(tg-b).
+    assert "배민" in body and "쿠팡" in body
+    # 라이브 램프: tg-a 최근 성공 → 정상(sev-normal).
+    assert "sev-normal" in body
+
+
+def test_registered_settings_send_gate_respects_tenant_sending_enabled() -> None:
+    # sending_enabled=False 면 enabled 규칙·ACTIVE 채널이 있어도 전송은 OFF 여야 한다.
+    body_on = _settings_app(sending_enabled=True).get(
+        f"/admin/registered-settings?tenant={_TENANT}"
+    ).text
+    body_off = _settings_app(sending_enabled=False).get(
+        f"/admin/registered-settings?tenant={_TENANT}"
+    ).text
+
+    # 켜짐: 전송 ON pill 이 최소 1개(tg-a). 꺼짐: 전송 ON 은 사라지고 크롤링 ON(tg-a)만 남는다.
+    assert body_on.count("toggle-pill on") > body_off.count("toggle-pill on")
+    # 게이트 OFF 라도 크롤링(수집) ON 은 유지(tg-a ACTIVE) → ON pill 이 정확히 1개.
+    assert body_off.count("toggle-pill on") == 1
+
+
+def test_registered_settings_empty_state() -> None:
+    body = _settings_app(seed_entities=False, seed_health=False).get(
+        f"/admin/registered-settings?tenant={_TENANT}"
+    ).text
+    assert "등록된 설정이 없습니다." in body
+
+
+def test_dashboard_full_page_includes_registered_settings_card() -> None:
+    body = _settings_app().get(f"/admin?tenant={_TENANT}").text
+
+    assert "등록된 설정" in body
+    assert 'id="registered-settings"' in body
+    assert "/admin/registered-settings?tenant=" in body
+    # 등록 config 변경 후 갱신 트리거(쓰기 커밋 착지 대기 delay:2s, targets 카드 선례).
+    assert "admin-entity-changed from:body delay:2s" in body
+    # 첫 페인트 사전 렌더(무-플래시): 카드 안에 행 데이터가 이미 들어 있다.
+    assert "강남점" in body
+
+
+def test_registered_settings_messenger_label_filter() -> None:
+    assert admin_routes._messenger_label("TELEGRAM") == "텔레그램"
+    assert admin_routes._messenger_label("KAKAO") == "카카오"
+    assert admin_routes._messenger_label("telegram") == "텔레그램"  # 대소문자 무관
+    assert admin_routes._messenger_label("UNKNOWN") == "UNKNOWN"  # 미지 코드 그대로
+    assert admin_routes._messenger_label(None) == ""
 

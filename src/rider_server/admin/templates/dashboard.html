@@ -231,6 +231,13 @@
     .sev-critical { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); }
     .sev-stopped { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
 
+    /* ── 등록된 설정 카드: 수집/전송 ON·OFF pill(기존 sev 토큰 재사용) ───────────────── */
+    .toggle-pill { display: inline-flex; align-items: center; font-family: var(--font-mono); font-weight: 600;
+      font-size: 0.8125rem; padding: 0.12rem 0.5rem; border-radius: 999px; white-space: nowrap; }
+    .toggle-pill.on { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+    .toggle-pill.off { color: var(--neutral); background: color-mix(in srgb, var(--neutral) 16%, transparent); }
+    .set-name { font-weight: 600; }
+
     /* ── 실시간 큐 뷰: job 상태 배지 / 멈춘 행 강조 ─────────────────────────── */
     .job-badge { display: inline-flex; align-items: center; font-weight: 600; font-size: 0.8125rem; padding: 0.14rem 0.5rem; border-radius: 999px; white-space: nowrap; }
     .job-pending { color: var(--muted-foreground); background: color-mix(in srgb, var(--neutral) 14%, transparent); }
@@ -414,6 +421,15 @@
       <summary>채널 상태 <span class="tag">Kakao {{ channels.kakao_queue_lag_seconds }}s · Telegram {{ channels.telegram_error_count }}건</span></summary>
       <div class="aux-body">
         <div id="channels" hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_channels.html" %}</div>
+      </div>
+    </details>
+    {# 등록된 설정: 현재 세팅된 모든 모니터링 대상을 한 표로(읽기 전용). 등록 config 변경(admin-entity-changed)
+       + 라이브 램프 신선도(30s)로 갱신. 관리 탭 쓰기 후 delay:2s 로 커밋 착지를 기다린다(targets 카드 선례). #}
+    {% set st_total = (settings_rows | default([])) | list | length %}
+    <details class="aux">
+      <summary>등록된 설정 <span class="tag">{{ st_total }}건 · 30s</span></summary>
+      <div class="aux-body">
+        <div id="registered-settings" hx-get="/admin/registered-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_registered_settings.html" %}</div>
       </div>
     </details>
     <details class="aux" {% if auth_n %}open{% endif %}>

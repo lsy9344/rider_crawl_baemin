@@ -86,6 +86,7 @@ class TargetRow:
     last_failure_code: str | None
     severity: str
     customer_name: str = ""
+    auth_session_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,7 @@ class DashboardService:
             last_failure_code=facts.last_failure_code,
             severity=overall,
             customer_name=facts.customer_name,
+            auth_session_pending=facts.auth_session_pending,
         )
 
     @staticmethod
@@ -355,7 +357,7 @@ class DashboardService:
     async def auth_required_rows(
         self, repo: DashboardRepository, *, tenant_id: str, now: datetime | None = None
     ) -> list[AuthRequiredRow]:
-        rows = await repo.auth_required(tenant_id=tenant_id)
+        rows = self._collapse_auth_required_rows(await repo.auth_required(tenant_id=tenant_id))
         missing_names = [row for row in rows if row.target_id and not row.target_name]
         if not missing_names or now is None:
             return rows
@@ -373,6 +375,46 @@ class DashboardService:
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _collapse_auth_required_rows(rows: list[AuthRequiredRow]) -> list[AuthRequiredRow]:
+        """Keep one visible auth action per target to avoid duplicate dashboard controls."""
+
+        def priority(row: AuthRequiredRow) -> int:
+            if row.reason == "AUTH_SESSION_PENDING":
+                return 0
+            if row.reason == "ACCOUNT_AUTH_REQUIRED":
+                return 1
+            return 2
+
+        def merge(existing: AuthRequiredRow, candidate: AuthRequiredRow) -> AuthRequiredRow:
+            winner, fallback = (
+                (candidate, existing)
+                if priority(candidate) < priority(existing)
+                else (existing, candidate)
+            )
+            return AuthRequiredRow(
+                tenant_id=winner.tenant_id,
+                target_id=winner.target_id,
+                profile_id=winner.profile_id or fallback.profile_id,
+                reason=winner.reason,
+                target_name=winner.target_name or fallback.target_name,
+            )
+
+        collapsed: dict[tuple[str, str], AuthRequiredRow] = {}
+        order: list[tuple[str, str]] = []
+        targetless: list[AuthRequiredRow] = []
+        for row in rows:
+            if not row.target_id:
+                targetless.append(row)
+                continue
+            key = (row.tenant_id, row.target_id)
+            if key not in collapsed:
+                collapsed[key] = row
+                order.append(key)
+                continue
+            collapsed[key] = merge(collapsed[key], row)
+        return [collapsed[key] for key in order] + targetless
 
     async def job_queue_rows(
         self, repo: DashboardRepository, *, tenant_id: str, now: datetime, limit: int = 100

@@ -1,0 +1,38 @@
+{# 등록된 모니터링 설정 목록 fragment(HTMX swap 대상, 읽기 전용). 8열: 상태/수집/전송/대상·센터/시작·종료/주기/메신저/플랫폼.
+   램프는 _targets.html 과 동일한 sev-badge 톤, ON/OFF 는 toggle-pill, 플랫폼/메신저는 plat 배지를 재사용한다. autoescape 유지. #}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>상태</th>
+        <th>수집</th>
+        <th>전송</th>
+        <th>대상 / 센터</th>
+        <th>시작 / 종료</th>
+        <th>주기</th>
+        <th>메신저</th>
+        <th>플랫폼</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in settings_rows %}
+      <tr>
+        <td><span class="{{ s.severity | severity_class }}">{{ s.severity | severity_label }}</span></td>
+        <td>{% if s.crawl_enabled %}<span class="toggle-pill on">ON</span>{% else %}<span class="toggle-pill off">OFF</span>{% endif %}</td>
+        <td>{% if s.send_enabled %}<span class="toggle-pill on">ON</span>{% else %}<span class="toggle-pill off">OFF</span>{% endif %}</td>
+        <td>
+          <div class="set-name">{{ s.name }}</div>
+          {% if tenant_id == 'all' and s.customer_name %}<div class="muted">고객: {{ s.customer_name }}</div>{% endif %}
+          <div class="muted">{% if s.center_name %}센터: {{ s.center_name }}{% else %}<span class="risk">⚠ 센터 미설정</span>{% endif %}</div>
+        </td>
+        <td>{% if s.schedule_enabled and s.start_time and s.stop_time %}{{ s.start_time }} ~ {{ s.stop_time }}{% else %}<span class="muted">상시</span>{% endif %}</td>
+        <td>{% if s.interval_minutes %}{{ s.interval_minutes }}분{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% for m in s.messengers %}<span class="plat">{{ m | messenger_label }}</span> {% else %}<span class="muted">—</span>{% endfor %}</td>
+        <td><span class="plat {{ s.platform | platform_class }}">{{ s.platform | platform_label }}</span></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">등록된 설정이 없습니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

@@ -10,20 +10,23 @@
   </thead>
   <tbody>
     {% for r in auth_required %}
+    {% set is_auth_pending = r.reason == "AUTH_SESSION_PENDING" %}
     <tr>
       <td>{{ r.target_name or "대상명 없음" }}</td>
       <td>{{ r.reason | reason_text }}</td>
       <td>
         {% if r.target_id %}
         {% set action_tenant = r.tenant_id or tenant_id %}
+        {% if not is_auth_pending %}
         <button type="button"
                 class="btn primary"
                 data-target="{{ r.target_id }}"
                 hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-start?tenant={{ action_tenant | urlencode }}"
                 hx-vals='{"confirm_action": "confirmed"}'
                 hx-target="#auth-required-result-{{ r.target_id }}">인증 시작</button>
+        {% endif %}
         <button type="button"
-                class="btn ghost"
+                class="btn {% if is_auth_pending %}primary{% else %}ghost{% endif %}"
                 data-target="{{ r.target_id }}"
                 hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-check?tenant={{ action_tenant | urlencode }}"
                 hx-vals='{"confirm_action": "confirmed"}'

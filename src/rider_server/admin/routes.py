@@ -19,7 +19,7 @@ tenant 선택은 5.6 단계에선 ``?tenant=<id>`` 쿼리 seam 으로 둔다 —
 from __future__ import annotations
 
 import inspect
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from ..domain import MessengerChannelState, MonitoringTargetStatus
 from ..security.access import enforce_session
 from .dashboard_service import ALL_TENANTS, DashboardRepository, DashboardService
 from . import severity as severity_policy
@@ -100,6 +101,7 @@ templates.env.filters["severity_class"] = _severity_class
 _REASON_TEXT: dict[str, str] = {
     "ACCOUNT_AUTH_REQUIRED": "로그인 만료 · 인증 확인 필요",
     "AUTH_REQUIRED": "로그인 만료 · 인증 확인 필요",
+    "AUTH_SESSION_PENDING": "인증번호 입력 필요 · Chrome에서 인증번호 입력 후 상태를 재확인하세요",
     "TARGET_VALIDATION_FAILURE": "센터/상점명 불일치 — 오발송 위험",
     "CRAWL_FAILURE": "수집 실패 — 확인 필요",
     "PROFILE_UNAVAILABLE": "브라우저 프로필 준비 실패 — Agent/Chrome 확인 필요",
@@ -113,6 +115,7 @@ _REASON_TEXT: dict[str, str] = {
 }
 _PLATFORM_LABELS: dict[str, str] = {"BAEMIN": "배민", "COUPANG": "쿠팡"}
 _PLATFORM_CLASSES: dict[str, str] = {"BAEMIN": "plat-baemin", "COUPANG": "plat-coupang"}
+_MESSENGER_LABELS: dict[str, str] = {"TELEGRAM": "텔레그램", "KAKAO": "카카오"}
 
 
 def _reason_text(code: str | None) -> str:
@@ -128,6 +131,11 @@ def _platform_label(code: str | None) -> str:
 
 def _platform_class(code: str | None) -> str:
     return _PLATFORM_CLASSES.get((code or "").upper(), "")
+
+
+def _messenger_label(code: str | None) -> str:
+    """메신저 코드 → 사람이 읽는 라벨(TELEGRAM→텔레그램, KAKAO→카카오). 미지 코드는 그대로."""
+    return _MESSENGER_LABELS.get((code or "").upper(), code or "")
 
 
 # ── 실시간 큐 뷰 표시 라벨(job type/status → 한글) ──────────────────────────────────
@@ -210,6 +218,7 @@ def _freshness_class(value: datetime | None) -> str:
 templates.env.filters["reason_text"] = _reason_text
 templates.env.filters["platform_label"] = _platform_label
 templates.env.filters["platform_class"] = _platform_class
+templates.env.filters["messenger_label"] = _messenger_label
 templates.env.filters["relative_time"] = _relative_time
 templates.env.filters["freshness_class"] = _freshness_class
 templates.env.filters["job_type_label"] = _job_type_label
@@ -357,6 +366,107 @@ def _display_severity(code: str, facts) -> str:
     return SEVERITY_OPERATOR_STOPPED
 
 
+# ── 등록된 설정 카드(읽기 전용 — 등록 config + 라이브 severity 조립) ─────────────────────
+@dataclass(frozen=True)
+class SettingsRow:
+    """모니터링 탭 "등록된 설정" 카드 한 행. 등록 config(AdminEntityService) + 라이브 램프 조립.
+
+    secret 0 — 라우팅/상태/시각 표시값만 담는다(SettingsRow 에 자격증명·토큰 필드 없음).
+    """
+
+    target_id: str
+    name: str
+    center_name: str
+    severity: str  # 라이브 severity(램프) — target_health join, 없으면 STOPPED(회색)
+    crawl_enabled: bool  # MonitoringTarget.status == ACTIVE
+    send_enabled: bool  # tenant.sending_enabled AND ≥1 enabled rule → ACTIVE channel
+    schedule_enabled: bool
+    start_time: str
+    stop_time: str
+    interval_minutes: int
+    messengers: tuple[str, ...]  # 연결 채널 메신저 distinct(TELEGRAM/KAKAO)
+    platform: str  # BAEMIN/COUPANG
+    customer_name: str = ""
+    status: str = ""  # 원시 MonitoringTargetStatus 값
+
+
+async def _settings_rows_for_display(
+    request: Request, *, tenant_id: str, now: datetime
+) -> list[SettingsRow]:
+    """등록된 모니터링 설정을 한 행씩 조립한다(읽기 전용). 데이터는 5.11 엔티티 service 에서.
+
+    조립 위치를 ``routes.py`` 로 둔 건 등록 config 가 ``AdminEntityService`` 에서 오고 라이브
+    램프가 ``DashboardRepository`` 에서 와 두 소스를 합쳐야 하기 때문이다(어느 한 service 도
+    상대에 의존하지 않는다). 엔티티 service 미주입이거나 tenant 미선택/전체 고객이면 빈 목록을
+    돌려 안전하게 무-카드로 렌더한다(``list_monitoring_targets`` 는 단일 tenant 전용).
+    """
+
+    service = getattr(request.app.state, "admin_entity_service", None)
+    if service is None or not tenant_id or tenant_id == ALL_TENANTS:
+        return []
+
+    targets = await service.list_monitoring_targets(tenant_id)
+    channels = await service.list_messenger_channels(tenant_id)
+    accounts = await service.list_platform_accounts(tenant_id)
+
+    # tenant 플래그는 public list 경로로 도출한다(service._repo 직접 접근 금지 — _dashboard_tenants 선례).
+    tenant = next((t for t in await service.list_tenants() if t.id == tenant_id), None)
+    sending_enabled = bool(getattr(tenant, "sending_enabled", False))
+    customer_name = tenant.name if tenant is not None else ""
+
+    account_platform = {a.id: a.platform.value for a in accounts}
+    channel_messenger = {c.id: c.messenger.value for c in channels}
+    active_channel_ids = {
+        c.id for c in channels if c.state == MessengerChannelState.ACTIVE
+    }
+
+    # 라이브 severity(램프)는 targets 카드와 동일 정제(_target_row_for_display)로 맞춘다 — STOPPED 가
+    # AUTH_REQUIRED/검증실패 등으로 분기해 두 카드의 램프 색이 어긋나지 않게 한다.
+    facts_rows = await _repo(request).target_health(tenant_id=tenant_id, now=now)
+    sev_by_id = {
+        f.target_id: _target_row_for_display(f, now).severity for f in facts_rows
+    }
+
+    rows: list[SettingsRow] = []
+    for t in targets:
+        # N+1: 대상별 delivery rule 조회. 벌크 list_* 가 없어 대상마다 1쿼리지만 ~100건 규모라 허용.
+        rules = await service.list_delivery_rules(t.id, tenant_id=tenant_id)
+        messengers = tuple(
+            sorted(
+                {
+                    channel_messenger[r.channel_id]
+                    for r in rules
+                    if r.enabled and r.channel_id in channel_messenger
+                }
+            )
+        )
+        send_enabled = sending_enabled and any(
+            r.enabled and r.channel_id in active_channel_ids for r in rules
+        )
+        rows.append(
+            SettingsRow(
+                target_id=t.id,
+                name=t.name,
+                center_name=t.center_name,
+                severity=sev_by_id.get(t.id, SEVERITY_STOPPED),
+                crawl_enabled=t.status == MonitoringTargetStatus.ACTIVE,
+                send_enabled=send_enabled,
+                schedule_enabled=t.schedule_enabled,
+                start_time=t.start_time,
+                stop_time=t.stop_time,
+                interval_minutes=t.interval_minutes,
+                messengers=messengers,
+                platform=account_platform.get(t.platform_account_id, ""),
+                customer_name=customer_name,
+                status=t.status.value,
+            )
+        )
+    # 위험도 높은 순으로 정렬하되(targets 카드와 동일), 동순위는 이름 오름차순으로 안정화한다.
+    rows.sort(key=lambda r: r.name)
+    rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
+    return rows
+
+
 # ── 라우트 ───────────────────────────────────────────────────────────────────────
 
 @router.get("", response_class=HTMLResponse)
@@ -397,6 +507,9 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
         channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
         auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
         jobs = await _service.job_queue_rows(repo, tenant_id=tenant_id, now=now, limit=100)
+        settings_rows = await _settings_rows_for_display(
+            request, tenant_id=tenant_id, now=now
+        )
     except Exception:  # noqa: BLE001 - Admin UI returns operator-safe HTML instead of JSON 500.
         return templates.TemplateResponse(
             request,
@@ -415,6 +528,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
             "channels": channels,
             "auth_required": auth_required,
             "jobs": jobs,
+            "settings_rows": settings_rows,
             "initial_target_id": initial_target_id,
             "show_debug_actions": False,
         },
@@ -490,6 +604,30 @@ async def channels_fragment(
     except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
         return _db_failure_fragment(request)
     return templates.TemplateResponse(request, "_channels.html", {"channels": health})
+
+
+@router.get("/registered-settings", response_class=HTMLResponse)
+async def registered_settings_fragment(
+    request: Request,
+    _auth: None = Depends(require_admin_session),
+) -> HTMLResponse:
+    """``GET /admin/registered-settings`` — 등록된 모니터링 설정 목록 fragment(읽기 전용).
+
+    운영자가 "지금 시스템에 최종 등록된 모든 설정"(상태/수집·전송 활성/시간/주기/메신저/플랫폼)을
+    한 표로 본다. 등록 config 와 라이브 램프를 :func:`_settings_rows_for_display` 로 조립한다.
+    """
+
+    try:
+        rows = await _settings_rows_for_display(
+            request, tenant_id=_tenant_id(request), now=_now()
+        )
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
+    return templates.TemplateResponse(
+        request,
+        "_registered_settings.html",
+        {"settings_rows": rows, "tenant_id": _tenant_id(request)},
+    )
 
 
 @router.get("/auth-required", response_class=HTMLResponse)

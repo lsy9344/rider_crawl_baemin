@@ -544,6 +544,7 @@ class PostgresDashboardRepository(DashboardRepository):
         session_conditions = [
             AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
             AuthSession.resolved_at.is_(None),
+            MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
         ]
         if tenant_id != ALL_TENANTS:
             account_conditions.append(PlatformAccount.tenant_id == tenant_id)
@@ -587,18 +588,31 @@ class PostgresDashboardRepository(DashboardRepository):
                 select(
                     PlatformAccount.tenant_id,
                     AuthSession.account_id,
+                    MonitoringTarget.id.label("target_id"),
+                    MonitoringTarget.name.label("target_name"),
+                    BrowserProfile.id.label("profile_id"),
                 )
                 .select_from(AuthSession)
                 .join(PlatformAccount, AuthSession.account_id == PlatformAccount.id)
+                .join(
+                    MonitoringTarget,
+                    MonitoringTarget.platform_account_id == PlatformAccount.id,
+                )
+                .join(
+                    BrowserProfile,
+                    BrowserProfile.target_id == MonitoringTarget.id,
+                    isouter=True,
+                )
                 .where(*session_conditions)
             )
             for row in (await session.execute(session_stmt)).all():
                 rows.append(
                     AuthRequiredRow(
                         tenant_id=str(row.tenant_id),
-                        target_id=None,
-                        profile_id=None,
+                        target_id=str(row.target_id) if row.target_id else None,
+                        profile_id=str(row.profile_id) if row.profile_id else None,
                         reason="AUTH_SESSION_PENDING",
+                        target_name=str(row.target_name) if row.target_name else None,
                     )
                 )
         return rows

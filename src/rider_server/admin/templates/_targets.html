@@ -7,9 +7,14 @@
   {# 배지 구동은 severity 단일 소스로만 결정한다(순수 정책이 묵은 last_failure_code·AUTH_VERIFIED
      억제를 이미 인코딩 — 인증 후에도 인증필요 배지가 남던 회귀 차단, 2026-06). #}
   {% set is_auth_required = t.severity == 'AUTH_REQUIRED' %}
+  {% set is_auth_pending = is_auth_required and t.auth_session_pending %}
   {% set is_target_validation = t.severity == 'TARGET_VALIDATION_FAILURE' %}
   {% set is_operator_stopped = t.severity in ('STOPPED', 'OPERATOR_STOPPED') and not is_auth_required and not is_target_validation %}
-  {% if is_auth_required %}
+  {% if is_auth_pending %}
+    {% set primary_action = 'auth-check' %}
+    {% set primary_label = '상태 재확인' %}
+    {% set primary_style = 'primary' %}
+  {% elif is_auth_required %}
     {% set primary_action = 'auth-start' %}
     {% set primary_label = '인증 시작' %}
     {% set primary_style = 'primary' %}
@@ -41,7 +46,7 @@
        data-severity-class="{{ t.severity | severity_class }}"
        data-interval="{{ t.interval_minutes }}"
        data-failcode="{{ t.last_failure_code or '' }}"
-       data-reason="{% if is_auth_required %}로그인 만료 · 인증 확인 필요{% elif is_target_validation %}센터/상점명 불일치: 오발송 위험{% elif is_operator_stopped %}운영자가 비활성한 대상입니다: 필요 시 활성화하세요.{% elif t.last_failure_code and t.severity != 'NORMAL' %}{{ t.last_failure_code | reason_text }}{% endif %}"
+       data-reason="{% if is_auth_pending %}인증번호 입력 필요 · Chrome에서 인증번호 입력 후 상태를 재확인하세요{% elif is_auth_required %}로그인 만료 · 인증 확인 필요{% elif is_target_validation %}센터/상점명 불일치: 오발송 위험{% elif is_operator_stopped %}운영자가 비활성한 대상입니다: 필요 시 활성화하세요.{% elif t.last_failure_code and t.severity != 'NORMAL' %}{{ t.last_failure_code | reason_text }}{% endif %}"
        data-success="{{ t.last_success_at | relative_time }}"
        data-delivery="{{ t.last_delivery_at | relative_time }}"
        data-target="{{ t.target_id }}"
@@ -61,7 +66,8 @@
     <span class="sev-badge {{ t.severity | severity_class }}">{{ t.severity | severity_label }}</span>
     <span class="t-reason">
       <span class="rs">
-        {%- if is_auth_required %}로그인 만료 · 인증 확인 필요
+        {%- if is_auth_pending %}인증번호 입력 필요 · Chrome에서 인증번호 입력 후 상태를 재확인하세요
+        {%- elif is_auth_required %}로그인 만료 · 인증 확인 필요
         {%- elif is_target_validation %}센터/상점명 불일치: 오발송 위험
         {%- elif is_operator_stopped %}운영 중지
         {%- elif t.severity == 'NORMAL' %}정상
@@ -75,7 +81,12 @@
     </span>
     <span class="t-act row-actions">
       {# 상황 맞춤 1차 액션 + 보조. event.stopPropagation 으로 행 클릭(드로어)과 분리. 위험 액션은 이름 박은 confirm. #}
-      {%- if is_auth_required %}
+      {%- if is_auth_pending %}
+      <button type="button" class="btn primary" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-check?tenant={{ t.tenant_id | urlencode }}"
+              hx-vals='{"confirm_action": "confirmed"}'
+              hx-target="#target-result-{{ t.target_id }}">상태 재확인</button>
+      {%- elif is_auth_required %}
       <button type="button" class="btn primary" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/auth-start?tenant={{ t.tenant_id | urlencode }}"
               hx-vals='{"confirm_action": "confirmed"}'
