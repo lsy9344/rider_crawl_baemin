@@ -318,13 +318,6 @@ class CrawlWorker:
         return default_execute_job(job)
 
     def _prepare_config(self, job: ClaimedJob, payload: CrawlJobPayload) -> AppConfig:
-        # crawl-coupang-auth-separation Task 4 / Decision 2: 크롤 job 은 inline email 2FA 를
-        # 직접 하지 않는다. payload 에 ``coupang_auto_email_2fa_enabled=True`` 가 와도 강제로
-        # 끈다(자동 OTP/IMAP/로그인 제출 0) — 로그인 화면을 만나면 BrowserActionRequiredError →
-        # AUTH_REQUIRED 로 표면화하고, 자동복구는 별도 ``AUTH_COUPANG_2FA`` job 이 담당한다.
-        # ``coupang_auto_email_2fa_enabled`` 는 crawl payload 에서 deprecated.
-        crawl_payload = dataclasses.replace(payload, coupang_auto_email_2fa_enabled=False)
-
         def build_config(
             *,
             tenant_id: str,
@@ -333,7 +326,7 @@ class CrawlWorker:
             user_data_dir: Path,
         ) -> AppConfig:
             return _build_config(
-                crawl_payload,
+                payload,
                 cdp_url=cdp_url,
                 user_data_dir=user_data_dir,
                 secret_resolver=self._secret_resolver,
@@ -600,8 +593,10 @@ def _build_config(
         payload.verification_email_app_password_ref,
         secret_resolver=secret_resolver,
     )
+    is_coupang = str(payload.platform or "").strip().casefold() == "coupang"
     enable_email_2fa = bool(
-        payload.coupang_auto_email_2fa_enabled
+        is_coupang
+        and payload.coupang_auto_email_2fa_enabled
         and coupang_login_id
         and coupang_login_password
         and verification_email_address
