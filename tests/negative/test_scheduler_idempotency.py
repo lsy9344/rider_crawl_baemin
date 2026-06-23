@@ -72,7 +72,7 @@ async def _seed(session_factory) -> None:
                 label="l",
                 username="vault://u",
                 password="vault://p",
-                auth_state="UNKNOWN",
+                auth_state="ACTIVE",
             )
         )
         session.add(
