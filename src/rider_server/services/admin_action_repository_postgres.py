@@ -25,6 +25,11 @@ import uuid
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from rider_server.db.base import (
+    AUTH_ENQUEUE_LOCK_NAMESPACE,
+    acquire_xact_advisory_lock,
+    advisory_lock_key_for_uuid,
+)
 from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
 from rider_server.db.models.account import PlatformAccount as PlatformAccountRow
 from rider_server.db.models.agent import BrowserProfile as BrowserProfileRow
@@ -278,13 +283,27 @@ class PostgresAdminActionRepository:
         async with self._session_factory() as session:
             locked_target = (
                 await session.execute(
-                    select(MonitoringTargetRow.id)
+                    select(
+                        MonitoringTargetRow.id,
+                        MonitoringTargetRow.platform_account_id,
+                    )
                     .where(MonitoringTargetRow.id == target_uuid)
                     .with_for_update()
                 )
-            ).scalar_one_or_none()
+            ).first()
             if locked_target is None:
                 raise AdminActionNotFound("monitoring_target", target_id)
+            platform_account_id = locked_target.platform_account_id
+            # 인증 시작 job 은 계정 단위 advisory lock 으로 동시 admin action 을 직렬화한다 — 같은
+            # 계정의 **다른 target** 에서 동시에 인증 시작이 들어오면 각자 자기 target row 만 잠가
+            # sibling 을 못 보고 중복 auth job 을 만들 수 있다(검토 High). scheduler 자동 복구와
+            # 같은 네임스페이스/키라 둘이 동시에 들어와도 직렬화된다(중복 OTP 요청 0).
+            if job_type in _AUTH_JOB_TYPES and platform_account_id is not None:
+                await acquire_xact_advisory_lock(
+                    session,
+                    namespace=AUTH_ENQUEUE_LOCK_NAMESPACE,
+                    key=advisory_lock_key_for_uuid(platform_account_id),
+                )
             assigned_agent_id = (
                 await session.execute(
                     select(BrowserProfileRow.agent_id)
@@ -298,11 +317,23 @@ class PostgresAdminActionRepository:
             duplicate_types = (
                 _AUTH_JOB_TYPES if job_type in _AUTH_JOB_TYPES else (job_type,)
             )
+            # 인증 job 의 중복 검사는 **계정 단위**다 — 여러 target 이 같은 쿠팡 계정/메일함을
+            # 공유할 수 있어 target 만 보면 같은 계정에 2FA job 이 둘 생긴다(검토 High). 같은
+            # platform_account_id 의 어느 target 에든 active auth job 이 있으면 차단한다. 그 외
+            # job 은 기존처럼 이 target 만 본다.
+            if job_type in _AUTH_JOB_TYPES and platform_account_id is not None:
+                target_scope = JobRow.target_id.in_(
+                    select(MonitoringTargetRow.id).where(
+                        MonitoringTargetRow.platform_account_id == platform_account_id
+                    )
+                )
+            else:
+                target_scope = JobRow.target_id == target_uuid
             existing = (
                 await session.execute(
                     select(JobRow.id)
                     .where(
-                        JobRow.target_id == target_uuid,
+                        target_scope,
                         JobRow.type.in_(duplicate_types),
                         JobRow.status.in_(active_statuses),
                     )

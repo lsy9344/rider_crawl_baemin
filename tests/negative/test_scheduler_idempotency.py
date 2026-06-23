@@ -235,3 +235,82 @@ def test_active_crawl_job_blocks_reenqueue_real_pg(pg_env):
         assert due_outcome.enqueued is False  # 활성 job 있으면 재-enqueue 0(멱등).
 
     asyncio.run(_run())
+
+
+def _auth_due_target(target_id: str):
+    from rider_server.scheduler.service import DueTarget
+
+    # 같은 _ACCOUNT 를 공유하는 두 target — account 단위 dedup/advisory lock 검증용.
+    return DueTarget(
+        target_id=target_id,
+        tenant_id=_TENANT,
+        platform="coupang",
+        interval_minutes=10,
+        next_run_at=None,
+        platform_account_id=_ACCOUNT,
+        primary_url="https://partner.coupangeats.example/perf",
+    )
+
+
+async def _count_auth_jobs(factory) -> int:
+    from sqlalchemy import func, select
+    from rider_server.db.models.agent import Job
+    from rider_server.queue.states import JOB_TYPE_AUTH_COUPANG_2FA
+
+    async with factory() as session:
+        n = (
+            await session.execute(
+                select(func.count())
+                .select_from(Job)
+                .where(Job.type == JOB_TYPE_AUTH_COUPANG_2FA)
+            )
+        ).scalar_one()
+    return int(n)
+
+
+@_pg_gate
+def test_concurrent_auth_enqueue_same_account_creates_one_job_real_pg(pg_env):
+    """같은 계정의 두 target 에 동시 auth enqueue → advisory lock 으로 정확히 1 job(검토 High).
+
+    count→insert race(둘 다 count 0 → 둘 다 insert)를 계정 단위 advisory lock 으로 직렬화한다.
+    _TARGET_DUE 와 _TARGET_FUTURE 는 둘 다 _ACCOUNT 를 공유한다.
+    """
+    repo, backend, factory = pg_env
+
+    async def _run():
+        payload = {"platform_account_id": _ACCOUNT, "recovery_mode": "coupang_auto_email_2fa"}
+        # 서로 다른 target 이지만 같은 계정 — 동시에 enqueue 시도.
+        r1, r2 = await asyncio.gather(
+            repo.enqueue_auth_coupang_2fa_job(
+                backend, _auth_due_target(_TARGET_DUE), payload_json=dict(payload), now=_T0
+            ),
+            repo.enqueue_auth_coupang_2fa_job(
+                backend, _auth_due_target(_TARGET_FUTURE), payload_json=dict(payload), now=_T0
+            ),
+        )
+        created = [jid for jid in (r1, r2) if jid is not None]
+        assert len(created) == 1, f"동시 auth enqueue 가 {len(created)} job 생성 — account dedup 깨짐"
+        assert await _count_auth_jobs(factory) == 1
+
+    asyncio.run(_run())
+
+
+@_pg_gate
+def test_sibling_target_auth_job_blocks_account_reenqueue_real_pg(pg_env):
+    """같은 계정의 sibling target 에 active auth job 이 있으면 새 auth job 0(account 단위 dedup)."""
+    repo, backend, factory = pg_env
+
+    async def _run():
+        payload = {"platform_account_id": _ACCOUNT, "recovery_mode": "coupang_auto_email_2fa"}
+        first = await repo.enqueue_auth_coupang_2fa_job(
+            backend, _auth_due_target(_TARGET_DUE), payload_json=dict(payload), now=_T0
+        )
+        assert first is not None
+        # 같은 계정의 **다른** target — sibling 의 active auth job 때문에 차단돼야 한다.
+        second = await repo.enqueue_auth_coupang_2fa_job(
+            backend, _auth_due_target(_TARGET_FUTURE), payload_json=dict(payload), now=_T0
+        )
+        assert second is None
+        assert await _count_auth_jobs(factory) == 1
+
+    asyncio.run(_run())

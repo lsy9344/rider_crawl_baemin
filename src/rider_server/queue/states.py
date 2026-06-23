@@ -153,10 +153,14 @@ def stale_recovery_reason(
     """stale lease recovery 시 이 job 을 **terminal 종료**시킬 reason(또는 재시도 대상이면 None).
 
     * ``OPEN_AUTH_BROWSER`` + payload ``expires_at < now`` → :data:`RESULT_REASON_STALE_AUTH_JOB_EXPIRED`.
-    * ``AUTH_COUPANG_2FA`` 가 lease 만료로 회수(``job_status`` 가 CLAIMED/RUNNING)
-      → :data:`RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED`(payload TTL 무관 — 자동 2FA 가
-      진행 중이었을 수 있으므로 재시도하지 않고 terminal 종료해 중복 OTP 요청을 막는다, Task 8).
-      claim 전 PENDING 인 healthy auth job 은 종료하지 않는다(``job_status`` 미지정/PENDING 보존).
+    * ``AUTH_COUPANG_2FA``:
+        - lease 만료로 회수(``job_status`` 가 CLAIMED/RUNNING)
+          → :data:`RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED`(payload TTL 무관 — 자동 2FA 가
+          진행 중이었을 수 있으므로 재시도하지 않고 terminal 종료해 중복 OTP 요청을 막는다, Task 8).
+        - 아직 claim 전(PENDING)이면 payload ``expires_at < now`` 일 때만 terminal 종료
+          (:data:`RESULT_REASON_STALE_AUTH_JOB_EXPIRED`) — downtime 뒤 누적된 오래된 인증 job 이
+          나중에 claim·실행돼 중복 OTP 를 요청하는 것을 막는다. 만료 전 healthy PENDING 은 보존한다.
+          이 분기는 Agent preflight(payload TTL 만 보고 ``job_status`` 미지정)에서도 같이 쓰인다.
     * scheduled crawl(``job_origin == "scheduler"`` 또는 ``CRAWL_*`` job) + ``expires_at < now``
       → :data:`RESULT_REASON_STALE_CRAWL_SKIPPED`.
     * 그 외(또는 ``expires_at`` 없음/미만료) → ``None``(기존 retry 정책 유지).
@@ -172,11 +176,16 @@ def stale_recovery_reason(
             return RESULT_REASON_STALE_AUTH_JOB_EXPIRED
         return None
     if job_type == JOB_TYPE_AUTH_COUPANG_2FA:
-        # claim 된(CLAIMED/RUNNING) auth job 의 lease 가 만료돼 회수될 때만 terminal 종료한다.
-        # payload TTL 이 아니라 lease 만료 자체로 판정한다 — 자동 2FA 가 OTP 를 받는 중이었을 수
-        # 있어 PENDING 재진입은 중복 요청을 부른다. 아직 claim 전(PENDING)인 job 은 보존한다.
+        # claim 된(CLAIMED/RUNNING) auth job 의 lease 가 만료돼 회수될 때는 payload TTL 과 무관하게
+        # terminal 종료한다 — 자동 2FA 가 OTP 를 받는 중이었을 수 있어 PENDING 재진입은 중복 요청을
+        # 부른다.
         if str(job_status or "").strip().upper() in {"CLAIMED", "RUNNING"}:
             return RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED
+        # 아직 claim 전(PENDING)이거나 preflight(job_status 미지정)에서는 payload TTL 만료로만
+        # 닫는다 — downtime 뒤 누적된 오래된 인증 job 이 나중에 실행돼 중복 OTP 를 요청하는 것을
+        # 막는다. 만료 전 healthy PENDING 은 보존한다.
+        if expires_at is not None and now >= expires_at:
+            return RESULT_REASON_STALE_AUTH_JOB_EXPIRED
         return None
     is_scheduled_crawl = (
         payload.get("job_origin") == JOB_ORIGIN_SCHEDULER

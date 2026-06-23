@@ -6,7 +6,12 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from rider_crawl.auth.imap_2fa import IMAP_HOST_BY_DOMAIN, Imap2faError, domain_of
+from rider_crawl.auth.imap_2fa import (
+    IMAP_HOST_BY_DOMAIN,
+    Imap2faError,
+    ImapAuthError,
+    domain_of,
+)
 from rider_crawl.config import AppConfig
 
 _REQUESTED_AFTER_SAFETY_SECONDS = 30
@@ -101,7 +106,16 @@ def recover_coupang_session_with_email_2fa(
 
 
 class Coupang2faError(RuntimeError):
-    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/앱 비밀번호를 넣지 않는다."""
+    """이메일 2FA 복구 중 운영자 조치가 필요한 실패. 메시지에 코드/앱 비밀번호를 넣지 않는다.
+
+    ``email_auth_required`` 는 IMAP 로그인/이메일 설정 실패(``ImapAuthError``)에서 비롯됐는지
+    표시한다 — 상위 인증 job 분류기가 이걸 보고 ``EMAIL_AUTH_REQUIRED`` 로 표면화해, 메일 지연
+    같은 일시적 실패와 운영자 조치형 실패를 구분한다(검토 Medium).
+    """
+
+    def __init__(self, *args: object, email_auth_required: bool = False) -> None:
+        super().__init__(*args)
+        self.email_auth_required = email_auth_required
 
 
 def _fetch_code(
@@ -123,7 +137,9 @@ def _fetch_code(
             code_digits=config.coupang_2fa_code_digits,
         )
     except Imap2faError as exc:
-        raise Coupang2faError(str(exc)) from exc
+        raise Coupang2faError(
+            str(exc), email_auth_required=isinstance(exc, ImapAuthError)
+        ) from exc
 
     if not code:
         raise Coupang2faError("이메일에서 인증번호를 받지 못했습니다.")

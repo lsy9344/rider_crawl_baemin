@@ -24,6 +24,11 @@ from datetime import datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from rider_server.db.base import (
+    AUTH_ENQUEUE_LOCK_NAMESPACE,
+    acquire_xact_advisory_lock,
+    advisory_lock_key_for_uuid,
+)
 from rider_server.db.models.account import MonitoringTarget, PlatformAccount
 from rider_server.admin.severity import is_agent_online
 from rider_server.db.models.agent import Agent, BrowserProfile, Job
@@ -55,6 +60,37 @@ _CRAWL_JOB_TYPES = (JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG)
 # (crawl-coupang-auth-separation Task 7: 중복 OTP 요청·동시 복구 방지).
 _AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
 _ACTIVE_JOB_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+
+
+def _safe_uuid(value: object) -> uuid.UUID | None:
+    """문자열/UUID 를 ``uuid.UUID`` 로(이미 UUID 면 그대로). 빈 값/형식 오류는 ``None``."""
+
+    if isinstance(value, uuid.UUID):
+        return value
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+async def _acquire_account_advisory_lock(
+    session: AsyncSession, account_uuid: uuid.UUID
+) -> bool:
+    """이 트랜잭션 동안 계정 단위 advisory lock 을 잡는다(공유 헬퍼 위임, Postgres 한정).
+
+    같은 ``platform_account_id`` 에 대한 동시 auth-enqueue 트랜잭션을 직렬화해, count→insert
+    사이의 race(둘 다 count 0 → 둘 다 insert)를 막는다(검토 High). admin 인증 시작 경로와 **같은
+    네임스페이스/키 규칙**이라 scheduler 자동 복구와 admin 수동 인증이 서로도 직렬화된다.
+    """
+
+    return await acquire_xact_advisory_lock(
+        session,
+        namespace=AUTH_ENQUEUE_LOCK_NAMESPACE,
+        key=advisory_lock_key_for_uuid(account_uuid),
+    )
 
 
 def _to_subscription_status(value: str | None) -> SubscriptionStatus | None:
@@ -332,6 +368,24 @@ class PostgresSchedulerRepository(SchedulerRepository):
             rows = (await session.execute(stmt)).scalars().all()
         return {str(target_id) for target_id in rows}
 
+    @staticmethod
+    def _account_target_ids_subquery(platform_account_id: str | None):
+        """``platform_account_id`` 에 속한 monitoring_target id 들의 scalar 서브쿼리(없으면 None).
+
+        account 단위 중복 검사용 — 같은 계정/메일함을 공유하는 여러 target 을 한 묶음으로 본다.
+        account id 가 없거나 UUID 가 아니면 ``None`` 을 돌려 호출자가 보수적으로 target 단위로만
+        검사하게 한다(잘못된 account id 로 dedup 이 전부 막히는 것 방지).
+        """
+
+        account_uuid = _safe_uuid(platform_account_id)
+        if account_uuid is None:
+            return None
+        return (
+            select(MonitoringTarget.id)
+            .where(MonitoringTarget.platform_account_id == account_uuid)
+            .scalar_subquery()
+        )
+
     async def enqueue_auth_coupang_2fa_job(
         self,
         queue_backend: QueueBackend,
@@ -344,23 +398,42 @@ class PostgresSchedulerRepository(SchedulerRepository):
 
         crawl ``next_run_at`` 은 전진시키지 않는다(인증 성공 후 다음 tick 이 crawl 재개). 같은
         transaction 안에서 active auth job 을 다시 확인해, tick 게이트와 동시 tick 경합 사이의
-        race 에서도 같은 대상에 인증 job 이 둘 만들어지지 않게 한다(중복 OTP 요청 방지).
+        race 에서도 같은 **계정**에 인증 job 이 둘 만들어지지 않게 한다(중복 OTP 요청 방지).
+
+        중복 검사는 target 단위가 아니라 ``platform_account_id`` 단위다 — 여러 monitoring_target 이
+        같은 쿠팡 계정/메일함을 공유할 수 있어, target 만 보면 같은 계정에 2FA job 이 둘 생긴다
+        (검토 High). 같은 계정의 다른 target 에 active auth job 이 있으면 새 job 을 만들지 않는다.
+
+        count→insert 사이의 동시 tick race(둘 다 count 0 → 둘 다 insert)는 계정 단위 **advisory
+        lock** 으로 직렬화한다 — count 가 잠글 행이 없어 transaction isolation 만으로는 못 막는다
+        (검토 High). 락 키는 ``platform_account_id``(없으면 target 으로 fallback)이며 트랜잭션
+        종료 시 자동 해제된다.
         """
 
         del queue_backend
         job_id = uuid.uuid4()
         target_uuid = uuid.UUID(target.target_id)
+        account_uuid = _safe_uuid(target.platform_account_id)
+        # 같은 platform_account_id 를 가진 target 들의 id 집합 — 이들 중 하나라도 active auth job 이
+        # 있으면 중복으로 본다(account 단위 dedup). account id 미상이면 보수적으로 target 단위로만 본다.
+        account_targets = self._account_target_ids_subquery(target.platform_account_id)
         existing_stmt = (
             select(func.count())
             .select_from(Job)
             .where(
-                Job.target_id == target_uuid,
+                (
+                    Job.target_id.in_(account_targets)
+                    if account_targets is not None
+                    else Job.target_id == target_uuid
+                ),
                 Job.type.in_(_AUTH_JOB_TYPES),
                 Job.status.in_(_ACTIVE_JOB_STATUSES),
             )
         )
         async with self._session_factory() as session:
             async with session.begin():
+                # count→insert 직렬화: 계정 단위(없으면 target 단위) advisory lock 을 먼저 잡는다.
+                await _acquire_account_advisory_lock(session, account_uuid or target_uuid)
                 existing = (await session.execute(existing_stmt)).scalar_one()
                 if int(existing or 0) > 0:
                     return None

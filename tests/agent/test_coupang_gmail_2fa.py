@@ -667,6 +667,164 @@ def test_auth_coupang_2fa_job_uses_mailbox_lock_once():
     assert all(r.status == JOB_STATUS_SUCCESS for r in results)
 
 
+def test_execute_auth_2fa_default_path_fails_closed_on_missing_app_password():
+    """이메일 주소만 있고 app password ref 가 비면 브라우저/IMAP 를 열기 전에 fail-closed(검토 Medium)."""
+
+    # mailbox address 는 풀리지만 app password ref 는 payload 에서 빈값 → 필수 secret 누락.
+    job = _auth_2fa_job(payload={"verification_email_app_password_ref": ""})
+    result = execute_auth_coupang_2fa_job(
+        job,  # recover 미주입 → 기본(브라우저/IMAP) 경로 → 필수 secret 검증
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] == REASON_SECRET_REF_UNRESOLVED
+
+
+def test_execute_auth_2fa_injected_recover_skips_required_secret_check():
+    """주입 recover(브라우저/IMAP 미사용)는 필수 secret 강제 대상이 아니다 — 회귀 방지."""
+
+    # 기본 경로라면 막혔을 app password 누락이라도, 주입 recover 면 통과해야 한다.
+    job = _auth_2fa_job(payload={"verification_email_app_password_ref": ""})
+    result = execute_auth_coupang_2fa_job(
+        job,
+        recover=lambda: True,  # 주입 → secret 강제 우회
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_state"] == AUTH_STATE_ACTIVE
+
+
+def test_default_is_email_auth_required_detects_imap_auth_failure():
+    """운영 predicate 가 IMAP 로그인/설정 실패를 EMAIL_AUTH_REQUIRED 로 본다(검토 Medium)."""
+    from rider_crawl.auth.coupang_email_2fa import Coupang2faError
+    from rider_crawl.auth.imap_2fa import Imap2faError, ImapAuthError
+
+    pred = agent_email_2fa.default_is_email_auth_required
+
+    # 직접 ImapAuthError.
+    assert pred(ImapAuthError("login failed")) is True
+    # Coupang2faError(email_auth_required=True) — recover_coupang_session 이 올리는 형태.
+    assert pred(Coupang2faError("imap login failed", email_auth_required=True)) is True
+    # 예외 체인으로 ImapAuthError 가 cause 인 경우.
+    wrapped = Coupang2faError("wrapped")
+    wrapped.__cause__ = ImapAuthError("login failed")
+    assert pred(wrapped) is True
+    # 메일 지연(코드 미수신) 같은 일시적 실패는 email-auth 가 아니다 → False.
+    assert pred(Imap2faError("코드 미수신")) is False
+    assert pred(Coupang2faError("mail delayed")) is False
+    assert pred(RuntimeError("unrelated")) is False
+
+
+def test_execute_auth_2fa_default_predicate_maps_imap_auth_to_email_auth_required():
+    """라우터가 predicate 를 안 넘겨도 기본값(운영 predicate)으로 EMAIL_AUTH_REQUIRED 가 표면화된다."""
+    from rider_crawl.auth.imap_2fa import ImapAuthError
+
+    def recover():
+        raise ImapAuthError(f"imap login failed pw={FAKE_APP_PASSWORD}")
+
+    # is_email_auth_required 미지정 → sentinel → 운영 predicate 적용.
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=recover,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.result_json["auth_recovery_state"] == STATE_EMAIL_AUTH_REQUIRED
+    assert result.result_json["reason"] == REASON_EMAIL_AUTH
+    blob = json.dumps(result.result_json, ensure_ascii=False) + str(result.metrics)
+    assert FAKE_APP_PASSWORD not in blob
+
+
+def test_execute_auth_2fa_explicit_none_predicate_disables_classification():
+    """명시적 None 은 분류 비활성화로 존중된다 — email-auth 신호가 있어도 RECOVERY_FAILED."""
+    from rider_crawl.auth.imap_2fa import ImapAuthError
+
+    def recover():
+        raise ImapAuthError("imap login failed")
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=recover,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        is_email_auth_required=None,  # 명시적 비활성화
+        max_attempts=1,
+        sleep=lambda _s: None,
+    )
+
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+
+
+def test_default_recover_runs_inside_open_playwright_context(monkeypatch):
+    """기본 recover 는 Playwright 컨텍스트가 **열려 있는 동안** page 를 운전한다(검토 High).
+
+    과거엔 ``_acquire_coupang_auth_page`` 가 ``with _sync_playwright()`` 를 빠져나간 뒤 page 를
+    돌려줘, 복구가 닫힌(CDP 끊긴) 컨텍스트의 page 를 운전하는 use-after-close 버그였다.
+    """
+    from types import SimpleNamespace
+
+    state = {"closed": False, "recover_ran_while_open": None}
+
+    class FakePage:
+        pass
+
+    fake_page = FakePage()
+
+    class FakePlaywright:
+        def __init__(self):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp: SimpleNamespace())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            state["closed"] = True
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright", lambda: FakePlaywright()
+    )
+    # coupang crawler page 선택 헬퍼를 가짜 page 로 단축(브라우저 페이지/로그인 화면 판정 무력화).
+    import rider_crawl.platforms.coupang.crawler as coupang_crawler
+
+    monkeypatch.setattr(coupang_crawler, "_browser_pages", lambda _b: [fake_page])
+    monkeypatch.setattr(coupang_crawler, "_login_required_page", lambda _pages: fake_page)
+    monkeypatch.setattr(
+        coupang_crawler, "_page_looks_like_coupang_login_required", lambda _p: True
+    )
+
+    # build_coupang_recover 가 돌려줄 closure 가 실행되는 시점에 컨텍스트가 아직 열려 있어야 한다.
+    def fake_build_coupang_recover(*, page, **_kw):
+        assert page is fake_page
+
+        def _inner():
+            state["recover_ran_while_open"] = not state["closed"]
+            return True
+
+        return _inner
+
+    monkeypatch.setattr(agent_email_2fa, "build_coupang_recover", fake_build_coupang_recover)
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),  # recover 미주입 → 기본 경로(_default_coupang_recover) 사용
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    assert state["recover_ran_while_open"] is True  # 컨텍스트가 열린 채로 복구가 돌았다
+    assert state["closed"] is True  # 복구 후 컨텍스트는 닫혔다
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_state"] == AUTH_STATE_ACTIVE
+
+
 def test_build_coupang_auth_execute_job_routes_only_auth_coupang_2fa():
     """Router intercepts AUTH_COUPANG_2FA and passes everything else to fallback."""
     fallback_jobs = []

@@ -23,6 +23,14 @@ class Imap2faError(RuntimeError):
     """이메일 인증번호 조회 실패. 메시지에 인증번호/앱 비밀번호를 넣지 않는다."""
 
 
+class ImapAuthError(Imap2faError):
+    """IMAP 로그인/이메일 설정 실패(앱 비밀번호·IMAP 사용 설정·미지원 도메인).
+
+    "코드가 아직 안 옴(메일 지연)" 같은 일시적 실패와 구분되는 **운영자 조치형** 실패다 —
+    상위 복구가 이걸 ``EMAIL_AUTH_REQUIRED`` 로 분류해 사람이 메일 설정을 고치게 한다. 메시지에
+    인증번호/앱 비밀번호를 넣지 않는다(부모와 동일 정책)."""
+
+
 def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[-1].strip().casefold() if "@" in (address or "") else ""
 
@@ -30,7 +38,7 @@ def domain_of(address: str) -> str:
 def imap_host_for_email(address: str) -> str:
     host = IMAP_HOST_BY_DOMAIN.get(domain_of(address))
     if not host:
-        raise Imap2faError(
+        raise ImapAuthError(
             "지원하지 않는 인증 이메일 도메인입니다. naver.com 또는 gmail.com 주소를 입력하세요."
         )
     return host
@@ -220,7 +228,7 @@ def _imap_connect(host: str, port: int, email_address: str, app_password: str) -
     try:
         server.login(email_address, app_password)
     except Exception as exc:
-        raise Imap2faError(
+        raise ImapAuthError(
             "IMAP 로그인 실패. 메일의 IMAP 사용 설정과 앱 비밀번호를 확인하세요."
         ) from exc
     return server

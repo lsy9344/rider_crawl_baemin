@@ -73,6 +73,12 @@ def test_ec2_memory_runbook_uses_repo_root_env_for_production_deploy() -> None:
     assert "deploy/env/*.env" in runbook
     assert "compose service env files" in runbook
     assert "not the root deploy variable file" in runbook
+    assert ". ./.env" not in runbook
+    assert "set -a" not in runbook
+    assert "docker compose --env-file /opt/rider-server/repo/.env" in runbook
+    assert "sudo python3 - <<'PY'" in runbook
+    assert "|| echo 'RIDER_DB_POOL_SIZE=2' | sudo tee -a .env" not in runbook
+    assert "|| echo 'RIDER_DB_POOL_SIZE=5' | sudo tee -a .env" not in runbook
 
 
 def test_ec2_memory_runbook_blocks_runner_shutdown_without_deploy_replacement() -> None:

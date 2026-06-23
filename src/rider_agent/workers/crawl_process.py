@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from rider_agent.job_loop import ClaimedJob, JobResult, make_failure_result
+from rider_crawl.redaction import redact
 
 _IS_WINDOWS = os.name == "nt"
+_MAX_STREAM_TAIL_CHARS = 4000
 
 
 def _new_process_group_kwargs() -> dict[str, Any]:
@@ -88,6 +90,8 @@ def run_crawl_in_subprocess(
         root = Path(tmp)
         input_path = root / "job.json"
         output_path = root / "result.json"
+        stdout_path = root / "stdout.log"
+        stderr_path = root / "stderr.log"
         payload = dict(job.payload)
         payload["timeout_seconds"] = 0
         input_path.write_text(
@@ -104,43 +108,82 @@ def run_crawl_in_subprocess(
             ),
             encoding="utf-8",
         )
-        proc = subprocess.Popen(  # noqa: S603 - argv is fixed; paths are temp files.
-            [
-                sys.executable,
-                "-m",
-                "rider_agent.workers.crawl_process",
-                str(input_path),
-                str(output_path),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **_new_process_group_kwargs(),
-        )
-        try:
-            proc.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            # child Python 만이 아니라 그 자손(Chrome 트리)까지 종료한다(고아 방지).
-            _terminate_process_tree(proc)
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-            if cleanup is not None:
-                cleanup()
-            return make_failure_result(
-                "CRAWL_TIMEOUT",
-                "crawl timed out",
-                result_json={"target_id": target_id, "platform": platform},
+        with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            proc = subprocess.Popen(  # noqa: S603 - argv is fixed; paths are temp files.
+                [
+                    sys.executable,
+                    "-m",
+                    "rider_agent.workers.crawl_process",
+                    str(input_path),
+                    str(output_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                **_new_process_group_kwargs(),
             )
+            try:
+                proc.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # child Python 만이 아니라 그 자손(Chrome 트리)까지 종료한다(고아 방지).
+                _terminate_process_tree(proc)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                if cleanup is not None:
+                    cleanup()
+                return make_failure_result(
+                    "CRAWL_TIMEOUT",
+                    "crawl timed out",
+                    result_json={"target_id": target_id, "platform": platform},
+                )
         if proc.returncode != 0 or not output_path.exists():
             return make_failure_result(
                 "CRAWL_FAILURE",
                 "crawl subprocess failed",
-                result_json={"target_id": target_id, "platform": platform},
+                result_json={
+                    "target_id": target_id,
+                    "platform": platform,
+                    "diagnostics": {
+                        "subprocess": _subprocess_diagnostics(
+                            proc.returncode, stdout_path=stdout_path, stderr_path=stderr_path
+                        )
+                    },
+                },
             )
         data = json.loads(output_path.read_text(encoding="utf-8"))
         return JobResult(**data)
+
+
+def _subprocess_diagnostics(
+    returncode: int | None,
+    *,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"returncode": returncode}
+    stdout_tail = _redacted_tail(stdout_path)
+    stderr_tail = _redacted_tail(stderr_path)
+    if stdout_tail:
+        diagnostics["stdout_tail"] = stdout_tail
+    if stderr_tail:
+        diagnostics["stderr_tail"] = stderr_tail
+    return diagnostics
+
+
+def _redacted_tail(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # **redact 먼저, truncate 나중.** redact 는 ``key=value``/OTP 문맥처럼 키와 값이 인접해야
+    # 매칭되는 정규식이라, 4000자로 먼저 자르면 민감 키가 tail 앞에서 잘리고 값만 남아 마스킹
+    # 문맥을 잃어 secret 이 누출될 수 있다(검토 High). 전체를 redact 한 뒤 마지막 N 자만 취한다.
+    redacted = redact(text)
+    if len(redacted) > _MAX_STREAM_TAIL_CHARS:
+        redacted = redacted[-_MAX_STREAM_TAIL_CHARS:]
+    return redacted.strip()
 
 
 def _run_child(input_path: Path, output_path: Path) -> int:

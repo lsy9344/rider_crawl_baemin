@@ -174,6 +174,50 @@ def test_healthy_pending_auth_coupang_2fa_is_not_closed_by_recovery() -> None:
     asyncio.run(_run())
 
 
+def test_stale_pending_auth_coupang_2fa_past_payload_ttl_is_closed() -> None:
+    """PENDING AUTH_COUPANG_2FA past its payload ``expires_at`` is closed terminal (검토 High).
+
+    downtime 뒤 누적된 오래된 자동 2FA 인증 job 이 나중에 claim·실행돼 중복 OTP 를 요청하는 것을
+    막는다. lease 만료가 아니라 payload TTL 로 닫으므로 reason 은 stale_auth_job_expired 다.
+    """
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        expires_at = _T0 + timedelta(minutes=5)
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+                "scheduled_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+        # claim 하지 않은 채(PENDING) payload TTL 이 지난 시점에 recovery.
+        now = expires_at + timedelta(minutes=1)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_AUTH_JOB_EXPIRED
+
+        # 다시 claim 되지 않는다(브라우저/OTP 미접근).
+        claimed = await backend.claim(
+            agent_id="agent-late",
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
+            max_jobs=5,
+            lease_seconds=120,
+            now=now,
+        )
+        assert claimed == []
+
+    asyncio.run(_run())
+
+
 def test_recovery_skips_expired_scheduled_crawl_instead_of_backlog_replay() -> None:
     """Expired scheduled crawls are closed with a safe reason."""
 
@@ -407,6 +451,43 @@ def test_recover_once_leaves_active_leases_claimed():
         assert backend.job_status(job_id) == JOB_STATUS_CLAIMED
 
     asyncio.run(_run())
+
+
+def test_recover_stale_iso_lexical_filter_matches_temporal_staleness() -> None:
+    """PostgresQueueBackend 의 ``expires_at <= now`` SQL 텍스트 필터가 시각 비교와 일치한다.
+
+    PENDING 후보를 **실제로 만료된** 행으로만 좁히는 SQL 필터는 ``_iso_utc_z`` 정규형의 사전식
+    비교에 의존한다(검토 High — 미래 expires_at 정상 PENDING 이 batch 를 먹지 않게). 이 가정이
+    경계에서 깨지면 만료 row 를 놓치거나 정상 row 를 stale 로 오판하므로, 사전식 결과가
+    ``stale_recovery_reason``(``_parse_iso_utc`` 기반)과 같은지 잠근다.
+    """
+    from rider_server.queue.postgres_queue import _iso_utc_z
+    from rider_server.queue.states import stale_recovery_reason
+
+    now = datetime(2026, 6, 23, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    now_iso = _iso_utc_z(now)
+    deltas = [
+        timedelta(minutes=-10),
+        timedelta(seconds=-1),
+        timedelta(0),  # 같은 초 → 만료로 본다(inclusive)
+        timedelta(seconds=1),
+        timedelta(minutes=10),
+    ]
+    for d in deltas:
+        expires = now + d
+        expires_iso = _iso_utc_z(expires)
+        lexical_stale = expires_iso <= now_iso
+        # scheduled crawl payload 로 Python 권위 판정(같은 _iso_utc 형식).
+        reason = stale_recovery_reason(
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            payload_json={"job_origin": "scheduler", "expires_at": expires_iso},
+            now=now,
+            job_status=JOB_STATUS_PENDING,
+        )
+        temporal_stale = reason is not None
+        assert lexical_stale == temporal_stale, (
+            f"delta={d}: lexical({lexical_stale}) != temporal({temporal_stale})"
+        )
 
 
 def test_queue_recovery_loop_uses_configured_batch_size() -> None:

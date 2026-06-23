@@ -1166,6 +1166,31 @@ def test_subprocess_failure_reports_redacted_stderr(monkeypatch) -> None:
     assert "raw-secret" not in diagnostics["stderr_tail"]
 
 
+def test_redacted_tail_redacts_before_truncating(tmp_path) -> None:
+    """tail 잘림이 마스킹 문맥을 끊지 않는다 — redact 먼저, truncate 나중(검토 High).
+
+    민감 키(``password=``)가 마지막 N 자(tail) 경계 **앞**에 있고 그 값은 tail 안에 남는 상황을
+    만든다. truncate 를 먼저 하면 키가 잘려 값만 남아 누출되지만, redact 를 먼저 하면 값이 마스킹된
+    뒤 tail 을 취하므로 secret 이 남지 않는다.
+    """
+    import rider_agent.workers.crawl_process as cp
+    from rider_crawl.redaction import REDACTED
+
+    secret = "supersecretvalue123456"
+    # password= 가 4000자 경계 앞쪽에 오도록 앞에 padding 을 채우고, 값은 거의 끝(tail 안)에 둔다.
+    head_pad = "A" * (cp._MAX_STREAM_TAIL_CHARS - 5)
+    tail_pad = "B" * 200
+    text = f"{head_pad} password={secret} {tail_pad}"
+    log_path = tmp_path / "stderr.log"
+    log_path.write_text(text, encoding="utf-8")
+
+    out = cp._redacted_tail(log_path)
+
+    assert len(out) <= cp._MAX_STREAM_TAIL_CHARS
+    assert secret not in out  # 값이 tail 안에 남았어도 마스킹됨
+    assert REDACTED in out
+
+
 def test_terminate_process_tree_is_best_effort_when_already_gone() -> None:
     import rider_agent.workers.crawl_process as cp
 

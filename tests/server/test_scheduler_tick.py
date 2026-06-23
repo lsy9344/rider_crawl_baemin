@@ -1014,6 +1014,10 @@ def test_scheduler_enqueues_auth_coupang_2fa_instead_of_crawl_when_auth_required
     assert payload["recovery_mode"] == "coupang_auto_email_2fa"
     assert payload["coupang_login_id_ref"] == "vault://coupang/login-id"
     assert payload["verification_email_address_ref"] == "vault://mail/address"
+    # payload TTL — 오래된 인증 job 이 downtime 뒤 실행돼 중복 OTP 를 요청하는 것을 막는다(검토 High).
+    scheduled_at = datetime.fromisoformat(payload["scheduled_at"].replace("Z", "+00:00"))
+    expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+    assert scheduled_at < expires_at <= scheduled_at + timedelta(minutes=5)
     # crawl 전용 플래그·인증번호 값은 싣지 않는다(auth job 은 recovery_mode 로 식별).
     assert "coupang_auto_email_2fa_enabled" not in payload
     assert "verification_code" not in payload

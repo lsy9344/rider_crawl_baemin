@@ -623,6 +623,42 @@ def test_runner_preflight_unavailable_is_fail_closed():
     assert complete_calls[0][1]["result_json"]["reason"] == "preflight_unavailable"
 
 
+def test_auth_coupang_2fa_is_a_preflight_job_type():
+    """AUTH_COUPANG_2FA 도 브라우저/CDP 를 열고 자동 OTP 를 요청하므로 preflight 대상이다(검토 High)."""
+    from rider_agent.job_loop import _PREFLIGHT_JOB_TYPES
+
+    assert "AUTH_COUPANG_2FA" in _PREFLIGHT_JOB_TYPES
+    # crawl/open-auth 도 여전히 포함, 비-브라우저 type 은 제외(불필요한 왕복 0).
+    assert {"CRAWL_BAEMIN", "CRAWL_COUPANG", "OPEN_AUTH_BROWSER"} <= _PREFLIGHT_JOB_TYPES
+    assert "KAKAO_SEND" not in _PREFLIGHT_JOB_TYPES
+    assert "AUTH_CHECK" not in _PREFLIGHT_JOB_TYPES
+
+
+def test_runner_preflight_denies_auth_coupang_2fa_before_opening_browser():
+    """만료된 AUTH_COUPANG_2FA 는 preflight 에서 거부돼 브라우저/OTP 요청 전에 안전히 닫힌다."""
+
+    class _PreflightDenyTransport(FakeTransport):
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/preflight"):
+                self.calls.append((url, body, headers))
+                return {"allowed": False, "reason": "payload_expired", "server_time": "2026-06-14T12:00:00Z"}
+            return super().post_json(url, body, headers=headers)
+
+    auth_job = dict(_JOB_DICT, type="AUTH_COUPANG_2FA")
+    transport = _PreflightDenyTransport(claim_script=[{"jobs": [auth_job]}])
+    executed: list[ClaimedJob] = []
+
+    runner = _runner(transport, execute_job=lambda j: executed.append(j))
+    runner.run()
+
+    assert executed == []  # 자동 OTP 워커 미실행
+    assert len(transport.calls_for("/preflight")) == 1
+    complete_calls = transport.calls_for("/complete")
+    assert len(complete_calls) == 1
+    assert complete_calls[0][1]["status"] == "failed"
+    assert complete_calls[0][1]["result_json"]["reason"] == "payload_expired"
+
+
 def test_runner_empty_claim_skips_execute_and_sleeps():
     transport = FakeTransport(claim_script=[{"jobs": []}])
     executed: list[ClaimedJob] = []

@@ -122,8 +122,10 @@ PREFLIGHT_REASON_UNAVAILABLE = "preflight_unavailable"
 
 # server 가 브라우저를 여는 job 만 preflight 대상으로 본다(crawl/auth). 나머지는 preflight 생략
 # (불필요한 왕복 0) — 이 type 집합은 heartbeat capability 문자열과 1:1 미러(import 금지).
+# AUTH_COUPANG_2FA 도 브라우저/CDP 를 열고 자동 OTP 를 요청하므로 preflight 대상이다 — payload
+# 가 stale 하면(서버가 더는 복구를 원치 않으면) 브라우저를 열기 전에 fail-closed 로 닫는다.
 _PREFLIGHT_JOB_TYPES = frozenset(
-    {"CRAWL_BAEMIN", "CRAWL_COUPANG", "OPEN_AUTH_BROWSER"}
+    {"CRAWL_BAEMIN", "CRAWL_COUPANG", "OPEN_AUTH_BROWSER", "AUTH_COUPANG_2FA"}
 )
 
 # 최소 진행 이벤트(claim 직후). 풍부한 진단 이벤트는 워커(4.5+) 소유.

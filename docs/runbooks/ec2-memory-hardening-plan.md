@@ -110,10 +110,7 @@ Emergency mode에서 사용할 수동 배포 명령:
 cd /opt/rider-server/repo
 git fetch origin main
 git checkout -B main -f FETCH_HEAD
-set -a
-. ./.env
-set +a
-docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up --build -d --remove-orphans
+docker compose --env-file /opt/rider-server/repo/.env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up --build -d --remove-orphans
 curl -fsS http://localhost:8000/health
 ```
 
@@ -208,19 +205,40 @@ compose service env files, not the root deploy variable file. 따라서 producti
 ```bash
 cd /opt/rider-server/repo
 sudo cp .env ".env.backup.$(date -u +%Y%m%dT%H%M%SZ)"
-grep -q '^RIDER_DB_POOL_SIZE=' .env && sudo sed -i 's/^RIDER_DB_POOL_SIZE=.*/RIDER_DB_POOL_SIZE=2/' .env || echo 'RIDER_DB_POOL_SIZE=2' | sudo tee -a .env
-grep -q '^RIDER_DB_MAX_OVERFLOW=' .env && sudo sed -i 's/^RIDER_DB_MAX_OVERFLOW=.*/RIDER_DB_MAX_OVERFLOW=2/' .env || echo 'RIDER_DB_MAX_OVERFLOW=2' | sudo tee -a .env
-grep -q '^RIDER_UVICORN_WORKERS=' .env && sudo sed -i 's/^RIDER_UVICORN_WORKERS=.*/RIDER_UVICORN_WORKERS=1/' .env || echo 'RIDER_UVICORN_WORKERS=1' | sudo tee -a .env
+sudo python3 - <<'PY'
+from pathlib import Path
+
+path = Path(".env")
+if not path.is_file():
+    raise SystemExit("missing /opt/rider-server/repo/.env")
+
+updates = {
+    "RIDER_DB_POOL_SIZE": "2",
+    "RIDER_DB_MAX_OVERFLOW": "2",
+    "RIDER_UVICORN_WORKERS": "1",
+}
+seen = set()
+out = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0] if "=" in line else ""
+    if key in updates:
+        if key not in seen:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        continue
+    out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
 ```
 
 반영:
 
 ```bash
 cd /opt/rider-server/repo
-set -a
-. ./.env
-set +a
-docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up -d --no-deps --force-recreate backend-api scheduler queue-recovery telegram-dispatch
+docker compose --env-file /opt/rider-server/repo/.env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up -d --no-deps --force-recreate backend-api scheduler queue-recovery telegram-dispatch
 ```
 
 검증:
@@ -350,18 +368,39 @@ root deploy variable file인 `/opt/rider-server/repo/.env`를 수정한다.
 ```bash
 cd /opt/rider-server/repo
 sudo cp .env ".env.rollback.$(date -u +%Y%m%dT%H%M%SZ)"
-grep -q '^RIDER_DB_POOL_SIZE=' .env && sudo sed -i 's/^RIDER_DB_POOL_SIZE=.*/RIDER_DB_POOL_SIZE=5/' .env || echo 'RIDER_DB_POOL_SIZE=5' | sudo tee -a .env
-grep -q '^RIDER_DB_MAX_OVERFLOW=' .env && sudo sed -i 's/^RIDER_DB_MAX_OVERFLOW=.*/RIDER_DB_MAX_OVERFLOW=10/' .env || echo 'RIDER_DB_MAX_OVERFLOW=10' | sudo tee -a .env
+sudo python3 - <<'PY'
+from pathlib import Path
+
+path = Path(".env")
+if not path.is_file():
+    raise SystemExit("missing /opt/rider-server/repo/.env")
+
+updates = {
+    "RIDER_DB_POOL_SIZE": "5",
+    "RIDER_DB_MAX_OVERFLOW": "10",
+}
+seen = set()
+out = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0] if "=" in line else ""
+    if key in updates:
+        if key not in seen:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        continue
+    out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
 ```
 
 그 다음 앱 컨테이너를 재생성한다.
 
 ```bash
 cd /opt/rider-server/repo
-set -a
-. ./.env
-set +a
-docker compose -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up -d --no-deps --force-recreate backend-api scheduler queue-recovery telegram-dispatch
+docker compose --env-file /opt/rider-server/repo/.env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up -d --no-deps --force-recreate backend-api scheduler queue-recovery telegram-dispatch
 ```
 
 ### Optional services rollback

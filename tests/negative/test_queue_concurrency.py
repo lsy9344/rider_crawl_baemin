@@ -164,6 +164,104 @@ def test_lease_expiry_recover_and_reassign_real_pg(pg_backend):
     asyncio.run(_run())
 
 
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+@_pg_gate
+def test_recover_stale_does_not_starve_stale_auth_under_healthy_pending_backlog(pg_backend):
+    """healthy PENDING backlog 가 batch 를 채워도 만료 AUTH_COUPANG_2FA PENDING 이 cleanup 된다.
+
+    예전엔 LIMIT 을 먼저 걸고 Python 에서 healthy PENDING 을 skip 해, 운영 batch(100)에서 정상
+    PENDING 이 batch 를 채우면 만료 auth PENDING 이 영원히 뒤로 밀렸다(검토 High). 이제 PENDING
+    후보를 **실제로 만료된**(``expires_at <= now``) 행으로만 SQL 단계에서 좁혀, 정상 PENDING 은
+    (expires_at 가 없든, 아직 미래든) batch 를 먹지 않는다.
+
+    여기서는 두 종류의 정상 PENDING 을 batch 보다 많이 섞는다:
+      (a) expires_at 없는 PENDING(KAKAO_SEND),
+      (b) expires_at 가 **아직 미래**인 scheduled crawl PENDING — 이게 핵심 회귀 케이스다.
+    그 뒤에 진짜 만료된 AUTH_COUPANG_2FA 가 작은 batch 로도 닫혀야 한다.
+    """
+    from rider_server.queue.states import (
+        JOB_STATUS_FAILED,
+        JOB_STATUS_PENDING,
+        JOB_TYPE_AUTH_COUPANG_2FA,
+        JOB_TYPE_CRAWL_COUPANG,
+        JOB_TYPE_KAKAO_SEND,
+        RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+    )
+
+    async def _run():
+        # (1) expires_at 없는 healthy PENDING 10개 — KAKAO_SEND.
+        for _ in range(10):
+            await pg_backend.enqueue(job_type=JOB_TYPE_KAKAO_SEND, now=_T0)
+        # (2) expires_at 가 **아직 미래**인 정상 scheduled crawl PENDING 10개 — 회귀 핵심.
+        #     (id 정렬상 뒤의 만료 auth job 앞에 와서 batch 를 먹을 수 있는 위치.)
+        future = _T0 + timedelta(hours=1)
+        for _ in range(10):
+            await pg_backend.enqueue(
+                job_type=JOB_TYPE_CRAWL_COUPANG,
+                payload_json={
+                    "job_type": JOB_TYPE_CRAWL_COUPANG,
+                    "job_origin": "scheduler",
+                    "scheduled_at": _iso(_T0),
+                    "expires_at": _iso(future),  # 미래 — 아직 stale 아님
+                },
+                now=_T0,
+            )
+        # (3) payload TTL 이 이미 지난 AUTH_COUPANG_2FA PENDING 하나.
+        expired = _T0 - timedelta(minutes=1)
+        auth_id = await pg_backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+                "expires_at": _iso(expired),
+            },
+            now=_T0,
+        )
+
+        # 작은 batch(=5)로 recovery — 정상 PENDING 20개가 batch 를 먹으면 auth job 이 안 닫힌다.
+        recovered = await pg_backend.recover_stale(now=_T0, batch_size=5)
+
+        assert recovered == 1  # 정상 PENDING 은 후보에서 빠지고 만료 auth 만 닫힌다.
+        status, result_json = await _job_status_and_result(pg_backend, auth_id)
+        assert status == JOB_STATUS_FAILED
+        assert (result_json or {}).get("reason") == RESULT_REASON_STALE_AUTH_JOB_EXPIRED
+        # 정상 PENDING 20개는 그대로 보존(닫히지 않음).
+        healthy_still_pending = await _count_status(pg_backend, JOB_STATUS_PENDING)
+        assert healthy_still_pending == 20
+
+    asyncio.run(_run())
+
+
+async def _job_status_and_result(backend, job_id: str):
+    from sqlalchemy import select
+    from rider_server.db.models.agent import Job
+
+    async with backend._session_factory() as session:
+        row = (
+            await session.execute(
+                select(Job.status, Job.result_json).where(Job.id == uuid.UUID(job_id))
+            )
+        ).first()
+    return (str(row.status), row.result_json)
+
+
+async def _count_status(backend, status: str) -> int:
+    from sqlalchemy import func, select
+    from rider_server.db.models.agent import Job
+
+    async with backend._session_factory() as session:
+        n = (
+            await session.execute(
+                select(func.count()).select_from(Job).where(Job.status == status)
+            )
+        ).scalar_one()
+    return int(n)
+
+
 @_pg_gate
 def test_stale_owner_complete_returns_lease_lost_real_pg(pg_backend):
     from rider_server.queue.backend import COMPLETE_LEASE_LOST

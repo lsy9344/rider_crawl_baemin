@@ -65,6 +65,11 @@ REASON_COUPANG_AUTO_RECOVERY_COOLDOWN = "COUPANG_AUTO_RECOVERY_COOLDOWN"
 #: circuit breaker 집계 윈도(최근 15분, AC3).
 DEFAULT_BREAKER_WINDOW = timedelta(minutes=15)
 
+#: AUTH_COUPANG_2FA payload TTL — 자동 email 2FA 인증 job 은 짧게 만료시킨다(docs 권고 3~5분).
+#: 서버/Agent downtime 뒤 누적된 오래된 인증 job 이 나중에 실행돼 중복 OTP 를 요청하는 것을 막기
+#: 위해 payload 에 ``expires_at`` 를 싣고, Agent preflight·queue recovery 가 이 값으로 stale 을 닫는다.
+AUTH_COUPANG_2FA_PAYLOAD_TTL = timedelta(minutes=5)
+
 
 @dataclass(frozen=True)
 class DueTarget:
@@ -609,6 +614,9 @@ def _auth_coupang_2fa_payload(target: DueTarget, *, now: datetime) -> dict[str, 
         "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
         "job_origin": JOB_ORIGIN_SCHEDULER,
         "scheduled_at": _iso_utc(now),
+        # payload TTL — 오래된 인증 job 이 downtime 뒤 실행돼 중복 OTP 를 요청하는 것을 막는다.
+        # Agent preflight·queue recovery 가 이 값으로 stale PENDING auth job 을 안전하게 닫는다.
+        "expires_at": _iso_utc(now + AUTH_COUPANG_2FA_PAYLOAD_TTL),
         "coupang_login_id_ref": target.username,
         "coupang_login_password_ref": target.password,
         "verification_email_address_ref": target.verification_email_address,

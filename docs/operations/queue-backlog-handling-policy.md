@@ -105,11 +105,31 @@ stop the Agent if already-queued work keeps opening windows**:
 | Scheduler tick, `AUTH_REQUIRED` Coupang w/ auto 2FA, auth job already active | No duplicate auth job | `AUTH_JOB_ALREADY_ACTIVE` |
 | Manual `인증 시작`, complete auto 2FA refs | Enqueues `AUTH_COUPANG_2FA`, never `CRAWL_COUPANG` | — |
 | Manual `인증 시작`, login only (no email 2FA) | Falls back to manual `OPEN_AUTH_BROWSER` | — |
-| `AUTH_COUPANG_2FA` lease expires while claimed | Closed terminal `FAILED`, not re-`PENDING` (no duplicate OTP) | `stale_auth_recovery_abandoned` |
+| `AUTH_COUPANG_2FA` lease expires while claimed | Closed terminal `FAILED`, not re-`PENDING` (no duplicate OTP); account cooldown set | `stale_auth_recovery_abandoned` |
+| `AUTH_COUPANG_2FA` PENDING past payload `expires_at` (5 min TTL) | Closed terminal `FAILED` on queue recovery / Agent preflight, browser never opens | `stale_auth_job_expired` |
+| `AUTH_COUPANG_2FA` with incomplete secrets (e.g. app password missing) | Fail-closed before opening browser/IMAP | `secret_ref_unresolved` |
+| `AUTH_COUPANG_2FA` IMAP login / mailbox setup failure | Stops as email-auth-required (operator must fix mailbox), not a transient retry | `EMAIL_AUTH_REQUIRED` |
+| Two monitoring targets on the same Coupang account | At most one active auth job per `platform_account_id` (account-scoped dedup) | `AUTH_JOB_ALREADY_ACTIVE` |
 | Coupang auto recovery success | Account `ACTIVE`, cooldown cleared, normal crawl scheduling resumes | — |
 | Coupang auto recovery failure | Cooldown set, repeated auth attempts suppressed | `coupang_auto_recovery_cooldown` |
 
-## Current Problem
+---
+
+# Historical design notes (pre-implementation — NOT current behavior)
+
+> **Authoritative behavior is the "Current Implemented Behavior" and "Verification
+> Matrix" sections above.** Everything below this line is the original
+> **pre-implementation** planning write-up. It describes the problem as it stood
+> *before* the `crawl-coupang-auth-separation` work order and proposes options
+> that were **not** the final design. In particular, the sections below still say
+> things like "`CRAWL_COUPANG` performs inline email 2FA", "one bounded recovery
+> **crawl**", and "`OPEN_AUTH_BROWSER` runs automatic OTP" — **these are obsolete.**
+> In the shipped system: `CRAWL_COUPANG` never does inline 2FA, auto recovery is a
+> dedicated `AUTH_COUPANG_2FA` job, and `OPEN_AUTH_BROWSER` is manual-only. Keep
+> this section only as a record of the original problem statement and rationale;
+> do not treat any rule here as operative.
+
+## Current Problem (historical)
 
 The current system can create and run `CRAWL_COUPANG` when all of these are true:
 

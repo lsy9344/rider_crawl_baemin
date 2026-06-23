@@ -160,8 +160,13 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "ssh-keyscan" not in workflow
     assert "git checkout -B main -f FETCH_HEAD" in workflow
     compose_files = "-f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml"
-    assert f"docker compose -p rider {compose_files} up --build -d --remove-orphans" in workflow
-    assert f"docker compose -p rider {compose_files} ps" in workflow
+    assert "set -a" not in workflow
+    assert ". ./.env" not in workflow
+    assert (
+        f"docker compose --env-file .env -p rider {compose_files} "
+        "up --build -d --remove-orphans"
+    ) in workflow
+    assert f"docker compose --env-file .env -p rider {compose_files} ps" in workflow
     assert "for i in $(seq 1 60)" in workflow
     assert "production health ok after ${i}s" in workflow
     assert "logs --tail=80 backend-api" in workflow

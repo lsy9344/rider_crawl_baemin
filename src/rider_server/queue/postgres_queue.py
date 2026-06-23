@@ -56,6 +56,18 @@ from .states import (
 _MAX_EVENT_TEXT_LENGTH = 200
 _MAX_EVENT_MESSAGE_LENGTH = 500
 _MAX_EVENT_ARTIFACTS = 5
+
+
+def _iso_utc_z(dt: datetime) -> str:
+    """datetime → ``YYYY-MM-DDTHH:MM:SSZ``(microsecond 0, UTC). payload ``expires_at`` 정규형과 동일.
+
+    payload 의 ``expires_at`` 들은 모두 이 형식으로 생성되므로(scheduler/admin 의 ``_iso_utc``),
+    같은 정규형의 now 문자열과 **사전식 비교**가 곧 시각 비교가 된다(SQL 텍스트 비교용).
+    """
+
+    return (
+        dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
 STALE_LEASE_ERROR_CODE = "CRAWL_TIMEOUT"
 
 #: Coupang 자동 이메일 2FA 복구 모드 마커(scheduler payload / agent result 공용).
@@ -583,6 +595,22 @@ class PostgresQueueBackend(QueueBackend):
             # (1) 만료 lease 의 CLAIMED/RUNNING job. (2) payload TTL 이 지난 PENDING scheduled
             # crawl/auth job — 서버 downtime 뒤 누적 backlog 가 한 번에 claim 되지 않게 미리
             # terminal 종료(Task 6). PENDING 은 lease 가 없어 payload expires_at 로만 stale 판정한다.
+            #
+            # **batch 예산 오염 방지(검토 High):** LIMIT 을 SQL 에서 거는데, PENDING 후보를
+            # **실제로 만료된 행**(``expires_at <= now``)으로만 좁혀야 한다. expires_at 존재 여부만
+            # 보면, 아직 만료 전인 정상 scheduled crawl/auth PENDING(둘 다 expires_at 를 실음)이
+            # batch 를 채워 뒤에 있는 진짜 만료 AUTH_COUPANG_2FA 가 영원히 cleanup 안 될 수 있다.
+            # ``expires_at`` 는 모두 ``_iso_utc``(``YYYY-MM-DDTHH:MM:SSZ``, microsecond 0, UTC)로
+            # 생성돼 **사전식 비교가 시각 비교와 일치**한다 — now 도 같은 정규형으로 만들어 텍스트
+            # 비교한다(타임스탬프 cast 의 malformed-value 에러 위험 회피). 최종 stale 판정은
+            # Python ``stale_recovery_reason`` 이 그대로 한다(``_parse_iso_utc`` 로 Z/+00:00 모두 허용).
+            now_iso = _iso_utc_z(now)
+            expires_text = Job.payload_json["expires_at"].as_string()
+            pending_stale_candidate = (
+                (Job.status == JOB_STATUS_PENDING)
+                & (Job.payload_json["expires_at"].is_not(None))
+                & (expires_text <= now_iso)
+            )
             stmt = (
                 select(Job)
                 .where(
@@ -591,7 +619,7 @@ class PostgresQueueBackend(QueueBackend):
                         & Job.lease_expires_at.is_not(None)
                         & (Job.lease_expires_at <= now)
                     )
-                    | (Job.status == JOB_STATUS_PENDING)
+                    | pending_stale_candidate
                 )
                 .order_by(Job.lease_expires_at.asc().nullslast(), Job.id.asc())
                 .with_for_update(skip_locked=True)
@@ -636,6 +664,13 @@ class PostgresQueueBackend(QueueBackend):
                     if stale_reason is not None:
                         existing = job.result_json if isinstance(job.result_json, dict) else {}
                         job.result_json = {**existing, "reason": stale_reason}
+                    # stale Coupang 자동복구 job(AUTH_COUPANG_2FA/legacy recovery crawl)을 terminal
+                    # FAILED 로 닫을 때 계정 cooldown 도 같이 건다 — 안 그러면 다음 scheduler tick 이
+                    # 같은 AUTH_REQUIRED 계정에 곧바로 새 인증 job 을 만들어 복구가 무한 재시도된다
+                    # (검토 High). recovery job 이 아니면 no-op.
+                    await self._persist_coupang_recovery_state(
+                        session, job=job, status=JOB_STATUS_FAILED, now=now
+                    )
                 job.attempts = next_attempt
                 job.agent_id = None
                 job.lease_expires_at = None

@@ -2,10 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement this plan task-by-task, or `superpowers:executing-plans` if one worker executes it inline. Keep checkbox state in this document as work lands.
 
-작성일: 2026-06-23  
-상태: 구현 완료  
-대상 저장소: `rider_result_mornitoring`  
-근거 문서: `docs/runbooks/ec2-memory-hardening-plan.md`  
+작성일: 2026-06-23
+상태: 구현 완료
+대상 저장소: `rider_result_mornitoring`
+근거 문서: `docs/runbooks/ec2-memory-hardening-plan.md`
 검토 근거: 2026-06-23 문서 리뷰, `_bmad-output/implementation-artifacts/investigations/ec2-memory-oom-investigation.md`, 병렬 서브에이전트 검토 결과
 
 **Goal:** 최근 EC2 OOM 재발 가능성을 낮추고, 운영자가 같은 runbook을 두 번 실행해도 안전하게 동작하도록 배포/모니터링/rollback 지시를 보강한다.
@@ -110,14 +110,41 @@ FAILED
 
 - [x] **Step 2: runbook DB pool command 수정**
 
-Required runbook content:
+Required runbook content (idempotent Python edit block — `grep ... || echo ... | sudo tee -a .env`
+append 방식은 **금지**한다. 그 방식은 중복 키를 만들고 마지막 값만 유효해 비결정적이며,
+`tests/server/test_runbooks_present.py` 가 명시적으로 차단한다. 실제 runbook
+(`docs/runbooks/ec2-memory-hardening-plan.md`)도 아래 Python 블록을 정본으로 쓴다):
 
 ```bash
 cd /opt/rider-server/repo
 sudo cp .env ".env.backup.$(date -u +%Y%m%dT%H%M%SZ)"
-grep -q '^RIDER_DB_POOL_SIZE=' .env && sudo sed -i 's/^RIDER_DB_POOL_SIZE=.*/RIDER_DB_POOL_SIZE=2/' .env || echo 'RIDER_DB_POOL_SIZE=2' | sudo tee -a .env
-grep -q '^RIDER_DB_MAX_OVERFLOW=' .env && sudo sed -i 's/^RIDER_DB_MAX_OVERFLOW=.*/RIDER_DB_MAX_OVERFLOW=2/' .env || echo 'RIDER_DB_MAX_OVERFLOW=2' | sudo tee -a .env
-grep -q '^RIDER_UVICORN_WORKERS=' .env && sudo sed -i 's/^RIDER_UVICORN_WORKERS=.*/RIDER_UVICORN_WORKERS=1/' .env || echo 'RIDER_UVICORN_WORKERS=1' | sudo tee -a .env
+sudo python3 - <<'PY'
+from pathlib import Path
+
+path = Path(".env")
+if not path.is_file():
+    raise SystemExit("missing /opt/rider-server/repo/.env")
+
+updates = {
+    "RIDER_DB_POOL_SIZE": "2",
+    "RIDER_DB_MAX_OVERFLOW": "2",
+    "RIDER_UVICORN_WORKERS": "1",
+}
+seen = set()
+out = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0] if "=" in line else ""
+    if key in updates:
+        if key not in seen:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        continue
+    out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
 ```
 
 Verification:

@@ -250,3 +250,34 @@ def test_cloudwatch_pusher_documents_host_memory_and_swap_metrics() -> None:
     assert "HostMemAvailablePercent" in pusher
     assert "HostSwapUsedBytes" in pusher
     assert "HostSwapUsedPercent" in pusher
+
+
+def test_cloudwatch_pusher_collects_host_metrics_before_app_endpoint() -> None:
+    """Host memory/swap metrics must not depend on the app metrics endpoint."""
+
+    pusher = Path("deploy/cloudwatch/push_metrics.sh").read_text(encoding="utf-8")
+
+    assert pusher.index('host_pairs="$(host_metric_pairs)"') < pusher.index(
+        'body="$(curl'
+    )
+    assert 'body="$(curl -s --max-time 10 "$METRICS_URL")" ||' not in pusher
+    assert 'select(.value | type == "number")' in pusher
+
+
+def test_cloudwatch_pusher_fails_when_app_metrics_missing_despite_host_publish() -> None:
+    """app 운영 7지표 손실(curl 실패/빈 응답/jq parse 실패)은 host publish 성공이 가리지 않는다.
+
+    host metric 만 올라가도 push_once 가 non-zero 로 끝나야 RUN_ONCE 헬스체크/로그가 손실을
+    잡는다(검토 Medium). 별도 app_ok 추적 + host-only 분기 + non-zero 반환을 소스로 잠근다.
+    """
+
+    pusher = Path("deploy/cloudwatch/push_metrics.sh").read_text(encoding="utf-8")
+
+    assert "app_ok=" in pusher  # app 성공 여부를 host publish 와 별도로 추적
+    # app 손실 + host 성공 분기는 성공(0)이 아닌 non-zero 로 끝난다.
+    assert "app operational metrics MISSING" in pusher
+    host_only = pusher.index("app operational metrics MISSING")
+    # 그 분기 직후 return 0 이 아니라 non-zero(return 2)여야 한다.
+    after = pusher[host_only:host_only + 200]
+    assert "return 2" in after
+    assert "return 0" not in after

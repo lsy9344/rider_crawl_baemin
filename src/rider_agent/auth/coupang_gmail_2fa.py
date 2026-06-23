@@ -161,6 +161,33 @@ def _email_auth_flag(
         return None
 
 
+def default_is_email_auth_required(exc: BaseException) -> bool:
+    """기본 운영 predicate — IMAP 로그인/이메일 설정 실패면 ``EMAIL_AUTH_REQUIRED`` 로 본다.
+
+    ``recover_coupang_session_with_email_2fa`` 가 IMAP 로그인 실패를 ``Coupang2faError
+    (email_auth_required=True)`` 로(또는 ``ImapAuthError`` 를 cause 로) 올린다. 예외 체인
+    (``__cause__``)을 따라가 그 신호를 감지한다 — "메일 지연(코드 미수신)" 같은 일시적 실패는
+    ``False`` 로 두어 ``RECOVERY_FAILED``(재요청 가능)로 남긴다. import-safe(lazy import).
+    """
+
+    try:
+        from rider_crawl.auth.coupang_email_2fa import Coupang2faError
+        from rider_crawl.auth.imap_2fa import ImapAuthError
+    except Exception:  # pragma: no cover - 의존성 부재 환경에선 보수적으로 미지정.
+        return False
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ImapAuthError):
+            return True
+        if isinstance(current, Coupang2faError) and getattr(current, "email_auth_required", False):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _success_result(mailbox_ref: str, attempts: int, log: Callable[[str], None] | None) -> JobResult:
     if log is not None:
         log(redact(f"coupang email 2fa recovered (mailbox {mailbox_ref})"))
@@ -273,13 +300,18 @@ def _config_from_coupang_auth_job(
     return _config_from_auth_job(job, secret_resolver=secret_resolver)
 
 
-def _acquire_coupang_auth_page(config: Any) -> Any | None:
-    """Coupang 인증/로그인 페이지를 획득한다(자동복구가 운전할 page).
+@contextmanager
+def _coupang_auth_page(config: Any) -> Iterator[Any | None]:
+    """자동복구가 운전할 Coupang 인증/로그인 page 를 **열린 Playwright 컨텍스트 안에서** 내준다.
 
     과거 ``baemin_auth._drive_coupang_email_2fa_flow`` 의 **안전한 페이지 선택 부분만** 옮겨온다:
     로그인 화면이면 그대로 두고(로그인 전 절대 안 뜰 대시보드 텍스트를 기다리지 않음 — 과거
     page_timeout 헛대기 회피), 로그인 화면이 아니고 대상 URL 이 있으면 한 번만 안내 navigate 한다.
     실제 OTP 취득·입력·제출은 호출자(``recover_coupang_session_with_email_2fa``)가 한다.
+
+    **반드시 page 사용이 끝날 때까지 컨텍스트를 열어 둔다** — ``_sync_playwright()`` 를 빠져나가면
+    CDP 연결이 끊겨 page 가 죽으므로, 호출자는 ``with`` 블록 안에서 복구를 완료해야 한다(닫힌
+    컨텍스트의 page 를 운전하던 use-after-close 버그 회피).
     """
 
     from rider_agent.auth.baemin_auth import (
@@ -302,7 +334,8 @@ def _acquire_coupang_auth_page(config: Any) -> Any | None:
         if page is None:
             page = _first_browser_page(browser)
         if page is None:
-            return None
+            yield None
+            return
         is_login_screen = coupang_crawler._page_looks_like_coupang_login_required(page)
         if target_url and not is_login_screen:
             try:
@@ -314,12 +347,13 @@ def _acquire_coupang_auth_page(config: Any) -> Any | None:
             except timeout_errors:
                 pass
             except Exception:
-                return page
+                yield page
+                return
             try:
                 page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
             except timeout_errors:
                 pass
-        return page
+        yield page
 
 
 def _default_coupang_recover(
@@ -327,24 +361,28 @@ def _default_coupang_recover(
     *,
     secret_resolver: Callable[[str], str | None] | None,
 ) -> Callable[[], bool]:
-    """기본 recover() 클로저 — page 획득 + ``build_coupang_recover`` 합성(실 브라우저는 lazy)."""
+    """기본 recover() 클로저 — page 획득 + ``build_coupang_recover`` 합성(실 브라우저는 lazy).
+
+    page 획득부터 OTP 취득·입력·제출까지 **한 ``with _coupang_auth_page`` 블록 안**에서 끝낸다 —
+    Playwright 컨텍스트가 닫힌 뒤 page 를 운전하면 CDP 연결이 끊겨 모든 동작이 실패하기 때문이다.
+    """
 
     config = _config_from_coupang_auth_job(job, secret_resolver=secret_resolver)
     email_address = str(getattr(config, "verification_email_address", "") or "")
     app_password = str(getattr(config, "verification_email_app_password", "") or "")
 
     def _recover() -> bool:
-        page = _acquire_coupang_auth_page(config)
-        if page is None:
-            return False
-        inner = build_coupang_recover(
-            page=page,
-            config=config,
-            mailbox_id=email_address,
-            email_address=email_address,
-            app_password=app_password,
-        )
-        return bool(inner())
+        with _coupang_auth_page(config) as page:
+            if page is None:
+                return False
+            inner = build_coupang_recover(
+                page=page,
+                config=config,
+                mailbox_id=email_address,
+                email_address=email_address,
+                app_password=app_password,
+            )
+            return bool(inner())
 
     return _recover
 
@@ -361,19 +399,59 @@ def _coupang_auth_account_fields(job: ClaimedJob) -> dict[str, Any]:
     }
 
 
-def _coupang_mailbox_id(job: ClaimedJob, *, secret_resolver: Callable[[str], str | None] | None) -> str:
-    """lock/ref 용 mailbox 식별자(해소된 이메일 주소 — ref 로만 노출, 평문은 결과에 안 남김).
+# 기본(브라우저/IMAP) 복구 경로가 실제로 쓰는 필수 secret 들 — 하나라도 비면 fail-closed.
+# (config attr 이름, 사람이 읽을 라벨) 쌍. 라벨은 reason/log 에 secret 값 없이 무엇이 빠졌는지만 남긴다.
+_REQUIRED_COUPANG_AUTH_SECRETS: tuple[tuple[str, str], ...] = (
+    ("verification_email_address", "mailbox_address"),
+    ("verification_email_app_password", "mailbox_app_password"),
+    ("coupang_login_id", "coupang_login_id"),
+    ("coupang_login_password", "coupang_login_password"),
+)
 
-    필수 ref 가 핸들 모양인데 해소되지 않으면 ``_build_config`` 가 ``SecretRefUnresolved`` 를
-    올린다 — 이때 빈 문자열을 돌려 호출자가 fail-closed(AUTH_REQUIRED + secret_ref_unresolved)로
-    종결하게 한다(브라우저/IMAP 미접근).
+
+def _resolve_coupang_auth_config(
+    job: ClaimedJob, *, secret_resolver: Callable[[str], str | None] | None
+) -> Any | None:
+    """auth job → 해소된 AppConfig(필수 ref 가 핸들 모양인데 미해소면 ``None``).
+
+    ``_build_config`` 가 ``SecretRefUnresolved`` 를 올리면(핸들 모양 ref 가 secret store 에서 안
+    풀림) ``None`` 을 돌려 호출자가 fail-closed(AUTH_REQUIRED + secret_ref_unresolved)로 종결하게
+    한다 — 브라우저/IMAP 미접근. 그 외 예외도 보수적으로 ``None``.
     """
 
     try:
-        config = _config_from_coupang_auth_job(job, secret_resolver=secret_resolver)
+        return _config_from_coupang_auth_job(job, secret_resolver=secret_resolver)
     except Exception:
+        return None
+
+
+def _coupang_mailbox_id(job: ClaimedJob, *, secret_resolver: Callable[[str], str | None] | None) -> str:
+    """lock/ref 용 mailbox 식별자(해소된 이메일 주소 — ref 로만 노출, 평문은 결과에 안 남김)."""
+
+    config = _resolve_coupang_auth_config(job, secret_resolver=secret_resolver)
+    if config is None:
         return ""
     return str(getattr(config, "verification_email_address", "") or "")
+
+
+# is_email_auth_required 기본값 sentinel — 미지정이면 운영 predicate 를 쓰고, 명시적으로 None 을
+# 넘기면(테스트가 분류를 끄려는 경우 등) 비활성화한다. None 자체가 "미지정"이 아님을 구분하기 위함.
+_USE_DEFAULT_EMAIL_AUTH_PREDICATE = object()
+
+
+def _missing_required_coupang_secret(config: Any | None) -> str | None:
+    """기본 복구가 쓸 필수 secret 중 비어 있는 첫 항목의 라벨(없으면 ``None``).
+
+    이메일 주소만 있고 app password/login id/password 가 비어도 브라우저를 열고 OTP 를 요청하는
+    것을 막기 위한 fail-closed 검증(검토 Medium). secret 값은 노출하지 않고 라벨만 돌려준다.
+    """
+
+    if config is None:
+        return _REQUIRED_COUPANG_AUTH_SECRETS[0][1]
+    for attr, label in _REQUIRED_COUPANG_AUTH_SECRETS:
+        if not str(getattr(config, attr, "") or "").strip():
+            return label
+    return None
 
 
 def execute_auth_coupang_2fa_job(
@@ -385,7 +463,7 @@ def execute_auth_coupang_2fa_job(
     sleep: Callable[[float], None] = time.sleep,
     max_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS,
     locks: MailboxLockRegistry | None = None,
-    is_email_auth_required: Callable[[BaseException], bool] | None = None,
+    is_email_auth_required: Callable[[BaseException], bool] | None | object = _USE_DEFAULT_EMAIL_AUTH_PREDICATE,
     log: Callable[[str], None] | None = None,
 ) -> JobResult:
     """``AUTH_COUPANG_2FA`` job — 쿠팡 email 2FA 자동복구 1회(mailbox lock·bounded·재시도 폭주 0).
@@ -402,11 +480,9 @@ def execute_auth_coupang_2fa_job(
 
     fields = _coupang_auth_account_fields(job)
 
-    # 필수 ref 미해소 시 fail-closed(AUTH_REQUIRED + 고정 reason) — 브라우저/IMAP 미접근.
-    mailbox_id = _coupang_mailbox_id(job, secret_resolver=secret_resolver)
-    if not mailbox_id:
+    def _fail_closed(reason: str) -> JobResult:
         if log is not None:
-            log(redact("coupang 2fa job: mailbox ref unresolved (target {})".format(job.target_id)))
+            log(redact("coupang 2fa job fail-closed: {} (target {})".format(reason, job.target_id)))
         return make_failure_result(
             ERROR_AUTH_REQUIRED,
             "coupang 2fa job could not resolve required secret refs",
@@ -419,6 +495,27 @@ def execute_auth_coupang_2fa_job(
             metrics={"reason": REASON_SECRET_REF_UNRESOLVED},
         )
 
+    # 필수 ref 미해소 시 fail-closed(AUTH_REQUIRED + 고정 reason) — 브라우저/IMAP 미접근.
+    config = _resolve_coupang_auth_config(job, secret_resolver=secret_resolver)
+    mailbox_id = str(getattr(config, "verification_email_address", "") or "") if config else ""
+    if not mailbox_id:
+        return _fail_closed(REASON_SECRET_REF_UNRESOLVED)
+
+    # 기본(브라우저/IMAP) 복구 경로일 때만 필수 secret 전체를 검증한다 — 주입 recover(테스트/대체
+    # 구현)는 브라우저/IMAP 를 안 쓰므로 secret 강제 대상이 아니다. 이메일 주소만 있고 app
+    # password/login id/password 가 비면 브라우저를 열기 전에 fail-closed 로 멈춘다(검토 Medium).
+    if recover is None:
+        missing = _missing_required_coupang_secret(config)
+        if missing is not None:
+            return _fail_closed("missing_{}".format(missing))
+
+    # sentinel → 운영 predicate. 명시적 None(분류 비활성화)/주입 predicate 는 그대로 존중한다.
+    email_auth_predicate = (
+        default_is_email_auth_required
+        if is_email_auth_required is _USE_DEFAULT_EMAIL_AUTH_PREDICATE
+        else is_email_auth_required
+    )
+
     recover_fn = recover or _default_coupang_recover(job, secret_resolver=secret_resolver)
     inner = recover_coupang_mailbox(
         mailbox_id=mailbox_id,
@@ -427,7 +524,7 @@ def execute_auth_coupang_2fa_job(
         now=now,
         sleep=sleep,
         max_attempts=max_attempts,
-        is_email_auth_required=is_email_auth_required,
+        is_email_auth_required=email_auth_predicate,  # type: ignore[arg-type]
         log=log,
     )
 

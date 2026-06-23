@@ -37,6 +37,7 @@ from rider_server.scheduler.postgres_repository import (
     _ACTIVE_JOB_STATUSES,
     _CRAWL_JOB_TYPES,
     _capacity_from_agent_rows,
+    _safe_uuid,
     PostgresSchedulerRepository,
     _to_lifecycle_status,
     _to_subscription_status,
@@ -109,6 +110,56 @@ def test_repository_active_status_scope_is_pending_claimed_running() -> None:
 
 def test_postgres_repository_has_release_due_target_for_enqueue_failures() -> None:
     assert hasattr(PostgresSchedulerRepository, "release_due_target")
+
+
+def test_safe_uuid_parses_valid_and_fails_closed_on_garbage() -> None:
+    import uuid
+
+    valid = uuid.uuid4()
+    assert _safe_uuid(str(valid)) == valid
+    assert _safe_uuid(valid) is valid  # 이미 UUID 면 그대로
+    assert _safe_uuid("") is None
+    assert _safe_uuid(None) is None
+    assert _safe_uuid("not-a-uuid") is None
+
+
+def test_advisory_lock_key_is_deterministic_and_int4_safe() -> None:
+    """advisory lock 키는 같은 UUID 면 항상 같고 signed int4 양수 범위 안(검토 High)."""
+    import uuid as _uuid
+    from rider_server.db.base import advisory_lock_key_for_uuid
+
+    u = _uuid.uuid4()
+    k = advisory_lock_key_for_uuid(u)
+    assert advisory_lock_key_for_uuid(u) == k  # 결정적
+    assert 0 <= k <= 0x7FFFFFFF  # int4 양수 범위(부호 문제 0)
+    # 서로 다른 UUID 는 (거의) 다른 키 — 결정성만 보장하면 충돌해도 정확성은 유지된다.
+    other = advisory_lock_key_for_uuid(_uuid.uuid4())
+    assert isinstance(other, int)
+
+
+def test_auth_enqueue_lock_namespace_is_stable_int4() -> None:
+    """scheduler/admin 두 경로가 공유하는 advisory lock 네임스페이스가 안정·int4 범위."""
+    from rider_server.db.base import AUTH_ENQUEUE_LOCK_NAMESPACE
+
+    assert isinstance(AUTH_ENQUEUE_LOCK_NAMESPACE, int)
+    assert -0x80000000 <= AUTH_ENQUEUE_LOCK_NAMESPACE <= 0x7FFFFFFF
+
+
+def test_account_target_ids_subquery_is_account_scoped_not_target_scoped() -> None:
+    """auth job 중복 검사가 platform_account_id 단위로 묶이는지(검토 High) — 같은 계정 공유 target 들."""
+    import uuid
+
+    account_id = str(uuid.uuid4())
+    subq = PostgresSchedulerRepository._account_target_ids_subquery(account_id)
+    assert subq is not None
+    sql = str(subq).lower()
+    # monitoring_targets 를 platform_account_id 로 거른다(target_id 단일이 아님).
+    assert "monitoring_targets" in sql
+    assert "platform_account_id" in sql
+
+    # account id 가 없거나 UUID 가 아니면 None → 호출자가 보수적으로 target 단위로만 검사.
+    assert PostgresSchedulerRepository._account_target_ids_subquery(None) is None
+    assert PostgresSchedulerRepository._account_target_ids_subquery("garbage") is None
 
 
 def test_capacity_snapshot_counts_only_online_agent_capacity() -> None:

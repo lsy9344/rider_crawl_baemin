@@ -65,24 +65,38 @@ host_metric_pairs() {
 }
 
 push_once() {
-  local body
-  body="$(curl -s --max-time 10 "$METRICS_URL")" || { log "curl failed"; return 1; }
-  if [[ -z "$body" ]]; then log "empty response"; return 1; fi
+  local app_pairs="" body="" host_pairs pairs jq_filter
+  # app 운영 7지표를 실제로 얻었는가. host metric publish 성공이 app 손실을 가리지 않도록
+  # 별도로 추적한다 — app 실패(curl 실패/빈 응답/jq parse 실패)면 host 를 올리고도 non-zero
+  # 로 끝낸다(검토 Medium: 운영 7지표 손실을 health check 가 잡을 수 있게).
+  local app_ok=0
 
-  # jq 로 (이름, 값) 쌍을 생성한다:
-  #   - 스칼라 numeric 7지표(null/비numeric 은 제외 → null 인 oldest_heartbeat 는 Agent 0대 시 스킵)
-  #   - 플랫폼 dict(crawl_error_rate/_samples)는 "이름_PLATFORM" 으로 평탄화
-  # 출력 한 줄당 "MetricName<TAB>Value".
-  local app_pairs host_pairs pairs jq_filter
-  jq_filter='.metrics | to_entries[] | if (.value | type) == "number" then "\(.key)\t\(.value)\tNone" elif (.value | type) == "object" then (.key) as $k | (.value | to_entries[] | "\($k)_\(.key)\t\(.value)\tNone") else empty end'
-  app_pairs="$(printf '%s' "$body" | jq -r "$jq_filter" 2>/dev/null)"
+  host_pairs="$(host_metric_pairs)" || { log "host meminfo parse failed"; host_pairs=""; }
 
-  if [[ -z "$app_pairs" ]]; then log "no numeric metrics parsed (body: ${body:0:200})"; return 1; fi
+  if body="$(curl -s --max-time 10 "$METRICS_URL")"; then
+    if [[ -n "$body" ]]; then
+      # jq 로 (이름, 값) 쌍을 생성한다:
+      #   - 스칼라 numeric 7지표(null/비numeric 은 제외 → null 인 oldest_heartbeat 는 Agent 0대 시 스킵)
+      #   - 플랫폼 dict(crawl_error_rate/_samples)는 numeric 값만 "이름_PLATFORM" 으로 평탄화
+      # 출력 한 줄당 "MetricName<TAB>Value<TAB>Unit".
+      jq_filter='.metrics | to_entries[] | if (.value | type) == "number" then "\(.key)\t\(.value)\tNone" elif (.value | type) == "object" then (.key) as $k | (.value | to_entries[] | select(.value | type == "number") | "\($k)_\(.key)\t\(.value)\tNone") else empty end'
+      if app_pairs="$(printf '%s' "$body" | jq -r "$jq_filter" 2>/dev/null)" && [[ -n "$app_pairs" ]]; then
+        app_ok=1
+      else
+        # jq 실패 또는 numeric 지표 0개 — app metric 손실(빈 app_pairs 로 진행하되 실패로 표시).
+        app_pairs=""
+        log "no numeric app metrics parsed (body: ${body:0:200})"
+      fi
+    else
+      log "empty app metrics response"
+    fi
+  else
+    log "curl failed; publishing host metrics only"
+  fi
 
-  host_pairs="$(host_metric_pairs)" || { log "host meminfo parse failed"; return 1; }
   pairs="$(printf '%s\n%s\n' "$app_pairs" "$host_pairs")"
 
-  # PutMetricData 를 배치(최대 20개/요청 — 여긴 한 번에 다 들어감)로 호출.
+  # PutMetricData 를 저카디널리티 단일 요청으로 호출.
   local md=() name value unit count=0
   while IFS=$'\t' read -r name value unit; do
     [[ -z "$name" ]] && continue
@@ -95,8 +109,13 @@ push_once() {
   if aws cloudwatch put-metric-data \
       --namespace "$CW_NAMESPACE" \
       --metric-data "${md[@]}" 2>/tmp/push_metrics.err; then
-    log "pushed $count metrics to $CW_NAMESPACE (region=$REGION)"
-    return 0
+    if [[ "$app_ok" -eq 1 ]]; then
+      log "pushed $count metrics to $CW_NAMESPACE (region=$REGION)"
+      return 0
+    fi
+    # host 는 올렸지만 app 운영지표는 손실 — 성공으로 끝내면 health check 가 못 잡는다(검토 Medium).
+    log "pushed $count host-only metrics to $CW_NAMESPACE (region=$REGION); app operational metrics MISSING"
+    return 2
   else
     log "put-metric-data failed: $(tr '\n' ' ' < /tmp/push_metrics.err)"
     return 1
