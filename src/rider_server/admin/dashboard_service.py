@@ -387,7 +387,9 @@ class DashboardService:
                 return 1
             return 2
 
-        def merge(existing: AuthRequiredRow, candidate: AuthRequiredRow) -> AuthRequiredRow:
+        def combine_rows(
+            existing: AuthRequiredRow, candidate: AuthRequiredRow
+        ) -> AuthRequiredRow:
             winner, fallback = (
                 (candidate, existing)
                 if priority(candidate) < priority(existing)
@@ -413,7 +415,7 @@ class DashboardService:
                 collapsed[key] = row
                 order.append(key)
                 continue
-            collapsed[key] = merge(collapsed[key], row)
+            collapsed[key] = combine_rows(collapsed[key], row)
         return [collapsed[key] for key in order] + targetless
 
     async def job_queue_rows(
