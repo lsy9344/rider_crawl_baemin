@@ -32,6 +32,15 @@ _PEAK_DASHBOARD_HTML_WITH_CENTER = _PEAK_DASHBOARD_HTML.replace(
     "<main>\n  <h1>제이앤에이치플러스 의정부남부</h1>",
 )
 
+_PEAK_DASHBOARD_HTML_WITH_TITLE_CENTER = _PEAK_DASHBOARD_HTML.replace(
+    "<main>",
+    '<main>\n  <div class="align-center dashboard-page-title-content flex">'
+    "<span>제이앤에이치플러스 의정부남부</span>"
+    "<span>저녁피크(16:55~20:00)</span>"
+    "<span>할당량 소진 중</span>"
+    "</div>",
+)
+
 _PEAK_DASHBOARD_HTML_WITH_SECTION_HEADINGS_ONLY = _PEAK_DASHBOARD_HTML.replace(
     "<p>배정 물량</p>",
     "<h2>실시간 오늘의 실적</h2>\n  <p>배정 물량</p>",
@@ -323,7 +332,7 @@ def test_coupang_crawl_performance_snapshot_rejects_peak_when_only_side_text_mat
     # 경우. 헤딩 exact 비교이므로 부수 텍스트 일치로는 통과하면 안 된다(회귀 방지).
     config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
 
-    with pytest.raises(RuntimeError, match="헤딩과 일치하지 않습니다"):
+    with pytest.raises(RuntimeError, match="센터명과 일치하지 않습니다"):
         crawl_performance_snapshot(
             config,
             fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_OTHER_CENTER_HEADING,
@@ -336,6 +345,17 @@ def test_coupang_crawl_performance_snapshot_accepts_matching_peak_center(tmp_pat
     snapshot = crawl_performance_snapshot(
         config,
         fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
+def test_coupang_crawl_performance_snapshot_accepts_peak_title_center_with_shift_suffix(tmp_path):
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_peak_dashboard_html=lambda _config: _PEAK_DASHBOARD_HTML_WITH_TITLE_CENTER,
     )
 
     assert snapshot.peak_dashboard.updated_at == "20:38"

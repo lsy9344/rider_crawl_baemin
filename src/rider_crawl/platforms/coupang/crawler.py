@@ -146,12 +146,13 @@ def _validate_coupang_center(config: AppConfig, snapshot: CurrentScreenSnapshot)
 def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> None:
     """Reject a peak-dashboard HTML that does not belong to the expected center.
 
-    피크 페이지의 **실제 선택 센터(헤딩)**만 추출해 alias와 exact 비교한다. 페이지
+    피크 페이지의 **실제 선택 센터(상단 제목/헤딩)**만 추출해 alias와 exact 비교한다. 페이지
     전체 텍스트에 "포함"되는지만 보면, 실제 선택 센터가 다른데도 드롭다운/목록/이전
     값 같은 부수 텍스트(예: ``<option>강남센터</option>``)에 기대 센터명이 있으면
-    잘못 통과한다. 그래서 헤딩(``h1``~``h3``)만 보고, 헤딩에 ``센터명 시프트(시간)…``
-    형태로 시프트가 붙어 있으면 앞쪽 센터명만 떼어내 비교한다.
-    피크 페이지는 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면
+    잘못 통과한다. 그래서 상단 제목 영역(``dashboard-page-title-content``)을 우선 보고,
+    없으면 기존 헤딩(``h1``~``h3``)을 본다. 제목/헤딩에 ``센터명 시프트(시간)…`` 형태로
+    시프트가 붙어 있으면 앞쪽 센터명만 떼어내 비교한다.
+    피크 페이지는 권위 페이지라 fail-closed로 둔다: 제목/헤딩에서 센터를 확인하지 못하면
     (미노출 포함) CoupangCenterValidationError를 던진다.
     기대 센터가 비어 있으면 검증을 건너뛴다(기존 동작 유지).
     """
@@ -160,20 +161,42 @@ def _validate_coupang_center_in_peak_html(config: AppConfig, peak_html: str) -> 
     if not expected_aliases:
         return
 
-    heading_centers = _coupang_peak_heading_centers(peak_html)
-    if not heading_centers:
+    peak_centers = _coupang_peak_centers(peak_html)
+    if not peak_centers:
         raise CoupangCenterValidationError(
             "쿠팡 센터 검증 실패: 피크 대시보드 화면에서 센터명을 확인하지 못했습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}"
         )
 
-    if not (heading_centers & expected_aliases):
+    if not (peak_centers & expected_aliases):
         raise CoupangCenterValidationError(
-            "쿠팡 센터 검증 실패: 설정한 센터가 피크 대시보드 화면 헤딩과 일치하지 않습니다. "
+            "쿠팡 센터 검증 실패: 설정한 센터가 피크 대시보드 화면 센터명과 일치하지 않습니다. "
             "다른 계정이거나 오래된 피크 탭이 열려 있을 수 있습니다.\n"
             f"설정 센터명: {config.baemin_center_name.strip()}\n"
-            f"화면 헤딩 센터명: {', '.join(sorted(_coupang_peak_heading_center_raw(peak_html))) or '(확인 불가)'}"
+            f"화면 센터명: {', '.join(sorted(_coupang_peak_center_raw(peak_html))) or '(확인 불가)'}"
         )
+
+
+def _coupang_peak_centers(peak_html: str) -> set[str]:
+    return {_normalize_coupang_center(name) for name in _coupang_peak_center_raw(peak_html)}
+
+
+def _coupang_peak_center_raw(peak_html: str) -> set[str]:
+    title_centers = _coupang_peak_title_center_raw(peak_html)
+    if title_centers:
+        return title_centers
+    return _coupang_peak_heading_center_raw(peak_html)
+
+
+def _coupang_peak_title_center_raw(peak_html: str) -> set[str]:
+    parser = _CoupangPeakTitleParser()
+    parser.feed(peak_html)
+    centers: set[str] = set()
+    for title in parser.titles:
+        center = _coupang_center_from_heading(title)
+        if center:
+            centers.add(center)
+    return centers
 
 
 def _coupang_peak_heading_centers(peak_html: str) -> set[str]:
@@ -273,6 +296,49 @@ class _CoupangHeadingParser(HTMLParser):
             return []
         top_level = min(self.headings_by_level)
         return list(self.headings_by_level[top_level])
+
+
+class _CoupangPeakTitleParser(HTMLParser):
+    """Collect text from the peak dashboard's selected-center title area."""
+
+    _TITLE_CLASS = "dashboard-page-title-content"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.titles: list[str] = []
+        self._depth = 0
+        self._buffer: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._depth > 0:
+            self._depth += 1
+            return
+        if _attrs_include_class(attrs, self._TITLE_CLASS):
+            self._depth = 1
+            self._buffer = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._depth <= 0:
+            return
+        self._depth -= 1
+        if self._depth == 0:
+            text = _normalize_visible_text(" ".join(self._buffer))
+            if text:
+                self.titles.append(text)
+            self._buffer = []
+
+    def handle_data(self, data: str) -> None:
+        if self._depth > 0:
+            self._buffer.append(data)
+
+
+def _attrs_include_class(attrs: list[tuple[str, str | None]], class_name: str) -> bool:
+    for name, value in attrs:
+        if name.lower() != "class" or value is None:
+            continue
+        if class_name in str(value).split():
+            return True
+    return False
 
 
 def _coupang_center_aliases(value: str) -> set[str]:
