@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from sqlalchemy.pool import NullPool
@@ -152,6 +155,69 @@ def test_runbook_documents_crawl_scale_operating_model() -> None:
         "scale smoke commands",
     ):
         assert needle in runbook
+
+
+def test_memory_hardening_db_pool_values_fit_single_host_budget() -> None:
+    """Recommended production pool values keep local PostgreSQL connection count low."""
+
+    memory_runbook = Path("docs/runbooks/ec2-memory-hardening-plan.md").read_text(
+        encoding="utf-8"
+    )
+    scale_runbook = Path("docs/runbooks/crawl-scale-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    recommended = (
+        "RIDER_DB_POOL_SIZE=2",
+        "RIDER_DB_MAX_OVERFLOW=2",
+        "RIDER_UVICORN_WORKERS=1",
+    )
+
+    for value in recommended:
+        assert value in memory_runbook
+        assert value in scale_runbook
+
+    budget = connection_budget(
+        uvicorn_workers=1,
+        db_pool_size=2,
+        db_max_overflow=2,
+        scheduler_processes=1,
+        queue_recovery_processes=1,
+        dispatch_processes=1,
+        reserved_connections=10,
+    )
+
+    assert budget.total_requested == 26
+    assert validate_connection_budget(budget, postgres_max_connections=100).ok
+
+
+def test_connection_budget_script_runs_without_server_dependencies() -> None:
+    env = {
+        **os.environ,
+        "PYTHONPATH": "src",
+        "RIDER_UVICORN_WORKERS": "1",
+        "RIDER_DB_POOL_SIZE": "2",
+        "RIDER_DB_MAX_OVERFLOW": "2",
+        "RIDER_DB_RESERVED_CONNECTIONS": "10",
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "scripts/check_db_connection_budget.py",
+            "--postgres-max-connections",
+            "100",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "database connection budget ok" in result.stdout
+    assert "requested=26" in result.stdout
 
 
 def test_crawl_scale_runbook_matches_current_process_boundary() -> None:

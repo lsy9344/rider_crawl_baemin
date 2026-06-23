@@ -8,6 +8,7 @@ identity/동등**(scheduler/severity 정본과 동일값)을 잠근다. PG-skip 
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 from rider_server.admin import severity
 from rider_server.admin.dashboard_repository_postgres import _TELEGRAM_ERROR_WINDOW
@@ -237,3 +238,15 @@ def test_snapshot_and_alert_are_frozen_immutable() -> None:
     snap = _snap()
     with pytest.raises(dataclasses.FrozenInstanceError):
         snap.agents_offline = 9  # type: ignore[misc]
+
+
+def test_cloudwatch_pusher_documents_host_memory_and_swap_metrics() -> None:
+    """Metric pusher publishes host memory pressure signals."""
+
+    pusher = Path("deploy/cloudwatch/push_metrics.sh").read_text(encoding="utf-8")
+
+    assert "/proc/meminfo" in pusher
+    assert "HostMemAvailableBytes" in pusher
+    assert "HostMemAvailablePercent" in pusher
+    assert "HostSwapUsedBytes" in pusher
+    assert "HostSwapUsedPercent" in pusher

@@ -1,1 +1,2 @@
 dist/rider_crawl_onefile.exe filter=lfs diff=lfs merge=lfs -text
+*.sh text eol=lf

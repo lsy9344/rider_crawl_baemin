@@ -1,4 +1,4 @@
-# rider_server 운영 7지표 CloudWatch 푸셔 (systemd, 60초 루프).
+# rider_server 운영 7지표 + host memory/swap CloudWatch 푸셔 (systemd, 60초 루프).
 #
 # 설치(EC2, ubuntu):
 #   sudo install -m 0755 /opt/rider-server/cloudwatch/push_metrics.sh /usr/local/bin/rider-push-metrics.sh
@@ -9,7 +9,7 @@
 # 의존: aws-cli v2, jq, curl. 앱(backend-api) 8000 포트가 localhost 에 떠 있어야 함.
 
 [Unit]
-Description=rider_server operational metrics -> CloudWatch custom metrics pusher
+Description=rider_server operational and host memory metrics -> CloudWatch custom metrics pusher
 After=network-online.target docker.service
 Wants=network-online.target
 

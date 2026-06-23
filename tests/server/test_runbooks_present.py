@@ -52,3 +52,82 @@ def test_seven_runbooks_cover_all_seven_failure_categories() -> None:
     covered = {code for codes in _REQUIRED.values() for code in codes}
     assert covered == {m.value for m in FailureCategory}
     assert len(_REQUIRED) == 7
+
+
+def _ec2_memory_runbook() -> str:
+    return (_RUNBOOK_DIR / "ec2-memory-hardening-plan.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_ec2_memory_runbook_uses_repo_root_env_for_production_deploy() -> None:
+    """Production deploy sources /opt/rider-server/repo/.env, not deploy/.env."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert "/opt/rider-server/repo/.env" in runbook
+    assert "/opt/rider-server/repo/deploy/.env`에" not in runbook
+    assert "deploy/env/*.env" in runbook
+    assert "compose service env files" in runbook
+    assert "not the root deploy variable file" in runbook
+
+
+def test_ec2_memory_runbook_blocks_runner_shutdown_without_deploy_replacement() -> None:
+    """Runner shutdown requires confirmed production deploy replacement."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert ".github/workflows/test.yml" in runbook
+    assert "deploy-production" in runbook
+    assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" in runbook
+    assert "systemctl disable" in runbook
+    assert (
+        "blocked until manual deploy or GitHub-hosted + SSH/SSM deploy is verified"
+        in runbook
+    )
+
+
+def test_ec2_memory_runbook_has_idempotent_swap_commands() -> None:
+    """Swap setup checks existing swapfile and fstab before writing."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert "test -f /swapfile" in runbook
+    assert "sudo file /swapfile" in runbook
+    assert "grep -q '^/swapfile none swap sw 0 0$' /etc/fstab" in runbook
+    assert "sudo fallocate -l 2G /swapfile\nsudo chmod 600 /swapfile" not in runbook
+    assert "\necho '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab" not in runbook
+
+
+def test_ec2_memory_runbook_keeps_required_services_enabled() -> None:
+    """Runbook names services that must not be disabled."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert "do not disable amazon-ssm-agent" in runbook
+    assert "do not disable docker" in runbook
+    assert "do not disable containerd" in runbook
+    assert "do not disable ssh" in runbook
+    assert "sudo systemctl enable --now fwupd.service fwupd-refresh.timer ModemManager.service udisks2.service" in runbook
+
+
+def test_ec2_memory_runbook_aborts_on_terraform_instance_replacement() -> None:
+    """Local PostgreSQL on root volume makes EC2 replacement a stop condition."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert "-/+ aws_instance.app" in runbook
+    assert "root volume local PostgreSQL data" in runbook
+    assert "delete_on_termination = true" in runbook
+
+
+def test_ec2_memory_runbook_success_criteria_include_metrics_and_oom_checks() -> None:
+    """Runbook success includes host metrics, alarms, and OOM log checks."""
+
+    runbook = _ec2_memory_runbook()
+
+    assert "journalctl -k --since" in runbook
+    assert "HostMemAvailablePercent" in runbook
+    assert "HostSwapUsedPercent" in runbook
+    assert "no new OOM log" in runbook
+    assert "rider-metrics.service" in runbook
