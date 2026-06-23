@@ -57,6 +57,18 @@ variable "crawl_error_min_samples" {
   default     = 5
 }
 
+variable "host_mem_available_alarm_percent" {
+  description = "HostMemAvailablePercent low-memory 알람 임계. t4g.small 전환 후에도 15% 미만 지속 시 경고."
+  type        = number
+  default     = 15
+}
+
+variable "host_swap_used_alarm_percent" {
+  description = "HostSwapUsedPercent high-swap 알람 임계. 40% 초과 지속 시 메모리 압박으로 본다."
+  type        = number
+  default     = 40
+}
+
 # ── SNS 토픽(알람 액션 대상). 구독은 alarm_email 지정 시에만 생성(승인 없는 실 이메일 구독 금지). ──
 resource "aws_sns_topic" "alarms" {
   name = "${var.project}-alarms"
@@ -75,6 +87,42 @@ locals {
   metric_dimensions = { Environment = "production" }
   # 알람 액션: SNS 토픽으로 알린다(미구독이어도 토픽 발행은 동작 — 추후 구독만 추가).
   alarm_actions = [aws_sns_topic.alarms.arn]
+}
+
+# (host-a) HostMemAvailablePercent < 15% (5분) — EC2 host memory pressure.
+resource "aws_cloudwatch_metric_alarm" "host_mem_available_low" {
+  alarm_name          = "${var.project}-host-mem-available-low"
+  alarm_description   = "HostMemAvailablePercent < ${var.host_mem_available_alarm_percent}% (5분 지속). EC2 host memory pressure."
+  namespace           = var.alarm_namespace
+  metric_name         = "HostMemAvailablePercent"
+  dimensions          = local.metric_dimensions
+  statistic           = "Minimum"
+  period              = 60
+  evaluation_periods  = 5
+  threshold           = var.host_mem_available_alarm_percent
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-host-mem-available-low" }
+}
+
+# (host-b) HostSwapUsedPercent > 40% (5분) — swap 사용 급증.
+resource "aws_cloudwatch_metric_alarm" "host_swap_used_high" {
+  alarm_name          = "${var.project}-host-swap-used-high"
+  alarm_description   = "HostSwapUsedPercent > ${var.host_swap_used_alarm_percent}% (5분 지속). EC2 host swap pressure."
+  namespace           = var.alarm_namespace
+  metric_name         = "HostSwapUsedPercent"
+  dimensions          = local.metric_dimensions
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 5
+  threshold           = var.host_swap_used_alarm_percent
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+  tags                = { Name = "${var.project}-host-swap-used-high" }
 }
 
 # (a) agents_offline >= 1 (5분) — Agent 오프라인. CRITICAL.
@@ -306,6 +354,8 @@ output "cloudwatch_metrics_namespace" {
 output "cloudwatch_alarm_names" {
   description = "생성된 CloudWatch 알람 이름 목록."
   value = [
+    aws_cloudwatch_metric_alarm.host_mem_available_low.alarm_name,
+    aws_cloudwatch_metric_alarm.host_swap_used_high.alarm_name,
     aws_cloudwatch_metric_alarm.agents_offline.alarm_name,
     aws_cloudwatch_metric_alarm.targets_critical.alarm_name,
     aws_cloudwatch_metric_alarm.telegram_errors.alarm_name,

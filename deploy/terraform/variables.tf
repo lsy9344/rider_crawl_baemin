@@ -11,7 +11,7 @@ variable "project" {
 }
 
 variable "instance_type" {
-  description = "EC2 인스턴스 타입 (비용 최소화: ARM t4g.micro)."
+  description = "EC2 인스턴스 타입. 기본은 비용 최소 예시(t4g.micro), 운영 memory hardening은 tfvars에서 t4g.small로 고정."
   type        = string
   default     = "t4g.micro"
 }

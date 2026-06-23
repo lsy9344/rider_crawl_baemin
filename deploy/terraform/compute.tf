@@ -57,7 +57,8 @@ resource "aws_instance" "app" {
   tags = { Name = "${var.project}-app" }
 
   lifecycle {
-    ignore_changes = [ami] # AMI 갱신만으로 인스턴스 재생성되지 않도록(의도적 교체 시 -replace).
+    ignore_changes  = [ami] # AMI 갱신만으로 인스턴스 재생성되지 않도록(의도적 교체 시 -replace).
+    prevent_destroy = true  # root volume local PostgreSQL data 보호: memory hardening 중 destroy/replacement 금지.
   }
 }
 

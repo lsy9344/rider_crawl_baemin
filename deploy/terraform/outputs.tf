@@ -32,3 +32,13 @@ output "vpc_id" {
   value       = aws_vpc.main.id
   description = "전용 VPC ID."
 }
+
+output "host_memory_metric_names" {
+  description = "EC2 host memory/swap CloudWatch custom metric 이름."
+  value = [
+    "HostMemAvailableBytes",
+    "HostMemAvailablePercent",
+    "HostSwapUsedBytes",
+    "HostSwapUsedPercent",
+  ]
+}

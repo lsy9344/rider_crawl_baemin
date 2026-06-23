@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# rider_server 운영 7지표 → CloudWatch custom metric 푸셔.
+# rider_server 운영 7지표 + host memory/swap → CloudWatch custom metric 푸셔.
 #
-# /metrics/operational(JSON)을 60초마다 긁어 numeric 지표를 namespace "RiderServer",
-# dimension Environment=production 으로 PutMetricData 한다. 비식별 fleet 집계만 다룬다.
+# /metrics/operational(JSON)과 /proc/meminfo를 60초마다 긁어 numeric 지표를 namespace
+# "RiderServer", dimension Environment=production 으로 PutMetricData 한다. 비식별 fleet/host
+# 집계만 다루며 process command line 또는 secret 값을 수집하지 않는다.
 #
 # 비용: custom metric 소수 + 표준 해상도(60s) → 저비용. CloudWatch agent(유료 로그수집) 미사용.
 # 권한: EC2 인스턴스 역할(rider-server-ec2-role)에 cloudwatch:PutMetricData(namespace=RiderServer 제한).
@@ -37,6 +38,32 @@ resolve_region() {
 REGION="$(resolve_region)"
 export AWS_DEFAULT_REGION="$REGION"
 
+host_metric_pairs() {
+  awk '
+    /^MemTotal:/ { mem_total = $2 * 1024 }
+    /^MemAvailable:/ { mem_available = $2 * 1024 }
+    /^SwapTotal:/ { swap_total = $2 * 1024 }
+    /^SwapFree:/ { swap_free = $2 * 1024 }
+    END {
+      if (mem_total > 0) {
+        printf "HostMemAvailableBytes\t%.0f\tBytes\n", mem_available
+        printf "HostMemAvailablePercent\t%.6f\tPercent\n", (mem_available / mem_total) * 100
+      }
+      if (swap_total > 0) {
+        swap_used = swap_total - swap_free
+      } else {
+        swap_used = 0
+      }
+      printf "HostSwapUsedBytes\t%.0f\tBytes\n", swap_used
+      if (swap_total > 0) {
+        printf "HostSwapUsedPercent\t%.6f\tPercent\n", (swap_used / swap_total) * 100
+      } else {
+        printf "HostSwapUsedPercent\t0\tPercent\n"
+      }
+    }
+  ' /proc/meminfo
+}
+
 push_once() {
   local body
   body="$(curl -s --max-time 10 "$METRICS_URL")" || { log "curl failed"; return 1; }
@@ -46,26 +73,20 @@ push_once() {
   #   - 스칼라 numeric 7지표(null/비numeric 은 제외 → null 인 oldest_heartbeat 는 Agent 0대 시 스킵)
   #   - 플랫폼 dict(crawl_error_rate/_samples)는 "이름_PLATFORM" 으로 평탄화
   # 출력 한 줄당 "MetricName<TAB>Value".
-  local pairs
-  pairs="$(printf '%s' "$body" | jq -r '
-    .metrics
-    | to_entries[]
-    | if (.value | type) == "number" then
-        "\(.key)\t\(.value)"
-      elif (.value | type) == "object" then
-        (.key) as $k | (.value | to_entries[] | "\($k)_\(.key)\t\(.value)")
-      else
-        empty
-      end
-  ' 2>/dev/null)"
+  local app_pairs host_pairs pairs jq_filter
+  jq_filter='.metrics | to_entries[] | if (.value | type) == "number" then "\(.key)\t\(.value)\tNone" elif (.value | type) == "object" then (.key) as $k | (.value | to_entries[] | "\($k)_\(.key)\t\(.value)\tNone") else empty end'
+  app_pairs="$(printf '%s' "$body" | jq -r "$jq_filter" 2>/dev/null)"
 
-  if [[ -z "$pairs" ]]; then log "no numeric metrics parsed (body: ${body:0:200})"; return 1; fi
+  if [[ -z "$app_pairs" ]]; then log "no numeric metrics parsed (body: ${body:0:200})"; return 1; fi
+
+  host_pairs="$(host_metric_pairs)" || { log "host meminfo parse failed"; return 1; }
+  pairs="$(printf '%s\n%s\n' "$app_pairs" "$host_pairs")"
 
   # PutMetricData 를 배치(최대 20개/요청 — 여긴 한 번에 다 들어감)로 호출.
-  local md=() name value count=0
-  while IFS=$'\t' read -r name value; do
+  local md=() name value unit count=0
+  while IFS=$'\t' read -r name value unit; do
     [[ -z "$name" ]] && continue
-    md+=("MetricName=${name},Value=${value},Unit=None,Dimensions=[{Name=Environment,Value=${CW_ENV}}]")
+    md+=("MetricName=${name},Value=${value},Unit=${unit:-None},Dimensions=[{Name=Environment,Value=${CW_ENV}}]")
     count=$((count + 1))
   done <<< "$pairs"
 

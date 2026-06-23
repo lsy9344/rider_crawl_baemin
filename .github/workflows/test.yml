@@ -212,6 +212,12 @@ jobs:
           RIDER_TELEGRAM_BOT_TOKEN: ci_dummy_bot_token
         run: docker compose -f deploy/docker-compose.yml config
 
+      - name: Validate memory-hardening DB budget
+        env:
+          PYTHONPATH: src
+          RIDER_DB_RESERVED_CONNECTIONS: "10"
+        run: RIDER_UVICORN_WORKERS=1 RIDER_DB_POOL_SIZE=2 RIDER_DB_MAX_OVERFLOW=2 python scripts/check_db_connection_budget.py --postgres-max-connections 100
+
       - name: Pre-pull BuildKit image
         shell: bash
         run: |

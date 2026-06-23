@@ -12,7 +12,8 @@ architecture.md 는 EC2 + **RDS** + S3 + Secrets Manager + CloudWatch 를 명시
   현재 구성에는 WAL 기반 PITR이 없으므로 최악 RPO는 약 24시간이다.
 - **NAT Gateway 없음.** 퍼블릭 서브넷 + IGW 만 사용(NAT 시간당 과금 ~$35/월 회피). EC2 가
   공인 IP(EIP)로 직접 outbound.
-- **EC2 t4g.micro (ARM).** control plane(FastAPI+scheduler)은 가벼워 충분. 월 ~$6.
+- **EC2 t4g.micro (ARM) 기본값.** 비용 최소 예시 기본값은 유지하되, 운영 memory hardening 이후
+  production `terraform.tfvars`에는 `instance_type = "t4g.small"`을 유지한다.
 
 예상 월 비용: **약 $8~12** (t4g.micro + gp3 20GB + S3/Secrets/전송).
 
@@ -42,6 +43,25 @@ terraform init
 terraform plan
 terraform apply
 ```
+
+운영 memory hardening용 `terraform.tfvars`에는 아래 값을 명시한다.
+
+```hcl
+instance_type = "t4g.small"
+```
+
+## EC2 replacement/destroy 중단 조건
+
+이 Terraform 구성은 root volume local PostgreSQL data를 사용한다. `aws_instance.app`의 root block
+device는 `delete_on_termination = true`이므로 EC2 replacement 또는 destroy가 local DB data 손실로
+이어질 수 있다.
+
+Memory hardening 중 `terraform plan`에 `-/+ aws_instance.app`가 보이면 즉시 중단한다. 이 작업에서
+허용되는 변경은 instance type change이며 replacement가 아니다. `aws_instance.app`에는
+`prevent_destroy = true`를 둬서 accidental destroy를 막는다.
+
+의도적으로 EC2를 교체해야 하는 별도 작업이라면 최신 EBS snapshot과 DB dump를 확인하고, 복원 절차를
+따로 승인받은 뒤에만 guard를 임시 해제한다. 교체가 끝나면 `prevent_destroy = true`를 즉시 복구한다.
 
 private key 는 apply 후 `.secrets/rider-server-keypair.pem` 에 생성된다(git 무시). 접속:
 

@@ -26,6 +26,7 @@
 ```
 
 - 운영 시작값은 `RIDER_UVICORN_WORKERS=1`, `scheduler_processes=1`, `recovery_processes=1`, `telegram_dispatch_processes=1`, `migration/admin 여유분=10` 으로 잡는다. 기본 pool이면 최소 70개 이상을 준비한다.
+- 단일 EC2 + local PostgreSQL memory hardening 권장값은 `RIDER_UVICORN_WORKERS=1`, `RIDER_DB_POOL_SIZE=2`, `RIDER_DB_MAX_OVERFLOW=2` 이다. 이때 산식은 `(1 + 1 + 1 + 1) * (2 + 2) + 10 = 26` 이므로 Postgres `max_connections=100` 아래에 머문다.
 - Postgres 연결 부족이 보이면 먼저 `RIDER_DB_MAX_OVERFLOW` 를 낮추고, API worker 수를 늘릴 때마다 위 산식을 다시 계산한다.
 - 배포 전 connection budget guard를 실행한다.
 

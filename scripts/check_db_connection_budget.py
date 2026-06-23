@@ -3,9 +3,35 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
+import sys
+from pathlib import Path
 
-from rider_server.db.connection_budget import connection_budget, validate_connection_budget
+
+def _load_connection_budget_module():
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "rider_server"
+        / "db"
+        / "connection_budget.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_rider_connection_budget",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load connection budget module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_connection_budget_module = _load_connection_budget_module()
+connection_budget = _connection_budget_module.connection_budget
+validate_connection_budget = _connection_budget_module.validate_connection_budget
 
 
 def _env_int(name: str, default: int) -> int:

@@ -108,6 +108,13 @@ def test_ci_validates_deployment_compose_and_server_image() -> None:
     assert "Deployment config" in workflow
 
 
+def test_ci_validates_memory_hardening_db_connection_budget() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert 'RIDER_DB_RESERVED_CONNECTIONS: "10"' in workflow
+    assert "RIDER_UVICORN_WORKERS=1 RIDER_DB_POOL_SIZE=2 RIDER_DB_MAX_OVERFLOW=2 python scripts/check_db_connection_budget.py --postgres-max-connections 100" in workflow
+
+
 def test_ci_postgres_gate_uses_linux_service_and_pr_path_filter() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
@@ -196,6 +203,8 @@ def test_terraform_cloudwatch_covers_runbook_alert_signals() -> None:
     cloudwatch = Path("deploy/terraform/cloudwatch.tf").read_text(encoding="utf-8")
 
     for metric_name in (
+        "HostMemAvailablePercent",
+        "HostSwapUsedPercent",
         "kakao_queue_lag_seconds",
         "auth_required_count",
         "gmail_reauth_required_count",
@@ -208,6 +217,8 @@ def test_terraform_cloudwatch_covers_runbook_alert_signals() -> None:
         assert metric_name in cloudwatch
 
     for alert_name in (
+        "host-mem-available-low",
+        "host-swap-used-high",
         "queue-lag",
         "auth-required",
         "gmail-reauth-required",
@@ -219,6 +230,18 @@ def test_terraform_cloudwatch_covers_runbook_alert_signals() -> None:
 
     assert "crawl_error_min_samples" in cloudwatch
     assert "crawl_error_rate_alarm_threshold" in cloudwatch
+
+
+def test_terraform_prevents_accidental_ec2_destroy_with_local_postgres() -> None:
+    compute = Path("deploy/terraform/compute.tf").read_text(encoding="utf-8")
+    readme = Path("deploy/terraform/README.md").read_text(encoding="utf-8")
+
+    app_resource = compute[compute.index('resource "aws_instance" "app"') :]
+    app_resource = app_resource[: app_resource.index('\nresource "aws_eip" "app"')]
+    assert "prevent_destroy = true" in app_resource
+    assert "delete_on_termination = true" in app_resource
+    assert "root volume local PostgreSQL data" in readme
+    assert "-/+ aws_instance.app" in readme
 
 
 def test_terraform_readme_documents_public_https_boundary() -> None:
