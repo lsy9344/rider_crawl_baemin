@@ -155,6 +155,8 @@ class JobQueueRow:
     run_after: datetime | None  # 이 시각 이후에야 claim 가능(retry 대기 등)
     claimed_at: datetime | None  # claim 된 시각(PENDING 은 None) — 처리 경과 표시용
     stuck: bool
+    error_code: str | None = None  # 최근 실패 job 의 실패 코드(active job 은 None)
+    recently_failed: bool = False  # 짧은 윈도 안에 terminal FAILED 된 job(사라지기 전 사유 표시)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -224,8 +226,10 @@ class DashboardRepository(abc.ABC):
     async def active_jobs(
         self, *, tenant_id: str, now: datetime, limit: int = 100
     ) -> list[JobQueueRow]:
-        """tenant 의 active(PENDING/CLAIMED/RUNNING/RETRY) job 목록(실시간 큐 뷰).
+        """tenant 의 active(PENDING/CLAIMED/RUNNING/RETRY) job + 최근 실패 job 목록(실시간 큐 뷰).
 
+        최근 실패(terminal FAILED, 짧은 윈도 내)도 포함해 ``error_code`` 와 함께 보여준다 —
+        그러지 않으면 재검증 crawl 이 실패하면 큐에서 그냥 사라져 운영자가 사유를 못 본다.
         ``tenant_id == ALL_TENANTS`` 면 전 tenant 를 합친다. target 미연결 job(fleet job)은
         ``tenant_id`` scope 밖이라 ALL_TENANTS 일 때만 보인다. 읽기 전용(상태 변경 0).
         """
@@ -379,13 +383,13 @@ class DashboardService:
         """
 
         rows = await repo.active_jobs(tenant_id=tenant_id, now=now, limit=limit)
-        # stuck(멈춘/배정 Agent 오프라인) job 을 가장 위로, 그다음 run_after(대기) → claimed_at
-        # (오래된 순). None 은 항상 뒤로 보낸다(naive datetime.max 와 tz-aware 비교 회피 — 키를
-        # (has_value 불리언, 값)으로 구성해 None 끼리는 값 비교 자체를 하지 않는다).
+        # 주의가 필요한 것(stuck=멈춤, recently_failed=방금 실패)을 가장 위로, 그다음 run_after
+        # (대기) → claimed_at(오래된 순). None 은 항상 뒤로 보낸다(naive datetime.max 와 tz-aware
+        # 비교 회피 — 키를 (has_value 불리언, 값)으로 구성해 None 끼리는 값 비교 자체를 안 한다).
         return sorted(
             rows,
             key=lambda r: (
-                not r.stuck,
+                not (r.stuck or r.recently_failed),
                 r.run_after is None,
                 r.run_after or now,
                 r.claimed_at is None,
@@ -494,6 +498,7 @@ class InMemoryDashboardRepository(DashboardRepository):
     async def active_jobs(
         self, *, tenant_id: str, now: datetime, limit: int = 100
     ) -> list[JobQueueRow]:
+        # fake 는 seed 된 행을 그대로 돌려준다(active + 최근 실패 모두 seed 로 표현). tenant scope 만 건다.
         if tenant_id == ALL_TENANTS:
             rows = list(self._active_jobs)
         else:

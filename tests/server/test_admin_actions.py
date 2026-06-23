@@ -365,6 +365,56 @@ def test_test_crawl_enqueues_single_job() -> None:
     }
 
 
+def test_test_crawl_coupang_payload_includes_login_and_2fa_refs() -> None:
+    # 쿠팡 재검증 crawl 은 scheduled crawl 처럼 로그인/이메일 2FA ref 를 실어야 세션 만료 시
+    # inline 자동복구가 동작한다(없으면 자격증명 없이 돌다 브라우저도 못 띄우고 실패·재시도).
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-id-ref",
+            password="coupang-pw-ref",
+            verification_email_address="email-ref",
+            verification_email_app_password="email-app-ref",
+        )
+    )
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(
+        svc.test_crawl(target_id="mt-1", job_type="CRAWL_COUPANG", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW)
+    )
+
+    payload = queue.job_snapshot(job_id).payload_json
+    assert payload["platform"] == "coupang"
+    assert payload["coupang_login_id_ref"] == "coupang-id-ref"
+    assert payload["coupang_login_password_ref"] == "coupang-pw-ref"
+    assert payload["verification_email_address_ref"] == "email-ref"
+    assert payload["verification_email_app_password_ref"] == "email-app-ref"
+    # ref 4종 모두 있으면 자동 email 2FA 활성.
+    assert payload["coupang_auto_email_2fa_enabled"] is True
+
+
+def test_test_crawl_coupang_without_2fa_refs_disables_auto_2fa() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(platform=Platform.COUPANG, username="id-ref", password="pw-ref")
+    )
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(
+        svc.test_crawl(target_id="mt-1", job_type="CRAWL_COUPANG", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW)
+    )
+
+    payload = queue.job_snapshot(job_id).payload_json
+    assert payload["coupang_login_id_ref"] == "id-ref"
+    # 이메일 ref 가 없으면 자동 2FA 비활성(수동 조치 폴백).
+    assert payload["coupang_auto_email_2fa_enabled"] is False
+
+
 def test_test_crawl_unknown_job_type_rejected() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())

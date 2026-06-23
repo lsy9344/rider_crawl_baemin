@@ -277,9 +277,42 @@ def build_diff_redacted(payload: dict) -> dict:
     return redact_mapping(payload, mask_operational_ids=True)
 
 
-def _test_crawl_payload(target: MonitoringTarget, job_type: str) -> dict[str, object]:
+def _test_crawl_payload(
+    target: MonitoringTarget,
+    job_type: str,
+    account: PlatformAccount | None = None,
+) -> dict[str, object]:
     platform = _platform_for_crawl_job(job_type)
-    return _target_job_payload(target, job_type=job_type, platform=platform)
+    payload = _target_job_payload(target, job_type=job_type, platform=platform)
+    # 쿠팡 crawl 은 로그인/이메일 2FA ref 가 있어야 세션 만료 시 inline 자동복구가 동작한다.
+    # scheduled crawl(_crawl_job_payload)은 이 ref 들을 싣는데 수동 test-crawl 은 빠져 있어,
+    # '지금 수집(재검증)'이 자격증명 없이 돌다 브라우저도 못 띄우고 빠르게 실패·재시도했다.
+    # 같은 ref 를 실어 scheduled crawl 과 동일하게 동작시킨다(secret 은 ref 핸들만, 평문 0).
+    if platform == "coupang" and account is not None:
+        auto_2fa_complete = bool(
+            account.username
+            and account.password
+            and account.verification_email_address
+            and account.verification_email_app_password
+        )
+        payload.update(
+            {
+                "coupang_login_id_ref": account.username,
+                "coupang_login_password_ref": account.password,
+                "verification_email_address_ref": account.verification_email_address,
+                "verification_email_app_password_ref": account.verification_email_app_password,
+                "verification_email_subject_keyword": (
+                    account.verification_email_subject_keyword
+                    or DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD
+                ),
+                "verification_email_sender_keyword": (
+                    account.verification_email_sender_keyword
+                    or DEFAULT_EMAIL_2FA_SENDER_KEYWORD
+                ),
+                "coupang_auto_email_2fa_enabled": auto_2fa_complete,
+            }
+        )
+    return payload
 
 
 def _auth_check_payload(target: MonitoringTarget, *, platform: str) -> dict[str, object]:
@@ -678,7 +711,18 @@ class AdminActionService:
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         if job_type not in JOB_TYPES:
             raise ValueError(f"unknown job type: {job_type}")
-        payload = _test_crawl_payload(target, job_type)
+        # 쿠팡 crawl 은 계정의 로그인/2FA ref 가 payload 에 있어야 세션 만료 시 자동복구가 된다
+        # (scheduled crawl 과 동일). 계정을 tenant scope 로 불러와 enrich 한다. 미연결/조회 실패
+        # 시엔 account 없이 진행(배민이거나 ref 없는 계정은 기존 동작 유지).
+        account: PlatformAccount | None = None
+        if job_type == JOB_TYPE_CRAWL_COUPANG and target.platform_account_id:
+            try:
+                account = await self._scoped_platform_account(
+                    target.platform_account_id, tenant_id=tenant_id
+                )
+            except AdminActionNotFound:
+                account = None
+        payload = _test_crawl_payload(target, job_type, account)
         enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
         if callable(enqueue_manual_job):
             job_id = str(uuid.uuid4())

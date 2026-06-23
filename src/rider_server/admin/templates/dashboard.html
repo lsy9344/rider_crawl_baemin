@@ -237,7 +237,10 @@
     .job-running { color: var(--info); background: color-mix(in srgb, var(--info) 14%, transparent); }
     .job-retry { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
     .job-stuck-badge { color: var(--crit); background: color-mix(in srgb, var(--crit) 15%, transparent); margin-left: 0.3rem; }
+    .job-failed-badge { color: var(--crit); background: color-mix(in srgb, var(--crit) 13%, transparent); }
+    .job-reason { font-size: 0.8125rem; color: var(--crit); }
     tbody tr.job-stuck td { background: color-mix(in srgb, var(--crit) 7%, transparent); }
+    tbody tr.job-failed td { background: color-mix(in srgb, var(--crit) 5%, transparent); }
 
     /* ── 관리 모드: 폼/폴드 ─────────────────────────────────────────────── */
     fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 28%, var(--card)); padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem; }

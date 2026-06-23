@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_server.db.models.account import (
@@ -46,6 +46,7 @@ from rider_server.domain import (
 )
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
@@ -80,6 +81,10 @@ _QUEUE_JOB_STATUSES = (
 
 #: claim 됐는데 lease 가 만료된(처리 중 멈춤) 상태로 보는 job status.
 _LEASED_JOB_STATUSES = (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+
+#: 최근 실패(terminal FAILED) job 을 큐 뷰에 잠시 더 노출하는 윈도. 재검증 crawl 이 실패하면
+#: active 가 아니라 사라지므로, 운영자가 사유(error_code)를 볼 시간을 준다(5분).
+_RECENT_FAILURE_WINDOW = timedelta(minutes=5)
 
 #: auth_sessions 인증대기로 보는 상태(BaeminAuthState 값).
 _AUTH_SESSION_PENDING_STATES = (
@@ -595,7 +600,18 @@ class PostgresDashboardRepository(DashboardRepository):
         # claim 후 실행 Agent 는 agent_id, claim 전 사전배정은 assigned_agent_id 에 있다.
         # 둘 중 있는 쪽을 Agent 조인 키로 쓴다(claim 된 job 은 실행 Agent, PENDING 은 배정 Agent).
         effective_agent_id = func.coalesce(Job.agent_id, Job.assigned_agent_id)
-        conditions = [Job.status.in_(_QUEUE_JOB_STATUSES)]
+        # 실패 시각 = last_failed_at(있으면) 또는 completed_at. 최근 윈도 안의 FAILED 만 본다.
+        failed_at = func.coalesce(Job.last_failed_at, Job.completed_at)
+        recent_failure_since = now - _RECENT_FAILURE_WINDOW
+        status_filter = or_(
+            Job.status.in_(_QUEUE_JOB_STATUSES),
+            and_(
+                Job.status == JOB_STATUS_FAILED,
+                failed_at.is_not(None),
+                failed_at >= recent_failure_since,
+            ),
+        )
+        conditions = [status_filter]
         if tenant_id != ALL_TENANTS:
             # jobs 엔 tenant 컬럼이 없다 — target 을 통해 scope 한다. tenant 지정이면 target 없는
             # fleet job 은 제외된다(ALL_TENANTS 에서만 보임).
@@ -610,6 +626,8 @@ class PostgresDashboardRepository(DashboardRepository):
                 Job.run_after,
                 Job.claimed_at,
                 Job.lease_expires_at,
+                Job.error_code,
+                failed_at.label("failed_at"),
                 MonitoringTarget.tenant_id.label("tenant_id"),
                 MonitoringTarget.name.label("target_name"),
                 MonitoringTarget.center_name.label("center_name"),
@@ -631,14 +649,16 @@ class PostgresDashboardRepository(DashboardRepository):
                     if row.agent_name is not None
                     else None
                 )
+                recently_failed = row.status == JOB_STATUS_FAILED
                 # stuck: claim 됐는데 lease 만료(처리 중 멈춤) 또는 배정 Agent 오프라인이라 아무도
                 # 집어가지 못함. stale recovery 가 곧 회수/종료하지만, 운영자가 먼저 보고 판단한다.
+                # 최근 실패 job 은 stuck 으로 보지 않는다(이미 종결됨 — error_code 로 사유를 본다).
                 lease_expired = (
                     row.status in _LEASED_JOB_STATUSES
                     and row.lease_expires_at is not None
                     and row.lease_expires_at <= now
                 )
-                stuck = bool(lease_expired or agent_online is False)
+                stuck = bool(not recently_failed and (lease_expired or agent_online is False))
                 result.append(
                     JobQueueRow(
                         job_id=str(row.id),
@@ -654,6 +674,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         run_after=row.run_after,
                         claimed_at=row.claimed_at,
                         stuck=stuck,
+                        error_code=str(row.error_code) if row.error_code else None,
+                        recently_failed=recently_failed,
                     )
                 )
         return result

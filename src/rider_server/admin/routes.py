@@ -153,6 +153,7 @@ _JOB_STATUS_CLASSES: dict[str, str] = {
     "CLAIMED": "job-running",
     "RUNNING": "job-running",
     "RETRY": "job-retry",
+    "FAILED": "job-failed-badge",
 }
 
 

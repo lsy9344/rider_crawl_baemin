@@ -268,6 +268,8 @@ def _job(
     claimed_at: datetime | None = None,
     agent_name: str | None = None,
     agent_online: bool | None = None,
+    error_code: str | None = None,
+    recently_failed: bool = False,
 ) -> JobQueueRow:
     return JobQueueRow(
         job_id=job_id,
@@ -283,6 +285,8 @@ def _job(
         run_after=run_after,
         claimed_at=claimed_at,
         stuck=stuck,
+        error_code=error_code,
+        recently_failed=recently_failed,
     )
 
 
@@ -310,6 +314,48 @@ def test_job_queue_rows_are_tenant_scoped() -> None:
 
     all_rows = asyncio.run(DashboardService().job_queue_rows(repo, tenant_id="all", now=_NOW))
     assert {r.job_id for r in all_rows} == {"mine", "theirs"}
+
+
+def test_job_queue_rows_surface_recent_failure_at_top_with_reason() -> None:
+    # 재검증 crawl 이 실패하면 active 가 아니라 사라지므로, 최근 실패를 사유와 함께 위로 올려
+    # 운영자가 "왜 사라졌는지"를 본다.
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(_job(job_id="wait", run_after=_NOW + timedelta(minutes=1)))
+    repo.seed_active_job(
+        _job(
+            job_id="failed",
+            status="FAILED",
+            recently_failed=True,
+            error_code="CDP_UNREACHABLE",
+            claimed_at=_NOW - timedelta(seconds=30),
+        )
+    )
+
+    rows = asyncio.run(DashboardService().job_queue_rows(repo, tenant_id=_TENANT, now=_NOW))
+
+    # 최근 실패가 맨 위(주의 필요), 사유 코드 보존.
+    assert rows[0].job_id == "failed"
+    assert rows[0].recently_failed is True
+    assert rows[0].error_code == "CDP_UNREACHABLE"
+
+
+def test_jobs_fragment_route_shows_failed_reason() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(
+        _job(
+            job_id="f1",
+            status="FAILED",
+            job_type="CRAWL_COUPANG",
+            recently_failed=True,
+            error_code="CDP_UNREACHABLE",
+        )
+    )
+
+    body = _client(repo).get(f"/admin/jobs?tenant={_TENANT}").text
+    # 실패 상태 한글 라벨 + error_code 가 사람이 읽는 사유로 표시.
+    assert "실패" in body
+    assert "브라우저 연결 실패" in body
+    assert 'class="job-failed"' in body
 
 
 def test_in_memory_dashboard_all_tenants_returns_targets_and_aggregates_channels() -> None:
