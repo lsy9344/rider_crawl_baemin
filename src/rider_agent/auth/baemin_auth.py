@@ -97,6 +97,10 @@ DEFAULT_MAX_WAIT_SECONDS = 180.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_ATTEMPTS = int(DEFAULT_MAX_WAIT_SECONDS / DEFAULT_POLL_INTERVAL_SECONDS) + 1
 _INTERACTION_TIMEOUT_MS = 10_000
+# 인증 시작(브라우저 열기) 경로의 networkidle 대기 상한. 쿠팡 partner 페이지는 백그라운드
+# 폴링이 잦아 networkidle 이 잘 안 떠 매번 상한까지 헛대기한다. DOM 은 이미 domcontentloaded
+# 로 떴으니 여기선 짧게(3초)만 settle 을 기다린다 — 로그인 폼은 그 전에 이미 보인다.
+_AUTH_NETWORKIDLE_TIMEOUT_MS = 3_000
 
 _USERNAME_INPUT_SELECTORS = (
     "input[name='username']",
@@ -370,7 +374,14 @@ def _drive_coupang_email_2fa_flow(config: Any) -> bool:
         if page is None:
             return False
 
-        if target_url and not coupang_crawler._page_looks_like_coupang_login_required(page):
+        # 인증 시작 시점엔 보통 로그인 화면이다. 이때 대상 페이지로 goto 하거나 대시보드
+        # 텍스트를 기다리면(아래 _wait_for_target_page_ready) 로그인 전이라 절대 나타나지
+        # 않을 텍스트를 page_timeout_seconds(기본 60초)만큼, peak-dashboard 면 reload 후
+        # 한 번 더 기다린다(최대 ~130초). 그동안 사람은 아이디/비밀번호도 입력하지 못한다.
+        # → 로그인 화면이면 이 대기를 통째로 건너뛰고 바로 2FA/로그인 복구로 진입한다.
+        is_login_screen = coupang_crawler._page_looks_like_coupang_login_required(page)
+
+        if target_url and not is_login_screen:
             try:
                 page.goto(
                     target_url,
@@ -382,12 +393,18 @@ def _drive_coupang_email_2fa_flow(config: Any) -> bool:
             except Exception:
                 return False
             try:
-                page.wait_for_load_state("networkidle", timeout=10_000)
+                page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
             except timeout_errors:
                 pass
 
+        # 이미 로그인돼 대시보드가 떠 있는 경우에만 "이미 완료" 빠른 경로를 탄다. 로그인
+        # 화면이면 여기서 대시보드 텍스트를 기다리지 않는다(절대 안 뜸 → 60초 헛대기 방지).
         try:
-            if target_url and _coupang_target_url_has_readiness_signal(target_url):
+            if (
+                target_url
+                and not is_login_screen
+                and _coupang_target_url_has_readiness_signal(target_url)
+            ):
                 coupang_crawler._wait_for_target_page_ready(
                     page,
                     config,

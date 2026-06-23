@@ -127,6 +127,15 @@ def _parse_run_args(run_argv: list[str]) -> argparse.Namespace:
         default=int(os.getenv("RIDER_AGENT_MAX_PROFILES", "20")),
         help="Agent가 보유할 최대 브라우저 프로필 수(0 이하면 제한 없음)",
     )
+    parser.add_argument(
+        "--short-poll-seconds",
+        type=float,
+        default=float(os.getenv("RIDER_AGENT_SHORT_POLL_SECONDS", "2")),
+        help=(
+            "빈 큐일 때 재폴링 전 대기 초(기본 2). 작을수록 '인증 시작' 등 job 을 더 빨리 "
+            "집지만 서버 claim 호출 빈도가 늘어난다(0.5 미만은 권장하지 않음)"
+        ),
+    )
     return parser.parse_args(run_argv)
 
 
@@ -200,6 +209,7 @@ def _run_agent_loop(
                 identity_path=identity_path,
                 base_url=args.server_url,
                 max_jobs=max(1, args.max_jobs),
+                short_poll_interval_seconds=max(0.5, args.short_poll_seconds),
                 profile_idle_ttl_seconds=max(0.0, args.profile_idle_ttl_seconds),
                 max_profiles=args.max_profiles if args.max_profiles > 0 else None,
                 start_auth_worker=True,
