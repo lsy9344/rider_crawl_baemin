@@ -33,9 +33,15 @@ from rider_server.queue import (
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
 from rider_server.queue.retry import default_retry_decider
-from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
+from rider_server.queue.states import (
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_KAKAO_SEND,
+)
 from rider_server.queue.postgres_queue import (
+    COUPANG_AUTO_RECOVERY_COOLDOWN,
     _platform_account_auth_update,
+    coupang_recovery_state_values,
     kakao_delivery_log_values,
 )
 
@@ -746,6 +752,67 @@ def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
         "33333333-3333-3333-3333-333333333333",
         BaeminAuthState.AUTH_VERIFIED.value,
     )
+
+
+# ── Task 4: Coupang 자동 복구 cooldown 영속(순수 함수, 항상 실행) ─────────────────
+
+
+_PA_ID = "33333333-3333-3333-3333-333333333333"
+
+
+def test_coupang_auto_recovery_failure_sets_cooldown_on_account() -> None:
+    """Failed auto recovery suppresses future scheduler attempts."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={
+            "platform_account_id": _PA_ID,
+            "recovery_mode": "coupang_auto_email_2fa",
+        },
+        result_json={"target_id": "mt-1", "auth_state": BaeminAuthState.AUTH_REQUIRED.value},
+    )
+
+    update = coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0)
+
+    assert update is not None
+    account_id, values = update
+    assert account_id == _PA_ID
+    assert values["auto_recovery_failed_at"] == _T0
+    assert values["auto_recovery_cooldown_until"] == _T0 + COUPANG_AUTO_RECOVERY_COOLDOWN
+    assert values["auto_recovery_attempted_at"] == _T0
+
+
+def test_coupang_auto_recovery_success_clears_cooldown_on_account() -> None:
+    """Successful recovery returns account to normal crawl scheduling."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={
+            "platform_account_id": _PA_ID,
+            "recovery_mode": "coupang_auto_email_2fa",
+        },
+        result_json={"target_id": "mt-1", "auth_state": BaeminAuthState.AUTH_VERIFIED.value},
+    )
+
+    update = coupang_recovery_state_values(job=job, status=JOB_STATUS_SUCCEEDED, now=_T0)
+
+    assert update is not None
+    account_id, values = update
+    assert account_id == _PA_ID
+    assert values["auto_recovery_cooldown_until"] is None
+    assert values["auto_recovery_failed_at"] is None
+
+
+def test_non_recovery_job_does_not_touch_cooldown() -> None:
+    """A normal (non-recovery) crawl completion leaves cooldown columns alone."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={"platform_account_id": _PA_ID},
+        result_json={"target_id": "mt-1"},
+    )
+    assert coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0) is None
+    assert coupang_recovery_state_values(job=job, status=JOB_STATUS_SUCCEEDED, now=_T0) is None
 
 
 # ── (b) 단일-claim / exactly-once (in-memory, 항상 실행) ──────────────────────────

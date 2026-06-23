@@ -20,7 +20,12 @@ from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUP
 from rider_server.scheduler import policy
 from rider_server.scheduler.service import (
     REASON_ACTIVE_JOB_EXISTS,
+    REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY,
+    REASON_AUTH_STATE_BLOCKED_OR_CAPTCHA,
+    REASON_AUTH_STATE_UNKNOWN,
+    REASON_AUTH_STATE_USER_ACTION_PENDING,
     REASON_BREAKER_OPEN,
+    REASON_COUPANG_AUTO_RECOVERY_COOLDOWN,
     REASON_ENQUEUED,
     REASON_RACE_LOST,
     REASON_THROTTLED_CAPACITY,
@@ -141,6 +146,10 @@ def _target(
     verification_email_subject_keyword="인증번호",
     verification_email_sender_keyword="coupang",
     assigned_agent_id="",
+    auth_state="ACTIVE",
+    auto_recovery_attempted_at=None,
+    auto_recovery_failed_at=None,
+    auto_recovery_cooldown_until=None,
 ):
     return DueTarget(
         target_id=tid,
@@ -158,6 +167,10 @@ def _target(
         verification_email_subject_keyword=verification_email_subject_keyword,
         verification_email_sender_keyword=verification_email_sender_keyword,
         assigned_agent_id=assigned_agent_id,
+        auth_state=auth_state,
+        auto_recovery_attempted_at=auto_recovery_attempted_at,
+        auto_recovery_failed_at=auto_recovery_failed_at,
+        auto_recovery_cooldown_until=auto_recovery_cooldown_until,
     )
 
 
@@ -238,6 +251,9 @@ def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
         "timeout_seconds": 60,
         "parser_version": "baemin-v1",
         "job_type": JOB_TYPE_CRAWL_BAEMIN,
+        "job_origin": "scheduler",
+        "scheduled_at": "2026-06-14T12:00:00Z",
+        "expires_at": "2026-06-14T12:10:00Z",
     }
 
 
@@ -277,6 +293,42 @@ def test_scheduler_enqueues_coupang_secret_refs_without_plaintext_values() -> No
     assert "coupang_login_password" not in job.payload_json
     assert "verification_email_address" not in job.payload_json
     assert "verification_email_app_password" not in job.payload_json
+
+
+def test_scheduler_crawl_payload_contains_scheduled_at_expires_at_and_origin() -> None:
+    """Scheduled crawl payloads are bounded and identify their source."""
+
+    coupang = _target(
+        "t-c",
+        platform="COUPANG",
+        username="vault://coupang/login-id",
+        password="vault://coupang/login-password",
+        verification_email_address="vault://mail/address",
+        verification_email_app_password="vault://mail/app-password",
+    )
+    repo = FakeSchedulerRepo(
+        targets=[coupang],
+        gates={coupang.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["job_origin"] == "scheduler"
+    # scheduled_at == tick now.
+    assert payload["scheduled_at"] == "2026-06-14T12:00:00Z"
+    scheduled_at = datetime.fromisoformat(payload["scheduled_at"].replace("Z", "+00:00"))
+    expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+    # expires_at 은 scheduled_at 으로부터 최대 1 interval 뒤.
+    assert scheduled_at < expires_at <= scheduled_at + timedelta(minutes=_INTERVAL_MIN)
+    # coupang 자동 2FA 플래그는 유지하되 인증번호 값은 저장하지 않는다.
+    assert payload["coupang_auto_email_2fa_enabled"] is True
+    assert "verification_code" not in payload
+    assert not any("code" in str(k).casefold() and "keyword" not in str(k).casefold() for k in payload)
 
 
 # ── AC2: 중지/비활성 고객 제외 ────────────────────────────────────────────────
@@ -852,3 +904,149 @@ def test_service_custom_breaker_threshold_changes_open_decision() -> None:
         SchedulerService(breaker_threshold=0.5).run_tick(repo, backend, now=_NOW)
     )
     assert result.enqueued_count == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 3 — 인증 상태 게이트 + Coupang 자동 복구(한 번만 + cooldown)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _coupang_target(tid="t-cp", *, auth_state="AUTH_REQUIRED", auto_2fa=True, cooldown=None):
+    refs = dict(
+        username="vault://coupang/login-id",
+        password="vault://coupang/login-password",
+        verification_email_address="vault://mail/address",
+        verification_email_app_password="vault://mail/app-password",
+    ) if auto_2fa else {}
+    return _target(
+        tid,
+        platform="COUPANG",
+        auth_state=auth_state,
+        auto_recovery_cooldown_until=cooldown,
+        **refs,
+    )
+
+
+def test_scheduler_blocks_crawl_when_coupang_auth_required_without_auto_2fa() -> None:
+    """AUTH_REQUIRED Coupang without complete email 2FA does not enqueue crawl."""
+
+    target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=False)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY
+
+
+def test_scheduler_blocks_crawl_for_user_action_pending_blocked_and_unknown() -> None:
+    """Unsafe auth states do not open scheduled browser crawl attempts."""
+
+    uap = _target("t-uap", auth_state="USER_ACTION_PENDING")
+    blocked = _target("t-blk", auth_state="BLOCKED_OR_CAPTCHA")
+    unknown = _target("t-unk", auth_state="UNKNOWN")
+    targets = [uap, blocked, unknown]
+    repo = FakeSchedulerRepo(
+        targets=targets,
+        gates={t.tenant_id: _ACTIVE_GATE for t in targets},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    reasons = {o.target_id: o.reason for o in result.outcomes}
+    assert reasons["t-uap"] == REASON_AUTH_STATE_USER_ACTION_PENDING
+    assert reasons["t-blk"] == REASON_AUTH_STATE_BLOCKED_OR_CAPTCHA
+    assert reasons["t-unk"] == REASON_AUTH_STATE_UNKNOWN
+
+
+def test_scheduler_allows_one_coupang_recovery_crawl_when_auto_2fa_ready() -> None:
+    """Complete auto 2FA allows one bounded recovery crawl."""
+
+    target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True, cooldown=None)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 1
+    assert result.outcomes[0].enqueued is True
+    assert result.outcomes[0].reason == REASON_ENQUEUED
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["job_origin"] == "scheduler"
+    assert payload["recovery_mode"] == "coupang_auto_email_2fa"
+    assert payload["recovery_attempt"] == 1
+    assert payload["coupang_auto_email_2fa_enabled"] is True
+    assert "expires_at" in payload
+    # 인증번호 값은 싣지 않는다.
+    assert "verification_code" not in payload
+
+
+def test_scheduler_blocks_coupang_recovery_during_cooldown() -> None:
+    """Recent failed recovery suppresses new crawl attempts."""
+
+    cooldown_until = _NOW + timedelta(minutes=30)
+    target = _coupang_target(
+        auth_state="AUTH_REQUIRED", auto_2fa=True, cooldown=cooldown_until
+    )
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_COUPANG_AUTO_RECOVERY_COOLDOWN
+
+
+def test_scheduler_recovery_crawl_keeps_target_affinity() -> None:
+    """Recovery crawl uses the same target affinity as normal scheduled crawl."""
+
+    target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True)
+    target = replace(target, assigned_agent_id="agent-7")
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    assert job.assigned_agent_id == "agent-7"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 6 — pending crawl coalescing(target/platform 당 활성 crawl 1건)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_scheduler_does_not_create_second_pending_crawl_for_same_target_and_platform() -> None:
+    """Backlog is coalesced to one useful crawl per target/platform."""
+
+    target = _target("t-c", platform="COUPANG")
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        active_jobs=["t-c"],  # 이미 활성 CRAWL_COUPANG 존재.
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+    svc = SchedulerService()
+
+    result = asyncio.run(svc.run_tick(repo, backend, now=_NOW))
+
+    # 두 번째 crawl 을 만들지 않는다(coalescing → target/platform 당 활성 1건).
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_ACTIVE_JOB_EXISTS
+    # next_run_at 도 전진하지 않아 매 tick 같은 stale target 으로 스핀하지 않는다(전진=재진입 차단).
+    assert repo.next_run_at_of("t-c") is None
+
+    # 다음 tick(같은 시각)에도 활성 job 이 남아 있으면 여전히 새 job 0(중복 backlog 누적 없음).
+    again = asyncio.run(svc.run_tick(repo, backend, now=_NOW))
+    assert again.enqueued_count == 0

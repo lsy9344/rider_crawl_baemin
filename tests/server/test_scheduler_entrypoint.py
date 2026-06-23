@@ -32,6 +32,7 @@ class _Repo(SchedulerRepository):
             platform_account_id="account-1",
             primary_url="https://example.invalid/performance",
             expected_display_name="센터A",
+            auth_state="ACTIVE",
         )
 
     async def due_targets(self, *, now, limit):

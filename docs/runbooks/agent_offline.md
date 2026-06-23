@@ -25,6 +25,11 @@
    확인.
 4. Agent 가 장시간 죽어 있던 동안 누락된 수집은 scheduler 가 다음 due 윈도에 멱등 enqueue 로
    따라잡는다 — 수동 중복 enqueue 금지(`CRAWL_FAILURE` 누적·중복 방지).
+5. Agent 재시작 시 오래된 브라우저/crawl job 이 자동 재실행되지 않는다 — payload TTL 이 지난
+   `OPEN_AUTH_BROWSER`/scheduled crawl 은 queue recovery 가 `stale_auth_job_expired` /
+   `stale_crawl_skipped` 로 닫고, Agent 는 브라우저를 열기 전 server preflight 로 유효성을
+   재확인한다. 브라우저 창이 계속 뜨면 대상 비활성화 → Agent 중지 순으로 조치한다(상세:
+   `docs/operations/queue-backlog-handling-policy.md`).
 
 ## 에스컬레이션
 

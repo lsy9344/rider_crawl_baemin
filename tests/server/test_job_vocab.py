@@ -26,6 +26,11 @@ from rider_server.queue.states import (
     JOB_STATUS_SUCCEEDED,
     JOB_STATUSES,
     JOB_TYPES,
+    RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+    RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+    RESULT_REASON_PAYLOAD_EXPIRED,
+    RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+    RESULT_REASON_STALE_CRAWL_SKIPPED,
     InvalidJobTransition,
     UnknownAgentStatus,
     assert_transition,
@@ -117,6 +122,47 @@ def test_succeeded_is_terminal():
         assert not is_allowed_transition(JOB_STATUS_SUCCEEDED, target)
     with pytest.raises(InvalidJobTransition):
         assert_transition(JOB_STATUS_SUCCEEDED, JOB_STATUS_PENDING)
+
+
+def test_pending_to_failed_allowed_for_stale_backlog_cleanup():
+    # Task 6: payload TTL 만료 PENDING scheduled crawl 을 recovery 가 terminal 종료한다.
+    assert is_allowed_transition(JOB_STATUS_PENDING, JOB_STATUS_FAILED)
+
+
+# ── Task 1: stale/expired job safe reason vocabulary(secret 0 분류 코드) ───────────
+
+
+def test_safe_result_reason_constants_are_machine_readable_and_distinct():
+    reasons = [
+        RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+        RESULT_REASON_STALE_CRAWL_SKIPPED,
+        RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+        RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+        RESULT_REASON_PAYLOAD_EXPIRED,
+    ]
+    # 모두 distinct, 비어있지 않은 소문자 snake-case 분류 코드.
+    assert len(set(reasons)) == len(reasons)
+    for reason in reasons:
+        assert reason and reason == reason.strip()
+        assert " " not in reason
+    # 정본 값(server/Agent/문서가 같은 문자열을 쓴다 — 중복 정의 금지).
+    assert RESULT_REASON_STALE_AUTH_JOB_EXPIRED == "stale_auth_job_expired"
+    assert RESULT_REASON_STALE_CRAWL_SKIPPED == "stale_crawl_skipped"
+    assert RESULT_REASON_PAYLOAD_EXPIRED == "payload_expired"
+
+
+def test_safe_result_reasons_contain_no_obvious_secret_tokens():
+    # tenant/account/email/password/code 같은 secret 값을 담지 않는다(분류 코드만).
+    forbidden = ("tenant", "account", "email", "password", "@", "token")
+    for reason in (
+        RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+        RESULT_REASON_STALE_CRAWL_SKIPPED,
+        RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+        RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+        RESULT_REASON_PAYLOAD_EXPIRED,
+    ):
+        lowered = reason.lower()
+        assert not any(part in lowered for part in forbidden)
 
 
 # ── 단방향 import: rider_server.queue/api 는 rider_agent 를 import 하지 않는다 ──────

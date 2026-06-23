@@ -170,6 +170,26 @@ def test_platform_account_credential_columns_present():
     assert "profile_path_ref" in bp
 
 
+def test_platform_accounts_have_coupang_auto_recovery_columns() -> None:
+    """Recovery cooldown is persisted on platform account rows."""
+
+    table = Base.metadata.tables["platform_accounts"]
+    columns = set(table.columns.keys())
+    assert {
+        "auto_recovery_attempted_at",
+        "auto_recovery_failed_at",
+        "auto_recovery_cooldown_until",
+    } <= columns
+    # timezone-aware + nullable(시도 이력 없음=NULL).
+    for name in (
+        "auto_recovery_attempted_at",
+        "auto_recovery_failed_at",
+        "auto_recovery_cooldown_until",
+    ):
+        assert table.c[name].type.timezone is True
+        assert table.c[name].nullable is True
+
+
 def test_delivery_logs_dedup_unique_constraint():
     table = Base.metadata.tables["delivery_logs"]
     uniques = {
@@ -680,8 +700,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0021: per-target send window policy on top of fleet claim scale hardening.
-    assert heads[0] == "0021_target_send_window"
+    # 0022: Coupang auto recovery state on top of per-target send window policy.
+    assert heads[0] == "0022_coupang_auto_recovery_state"
+    assert (
+        script.get_revision("0022_coupang_auto_recovery_state").down_revision
+        == "0021_target_send_window"
+    )
     assert (
         script.get_revision("0021_target_send_window").down_revision
         == "0020_fleet_claim_scale"

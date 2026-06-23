@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import importlib
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -82,6 +83,28 @@ ERROR_AUTH_REQUIRED = "AUTH_REQUIRED"
 
 # 재인증 미완료 사유(평문 상수) — timeout 결과 metrics/result_json 에 실어 운영에 남긴다.
 REASON_AUTH_TIMEOUT = "auth_timeout"
+
+# payload TTL 이 지난 stale OPEN_AUTH_BROWSER job 을 브라우저 열기 전에 거르는 defensive 가드
+# (server preflight 가 우회돼도 오래된 인증 브라우저를 열지 않게 — Task 5 defense-in-depth).
+ERROR_PAYLOAD_EXPIRED = "PAYLOAD_EXPIRED"
+REASON_PAYLOAD_EXPIRED = "payload_expired"
+
+
+def _payload_expired(job: ClaimedJob, *, now: datetime) -> bool:
+    """job payload ``expires_at``(ISO 8601 ``…Z``) 가 지났는가(없거나 파싱 실패면 False)."""
+
+    text = str((job.payload or {}).get("expires_at") or "").strip()
+    if not text:
+        return False
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return now >= parsed
 
 # auth-required/verified 진행 이벤트 type(평문 상수). 실제 emit 은 호출자(loop)가 한다.
 EVENT_TYPE_AUTH_REQUIRED = "AUTH_REQUIRED"
@@ -652,6 +675,7 @@ def execute_open_auth_browser_job(
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     log: Callable[[str], None] | None = None,
+    wall_now: Callable[[], datetime] | None = None,
 ) -> JobResult:
     """``OPEN_AUTH_BROWSER`` job — 프로필 열기 + 인증 전용 조치 + bounded 재인증 대기.
 
@@ -670,6 +694,22 @@ def execute_open_auth_browser_job(
     """
 
     target_id = job.target_id
+
+    # payload TTL 이 지났으면 브라우저를 열기 전에 fail-fast(server preflight 우회돼도 오래된
+    # 인증 브라우저를 열지 않게 — Task 5 defense-in-depth).
+    wall_clock = wall_now or (lambda: datetime.now(timezone.utc))
+    if _payload_expired(job, now=wall_clock()):
+        if log is not None:
+            log(redact(f"auth payload expired before browser open (target {target_id})"))
+        return make_failure_result(
+            ERROR_PAYLOAD_EXPIRED,
+            "auth payload expired before browser open",
+            result_json={
+                "target_id": target_id,
+                "auth_state": AUTH_STATE_AUTH_REQUIRED,
+                "reason": REASON_PAYLOAD_EXPIRED,
+            },
+        )
 
     # (a) 프로필 브라우저를 인증 전용으로 연다. 정확히 1회.
     opened = open_auth_browser(job)

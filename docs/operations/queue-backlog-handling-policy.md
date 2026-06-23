@@ -10,6 +10,82 @@ jobs such as Coupang authentication and Coupang crawling, because replaying stal
 jobs can open browser windows repeatedly and trigger unintended login or 2FA
 flows.
 
+## Current Implemented Behavior
+
+This section describes what the code does **now that this work order is
+implemented** (2026-06-23). It is the source of truth for what to expect in
+production today.
+
+- `OPEN_AUTH_BROWSER` payloads carry `requested_at` / `expires_at` (a 10–15 minute
+  operator-intent TTL). Queue recovery closes an expired auth browser job as
+  terminal `FAILED` with result reason `stale_auth_job_expired` instead of
+  re-`PENDING`-ing it. It is not replayed after a server or Agent restart.
+- Scheduled `CRAWL_BAEMIN` / `CRAWL_COUPANG` payloads carry `job_origin="scheduler"`,
+  `scheduled_at`, and `expires_at` (at most one interval after `scheduled_at`).
+  Queue recovery closes an expired scheduled crawl (whether `PENDING`, `CLAIMED`,
+  or `RUNNING`) as terminal `FAILED` with result reason `stale_crawl_skipped`.
+- The scheduler reads `PlatformAccount.auth_state` and the per-account Coupang
+  auto-recovery cooldown. It blocks scheduled crawl for `AUTH_REQUIRED` without
+  complete auto email 2FA, `USER_ACTION_PENDING`, `BLOCKED_OR_CAPTCHA`, and
+  `UNKNOWN`, and allows exactly one bounded recovery crawl for `AUTH_REQUIRED`
+  Coupang with complete auto 2FA and no active cooldown.
+- A failed Coupang auto recovery sets `auto_recovery_failed_at` and
+  `auto_recovery_cooldown_until` on the account, suppressing new recovery crawls
+  during the cooldown. A successful recovery clears the cooldown.
+- Before opening a browser/profile, the Agent calls a server preflight
+  (`POST /v1/jobs/{id}/preflight`) and also defensively rechecks the payload
+  `expires_at`. A denied or expired job completes with a safe reason
+  (`payload_expired`, or `preflight_unavailable` when preflight is unreachable —
+  fail-closed) and **does not open a browser**.
+
+> Note: before this work order, old code re-`PENDING`-ed stale leased jobs after
+> restart, so a stopped/restarted Agent could re-open browser windows for expired
+> auth and crawl jobs. That legacy behavior is what these changes remove.
+
+## Target Permanent Behavior
+
+The long-term policy these changes move toward (some items extend beyond the
+first implementation):
+
+- Interactive/browser-opening jobs always expire quickly and never replay as a
+  backlog.
+- Scheduled crawls are coalesced to one useful job per target/platform; missed
+  intervals are skipped, not replayed one-by-one.
+- Coupang automatic recovery is attempted at most once per cooldown window, and a
+  human-action state (`USER_ACTION_PENDING`, `BLOCKED_OR_CAPTCHA`) ends automatic
+  retries until an operator acts.
+- Operator-triggered auth (`OPEN_AUTH_BROWSER`) and scheduled crawl
+  (`CRAWL_COUPANG`) stay separate concerns; the auth-start button never enqueues
+  a crawl.
+- Result, audit, and log records never contain passwords, verification codes,
+  email app passwords, or secret-ref values — only machine-readable reason codes.
+
+## Emergency Operator Action
+
+If browser windows keep opening unexpectedly, **deactivate the target first, then
+stop the Agent if already-queued work keeps opening windows**:
+
+1. Open `/admin` from an allowed admin IP and select the affected customer.
+2. Go to `관리` / entity management, find the Coupang 업체, and click `비활성화`
+   so the monitoring target status becomes `INACTIVE`. The scheduler only selects
+   `ACTIVE` targets, so this stops new scheduler-created crawl jobs for that target.
+3. If windows are still opening after the target is inactive, stop the Windows
+   Agent process — that means already-queued work is still being consumed. Inspect
+   pending jobs before restarting.
+
+## Verification Matrix
+
+| Scenario | Expected behavior | Safe reason |
+| --- | --- | --- |
+| Server startup with expired `OPEN_AUTH_BROWSER` | Closed terminal `FAILED`, not re-`PENDING` | `stale_auth_job_expired` |
+| Server startup with stale scheduled crawl (PENDING/CLAIMED/RUNNING) | Closed terminal `FAILED`, not replayed | `stale_crawl_skipped` |
+| Agent startup with expired auth/crawl payload | Preflight denies / worker fails fast, no browser opens | `payload_expired` |
+| Scheduler tick, `AUTH_REQUIRED` Coupang w/o auto 2FA | No crawl enqueued | `AUTH_REQUIRED_NO_AUTO_RECOVERY` |
+| Scheduler tick, `AUTH_REQUIRED` Coupang w/ auto 2FA, no cooldown | One bounded recovery crawl enqueued | `ENQUEUED` |
+| Manual `인증 시작` | Enqueues `OPEN_AUTH_BROWSER` only, never `CRAWL_COUPANG` | — |
+| Coupang auto recovery success | Account cooldown cleared, normal scheduling resumes | — |
+| Coupang auto recovery failure | Cooldown set, repeated crawl attempts suppressed | `coupang_auto_recovery_cooldown` |
+
 ## Current Problem
 
 The current system can create and run `CRAWL_COUPANG` when all of these are true:

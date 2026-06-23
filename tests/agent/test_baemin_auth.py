@@ -17,6 +17,7 @@ import ast
 import inspect
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,9 @@ from rider_agent.auth.baemin_auth import (
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     ERROR_AUTH_REQUIRED,
+    ERROR_PAYLOAD_EXPIRED,
     REASON_AUTH_TIMEOUT,
+    REASON_PAYLOAD_EXPIRED,
     build_auth_execute_job,
     classify_baemin_auth_state,
     default_detect_completion,
@@ -264,6 +267,62 @@ def test_open_auth_browser_accepts_auth_only_open_success_without_probe():
     assert detect_calls == []
 
 
+def test_open_auth_browser_rejects_expired_payload_before_browser_open():
+    """auth worker checks expires_at before browser interaction."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    expired_at = now - timedelta(minutes=5)
+    open_calls = []
+    detect_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "expires_at": expired_at.isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        open_auth_browser=lambda j: open_calls.append(j) or True,
+        detect_completion=lambda j: detect_calls.append(j) or True,
+        now=lambda: 0.0,
+        sleep=lambda _s: None,
+        wall_now=lambda: now,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PAYLOAD_EXPIRED
+    assert result.result_json["reason"] == REASON_PAYLOAD_EXPIRED
+    # 브라우저 열기/완료 감지는 호출되지 않았다(stale job — 브라우저 미오픈).
+    assert open_calls == []
+    assert detect_calls == []
+
+
+def test_open_auth_browser_runs_when_payload_not_expired():
+    """Non-expired auth payload opens the browser normally."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    open_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        open_auth_browser=lambda j: open_calls.append(j) or True,
+        detect_completion=lambda j: False,
+        now=lambda: 0.0,
+        sleep=lambda _s: None,
+        wall_now=lambda: now,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert len(open_calls) == 1
+
+
 def test_default_detect_completion_coupang_returns_true_for_ready_target_without_crawl(monkeypatch):
     from types import SimpleNamespace
 
@@ -431,6 +490,7 @@ def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
         "poll_interval_seconds",
         "max_attempts",
         "log",
+        "wall_now",  # Task 5: payload TTL 만료 판정용 wall-clock 주입(OTP 입력 주입점 아님).
     }
     forbidden = {"otp", "code", "verification_code", "fetch_code", "submit_code", "fill"}
     assert forbidden.isdisjoint(params)

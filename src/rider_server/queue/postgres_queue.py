@@ -50,12 +50,19 @@ from .states import (
     JOB_STATUS_SUCCEEDED,
     JOB_TYPE_KAKAO_SEND,
     assert_transition,
+    stale_recovery_reason,
 )
 
 _MAX_EVENT_TEXT_LENGTH = 200
 _MAX_EVENT_MESSAGE_LENGTH = 500
 _MAX_EVENT_ARTIFACTS = 5
 STALE_LEASE_ERROR_CODE = "CRAWL_TIMEOUT"
+
+#: Coupang 자동 이메일 2FA 복구 모드 마커(scheduler payload / agent result 공용).
+RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = "coupang_auto_email_2fa"
+#: 자동 복구 실패 뒤 같은 계정에 재시도를 막는 cooldown 길이. 한 계정에 여러 target 이 묶여
+#: 있으면 계정 단위로 적용된다(문서에 명시 — queue-backlog-handling-policy.md).
+COUPANG_AUTO_RECOVERY_COOLDOWN = timedelta(hours=6)
 
 
 def _as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
@@ -154,6 +161,59 @@ def _platform_account_auth_update(
     if error_code == FailureCategory.TARGET_VALIDATION_FAILURE.value:
         return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
     return None
+
+
+def _is_coupang_recovery_job(job: Job) -> bool:
+    """이 완료가 Coupang 자동 이메일 2FA 복구 crawl 인가(payload 또는 result 의 recovery_mode)."""
+
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    result = job.result_json if isinstance(job.result_json, dict) else {}
+    return (
+        payload.get("recovery_mode") == RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
+        or result.get("recovery_mode") == RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
+    )
+
+
+def coupang_recovery_state_values(
+    *,
+    job: Job,
+    status: str,
+    now: datetime,
+) -> tuple[str, dict[str, Any]] | None:
+    """``(platform_account_id, account update values)`` 를 돌려준다(복구 job 아니면 None).
+
+    "한 번만 자동 복구 + 실패 뒤 cooldown" 을 계정 단위로 강제한다:
+
+    * 실패(``FAILED``) → ``auto_recovery_attempted_at``/``auto_recovery_failed_at`` 를 now 로,
+      ``auto_recovery_cooldown_until`` 를 ``now + COUPANG_AUTO_RECOVERY_COOLDOWN`` 으로 설정해
+      cooldown 동안 scheduler 가 새 복구 crawl 을 만들지 않게 한다.
+    * 성공(``SUCCEEDED``) → ``auto_recovery_attempted_at`` 는 now 로 남기되
+      ``auto_recovery_cooldown_until``/``auto_recovery_failed_at`` 를 클리어해 정상 스케줄로 복귀.
+
+    secret 0(시각만). ``auth_state`` 갱신은 기존 :func:`_platform_account_auth_update` 가 담당한다.
+    """
+
+    if not _is_coupang_recovery_job(job):
+        return None
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    platform_account_id = payload.get("platform_account_id")
+    if not platform_account_id:
+        return None
+    if status == JOB_STATUS_FAILED:
+        values = {
+            "auto_recovery_attempted_at": now,
+            "auto_recovery_failed_at": now,
+            "auto_recovery_cooldown_until": now + COUPANG_AUTO_RECOVERY_COOLDOWN,
+        }
+    elif status == JOB_STATUS_SUCCEEDED:
+        values = {
+            "auto_recovery_attempted_at": now,
+            "auto_recovery_failed_at": None,
+            "auto_recovery_cooldown_until": None,
+        }
+    else:
+        return None
+    return str(platform_account_id), values
 
 
 class PostgresQueueBackend(QueueBackend):
@@ -321,6 +381,12 @@ class PostgresQueueBackend(QueueBackend):
                 job=job,
                 error_code=error_code,
             )
+            await self._persist_coupang_recovery_state(
+                session,
+                job=job,
+                status=status,
+                now=now,
+            )
             await self._update_kakao_delivery_log(
                 session,
                 job=job,
@@ -373,6 +439,24 @@ class PostgresQueueBackend(QueueBackend):
             update(PlatformAccount)
             .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
             .values(auth_state=auth_state)
+        )
+
+    async def _persist_coupang_recovery_state(
+        self,
+        session: AsyncSession,
+        *,
+        job: Job,
+        status: str,
+        now: datetime,
+    ) -> None:
+        recovery_update = coupang_recovery_state_values(job=job, status=status, now=now)
+        if recovery_update is None:
+            return
+        platform_account_id, values = recovery_update
+        await session.execute(
+            update(PlatformAccount)
+            .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
+            .values(**values)
         )
 
     async def _update_kakao_delivery_log(
@@ -478,24 +562,45 @@ class PostgresQueueBackend(QueueBackend):
 
     async def recover_stale(self, *, now: datetime, batch_size: int | None = None) -> int:
         async with self._session_factory() as session:
+            # (1) 만료 lease 의 CLAIMED/RUNNING job. (2) payload TTL 이 지난 PENDING scheduled
+            # crawl/auth job — 서버 downtime 뒤 누적 backlog 가 한 번에 claim 되지 않게 미리
+            # terminal 종료(Task 6). PENDING 은 lease 가 없어 payload expires_at 로만 stale 판정한다.
             stmt = (
                 select(Job)
                 .where(
-                    Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)),
-                    Job.lease_expires_at.is_not(None),
-                    Job.lease_expires_at <= now,
+                    (
+                        Job.status.in_((JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING))
+                        & Job.lease_expires_at.is_not(None)
+                        & (Job.lease_expires_at <= now)
+                    )
+                    | (Job.status == JOB_STATUS_PENDING)
                 )
-                .order_by(Job.lease_expires_at.asc(), Job.id.asc())
+                .order_by(Job.lease_expires_at.asc().nullslast(), Job.id.asc())
                 .with_for_update(skip_locked=True)
             )
             if batch_size is not None and batch_size > 0:
                 stmt = stmt.limit(batch_size)
             rows = (await session.execute(stmt)).scalars().all()
+            recovered = 0
             for job in rows:
+                stale_reason = stale_recovery_reason(
+                    job_type=job.type, payload_json=job.payload_json, now=now
+                )
+                # PENDING 은 stale(payload TTL 만료)일 때만 종료 대상이다 — 그 외 PENDING 은 건드리지
+                # 않는다(정상 대기 job 보존).
+                if job.status == JOB_STATUS_PENDING and stale_reason is None:
+                    continue
                 next_attempt = int(job.attempts or 0) + 1
+                # 브라우저를 여는 interactive job / scheduled crawl 은 payload TTL 이 지났으면
+                # 재시도하지 않고 terminal FAILED + safe reason 으로 닫는다(무제한 재실행 차단).
+                # PENDING 은 lease 만료 retry 대상이 아니다 — stale 이면 terminal 종료만 한다.
                 retry_decision = (
                     self._retry_decider(STALE_LEASE_ERROR_CODE, next_attempt, now)
-                    if self._retry_decider is not None
+                    if (
+                        self._retry_decider is not None
+                        and stale_reason is None
+                        and job.status in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                    )
                     else None
                 )
                 if retry_decision is not None:
@@ -507,14 +612,18 @@ class PostgresQueueBackend(QueueBackend):
                     job.status = JOB_STATUS_FAILED
                     job.run_after = None
                     job.completed_at = now
+                    if stale_reason is not None:
+                        existing = job.result_json if isinstance(job.result_json, dict) else {}
+                        job.result_json = {**existing, "reason": stale_reason}
                 job.attempts = next_attempt
                 job.agent_id = None
                 job.lease_expires_at = None
                 job.claimed_at = None
                 job.error_code = STALE_LEASE_ERROR_CODE
                 job.last_failed_at = now
+                recovered += 1
             await session.commit()
-            return len(rows)
+            return recovered
 
     async def restore_claimed_after_snapshot_failure(
         self,

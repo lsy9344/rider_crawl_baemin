@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from rider_crawl.redaction import redact, redact_mapping
@@ -70,6 +70,25 @@ from rider_crawl.config import (
 
 #: 미해결(미인증/익명) actor 의 명시적 sentinel — 5.8 이 MFA/실 사용자/역할로 교체(AC3).
 UNAUTHENTICATED_ACTOR = "UNAUTHENTICATED_ADMIN"
+
+#: ``OPEN_AUTH_BROWSER`` 는 operator intent 가 짧게 살아 있는 interactive job 이다 — 운영자가
+#: '인증 시작'을 누른 시점 이후 짧은 TTL 안에서만 유효하다. 서버 재시작 뒤 오래된 인증 브라우저
+#: job 이 무제한 재실행되지 않도록, payload 에 ``requested_at``/``expires_at`` 를 실어 stale 판정의
+#: 단일 시간 기준을 준다(10~15분 사이). [근거 문서: queue-backlog-handling-policy.md]
+OPEN_AUTH_BROWSER_TTL = timedelta(minutes=12)
+
+
+def _iso_utc(dt: datetime) -> str:
+    """timezone-aware datetime 을 ISO 8601 UTC(``…Z``)로 — epoch 혼용 금지(ADD-13)."""
+
+    from datetime import timezone as _tz
+
+    return (
+        dt.astimezone(_tz.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 # ── audit action 코드(UPPER_SNAKE 기계가독) ──────────────────────────────────────
 ACTION_TARGET_ACTIVATE = "TARGET_ACTIVATE"
@@ -266,12 +285,32 @@ def _auth_check_payload(target: MonitoringTarget, *, platform: str) -> dict[str,
     )
 
 
+def _open_auth_browser_ttl_fields(at: datetime) -> dict[str, object]:
+    """``OPEN_AUTH_BROWSER`` payload 에 실을 operator-intent TTL 필드(짧은 수명).
+
+    ``requested_at`` 은 운영자가 '인증 시작'을 누른 시점(주입 ``at``), ``expires_at`` 은 그로부터
+    :data:`OPEN_AUTH_BROWSER_TTL`(10~15분) 뒤다. server/Agent 가 이 두 ISO 시각으로 stale 여부를
+    같은 기준으로 판단한다. secret 0(시각만).
+    """
+
+    return {
+        "requested_at": _iso_utc(at),
+        "expires_at": _iso_utc(at + OPEN_AUTH_BROWSER_TTL),
+    }
+
+
 def _auth_start_payload(
     target: MonitoringTarget,
     account: PlatformAccount,
+    *,
+    at: datetime,
 ) -> tuple[str, dict[str, object]]:
     platform = _platform_registry_key(account.platform.value)
-    base_payload = _target_job_payload(target, job_type=JOB_TYPE_OPEN_AUTH_BROWSER, platform=platform)
+    ttl_fields = _open_auth_browser_ttl_fields(at)
+    base_payload = {
+        **_target_job_payload(target, job_type=JOB_TYPE_OPEN_AUTH_BROWSER, platform=platform),
+        **ttl_fields,
+    }
     if platform == "baemin":
         login_id_ref = str(account.username or "").strip()
         login_password_ref = str(account.password or "").strip()
@@ -304,7 +343,7 @@ def _auth_start_payload(
     return (
         JOB_TYPE_OPEN_AUTH_BROWSER,
         {
-            **_target_job_payload(target, job_type=JOB_TYPE_OPEN_AUTH_BROWSER, platform=platform),
+            **base_payload,
             "coupang_login_id_ref": login_id_ref,
             "coupang_login_password_ref": login_password_ref,
             "verification_email_address_ref": verification_email_address_ref,
@@ -717,7 +756,7 @@ class AdminActionService:
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         account = await self._scoped_platform_account(target.platform_account_id, tenant_id=tenant_id)
-        job_type, payload = _auth_start_payload(target, account)
+        job_type, payload = _auth_start_payload(target, account, at=at)
         enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
         if callable(enqueue_manual_job):
             job_id = str(uuid.uuid4())

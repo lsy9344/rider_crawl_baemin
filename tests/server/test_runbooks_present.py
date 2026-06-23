@@ -13,6 +13,9 @@ from rider_server.domain import FailureCategory
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RUNBOOK_DIR = _REPO_ROOT / "docs" / "runbooks"
+_QUEUE_BACKLOG_POLICY = (
+    _REPO_ROOT / "docs" / "operations" / "queue-backlog-handling-policy.md"
+)
 
 # runbook 파일 → 명시 참조해야 하는 정본 FailureCategory 코드(NFR-15 분류 계약).
 _REQUIRED: dict[str, tuple[str, ...]] = {
@@ -52,3 +55,16 @@ def test_seven_runbooks_cover_all_seven_failure_categories() -> None:
     covered = {code for codes in _REQUIRED.values() for code in codes}
     assert covered == {m.value for m in FailureCategory}
     assert len(_REQUIRED) == 7
+
+
+def test_queue_backlog_policy_mentions_implemented_and_target_behavior_sections() -> None:
+    """Runbook separates present behavior from future policy."""
+
+    text = _QUEUE_BACKLOG_POLICY.read_text(encoding="utf-8")
+    assert "Current Implemented Behavior" in text
+    assert "Target Permanent Behavior" in text
+    assert "Emergency Operator Action" in text
+    assert "Verification Matrix" in text
+    # 안전한 reason 코드(secret 없는 분류 코드)가 문서에 명시돼 운영자가 의미를 안다.
+    assert "stale_auth_job_expired" in text
+    assert "stale_crawl_skipped" in text

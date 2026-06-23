@@ -22,11 +22,20 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from rider_server.queue.backend import QueueBackend
 
 from . import policy
+
+#: scheduled crawl payload 의 ``job_origin`` 값 — 이 job 이 scheduler tick 에서 생성됐음을 표시.
+#: recovery 가 "scheduled crawl" 을 식별해 stale backlog 를 안전하게 닫는 데 쓴다(Agent/manual
+#: crawl 과 구분). secret 0(분류 코드).
+JOB_ORIGIN_SCHEDULER = "scheduler"
+
+#: Coupang 자동 이메일 2FA 복구 crawl 의 ``recovery_mode`` 값. result ingest 가 이 값으로
+#: "자동 복구 결과"를 식별해 계정 cooldown 을 셋/클리어한다(Task 4). secret 0.
+RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = "coupang_auto_email_2fa"
 
 # 신규 enqueue 결과/차단 사유 코드(UPPER_SNAKE — 평문 secret 없음, 결정 결과 가시성).
 REASON_ENQUEUED = "ENQUEUED"
@@ -35,6 +44,13 @@ REASON_ACTIVE_JOB_EXISTS = "ACTIVE_JOB_EXISTS"
 REASON_THROTTLED_CAPACITY = "THROTTLED_CAPACITY"
 REASON_UNKNOWN_PLATFORM = "UNKNOWN_PLATFORM"
 REASON_RACE_LOST = "RACE_LOST"
+# ── 인증 상태 게이트 차단/허용 사유(Task 3) — 인증이 필요한 계정에 scheduled crawl 이 반복
+# 생성되는 것을 scheduler 단계에서 막는다. 자동 복구는 한 번만 안전하게 허용한다. secret 0.
+REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY = "AUTH_REQUIRED_NO_AUTO_RECOVERY"
+REASON_AUTH_STATE_USER_ACTION_PENDING = "AUTH_STATE_USER_ACTION_PENDING"
+REASON_AUTH_STATE_BLOCKED_OR_CAPTCHA = "AUTH_STATE_BLOCKED_OR_CAPTCHA"
+REASON_AUTH_STATE_UNKNOWN = "AUTH_STATE_UNKNOWN"
+REASON_COUPANG_AUTO_RECOVERY_COOLDOWN = "COUPANG_AUTO_RECOVERY_COOLDOWN"
 
 #: circuit breaker 집계 윈도(최근 15분, AC3).
 DEFAULT_BREAKER_WINDOW = timedelta(minutes=15)
@@ -59,6 +75,14 @@ class DueTarget:
     verification_email_subject_keyword: str = "인증번호"
     verification_email_sender_keyword: str = "coupang"
     assigned_agent_id: str = ""
+    # ── 인증 상태 + Coupang 자동 복구 cooldown facts(Task 3/4) ──────────────────
+    # auth_state 는 ``PlatformAccount.auth_state``(BaeminAuthState 값). 미매핑/미상은 UNKNOWN
+    # 으로 취급(fail-closed). auto_recovery_* 는 "한 번만 자동 복구 + 실패 뒤 cooldown" 을 계정
+    # 단위로 강제하는 시간 facts(Task 4 가 DB 에 영속).
+    auth_state: str = ""
+    auto_recovery_attempted_at: datetime | None = None
+    auto_recovery_failed_at: datetime | None = None
+    auto_recovery_cooldown_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +321,25 @@ class SchedulerService:
                 )
                 continue
 
+            # ③-b 인증 상태 게이트(Task 3) — 인증 필요/막힘/미상 계정에는 scheduled crawl 을
+            # 만들지 않는다. AUTH_REQUIRED Coupang 은 자동 2FA 설정 완전 + cooldown 없을 때만
+            # 복구 crawl 1건을 받는다(한 번만 안전하게).
+            auth_decision = policy.decide_auth_gate(
+                auth_state=target.auth_state,
+                platform=target.platform,
+                auto_2fa_complete=_coupang_auto_2fa_complete(target),
+                cooldown_until=target.auto_recovery_cooldown_until,
+                now=now,
+            )
+            if not auth_decision.allow:
+                outcomes.append(
+                    ScheduleOutcome(
+                        target.target_id, False, auth_decision.reason,
+                        warn_admin=decision.warn_admin,
+                    )
+                )
+                continue
+
             # ⑤-a 멱등성: 활성 CrawlJob 이 있으면 두 번째를 만들지 않는다(전진도 안 함 — 재진입 차단).
             if target.target_id in active_target_ids:
                 outcomes.append(
@@ -322,11 +365,23 @@ class SchedulerService:
             interval_seconds = target.interval_minutes * 60
             jitter = policy.compute_jitter(target.target_id, interval_seconds)
             advanced_next = policy.next_run_at(now, interval_seconds, jitter)
+            crawl_payload = _crawl_job_payload(
+                target, job_type, now=now, interval_seconds=interval_seconds
+            )
+            if auth_decision.recovery:
+                # 허용된 Coupang 자동 복구 crawl — bounded recovery metadata 를 더한다.
+                # 인증번호 값은 싣지 않는다(자동 2FA 플래그만). target/platform payload 는 normal
+                # crawl 과 동일(같은 affinity·payload 계약).
+                crawl_payload = {
+                    **crawl_payload,
+                    "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
+                    "recovery_attempt": 1,
+                }
             job_id = await repo.claim_due_target_and_enqueue(
                 queue_backend,
                 target,
                 job_type=job_type,
-                payload_json=_crawl_job_payload(target, job_type),
+                payload_json=crawl_payload,
                 now=now,
                 next_run_at=advanced_next,
             )
@@ -352,7 +407,39 @@ class SchedulerService:
         return TickResult(tuple(outcomes), enqueued_count)
 
 
-def _crawl_job_payload(target: DueTarget, job_type: str) -> dict[str, object]:
+def _iso_utc(dt: datetime) -> str:
+    """timezone-aware datetime 을 ISO 8601 UTC(``…Z``)로 — epoch 혼용 금지(ADD-13)."""
+
+    return (
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _coupang_auto_2fa_complete(target: DueTarget) -> bool:
+    """대상의 Coupang 자동 이메일 2FA 설정이 완전한가(로그인 + 이메일 ref 4종 모두 존재).
+
+    auth gate 가 AUTH_REQUIRED Coupang 계정에 복구 crawl 을 허용할지 판단하는 입력이다.
+    값(ref 문자열) 존재 여부만 보고 평문 secret 을 노출하지 않는다.
+    """
+
+    return bool(
+        target.username
+        and target.password
+        and target.verification_email_address
+        and target.verification_email_app_password
+    )
+
+
+def _crawl_job_payload(
+    target: DueTarget,
+    job_type: str,
+    *,
+    now: datetime,
+    interval_seconds: int,
+) -> dict[str, object]:
     platform = str(target.platform or "").strip().casefold()
     payload: dict[str, object] = {
         "target_id": target.target_id,
@@ -365,6 +452,12 @@ def _crawl_job_payload(target: DueTarget, job_type: str) -> dict[str, object]:
         "timeout_seconds": 60,
         "parser_version": f"{platform}-v1",
         "job_type": job_type,
+        # scheduled crawl 의 출처/시간 경계 — recovery 가 stale backlog 를 안전하게 닫는 기준.
+        # expires_at 은 scheduled_at 으로부터 최대 1 interval 뒤(다음 due 윈도가 열리기 전까지만
+        # 유효 — 서버 downtime 뒤 누적된 missed-interval job 이 한 번에 재생되는 것을 막는다).
+        "job_origin": JOB_ORIGIN_SCHEDULER,
+        "scheduled_at": _iso_utc(now),
+        "expires_at": _iso_utc(now + timedelta(seconds=max(0, interval_seconds))),
     }
     if platform == "coupang":
         payload.update(

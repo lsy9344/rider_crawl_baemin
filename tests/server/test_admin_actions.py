@@ -14,7 +14,7 @@ fake 값만(실제 토큰/전화/이메일/chat_id 형태 금지). 평면 ``test
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 
 import pytest
@@ -693,11 +693,42 @@ def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
         "timeout_seconds": 60,
         "parser_version": "baemin-v1",
         "job_type": "OPEN_AUTH_BROWSER",
+        "requested_at": "2026-06-14T12:00:00Z",
+        "expires_at": "2026-06-14T12:12:00Z",
         "login_id_ref": "login-id-ref",
         "login_password_ref": "login-password-ref",
     }
     assert repo.audits[-1].action == "AUTH_START"
     assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
+
+
+def test_start_auth_payload_contains_requested_at_and_expires_at() -> None:
+    """OPEN_AUTH_BROWSER carries a short operator-intent TTL."""
+
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account())
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["job_type"] == "OPEN_AUTH_BROWSER"
+    # requested_at == injected at(분리된 시간 기준 — server/Agent 공용 stale 판정).
+    assert payload["requested_at"] == "2026-06-14T12:00:00Z"
+    requested_at = datetime.fromisoformat(payload["requested_at"].replace("Z", "+00:00"))
+    expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+    delta = expires_at - requested_at
+    assert timedelta(minutes=10) <= delta <= timedelta(minutes=15)
+    # start_auth 는 CRAWL_COUPANG job 을 만들지 않는다(인증 시작 != scheduled crawl).
+    assert all(
+        snap.type != JOB_TYPE_CRAWL_COUPANG
+        for snap in (queue.job_snapshot(job_id),)
+        if snap is not None
+    )
 
 
 def test_start_auth_enqueues_coupang_open_auth_browser_with_email_2fa_refs() -> None:
@@ -733,6 +764,8 @@ def test_start_auth_enqueues_coupang_open_auth_browser_with_email_2fa_refs() -> 
         "timeout_seconds": 60,
         "parser_version": "coupang-v1",
         "job_type": "OPEN_AUTH_BROWSER",
+        "requested_at": "2026-06-14T12:00:00Z",
+        "expires_at": "2026-06-14T12:12:00Z",
         "coupang_login_id_ref": "coupang-login-id-ref",
         "coupang_login_password_ref": "coupang-login-password-ref",
         "verification_email_address_ref": "mailbox-ref",

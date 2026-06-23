@@ -32,6 +32,16 @@
 - 이 근사는 "쿠팡 인증 흐름이 사람 개입 대기 중"을 대표할 뿐, 인증 이메일 단계만 정밀 분리하지
   않는다. 임의 enum/컬럼을 신설해 정밀 수치를 **위조하지 않는다** — 한계를 안 채로 운영한다.
 
+## 큐 백로그 / 자동 복구 cooldown 연계 (2026-06-23)
+
+- 쿠팡 `AUTH_REQUIRED` 계정은 자동 이메일 2FA 설정이 완전하고 cooldown 이 없을 때만 scheduler 가
+  **복구 crawl 1건**을 만든다. 자동 복구가 실패하면 계정에 cooldown 이 설정돼 그 동안 새 복구
+  crawl 이 만들어지지 않는다(반복 브라우저 오픈 차단). cooldown 중에는 운영자 `인증 시작`
+  (`OPEN_AUTH_BROWSER`)으로만 재시도한다.
+- `인증 시작` 으로 만든 `OPEN_AUTH_BROWSER` 는 짧은 TTL(10~15분) 을 가진다. 서버/Agent 재시작
+  뒤 만료된 인증 브라우저 job 은 재실행되지 않고 `stale_auth_job_expired` 로 닫힌다.
+- 상세 정책: `docs/operations/queue-backlog-handling-policy.md` 참조.
+
 ## 에스컬레이션
 
 - 동일 계정이 짧은 주기로 반복 `AUTH_REQUIRED` → 계정 차단/패턴 변화 의심, 운영 책임자 보고.

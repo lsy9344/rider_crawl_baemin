@@ -29,6 +29,7 @@ from rider_server.admin.severity import is_agent_online
 from rider_server.db.models.agent import Agent, BrowserProfile, Job
 from rider_server.db.models.tenancy import Subscription, Tenant
 from rider_server.domain import (
+    BaeminAuthState,
     CustomerLifecycleState,
     MonitoringTargetStatus,
     SubscriptionStatus,
@@ -134,6 +135,10 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 PlatformAccount.verification_email_app_password,
                 PlatformAccount.verification_email_subject_keyword,
                 PlatformAccount.verification_email_sender_keyword,
+                PlatformAccount.auth_state,
+                PlatformAccount.auto_recovery_attempted_at,
+                PlatformAccount.auto_recovery_failed_at,
+                PlatformAccount.auto_recovery_cooldown_until,
                 MonitoringTarget.interval_minutes,
                 MonitoringTarget.next_run_at,
                 assigned_agent_id.label("assigned_agent_id"),
@@ -175,6 +180,11 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 assigned_agent_id=str(row.assigned_agent_id)
                 if row.assigned_agent_id is not None
                 else "",
+                # 인증 facts(Task 3) — 미상/미매핑은 UNKNOWN 으로 fail-closed 차단.
+                auth_state=row.auth_state or BaeminAuthState.UNKNOWN.value,
+                auto_recovery_attempted_at=row.auto_recovery_attempted_at,
+                auto_recovery_failed_at=row.auto_recovery_failed_at,
+                auto_recovery_cooldown_until=row.auto_recovery_cooldown_until,
             )
             for row in rows
         ]

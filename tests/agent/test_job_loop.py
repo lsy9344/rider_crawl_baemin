@@ -478,6 +478,61 @@ def test_runner_executes_only_claimed_job_then_completes():
     assert started[0][1]["event_type"] == EVENT_TYPE_JOB_STARTED
 
 
+def test_runner_does_not_call_worker_when_preflight_denies_job():
+    """Preflight denial completes safely without opening browser/profile."""
+
+    class _PreflightDenyTransport(FakeTransport):
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/preflight"):
+                self.calls.append((url, body, headers))
+                return {"allowed": False, "reason": "payload_expired", "server_time": "2026-06-14T12:00:00Z"}
+            return super().post_json(url, body, headers=headers)
+
+    transport = _PreflightDenyTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    executed: list[ClaimedJob] = []
+
+    def execute(job):
+        executed.append(job)
+        return make_success_result(result_json={"ok": True})
+
+    runner = _runner(transport, execute_job=execute)
+    runner.run()
+
+    # 워커(execute_job)는 호출되지 않는다(브라우저/profile 미오픈).
+    assert executed == []
+    # preflight 는 1회 호출됐다.
+    assert len(transport.calls_for("/preflight")) == 1
+    # complete 는 실패 status + result_json["reason"] 로 안전히 보고된다.
+    complete_calls = transport.calls_for("/complete")
+    assert len(complete_calls) == 1
+    complete_body = complete_calls[0][1]
+    assert complete_body["status"] == "failed"
+    assert complete_body["result_json"]["reason"] == "payload_expired"
+
+
+def test_runner_preflight_unavailable_is_fail_closed():
+    """Preflight transport failure stops the worker (fail-closed)."""
+
+    class _PreflightErrorTransport(FakeTransport):
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/preflight"):
+                self.calls.append((url, body, headers))
+                raise TransportError("preflight HTTP error", status_code=503)
+            return super().post_json(url, body, headers=headers)
+
+    transport = _PreflightErrorTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    executed: list[ClaimedJob] = []
+
+    runner = _runner(transport, execute_job=lambda j: executed.append(j))
+    runner.run()
+
+    assert executed == []
+    complete_calls = transport.calls_for("/complete")
+    assert len(complete_calls) == 1
+    assert complete_calls[0][1]["status"] == "failed"
+    assert complete_calls[0][1]["result_json"]["reason"] == "preflight_unavailable"
+
+
 def test_runner_empty_claim_skips_execute_and_sleeps():
     transport = FakeTransport(claim_script=[{"jobs": []}])
     executed: list[ClaimedJob] = []
