@@ -106,6 +106,10 @@ RESULT_REASON_STALE_CRAWL_SKIPPED = "stale_crawl_skipped"
 RESULT_REASON_CRAWL_RECOVERY_COOLDOWN = "coupang_auto_recovery_cooldown"
 RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED = "coupang_auto_recovery_not_allowed"
 RESULT_REASON_PAYLOAD_EXPIRED = "payload_expired"
+#: AUTH_COUPANG_2FA 가 lease 만료로 회수될 때의 safe reason. 자동 2FA 가 진행 중이었을 수
+#: 있으므로 **재시도(PENDING 재진입)하지 않고** terminal FAILED 로 닫아 중복 OTP 요청을 막는다
+#: (crawl-coupang-auth-separation Task 8). secret 0(기계가독 분류 코드).
+RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED = "stale_auth_recovery_abandoned"
 
 
 # ── stale lease recovery 분류(server/Agent 공용 — backend 간 동일 규칙) ───────────
@@ -144,16 +148,21 @@ def stale_recovery_reason(
     job_type: str,
     payload_json: object,
     now: "_dt",
+    job_status: str | None = None,
 ) -> str | None:
     """stale lease recovery 시 이 job 을 **terminal 종료**시킬 reason(또는 재시도 대상이면 None).
 
     * ``OPEN_AUTH_BROWSER`` + payload ``expires_at < now`` → :data:`RESULT_REASON_STALE_AUTH_JOB_EXPIRED`.
+    * ``AUTH_COUPANG_2FA`` 가 lease 만료로 회수(``job_status`` 가 CLAIMED/RUNNING)
+      → :data:`RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED`(payload TTL 무관 — 자동 2FA 가
+      진행 중이었을 수 있으므로 재시도하지 않고 terminal 종료해 중복 OTP 요청을 막는다, Task 8).
+      claim 전 PENDING 인 healthy auth job 은 종료하지 않는다(``job_status`` 미지정/PENDING 보존).
     * scheduled crawl(``job_origin == "scheduler"`` 또는 ``CRAWL_*`` job) + ``expires_at < now``
       → :data:`RESULT_REASON_STALE_CRAWL_SKIPPED`.
     * 그 외(또는 ``expires_at`` 없음/미만료) → ``None``(기존 retry 정책 유지).
 
-    payload 가 dict 가 아니거나 ``expires_at`` 가 없으면 stale 로 보지 않는다(보수적 — 기존
-    동작 보존). reason 값은 secret 0(기계가독 분류 코드)이다.
+    payload 가 dict 가 아니거나 ``expires_at`` 가 없으면(AUTH_COUPANG_2FA 제외) stale 로 보지
+    않는다(보수적 — 기존 동작 보존). reason 값은 secret 0(기계가독 분류 코드)이다.
     """
 
     payload = payload_json if isinstance(payload_json, dict) else {}
@@ -161,6 +170,13 @@ def stale_recovery_reason(
     if job_type == JOB_TYPE_OPEN_AUTH_BROWSER:
         if expires_at is not None and now >= expires_at:
             return RESULT_REASON_STALE_AUTH_JOB_EXPIRED
+        return None
+    if job_type == JOB_TYPE_AUTH_COUPANG_2FA:
+        # claim 된(CLAIMED/RUNNING) auth job 의 lease 가 만료돼 회수될 때만 terminal 종료한다.
+        # payload TTL 이 아니라 lease 만료 자체로 판정한다 — 자동 2FA 가 OTP 를 받는 중이었을 수
+        # 있어 PENDING 재진입은 중복 요청을 부른다. 아직 claim 전(PENDING)인 job 은 보존한다.
+        if str(job_status or "").strip().upper() in {"CLAIMED", "RUNNING"}:
+            return RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED
         return None
     is_scheduled_crawl = (
         payload.get("job_origin") == JOB_ORIGIN_SCHEDULER

@@ -23,6 +23,7 @@ from rider_server.admin.severity import (
     FailClosedSignals,
     classify_failclosed,
     classify_freshness,
+    coupang_recovery_detail_label,
     failclosed_signals_from,
     is_agent_online,
     overall_severity,
@@ -309,3 +310,55 @@ def test_is_agent_online_respects_injected_offline_threshold() -> None:
     short = timedelta(seconds=30)
     assert is_agent_online(_NOW - timedelta(seconds=29), _NOW, offline_after=short) is True
     assert is_agent_online(_NOW - timedelta(seconds=31), _NOW, offline_after=short) is False
+
+
+# ── crawl-coupang-auth-separation Task 9: 쿠팡 자동 인증 복구 세부 사유 표시 ─────────
+
+
+def test_dashboard_surfaces_coupang_email_auth_required_detail() -> None:
+    """Email mailbox auth issue is visible as auth-required detail."""
+    # 계정 gate 는 AUTH_REQUIRED(STOPPED) 그대로, 세부는 "메일 인증 필요"로 구분된다.
+    assert (
+        coupang_recovery_detail_label(auth_recovery_state="EMAIL_AUTH_REQUIRED")
+        == "메일 인증 필요"
+    )
+    assert (
+        coupang_recovery_detail_label(
+            auth_recovery_state="EMAIL_AUTH_REQUIRED", reason="email_auth_required"
+        )
+        == "메일 인증 필요"
+    )
+
+
+def test_dashboard_surfaces_coupang_recovery_failed_detail() -> None:
+    """Repeated/mail-delay recovery failures are not shown as generic crawl failure."""
+    # 메일 지연은 "인증 메일 지연"으로, 반복 실패는 "자동 인증 실패"로 구분된다.
+    assert (
+        coupang_recovery_detail_label(
+            auth_recovery_state="RECOVERY_FAILED", reason="verification_mail_delayed"
+        )
+        == "인증 메일 지연"
+    )
+    assert (
+        coupang_recovery_detail_label(
+            auth_recovery_state="RECOVERY_FAILED", reason="repeated_recovery_failure"
+        )
+        == "자동 인증 실패"
+    )
+    # reason 없이 상태만 와도 일반 "자동 인증 실패"로 표면화.
+    assert coupang_recovery_detail_label(auth_recovery_state="RECOVERY_FAILED") == "자동 인증 실패"
+
+
+def test_dashboard_surfaces_coupang_user_action_required_detail() -> None:
+    """CAPTCHA/abnormal login is surfaced as captcha detail, not crawl failure."""
+    assert (
+        coupang_recovery_detail_label(auth_recovery_state="USER_ACTION_REQUIRED")
+        == "캡차/이상 로그인"
+    )
+
+
+def test_coupang_recovery_detail_is_none_for_active_or_unknown() -> None:
+    # 복구 성공(ACTIVE)·미매핑 상태는 detail 을 만들지 않는다(gate 심각도만 표시).
+    assert coupang_recovery_detail_label(auth_recovery_state="ACTIVE") is None
+    assert coupang_recovery_detail_label(auth_recovery_state=None) is None
+    assert coupang_recovery_detail_label(auth_recovery_state="", reason="") is None

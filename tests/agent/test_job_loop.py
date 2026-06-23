@@ -819,6 +819,39 @@ def test_runner_records_lease_and_exposes_active_jobs_in_flight():
     assert runner.active_jobs() == []
 
 
+def test_auth_coupang_2fa_job_is_exposed_as_active_job_for_heartbeat():
+    """Long auth jobs are lease-extended while running.
+
+    crawl-coupang-auth-separation Task 8: AUTH_COUPANG_2FA 도 다른 job 과 동일하게 실행 중
+    in-flight 로 추적돼 heartbeat active_jobs 에 노출된다(서버가 lease 를 계속 연장 — 장시간
+    메일 대기 중 stale 회수로 중복 OTP 가 요청되지 않게).
+    """
+
+    auth_job = dict(
+        _JOB_DICT,
+        job_id="job-auth-2fa-9",
+        type="AUTH_COUPANG_2FA",
+        payload={"platform": "coupang", "recovery_mode": "coupang_auto_email_2fa"},
+    )
+    transport = FakeTransport(claim_script=[{"jobs": [auth_job]}])
+    captured: dict = {}
+    holder: dict = {}
+
+    def execute(job):
+        captured["active"] = holder["runner"].active_jobs()
+        return make_success_result()
+
+    runner = _runner(transport, execute_job=execute)
+    holder["runner"] = runner
+    runner.run()
+
+    # 실행 중 lease_expires_at 가 active_jobs 로 노출됨(heartbeat 연장 입력).
+    assert captured["active"] == [
+        {"job_id": "job-auth-2fa-9", "lease_expires_at": FUTURE_LEASE}
+    ]
+    assert runner.active_jobs() == []
+
+
 def test_runner_reports_success_even_when_original_claim_lease_looks_expired():
     transport = FakeTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
     # started=100, finished=200. 서버 heartbeat가 lease를 연장했을 수 있으므로

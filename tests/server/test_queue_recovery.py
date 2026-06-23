@@ -15,10 +15,12 @@ from rider_server.queue import (
 from rider_server.queue import __main__ as queue_main
 from rider_server.queue.recovery import recover_once
 from rider_server.queue.states import (
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_OPEN_AUTH_BROWSER,
     RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+    RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED,
     RESULT_REASON_STALE_CRAWL_SKIPPED,
 )
 
@@ -95,6 +97,79 @@ def test_recovery_expires_open_auth_browser_instead_of_repending() -> None:
             now=now,
         )
         assert claimed == []
+
+    asyncio.run(_run())
+
+
+def test_stale_auth_coupang_2fa_is_not_retried_by_recovery_loop() -> None:
+    """Expired auth job does not trigger repeated OTP request.
+
+    crawl-coupang-auth-separation Task 8: AUTH_COUPANG_2FA 의 lease 가 만료되면(claim 된 상태)
+    payload TTL 과 무관하게 terminal FAILED 로 닫는다 — PENDING 재진입 0(중복 OTP 요청 차단).
+    """
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+            },
+            now=_T0,
+        )
+        await backend.claim(
+            agent_id="agent-auth",
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        # lease 만료 시점에 recovery — payload TTL 은 없지만 lease 만료만으로 terminal 종료.
+        now = _T0 + timedelta(seconds=121)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        # PENDING 재진입이 아니라 terminal FAILED.
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED
+
+        # 다시 claim 되지 않는다(중복 OTP 요청 차단).
+        claimed = await backend.claim(
+            agent_id="agent-auth-2",
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
+            max_jobs=5,
+            lease_seconds=120,
+            now=now,
+        )
+        assert claimed == []
+
+    asyncio.run(_run())
+
+
+def test_healthy_pending_auth_coupang_2fa_is_not_closed_by_recovery() -> None:
+    """A not-yet-claimed AUTH_COUPANG_2FA job is preserved (only claimed+expired is terminal)."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+            },
+            now=_T0,
+        )
+        # claim 하지 않은 채 recovery 를 돌려도 PENDING 보존.
+        result = await recover_once(backend, now=_T0 + timedelta(hours=1))
+
+        assert result.recovered_count == 0
+        assert backend.job_status(job_id) == JOB_STATUS_PENDING
 
     asyncio.run(_run())
 

@@ -602,7 +602,10 @@ class PostgresQueueBackend(QueueBackend):
             recovered = 0
             for job in rows:
                 stale_reason = stale_recovery_reason(
-                    job_type=job.type, payload_json=job.payload_json, now=now
+                    job_type=job.type,
+                    payload_json=job.payload_json,
+                    now=now,
+                    job_status=job.status,
                 )
                 # PENDING 은 stale(payload TTL 만료)일 때만 종료 대상이다 — 그 외 PENDING 은 건드리지
                 # 않는다(정상 대기 job 보존).

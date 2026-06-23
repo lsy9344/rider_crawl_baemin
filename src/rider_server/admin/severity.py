@@ -224,6 +224,48 @@ def severity_rank(severity: str) -> int:
 # AC1 — agent online/offline 판정(시각 주입, 순수)
 # ══════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════
+# crawl-coupang-auth-separation Task 9 — 쿠팡 자동 인증 복구 세부 사유 표시
+# ══════════════════════════════════════════════════════════════════════════
+# 계정 gate 상태(AUTH_REQUIRED 등)는 그대로 red/yellow 심각도를 만든다. 그 위에, AUTH_COUPANG_2FA
+# job 의 세부 복구 상태(``auth_recovery_state``)/reason 을 운영자에게 보이는 한글 detail 로
+# 매핑한다 — "크롤 실패"가 아니라 "메일 인증 필요/인증 메일 지연/캡차·이상 로그인/자동 인증 실패"
+# 로 구분해 조치를 안내한다. secret 0(분류 코드만 입력으로 받는다).
+
+#: 세부 복구 상태(result_json.auth_recovery_state) → 한글 detail 라벨.
+COUPANG_RECOVERY_DETAIL_BY_STATE: dict[str, str] = {
+    "EMAIL_AUTH_REQUIRED": "메일 인증 필요",
+    "USER_ACTION_REQUIRED": "캡차/이상 로그인",
+    "RECOVERY_FAILED": "자동 인증 실패",
+}
+
+#: 고정 reason(result_json.reason / metrics.reason) → 한글 detail 라벨(상태보다 구체적인 경우).
+COUPANG_RECOVERY_DETAIL_BY_REASON: dict[str, str] = {
+    "email_auth_required": "메일 인증 필요",
+    "captcha_or_abnormal_login": "캡차/이상 로그인",
+    "verification_mail_delayed": "인증 메일 지연",
+    "repeated_recovery_failure": "자동 인증 실패",
+}
+
+
+def coupang_recovery_detail_label(
+    *,
+    auth_recovery_state: str | None,
+    reason: str | None = None,
+) -> str | None:
+    """쿠팡 자동 인증 복구 세부 사유의 한글 detail 라벨(없거나 정상 복구면 ``None``).
+
+    reason 이 더 구체적이면(예: ``verification_mail_delayed`` → "인증 메일 지연") reason 매핑을
+    우선한다. ``ACTIVE``(복구 성공)와 미매핑은 detail 을 만들지 않는다(gate 심각도만 표시).
+    입력은 기계가독 분류 코드뿐 — secret 을 받지 않는다.
+    """
+
+    reason_label = COUPANG_RECOVERY_DETAIL_BY_REASON.get(str(reason or "").strip())
+    if reason_label is not None:
+        return reason_label
+    return COUPANG_RECOVERY_DETAIL_BY_STATE.get(str(auth_recovery_state or "").strip())
+
+
 def is_agent_online(
     last_heartbeat_at: datetime | None,
     now: datetime,

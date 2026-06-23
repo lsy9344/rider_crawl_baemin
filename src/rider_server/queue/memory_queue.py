@@ -328,8 +328,12 @@ class InMemoryQueueBackend(QueueBackend):
                 next_attempt = job.attempts + 1
                 # 브라우저를 여는 interactive job / scheduled crawl 은 payload TTL 이 지났으면
                 # 재시도하지 않고 terminal FAILED + safe reason 으로 닫는다(무제한 재실행 차단).
+                # AUTH_COUPANG_2FA 는 CLAIMED/RUNNING lease 만료 자체로 terminal 종료(중복 OTP 방지).
                 stale_reason = stale_recovery_reason(
-                    job_type=job.type, payload_json=job.payload_json, now=now
+                    job_type=job.type,
+                    payload_json=job.payload_json,
+                    now=now,
+                    job_status=job.status,
                 )
                 # PENDING job 은 lease 만료 retry 대상이 아니다 — stale 이면 terminal 종료만 한다.
                 retry_decision = (

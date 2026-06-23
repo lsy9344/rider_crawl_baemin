@@ -16,10 +16,29 @@ This section describes what the code does **now that this work order is
 implemented** (2026-06-23). It is the source of truth for what to expect in
 production today.
 
+> **Superseded (crawl-coupang-auth-separation, 2026-06-23):** the earlier
+> "one bounded **recovery crawl**" approach has been replaced by a dedicated
+> auto-recovery auth job, `AUTH_COUPANG_2FA`. The scheduler now enqueues
+> `AUTH_COUPANG_2FA` (not a `CRAWL_COUPANG` recovery crawl) for an `AUTH_REQUIRED`
+> Coupang account with complete auto 2FA and no cooldown, and `CRAWL_COUPANG` no
+> longer performs inline email 2FA. Bullets below that mention a "recovery crawl"
+> read as "auto-recovery auth job." See
+> `docs/goal/crawl-coupang-auth-separation-work-order-2026-06-23.md`.
+
 - `OPEN_AUTH_BROWSER` payloads carry `requested_at` / `expires_at` (a 10–15 minute
   operator-intent TTL). Queue recovery closes an expired auth browser job as
   terminal `FAILED` with result reason `stale_auth_job_expired` instead of
   re-`PENDING`-ing it. It is not replayed after a server or Agent restart.
+  `OPEN_AUTH_BROWSER` is now **manual only** — it opens the browser for a human and
+  never runs automatic OTP/email 2FA.
+- `AUTH_COUPANG_2FA` is the dedicated Coupang auto email-2FA recovery job. If its
+  lease expires while claimed, queue recovery closes it as terminal `FAILED` with
+  reason `stale_auth_recovery_abandoned` (never re-`PENDING`) so a stale auto
+  recovery cannot trigger a duplicate OTP request. While running it is exposed as
+  an active job so heartbeats keep extending its lease.
+- `CRAWL_COUPANG` no longer performs inline login / email 2FA. A crawl that hits a
+  login screen returns `AUTH_REQUIRED` and stops; auto recovery is a separate
+  `AUTH_COUPANG_2FA` job.
 - Scheduled `CRAWL_BAEMIN` / `CRAWL_COUPANG` payloads carry `job_origin="scheduler"`,
   `scheduled_at`, and `expires_at` (at most one interval after `scheduled_at`).
   Queue recovery closes an expired scheduled crawl (whether `PENDING`, `CLAIMED`,
@@ -27,10 +46,11 @@ production today.
 - The scheduler reads `PlatformAccount.auth_state` and the per-account Coupang
   auto-recovery cooldown. It blocks scheduled crawl for `AUTH_REQUIRED` without
   complete auto email 2FA, `USER_ACTION_PENDING`, `BLOCKED_OR_CAPTCHA`, and
-  `UNKNOWN`, and allows exactly one bounded recovery crawl for `AUTH_REQUIRED`
-  Coupang with complete auto 2FA and no active cooldown.
+  `UNKNOWN`, and enqueues exactly one `AUTH_COUPANG_2FA` auth job for
+  `AUTH_REQUIRED` Coupang with complete auto 2FA and no active cooldown (duplicate
+  auth jobs are suppressed while one is active).
 - A failed Coupang auto recovery sets `auto_recovery_failed_at` and
-  `auto_recovery_cooldown_until` on the account, suppressing new recovery crawls
+  `auto_recovery_cooldown_until` on the account, suppressing new recovery attempts
   during the cooldown. A successful recovery clears the cooldown.
 - Before opening a browser/profile, the Agent calls a server preflight
   (`POST /v1/jobs/{id}/preflight`) and also defensively rechecks the payload
@@ -80,11 +100,14 @@ stop the Agent if already-queued work keeps opening windows**:
 | Server startup with expired `OPEN_AUTH_BROWSER` | Closed terminal `FAILED`, not re-`PENDING` | `stale_auth_job_expired` |
 | Server startup with stale scheduled crawl (PENDING/CLAIMED/RUNNING) | Closed terminal `FAILED`, not replayed | `stale_crawl_skipped` |
 | Agent startup with expired auth/crawl payload | Preflight denies / worker fails fast, no browser opens | `payload_expired` |
-| Scheduler tick, `AUTH_REQUIRED` Coupang w/o auto 2FA | No crawl enqueued | `AUTH_REQUIRED_NO_AUTO_RECOVERY` |
-| Scheduler tick, `AUTH_REQUIRED` Coupang w/ auto 2FA, no cooldown | One bounded recovery crawl enqueued | `ENQUEUED` |
-| Manual `인증 시작` | Enqueues `OPEN_AUTH_BROWSER` only, never `CRAWL_COUPANG` | — |
-| Coupang auto recovery success | Account cooldown cleared, normal scheduling resumes | — |
-| Coupang auto recovery failure | Cooldown set, repeated crawl attempts suppressed | `coupang_auto_recovery_cooldown` |
+| Scheduler tick, `AUTH_REQUIRED` Coupang w/o auto 2FA | No crawl/auth job enqueued | `AUTH_REQUIRED_NO_AUTO_RECOVERY` |
+| Scheduler tick, `AUTH_REQUIRED` Coupang w/ auto 2FA, no cooldown | One `AUTH_COUPANG_2FA` auth job enqueued (not a crawl) | `ENQUEUED_AUTH_COUPANG_2FA` |
+| Scheduler tick, `AUTH_REQUIRED` Coupang w/ auto 2FA, auth job already active | No duplicate auth job | `AUTH_JOB_ALREADY_ACTIVE` |
+| Manual `인증 시작`, complete auto 2FA refs | Enqueues `AUTH_COUPANG_2FA`, never `CRAWL_COUPANG` | — |
+| Manual `인증 시작`, login only (no email 2FA) | Falls back to manual `OPEN_AUTH_BROWSER` | — |
+| `AUTH_COUPANG_2FA` lease expires while claimed | Closed terminal `FAILED`, not re-`PENDING` (no duplicate OTP) | `stale_auth_recovery_abandoned` |
+| Coupang auto recovery success | Account `ACTIVE`, cooldown cleared, normal crawl scheduling resumes | — |
+| Coupang auto recovery failure | Cooldown set, repeated auth attempts suppressed | `coupang_auto_recovery_cooldown` |
 
 ## Current Problem
 

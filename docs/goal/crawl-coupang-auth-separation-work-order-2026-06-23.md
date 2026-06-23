@@ -3,8 +3,15 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` for implementation slices, or `superpowers:executing-plans` if one worker executes the whole plan. Keep checkbox state in this document as work lands.
 
 작성일: 2026-06-23  
-상태: 작업 전  
+상태: 완료(Task 0~9 구현·테스트 통과 — 전체 스위트 그린)  
 대상 저장소: `rider_result_mornitoring`  
+
+> **구현 노트(2026-06-23):** Task 9 의 대시보드 detail 은 순수 매핑 헬퍼
+> `severity.coupang_recovery_detail_label()` + 단위 테스트로 구현했다(메일 인증 필요/인증 메일
+> 지연/캡차·이상 로그인/자동 인증 실패). 실제 대시보드 행/템플릿에 최신 `AUTH_COUPANG_2FA`
+> 결과의 `auth_recovery_state` 를 조회·바인딩하는 배선은 후속 슬라이스로 남겨 둔다(헬퍼 계약은
+> 확정). Task 4 는 Option 1(저위험) 컷 — `rider_crawl` 크롤러의 inline 복구 코드는 그대로 두되
+> Agent crawl path 에서 자동 2FA 를 강제로 끈다.
 대상 범위: `CRAWL_COUPANG` 실행 경로와 Coupang email 2FA 인증 경로 분리  
 검토 근거: 사용자 제공 분석, 현행 코드 확인, 기존 `docs/goal/queue-backlog-hardening-work-order-2026-06-23.md`
 
@@ -217,7 +224,7 @@ Agent
 
 **Files:** 없음
 
-- [ ] **Step 1: 작업 전 변경 상태 확인**
+- [x] **Step 1: 작업 전 변경 상태 확인**
 
 Run:
 
@@ -230,7 +237,7 @@ Expected:
 - 이 문서 작성 시점에 이미 `src/rider_agent/workers/crawl_process.py`, `src/rider_agent/workers/crawl_worker.py`, `tests/agent/test_crawl_worker.py` 변경이 있었다.
 - 구현자는 본인 작업과 무관한 변경을 되돌리지 않는다.
 
-- [ ] **Step 2: 기존 queue backlog 문서와 충돌점 표시**
+- [x] **Step 2: 기존 queue backlog 문서와 충돌점 표시**
 
 Review:
 
@@ -256,7 +263,7 @@ Expected:
 - Modify: `tests/server/test_queue_states.py` 또는 기존 상태 테스트
 - Modify: `tests/agent/test_heartbeat.py`
 
-- [ ] **Step 1: 서버 job type 상수 추가**
+- [x] **Step 1: 서버 job type 상수 추가**
 
 Required constant:
 
@@ -270,7 +277,7 @@ Rules:
 - 기존 type 문자열은 바꾸지 않는다.
 - count-lock을 만들지 않는다. 기존 파일 주석처럼 후속 type 확장을 허용한다.
 
-- [ ] **Step 2: Agent capability 상수 추가**
+- [x] **Step 2: Agent capability 상수 추가**
 
 Required constant:
 
@@ -283,7 +290,7 @@ Rules:
 - `DEFAULT_CAPABILITIES`에 추가한다. 이 Agent가 auth worker를 시작하지 않으면 fallback이 unsupported를 반환할 수 있으므로, 실제 실행 배선은 Task 4에서 한다.
 - `rider_agent`는 `rider_server.queue.states`를 import하지 않는다.
 
-- [ ] **Step 3: vocabulary drift 테스트 추가**
+- [x] **Step 3: vocabulary drift 테스트 추가**
 
 Add assertions:
 
@@ -308,7 +315,7 @@ Run:
 - Modify: `src/rider_agent/auth/baemin_auth.py`
 - Modify: `tests/agent/test_baemin_auth.py`
 
-- [ ] **Step 1: 실패 테스트 추가**
+- [x] **Step 1: 실패 테스트 추가**
 
 Add test:
 
@@ -329,7 +336,7 @@ Expected before implementation:
 FAILED
 ```
 
-- [ ] **Step 2: `default_open_auth_browser()` Coupang branch 축소**
+- [x] **Step 2: `default_open_auth_browser()` Coupang branch 축소**
 
 Current:
 
@@ -341,7 +348,7 @@ Change:
 - It may navigate to `coupang_eats_url` or login page, but it must not submit login, click send-code, read IMAP, fill OTP, or submit 2FA.
 - Keep `default_detect_completion()` read-only behavior.
 
-- [ ] **Step 3: `_drive_coupang_email_2fa_flow()` 이동 준비**
+- [x] **Step 3: `_drive_coupang_email_2fa_flow()` 이동 준비**
 
 Do not delete logic immediately. Move or wrap it in `rider_agent/auth/coupang_gmail_2fa.py` as an internal helper for `AUTH_COUPANG_2FA`.
 
@@ -370,7 +377,7 @@ Run:
 - Test: `tests/agent/test_coupang_gmail_2fa.py`
 - Test: `tests/agent/test_baemin_auth.py` if auth router tests live there
 
-- [ ] **Step 1: job 실행자 실패 테스트 추가**
+- [x] **Step 1: job 실행자 실패 테스트 추가**
 
 Add tests:
 
@@ -422,7 +429,7 @@ Secrets must not appear in:
 - `error_message_redacted`
 - logs
 
-- [ ] **Step 2: `execute_auth_coupang_2fa_job()` 구현**
+- [x] **Step 2: `execute_auth_coupang_2fa_job()` 구현**
 
 Recommended signature:
 
@@ -448,7 +455,7 @@ Implementation rules:
 - If a required ref cannot be resolved, fail closed with `AUTH_REQUIRED` and a fixed reason such as `secret_ref_unresolved`.
 - Do not pass raw email address as `mailbox_ref`. Use existing `mailbox_credential_ref()` or a hashed mailbox handle.
 
-- [ ] **Step 3: Playwright/CDP page acquisition helper**
+- [x] **Step 3: Playwright/CDP page acquisition helper**
 
 The auth worker needs a page for `recover_coupang_session_with_email_2fa(page, config)`.
 
@@ -459,7 +466,7 @@ Rules:
 - Avoid the historical `page_timeout_seconds * 2` dead wait.
 - After recovery success, reload the target page and verify readiness only if the target URL is a known Coupang page.
 
-- [ ] **Step 4: auth execute router에 연결**
+- [x] **Step 4: auth execute router에 연결**
 
 Options:
 
@@ -492,7 +499,7 @@ Run:
 - Test: `tests/agent/test_crawl_worker.py`
 - Test: `tests/test_coupang_crawler.py`
 
-- [ ] **Step 1: Agent crawl path 실패 테스트 추가**
+- [x] **Step 1: Agent crawl path 실패 테스트 추가**
 
 Add tests:
 
@@ -510,7 +517,7 @@ Required assertions:
 - `recover_coupang_session_with_email_2fa` is not called.
 - Result is failed with `error_code == "AUTH_REQUIRED"` and `result_json.auth_state == "AUTH_REQUIRED"`.
 
-- [ ] **Step 2: `CrawlWorker._prepare_config()` 정책 변경**
+- [x] **Step 2: `CrawlWorker._prepare_config()` 정책 변경**
 
 Current:
 
@@ -522,7 +529,7 @@ Change:
 - Keep secret resolution fields only if still needed for local compatibility, but they should not drive 2FA in crawl job.
 - For future cleanup, mark `coupang_auto_email_2fa_enabled` in crawl payload as deprecated.
 
-- [ ] **Step 3: shared crawler compatibility decision**
+- [x] **Step 3: shared crawler compatibility decision**
 
 There are two acceptable cuts:
 
@@ -549,7 +556,7 @@ Run:
 - Modify: `src/rider_server/admin/actions_routes.py` if UI text/action split is needed
 - Modify: `tests/server/test_admin_actions.py`
 
-- [ ] **Step 1: `_auth_start_payload()` 테스트 변경**
+- [x] **Step 1: `_auth_start_payload()` 테스트 변경**
 
 Add tests:
 
@@ -577,7 +584,7 @@ Required assertions:
   - raw app password
 - Manual fallback uses `OPEN_AUTH_BROWSER` and does not include `coupang_auto_email_2fa_enabled=True`.
 
-- [ ] **Step 2: action naming 정리**
+- [x] **Step 2: action naming 정리**
 
 Current:
 
@@ -591,7 +598,7 @@ Recommended:
   - auto: `쿠팡 자동 인증 시작됨`
   - manual: `인증 브라우저 열기 시작됨`
 
-- [ ] **Step 3: duplicate active auth job guard**
+- [x] **Step 3: duplicate active auth job guard**
 
 Before enqueueing `AUTH_COUPANG_2FA`, server must avoid duplicate active auth jobs for the same account/target.
 
@@ -622,7 +629,7 @@ Run:
 - Modify: `src/rider_server/queue/memory_queue.py` if in-memory read model needs parity
 - Test: `tests/server/test_queue_backend.py`
 
-- [ ] **Step 1: persistence 실패 테스트 추가**
+- [x] **Step 1: persistence 실패 테스트 추가**
 
 Add tests:
 
@@ -644,7 +651,7 @@ Required behavior:
 - If `auth_recovery_state == "EMAIL_AUTH_REQUIRED"` or `RECOVERY_FAILED`, normalized account state is `AUTH_REQUIRED` unless a later schema adds `auth_state_detail`.
 - Existing `CENTER_MISMATCH` behavior is unchanged.
 
-- [ ] **Step 2: detail preservation**
+- [x] **Step 2: detail preservation**
 
 If schema already has or gains recovery metadata columns, store:
 
@@ -656,7 +663,7 @@ If schema already has or gains recovery metadata columns, store:
 
 If these columns are not part of the current implementation slice, at minimum keep detail in `jobs.result_json`; do not drop it in complete processing.
 
-- [ ] **Step 3: retry policy 확인**
+- [x] **Step 3: retry policy 확인**
 
 Auth job failure should not requeue automatically.
 
@@ -687,7 +694,7 @@ Run:
 - Test: `tests/server/test_scheduler_repository.py`
 - Test: `tests/server/test_scheduler_policy.py`
 
-- [ ] **Step 1: scheduler policy 테스트 변경**
+- [x] **Step 1: scheduler policy 테스트 변경**
 
 Add or update tests:
 
@@ -714,7 +721,7 @@ Required reason codes:
 - `AUTH_STATE_AUTH_REQUIRED_NO_AUTO_CONFIG`
 - `COUPANG_AUTO_RECOVERY_COOLDOWN`
 
-- [ ] **Step 2: DueTarget auth facts**
+- [x] **Step 2: DueTarget auth facts**
 
 Required fields:
 
@@ -733,7 +740,7 @@ Rules:
 - Avoid target-by-target N+1.
 - Missing auth state is treated as `UNKNOWN`, which blocks crawl.
 
-- [ ] **Step 3: enqueue behavior**
+- [x] **Step 3: enqueue behavior**
 
 Rules:
 
@@ -763,7 +770,7 @@ Run:
 - Test: `tests/server/test_queue_backend.py`
 - Test: `tests/agent/test_job_loop.py`
 
-- [ ] **Step 1: heartbeat extension 확인 테스트**
+- [x] **Step 1: heartbeat extension 확인 테스트**
 
 Add test:
 
@@ -777,7 +784,7 @@ Required assertions:
 - Claimed auth job appears in `JobRunner.active_jobs()` during execution.
 - Heartbeat payload contains its `job_id`.
 
-- [ ] **Step 2: stale auth job recovery 정책 테스트**
+- [x] **Step 2: stale auth job recovery 정책 테스트**
 
 Add tests:
 
@@ -792,7 +799,7 @@ Required behavior:
 - Account should remain `AUTH_REQUIRED` or `USER_ACTION_PENDING`.
 - Scheduler duplicate guard should prevent immediate re-enqueue without cooldown/operator action.
 
-- [ ] **Step 3: no job-type lease change in first cut**
+- [x] **Step 3: no job-type lease change in first cut**
 
 Do not widen `QueueBackend.claim()` for per-job lease unless the first-cut tests prove heartbeat extension is insufficient. If widening is required, update all queue backends and API tests together.
 
@@ -818,7 +825,7 @@ Run:
 - Test: `tests/server/test_admin_dashboard.py`
 - Test: `tests/server/test_dashboard_severity.py`
 
-- [ ] **Step 1: severity 표시 테스트**
+- [x] **Step 1: severity 표시 테스트**
 
 Add tests:
 
@@ -839,7 +846,7 @@ Required display behavior:
   - `캡차/이상 로그인`
   - `자동 인증 실패`
 
-- [ ] **Step 2: runbook 갱신**
+- [x] **Step 2: runbook 갱신**
 
 Runbook must explain:
 
