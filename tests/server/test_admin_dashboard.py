@@ -760,6 +760,10 @@ def test_failclosed_display_severity_drives_primary_actions_without_failure_code
     assert 'data-primary-action="center-name"' in html
     assert "로그인 만료 · 인증 확인 필요" in html
     assert "센터/상점명 불일치" in html
+    # 센터명 정정 후 같은 행에서 바로 재검증할 수 있도록 test-crawl 버튼이 노출돼야 한다
+    # (불일치 해소 여부를 다음 스케줄 주기까지 기다리지 않게 한다).
+    assert "/admin/targets/t-center/test-crawl" in html
+    assert "지금 수집(재검증)" in html
 
 
 def test_auth_required_reason_takes_precedence_over_latest_profile_failure() -> None:

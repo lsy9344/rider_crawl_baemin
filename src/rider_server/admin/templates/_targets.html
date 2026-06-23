@@ -82,6 +82,12 @@
               hx-target="#target-result-{{ t.target_id }}">인증 시작</button>
       {%- elif is_target_validation %}
       <button type="button" class="btn primary" onclick="event.stopPropagation(); openTargetDrawer(this.closest('.trow'), this); focusCenterNameEdit()">센터명 설정</button>
+      {# 센터명 정정 후 재수집+재검증을 행에서 바로 트리거(불일치 해소 확인). 서버 test-crawl 은
+         severity 와 무관하게 동작하므로 STOPPED 상태에서도 안전하게 재검증 잡을 enqueue 한다. #}
+      <button type="button" class="btn" onclick="event.stopPropagation()"
+              hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
+              hx-vals='{"platform": "{{ t.platform }}", "confirm_action": "confirmed"}'
+              hx-target="#target-result-{{ t.target_id }}">지금 수집(재검증)</button>
       {%- elif is_operator_stopped %}
       <button type="button" class="btn" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
