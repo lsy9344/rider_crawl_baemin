@@ -269,6 +269,43 @@ def test_same_target_reuses_assignment_without_reallocation(tmp_path):
     assert len(prepare.calls) == 1  # 두번째 호출은 prepare 재실행 안 함
 
 
+def test_same_target_relaunches_when_tracked_browser_process_exited(tmp_path):
+    prepare_calls: list[str] = []
+    first = FakeProcess()
+    second = FakeProcess()
+    processes = [first, second]
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        prepare_calls.append(str(config.cdp_url))
+        assert run_command is not None
+        run_command(["chrome-fake"], False)
+
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        run_command=lambda command, check: processes.pop(0),
+        allocate_port=_fixed_ports([9301, 9302]),
+    )
+
+    first_assignment = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    first.poll = lambda: 0
+    second_assignment = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert first_assignment is not second_assignment
+    assert first_assignment.cdp_port == 9301
+    assert second_assignment.cdp_port == 9302
+    assert prepare_calls == ["http://127.0.0.1:9301", "http://127.0.0.1:9302"]
+    assert manager.browser_profiles() == [
+        {
+            "id": "t1:alpha",
+            "target_id": "alpha",
+            "agent_id": "agent-fake-1",
+            "cdp_port": 9302,
+            "state": STATE_READY,
+        }
+    ]
+
+
 def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path):
     times = iter([100.0, 200.0, 500.0, 501.0])
     manager = _manager(

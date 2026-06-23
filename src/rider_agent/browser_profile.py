@@ -253,23 +253,33 @@ class BrowserProfileManager:
         last_used_at = self._now()
 
         while True:
+            process_to_close = None
+            wait_for_reservation = None
             with self._lock:
                 existing = self._registry.get(key)
                 if existing is not None:
-                    # 이미 할당된 대상은 그 할당을 재사용한다 — 다른 대상에 재배정하지 않는다(AC1.2).
-                    object.__setattr__(existing, "last_used_at", last_used_at)
-                    return existing
-                reservation = self._reservations.get(key)
-                if reservation is not None:
-                    wait_for_reservation = reservation
-                else:
-                    processes_to_close = self._enforce_max_profiles_locked()
-                    profile_dir = self._profile_dir_for(*key)
-                    profile_key = _profile_key(profile_dir)
-                    port = int(self._allocate_port())
-                    self._reserve_launch_locked(key, port, profile_key)
-                    reservation = self._reservations[key]
-                    break
+                    process = self._processes.get(key)
+                    if _process_has_exited(process):
+                        _assignment, process_to_close = self._release_key_locked(key)
+                    else:
+                        # 이미 할당된 대상은 그 할당을 재사용한다 — 다른 대상에 재배정하지 않는다(AC1.2).
+                        object.__setattr__(existing, "last_used_at", last_used_at)
+                        return existing
+                if process_to_close is None:
+                    reservation = self._reservations.get(key)
+                    if reservation is not None:
+                        wait_for_reservation = reservation
+                    else:
+                        processes_to_close = self._enforce_max_profiles_locked()
+                        profile_dir = self._profile_dir_for(*key)
+                        profile_key = _profile_key(profile_dir)
+                        port = int(self._allocate_port())
+                        self._reserve_launch_locked(key, port, profile_key)
+                        reservation = self._reservations[key]
+                        break
+            if process_to_close is not None:
+                self._close_process(process_to_close)
+                continue
             wait_for_reservation.wait()
         for process in processes_to_close:
             self._close_process(process)
@@ -614,3 +624,13 @@ def _default_run_command(command: list[str], check: bool) -> Any:
 
 def _is_process_handle(value: Any) -> bool:
     return any(callable(getattr(value, name, None)) for name in ("terminate", "kill", "poll"))
+
+
+def _process_has_exited(value: Any) -> bool:
+    poll = getattr(value, "poll", None)
+    if not callable(poll):
+        return False
+    try:
+        return poll() is not None
+    except Exception:
+        return False
