@@ -25,6 +25,7 @@ import uuid
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from rider_server.admin.severity import is_agent_online
 from rider_server.db.base import (
     AUTH_ENQUEUE_LOCK_NAMESPACE,
     acquire_xact_advisory_lock,
@@ -32,6 +33,7 @@ from rider_server.db.base import (
 )
 from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
 from rider_server.db.models.account import PlatformAccount as PlatformAccountRow
+from rider_server.db.models.agent import Agent as AgentRow
 from rider_server.db.models.agent import BrowserProfile as BrowserProfileRow
 from rider_server.db.models.agent import Job as JobRow
 from rider_server.db.models.audit import AuditLog as AuditLogRow
@@ -59,6 +61,52 @@ from rider_server.queue.states import (
 #: 인증 시작 계열 job type — 같은 대상에 둘 중 하나라도 진행 중이면 중복 인증 작업을 막는다
 #: (auto AUTH_COUPANG_2FA 와 manual OPEN_AUTH_BROWSER 가 동시에 돌지 않게 — Task 5 Step 3).
 _AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
+_INACTIVE_BROWSER_PROFILE_STATE = "INACTIVE"
+
+
+def _uuid_or_none(value) -> uuid.UUID | None:
+    try:
+        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _assigned_agent_id_from_agent_capacity(
+    agent_rows,
+    *,
+    target_id: uuid.UUID,
+    job_type: str,
+    now,
+) -> uuid.UUID | None:
+    """Pick the agent for a manual job from recent heartbeat capacity data."""
+
+    online_rows = [
+        row for row in agent_rows if is_agent_online(row.last_heartbeat_at, now)
+    ]
+    target_text = str(target_id)
+    for row in online_rows:
+        data = row.capacity_json or {}
+        profiles = data.get("browser_profiles") if isinstance(data, dict) else None
+        if not isinstance(profiles, list):
+            continue
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            if str(profile.get("target_id") or "") != target_text:
+                continue
+            if str(profile.get("state") or "").upper() == _INACTIVE_BROWSER_PROFILE_STATE:
+                continue
+            return _uuid_or_none(profile.get("agent_id")) or _uuid_or_none(row.id)
+
+    capable_rows = []
+    for row in online_rows:
+        data = row.capacity_json or {}
+        capabilities = data.get("capabilities") if isinstance(data, dict) else None
+        if isinstance(capabilities, list) and job_type in capabilities:
+            capable_rows.append(row)
+    if len(capable_rows) == 1:
+        return _uuid_or_none(capable_rows[0].id)
+    return None
 
 
 def _sub_to_domain(row: SubscriptionRow) -> Subscription:
@@ -312,6 +360,22 @@ class PostgresAdminActionRepository:
                     .limit(1)
                 )
             ).scalar_one_or_none()
+            if assigned_agent_id is None:
+                agent_rows = (
+                    await session.execute(
+                        select(
+                            AgentRow.id,
+                            AgentRow.last_heartbeat_at,
+                            AgentRow.capacity_json,
+                        )
+                    )
+                ).all()
+                assigned_agent_id = _assigned_agent_id_from_agent_capacity(
+                    agent_rows,
+                    target_id=target_uuid,
+                    job_type=job_type,
+                    now=now,
+                )
             # 인증 시작 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER)은 둘을 한 묶음으로 중복 차단한다.
             # 그 외 job(test crawl 등)은 기존처럼 같은 type 만 본다.
             duplicate_types = (

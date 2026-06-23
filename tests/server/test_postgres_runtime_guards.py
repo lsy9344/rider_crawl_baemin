@@ -51,6 +51,8 @@ def test_admin_manual_enqueue_preserves_browser_profile_affinity() -> None:
     body = source[source.index("async def enqueue_manual_job") :]
 
     assert "BrowserProfileRow.agent_id" in body
+    assert "AgentRow.capacity_json" in body
+    assert "_assigned_agent_id_from_agent_capacity" in body
     assert "assigned_agent_id=assigned_agent_id" in body
 
 
