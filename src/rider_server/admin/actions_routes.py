@@ -230,7 +230,20 @@ async def test_crawl(
             source=_resolve_source(request),
             at=_now(),
         )
-    except (LookupError, ValueError) as exc:
+    except AdminActionNotFound as exc:
+        _raise_for(exc)
+    except ValueError as exc:
+        # "active manual job already exists" 는 오류가 아니라 같은 대상의 수집 job 이 이미 큐에
+        # 있다는 뜻이다(검증 실패 대상은 스케줄러가 계속 재수집을 걸어 보통 이 상태다). 일반
+        # "허용되지 않은 액션입니다" 로 뭉뚱그리지 않고, 기다리면 된다는 안내로 돌려준다.
+        if str(exc) == "active manual job already exists":
+            return _fragment(
+                request,
+                "이미 진행 중인 수집 작업이 있습니다. 완료 후 검증 결과를 확인하세요.",
+                ok=False,
+                status_code=HTTPStatus.CONFLICT,
+                trigger_changed=False,
+            )
         _raise_for(exc)
     return _fragment(request, f"test crawl enqueue됨 (job {job_id})")
 

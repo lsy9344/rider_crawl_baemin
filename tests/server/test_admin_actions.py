@@ -1083,6 +1083,29 @@ def test_route_auth_start_duplicate_returns_operator_message() -> None:
     assert "active manual job already exists" not in resp.text
 
 
+def test_route_test_crawl_duplicate_returns_operator_message() -> None:
+    # 검증 실패 대상은 스케줄러가 이미 수집 job 을 걸어둔 상태가 많다. '지금 수집(재검증)'이
+    # 그 job 과 충돌하면 일반 "허용되지 않은 액션입니다"(BAD_REQUEST) 가 아니라, 기다리면
+    # 된다는 안내(CONFLICT)로 돌려줘야 한다.
+    class DuplicateManualJobRepository(InMemoryAdminActionRepository):
+        async def enqueue_manual_job(self, **_kwargs):
+            raise ValueError("active manual job already exists")
+
+    repo = DuplicateManualJobRepository()
+    repo.seed_target(_target())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/targets/mt-1/test-crawl?tenant=tn-1",
+        data=_confirmed({"platform": "COUPANG"}),
+    )
+
+    assert resp.status_code == HTTPStatus.CONFLICT
+    assert "이미 진행 중인 수집 작업이 있습니다" in resp.text
+    assert "허용되지 않은 액션입니다" not in resp.text
+    assert "active manual job already exists" not in resp.text
+
+
 def test_route_dry_run_returns_preview_without_send() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
