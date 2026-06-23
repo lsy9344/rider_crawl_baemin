@@ -29,6 +29,7 @@ from rider_server.admin.severity import is_agent_online
 from rider_server.db.models.agent import Agent, BrowserProfile, Job
 from rider_server.db.models.tenancy import Subscription, Tenant
 from rider_server.domain import (
+    BaeminAuthState,
     CustomerLifecycleState,
     MonitoringTargetStatus,
     SubscriptionStatus,
@@ -39,8 +40,10 @@ from rider_server.queue.states import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_FAILED,
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_CRAWL_BAEMIN,
     JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
 )
 
 from . import policy
@@ -48,6 +51,9 @@ from .service import DueTarget, SchedulerRepository, TenantGate
 
 # scheduler 가 생성/평가하는 CrawlJob type(정본 6종 중 2종). 활성 job/실패 집계 스코프.
 _CRAWL_JOB_TYPES = (JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG)
+# 인증 시작 계열 job type — 같은 대상에 둘 중 하나라도 진행 중이면 새 자동 복구 auth job 을 막는다
+# (crawl-coupang-auth-separation Task 7: 중복 OTP 요청·동시 복구 방지).
+_AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
 _ACTIVE_JOB_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
 
 
@@ -120,6 +126,18 @@ class PostgresSchedulerRepository(SchedulerRepository):
             .limit(1)
             .scalar_subquery()
         )
+        # 같은 대상에 진행 중인 인증 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER) 수 — 같은 due 질의에서
+        # 채워 tick 이 자동 복구 auth job 을 중복 생성하지 않게 한다(target-by-target N+1 회피).
+        active_auth_job_count = (
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.target_id == MonitoringTarget.id,
+                Job.type.in_(_AUTH_JOB_TYPES),
+                Job.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+            .scalar_subquery()
+        )
         stmt = (
             select(
                 MonitoringTarget.id,
@@ -134,9 +152,14 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 PlatformAccount.verification_email_app_password,
                 PlatformAccount.verification_email_subject_keyword,
                 PlatformAccount.verification_email_sender_keyword,
+                PlatformAccount.auth_state,
+                PlatformAccount.auto_recovery_attempted_at,
+                PlatformAccount.auto_recovery_failed_at,
+                PlatformAccount.auto_recovery_cooldown_until,
                 MonitoringTarget.interval_minutes,
                 MonitoringTarget.next_run_at,
                 assigned_agent_id.label("assigned_agent_id"),
+                active_auth_job_count.label("active_auth_job_count"),
             )
             .join(
                 PlatformAccount,
@@ -175,6 +198,12 @@ class PostgresSchedulerRepository(SchedulerRepository):
                 assigned_agent_id=str(row.assigned_agent_id)
                 if row.assigned_agent_id is not None
                 else "",
+                # 인증 facts(Task 3) — 미상/미매핑은 UNKNOWN 으로 fail-closed 차단.
+                auth_state=row.auth_state or BaeminAuthState.UNKNOWN.value,
+                auto_recovery_attempted_at=row.auto_recovery_attempted_at,
+                auto_recovery_failed_at=row.auto_recovery_failed_at,
+                auto_recovery_cooldown_until=row.auto_recovery_cooldown_until,
+                active_auth_job_count=int(row.active_auth_job_count or 0),
             )
             for row in rows
         ]
@@ -285,6 +314,73 @@ class PostgresSchedulerRepository(SchedulerRepository):
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
         return {str(target_id) for target_id in rows}
+
+    async def active_auth_job_target_ids(self, target_ids: list[str]) -> set[str]:
+        unique_ids = list(dict.fromkeys(tid for tid in target_ids if tid))
+        if not unique_ids:
+            return set()
+        stmt = (
+            select(Job.target_id)
+            .where(
+                Job.target_id.in_(unique_ids),
+                Job.type.in_(_AUTH_JOB_TYPES),
+                Job.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+            .distinct()
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return {str(target_id) for target_id in rows}
+
+    async def enqueue_auth_coupang_2fa_job(
+        self,
+        queue_backend: QueueBackend,
+        target: DueTarget,
+        *,
+        payload_json: dict[str, object],
+        now: datetime,
+    ) -> str | None:
+        """AUTH_COUPANG_2FA 인증 job 을 원자적으로 만든다(중복 active auth job 재확인).
+
+        crawl ``next_run_at`` 은 전진시키지 않는다(인증 성공 후 다음 tick 이 crawl 재개). 같은
+        transaction 안에서 active auth job 을 다시 확인해, tick 게이트와 동시 tick 경합 사이의
+        race 에서도 같은 대상에 인증 job 이 둘 만들어지지 않게 한다(중복 OTP 요청 방지).
+        """
+
+        del queue_backend
+        job_id = uuid.uuid4()
+        target_uuid = uuid.UUID(target.target_id)
+        existing_stmt = (
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.target_id == target_uuid,
+                Job.type.in_(_AUTH_JOB_TYPES),
+                Job.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                existing = (await session.execute(existing_stmt)).scalar_one()
+                if int(existing or 0) > 0:
+                    return None
+                session.add(
+                    Job(
+                        id=job_id,
+                        type=JOB_TYPE_AUTH_COUPANG_2FA,
+                        target_id=target_uuid,
+                        assigned_agent_id=uuid.UUID(target.assigned_agent_id)
+                        if target.assigned_agent_id
+                        else None,
+                        agent_id=None,
+                        status=JOB_STATUS_PENDING,
+                        run_after=now,
+                        attempts=0,
+                        error_code=None,
+                        payload_json=payload_json,
+                    )
+                )
+        return str(job_id)
 
     async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
         """``agents.capacity_json`` 집계.

@@ -112,6 +112,19 @@ ERROR_JOB_COMPLETE = "AGENT_JOB_COMPLETE_ERROR"
 ERROR_JOB_REVOKED = "AGENT_JOB_REVOKED"
 ERROR_JOB_LEASE_LOST = "AGENT_JOB_LEASE_LOST"
 ERROR_JOB_EVENT = "AGENT_JOB_EVENT_ERROR"
+# preflight denied / 호출 불가 시 기록하는 에러 코드(UPPER_SNAKE, secret 아님).
+ERROR_JOB_PREFLIGHT_DENIED = "AGENT_JOB_PREFLIGHT_DENIED"
+
+# preflight denied 결과 result_json 에 남기는 reason(server reason 그대로 보존, 없으면 기본값).
+# server preflight 호출 자체가 실패하면 fail-closed 로 browser open 을 막고 이 reason 을 남긴다.
+PREFLIGHT_REASON_DEFAULT = "payload_expired"
+PREFLIGHT_REASON_UNAVAILABLE = "preflight_unavailable"
+
+# server 가 브라우저를 여는 job 만 preflight 대상으로 본다(crawl/auth). 나머지는 preflight 생략
+# (불필요한 왕복 0) — 이 type 집합은 heartbeat capability 문자열과 1:1 미러(import 금지).
+_PREFLIGHT_JOB_TYPES = frozenset(
+    {"CRAWL_BAEMIN", "CRAWL_COUPANG", "OPEN_AUTH_BROWSER"}
+)
 
 # 최소 진행 이벤트(claim 직후). 풍부한 진단 이벤트는 워커(4.5+) 소유.
 EVENT_TYPE_JOB_STARTED = "JOB_STARTED"
@@ -282,6 +295,10 @@ def _complete_url(base_url: str | None, job_id: str) -> str:
     return f"{_server_base(base_url)}/v1/jobs/{job_id}/complete"
 
 
+def _preflight_url(base_url: str | None, job_id: str) -> str:
+    return f"{_server_base(base_url)}/v1/jobs/{job_id}/preflight"
+
+
 def _events_url(base_url: str | None, job_id: str) -> str:
     return f"{_server_base(base_url)}/v1/jobs/{job_id}/events"
 
@@ -339,6 +356,27 @@ def complete_job(
     body = _complete_body(result, completion_id=completion_id)
     return transport.post_json(
         _complete_url(base_url, job_id), body, headers=_auth_headers(identity.agent_token)
+    )
+
+
+def preflight_job(
+    identity: AgentIdentity,
+    job_id: str,
+    *,
+    transport: Transport,
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    """``POST /v1/jobs/{job_id}/preflight`` — 브라우저/profile 열기 전 server 유효성 확인.
+
+    server 가 ``{"allowed": bool, "reason": str|None, "server_time": str}`` 를 돌려준다. token 은
+    헤더로만. 비-2xx 는 주입 transport 가 :class:`TransportError` 로 올린다(호출부가 fail-closed
+    처리). 본문 모양은 :func:`claim_jobs`/:func:`complete_job` 과 동형(snake_case).
+    """
+
+    return transport.post_json(
+        _preflight_url(base_url, job_id),
+        {"agent_id": identity.agent_id},
+        headers=_auth_headers(identity.agent_token),
     )
 
 
@@ -523,10 +561,12 @@ class JobRunner:
         backoff_base_seconds: float = DEFAULT_CLAIM_BACKOFF_BASE_SECONDS,
         backoff_max_seconds: float = DEFAULT_CLAIM_BACKOFF_MAX_SECONDS,
         poll_jitter_ratio: float = DEFAULT_POLL_JITTER_RATIO,
+        preflight_enabled: bool = True,
     ) -> None:
         self.identity = identity
         self._transport = transport
         self._execute_job = execute_job
+        self._preflight_enabled = preflight_enabled
         self._sleep = sleep
         self._now = now
         self._capabilities = capabilities
@@ -710,6 +750,21 @@ class JobRunner:
         started_at = self._now()
         self._emit_started(job)
 
+        # 브라우저/profile 을 열기 전 server preflight — payload TTL 만료/서버 거부면 워커를
+        # 호출하지 않고(브라우저 미오픈) 실패로 안전히 닫는다(서버/Agent 재시작 뒤 stale 작업
+        # 무제한 재실행 차단). 비대상 type 은 skip(불필요 왕복 0).
+        denied = self._preflight_denial(job)
+        if denied is not None:
+            finished_at = self._now()
+            result = replace(
+                denied,
+                agent_id=self.identity.agent_id,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            self._complete(job, result)
+            return
+
         try:
             result = self._execute_job(job)
         except Exception as exc:  # noqa: BLE001 — executor 예외도 루프를 죽이지 않는다(complete 로 보고).
@@ -726,6 +781,47 @@ class JobRunner:
         )
 
         self._complete(job, result)
+
+    def _preflight_denial(self, job: ClaimedJob) -> JobResult | None:
+        """server preflight 가 거부하면 실패 :class:`JobResult` 를(허용/비대상이면 ``None``).
+
+        브라우저를 여는 job type(crawl/auth)만 preflight 한다. preflight 호출 자체가 실패하면
+        **fail-closed**(browser open 차단) 로 ``preflight_unavailable`` reason 을 남긴다 — 서버
+        장애가 stale 작업의 무제한 브라우저 오픈으로 번지지 않게 한다(리스크 대응 #3).
+        """
+
+        if not self._preflight_enabled or job.type not in _PREFLIGHT_JOB_TYPES:
+            return None
+        try:
+            response = preflight_job(
+                self.identity,
+                job.job_id,
+                transport=self._transport,
+                base_url=self._base_url,
+            )
+        except Exception as exc:  # noqa: BLE001 — preflight 실패는 fail-closed(브라우저 미오픈).
+            self._record_error(
+                ERROR_JOB_PREFLIGHT_DENIED, "job preflight unavailable", exc
+            )
+            return make_failure_result(
+                ERROR_JOB_PREFLIGHT_DENIED,
+                "job preflight unavailable",
+                result_json={"reason": PREFLIGHT_REASON_UNAVAILABLE},
+            )
+        if isinstance(response, dict) and response.get("allowed") is False:
+            reason = response.get("reason")
+            safe_reason = reason if isinstance(reason, str) and reason else PREFLIGHT_REASON_DEFAULT
+            self._record_error(
+                ERROR_JOB_PREFLIGHT_DENIED,
+                f"job preflight denied: {job.type}",
+                None,
+            )
+            return make_failure_result(
+                ERROR_JOB_PREFLIGHT_DENIED,
+                "job preflight denied",
+                result_json={"reason": safe_reason},
+            )
+        return None
 
     def _complete(self, job: ClaimedJob, result: JobResult) -> None:
         completion_id = self._completion_id(job, result)

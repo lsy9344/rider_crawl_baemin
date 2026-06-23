@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import importlib
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -82,6 +83,28 @@ ERROR_AUTH_REQUIRED = "AUTH_REQUIRED"
 
 # 재인증 미완료 사유(평문 상수) — timeout 결과 metrics/result_json 에 실어 운영에 남긴다.
 REASON_AUTH_TIMEOUT = "auth_timeout"
+
+# payload TTL 이 지난 stale OPEN_AUTH_BROWSER job 을 브라우저 열기 전에 거르는 defensive 가드
+# (server preflight 가 우회돼도 오래된 인증 브라우저를 열지 않게 — Task 5 defense-in-depth).
+ERROR_PAYLOAD_EXPIRED = "PAYLOAD_EXPIRED"
+REASON_PAYLOAD_EXPIRED = "payload_expired"
+
+
+def _payload_expired(job: ClaimedJob, *, now: datetime) -> bool:
+    """job payload ``expires_at``(ISO 8601 ``…Z``) 가 지났는가(없거나 파싱 실패면 False)."""
+
+    text = str((job.payload or {}).get("expires_at") or "").strip()
+    if not text:
+        return False
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return now >= parsed
 
 # auth-required/verified 진행 이벤트 type(평문 상수). 실제 emit 은 호출자(loop)가 한다.
 EVENT_TYPE_AUTH_REQUIRED = "AUTH_REQUIRED"
@@ -216,10 +239,17 @@ def default_open_auth_browser(
     *,
     secret_resolver: Callable[[str], str | None] | None = None,
 ) -> bool | None:
-    """기본 프로필 브라우저 열기.
+    """기본 프로필 브라우저 열기(**사람 개입형 수동 조치 전용**).
 
-    ``prepare_chrome`` 를 재사용한다. Baemin 은 프로필을 열고 로그인 화면 조치만 수행하며,
-    Coupang 은 기존 이메일 2FA 복구 seam 만 실행한다. 어느 경로도 수집 job 을 실행하지 않는다.
+    ``prepare_chrome`` 를 재사용한다. Baemin 은 프로필을 열고 로그인 화면 조치(아이디/비번 입력
+    + 휴대폰 인증 요청 버튼 클릭)만 수행한다. **Coupang 은 프로필 브라우저만 열고 사람이 직접
+    조치하도록 둔다** — 자동 email 2FA(OTP 취득·입력·제출)는 별도 인증 job
+    ``AUTH_COUPANG_2FA``(:func:`rider_agent.auth.coupang_gmail_2fa.execute_auth_coupang_2fa_job`)
+    가 담당한다(``OPEN_AUTH_BROWSER`` 의 이름과 동작이 충돌하지 않게 책임 분리 — work order
+    crawl-coupang-auth-separation Decision 1). 어느 경로도 수집 job 을 실행하지 않는다.
+
+    반환값: 자동 복구를 하지 않으므로 사람-완료 감지는 호출자의 bounded polling
+    (``detect_completion``)에 맡긴다 — 항상 ``None``(수동 진행 중)을 돌려준다.
     """
 
     from rider_agent import reuse
@@ -231,10 +261,13 @@ def default_open_auth_browser(
     except Exception:
         return
     if platform == "coupang":
+        # Coupang 은 브라우저만 연다(자동 OTP 0). 로그인 화면이 보이도록 대상 URL 로만 안내하고,
+        # IMAP/OTP/2FA 제출은 하지 않는다. 사람이 직접 조치하면 detect_completion 이 감지한다.
         try:
-            return _drive_coupang_email_2fa_flow(config)
+            _open_coupang_auth_browser_only(config)
         except Exception:
-            return False
+            return
+        return None
     if platform != "baemin":
         return None
     try:
@@ -242,6 +275,45 @@ def default_open_auth_browser(
     except Exception:
         return
     return None
+
+
+def _open_coupang_auth_browser_only(config: Any) -> None:
+    """Coupang 인증 브라우저를 **열기만** 한다(자동 OTP/IMAP/2FA 제출 0 — 사람 개입 전용).
+
+    로그인 화면이면 그대로 둔다. 로그인 화면이 아니고 대상 URL 이 있으면 한 번만 안내 navigate
+    하되, 로그인 전 절대 안 뜰 대시보드 텍스트를 기다리지 않는다(과거 page_timeout 헛대기 회피).
+    """
+
+    from rider_crawl.platforms.coupang import crawler as coupang_crawler
+
+    with _sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+        target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+        timeout_errors = _playwright_timeout_errors()
+        pages = coupang_crawler._browser_pages(browser)
+        page = coupang_crawler._login_required_page(pages)
+        if page is None and target_url:
+            page = coupang_crawler._select_page_by_url(pages, target_url)
+        if page is None:
+            page = _first_browser_page(browser)
+        if page is None:
+            return
+        is_login_screen = coupang_crawler._page_looks_like_coupang_login_required(page)
+        if target_url and not is_login_screen:
+            try:
+                page.goto(
+                    target_url,
+                    wait_until="domcontentloaded",
+                    timeout=getattr(config, "page_timeout_seconds", _INTERACTION_TIMEOUT_MS),
+                )
+            except timeout_errors:
+                pass
+            except Exception:
+                return
+            try:
+                page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
+            except timeout_errors:
+                pass
 
 
 def default_detect_completion(
@@ -355,94 +427,6 @@ def _wait_for_baemin_phone_code_request(page: Any, config: Any) -> None:
             return
         except Exception:
             continue
-
-
-def _drive_coupang_email_2fa_flow(config: Any) -> bool:
-    from rider_agent import reuse
-    from rider_crawl.platforms.coupang import crawler as coupang_crawler
-
-    with _sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(config.cdp_url)
-        target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
-        timeout_errors = _playwright_timeout_errors()
-        pages = coupang_crawler._browser_pages(browser)
-        page = coupang_crawler._login_required_page(pages)
-        if page is None and target_url:
-            page = coupang_crawler._select_page_by_url(pages, target_url)
-        if page is None:
-            page = _first_browser_page(browser)
-        if page is None:
-            return False
-
-        # 인증 시작 시점엔 보통 로그인 화면이다. 이때 대상 페이지로 goto 하거나 대시보드
-        # 텍스트를 기다리면(아래 _wait_for_target_page_ready) 로그인 전이라 절대 나타나지
-        # 않을 텍스트를 page_timeout_seconds(기본 60초)만큼, peak-dashboard 면 reload 후
-        # 한 번 더 기다린다(최대 ~130초). 그동안 사람은 아이디/비밀번호도 입력하지 못한다.
-        # → 로그인 화면이면 이 대기를 통째로 건너뛰고 바로 2FA/로그인 복구로 진입한다.
-        is_login_screen = coupang_crawler._page_looks_like_coupang_login_required(page)
-
-        if target_url and not is_login_screen:
-            try:
-                page.goto(
-                    target_url,
-                    wait_until="domcontentloaded",
-                    timeout=getattr(config, "page_timeout_seconds", _INTERACTION_TIMEOUT_MS),
-                )
-            except timeout_errors:
-                pass
-            except Exception:
-                return False
-            try:
-                page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
-            except timeout_errors:
-                pass
-
-        # 이미 로그인돼 대시보드가 떠 있는 경우에만 "이미 완료" 빠른 경로를 탄다. 로그인
-        # 화면이면 여기서 대시보드 텍스트를 기다리지 않는다(절대 안 뜸 → 60초 헛대기 방지).
-        try:
-            if (
-                target_url
-                and not is_login_screen
-                and _coupang_target_url_has_readiness_signal(target_url)
-            ):
-                coupang_crawler._wait_for_target_page_ready(
-                    page,
-                    config,
-                    target_url=target_url,
-                    timeout_errors=timeout_errors,
-                )
-                return True
-        except BrowserActionRequiredError:
-            pass
-        except Exception:
-            pass
-
-        try:
-            recovered = bool(reuse.recover_coupang_session_with_email_2fa(page, config))
-        except Exception:
-            recovered = False
-        if recovered and target_url:
-            if not _coupang_target_url_has_readiness_signal(target_url):
-                return False
-            coupang_crawler._reload_target_page(
-                page,
-                config,
-                target_url=target_url,
-                load_timeout_errors=timeout_errors,
-            )
-            try:
-                coupang_crawler._wait_for_target_page_ready(
-                    page,
-                    config,
-                    target_url=target_url,
-                    timeout_errors=timeout_errors,
-                )
-                return True
-            except BrowserActionRequiredError:
-                return False
-            except Exception:
-                return False
-        return False
 
 
 def _first_browser_page(browser: Any) -> Any | None:
@@ -652,6 +636,7 @@ def execute_open_auth_browser_job(
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     log: Callable[[str], None] | None = None,
+    wall_now: Callable[[], datetime] | None = None,
 ) -> JobResult:
     """``OPEN_AUTH_BROWSER`` job — 프로필 열기 + 인증 전용 조치 + bounded 재인증 대기.
 
@@ -670,6 +655,22 @@ def execute_open_auth_browser_job(
     """
 
     target_id = job.target_id
+
+    # payload TTL 이 지났으면 브라우저를 열기 전에 fail-fast(server preflight 우회돼도 오래된
+    # 인증 브라우저를 열지 않게 — Task 5 defense-in-depth).
+    wall_clock = wall_now or (lambda: datetime.now(timezone.utc))
+    if _payload_expired(job, now=wall_clock()):
+        if log is not None:
+            log(redact(f"auth payload expired before browser open (target {target_id})"))
+        return make_failure_result(
+            ERROR_PAYLOAD_EXPIRED,
+            "auth payload expired before browser open",
+            result_json={
+                "target_id": target_id,
+                "auth_state": AUTH_STATE_AUTH_REQUIRED,
+                "reason": REASON_PAYLOAD_EXPIRED,
+            },
+        )
 
     # (a) 프로필 브라우저를 인증 전용으로 연다. 정확히 1회.
     opened = open_auth_browser(job)

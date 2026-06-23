@@ -226,6 +226,121 @@ def test_claim_empty_queue_returns_empty_jobs():
     assert r.json() == {"jobs": []}
 
 
+# ── Task 5: server preflight(브라우저/profile 열기 전 유효성 확인) ────────────────
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _enqueue_and_claim(backend: InMemoryQueueBackend, *, job_type: str, payload: dict, now: datetime) -> str:
+    import asyncio
+
+    async def _run() -> str:
+        job_id = await backend.enqueue(job_type=job_type, payload_json=payload, now=now)
+        await backend.claim(
+            agent_id="agent-1",
+            capabilities=[job_type],
+            max_jobs=1,
+            lease_seconds=900,  # 넉넉한 lease — preflight 가 실 server-time 으로 평가될 때
+            now=now,            # in_flight_job(lease 미만료)이 record 를 돌려주게 한다.
+        )
+        return job_id
+
+    return asyncio.run(_run())
+
+
+# preflight 라우트는 실 server time(datetime.now)으로 평가한다 — 테스트 시각도 실 now 기준으로
+# 앵커링해야 lease 미만료(record 반환) + payload expires_at 과거(만료) 조합을 결정적으로 만든다.
+def _real_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def test_job_preflight_denies_expired_open_auth_browser():
+    """Expired browser-opening jobs are denied before Agent side effects."""
+
+    from rider_server.queue.states import JOB_TYPE_OPEN_AUTH_BROWSER
+
+    backend = InMemoryQueueBackend()
+    now = _real_now()
+    job_id = _enqueue_and_claim(
+        backend,
+        job_type=JOB_TYPE_OPEN_AUTH_BROWSER,
+        payload={
+            "job_type": JOB_TYPE_OPEN_AUTH_BROWSER,
+            "requested_at": _iso(now - timedelta(minutes=30)),
+            "expires_at": _iso(now - timedelta(minutes=18)),  # payload TTL 이미 지남.
+        },
+        now=now,
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(f"/v1/jobs/{job_id}/preflight", headers=_BEARER)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["allowed"] is False
+    assert body["reason"] == "payload_expired"
+    assert "server_time" in body
+
+
+def test_job_preflight_denies_crawl_when_account_recovery_not_allowed():
+    """Server state can stop a stale scheduled crawl before browser launch."""
+
+    backend = InMemoryQueueBackend()
+    now = _real_now()
+    # 이미 다음 due 윈도가 지난(expires_at 과거) stale scheduled crawl — server 가 멈춘다.
+    job_id = _enqueue_and_claim(
+        backend,
+        job_type=JOB_TYPE_CRAWL_BAEMIN,
+        payload={
+            "job_type": JOB_TYPE_CRAWL_BAEMIN,
+            "job_origin": "scheduler",
+            "scheduled_at": _iso(now - timedelta(minutes=30)),
+            "expires_at": _iso(now - timedelta(minutes=20)),
+        },
+        now=now,
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(f"/v1/jobs/{job_id}/preflight", headers=_BEARER)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["allowed"] is False
+    assert body["reason"] == "payload_expired"
+
+
+def test_job_preflight_allows_active_normal_crawl():
+    """Valid non-expired active crawl still runs."""
+
+    backend = InMemoryQueueBackend()
+    now = _real_now()
+    job_id = _enqueue_and_claim(
+        backend,
+        job_type=JOB_TYPE_CRAWL_BAEMIN,
+        payload={
+            "job_type": JOB_TYPE_CRAWL_BAEMIN,
+            "job_origin": "scheduler",
+            "scheduled_at": _iso(now),
+            "expires_at": _iso(now + timedelta(minutes=10)),  # 아직 유효.
+        },
+        now=now,
+    )
+    client = TestClient(_app_with_backend(backend))
+
+    r = client.post(f"/v1/jobs/{job_id}/preflight", headers=_BEARER)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["allowed"] is True
+    assert body["reason"] is None
+
+
+def test_job_preflight_requires_bearer():
+    backend = InMemoryQueueBackend()
+    client = TestClient(_app_with_backend(backend))
+    r = client.post("/v1/jobs/some-job/preflight")
+    assert r.status_code == 401
+
+
 def test_claim_uses_configured_job_lease_seconds():
     backend = _ClaimRecordingBackend()
     settings = Settings(

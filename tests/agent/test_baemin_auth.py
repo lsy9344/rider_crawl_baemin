@@ -17,6 +17,7 @@ import ast
 import inspect
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,9 @@ from rider_agent.auth.baemin_auth import (
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     ERROR_AUTH_REQUIRED,
+    ERROR_PAYLOAD_EXPIRED,
     REASON_AUTH_TIMEOUT,
+    REASON_PAYLOAD_EXPIRED,
     build_auth_execute_job,
     classify_baemin_auth_state,
     default_detect_completion,
@@ -264,6 +267,62 @@ def test_open_auth_browser_accepts_auth_only_open_success_without_probe():
     assert detect_calls == []
 
 
+def test_open_auth_browser_rejects_expired_payload_before_browser_open():
+    """auth worker checks expires_at before browser interaction."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    expired_at = now - timedelta(minutes=5)
+    open_calls = []
+    detect_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "expires_at": expired_at.isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        open_auth_browser=lambda j: open_calls.append(j) or True,
+        detect_completion=lambda j: detect_calls.append(j) or True,
+        now=lambda: 0.0,
+        sleep=lambda _s: None,
+        wall_now=lambda: now,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PAYLOAD_EXPIRED
+    assert result.result_json["reason"] == REASON_PAYLOAD_EXPIRED
+    # 브라우저 열기/완료 감지는 호출되지 않았다(stale job — 브라우저 미오픈).
+    assert open_calls == []
+    assert detect_calls == []
+
+
+def test_open_auth_browser_runs_when_payload_not_expired():
+    """Non-expired auth payload opens the browser normally."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    open_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        open_auth_browser=lambda j: open_calls.append(j) or True,
+        detect_completion=lambda j: False,
+        now=lambda: 0.0,
+        sleep=lambda _s: None,
+        wall_now=lambda: now,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert len(open_calls) == 1
+
+
 def test_default_detect_completion_coupang_returns_true_for_ready_target_without_crawl(monkeypatch):
     from types import SimpleNamespace
 
@@ -431,6 +490,7 @@ def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
         "poll_interval_seconds",
         "max_attempts",
         "log",
+        "wall_now",  # Task 5: payload TTL 만료 판정용 wall-clock 주입(OTP 입력 주입점 아님).
     }
     forbidden = {"otp", "code", "verification_code", "fetch_code", "submit_code", "fill"}
     assert forbidden.isdisjoint(params)
@@ -675,44 +735,40 @@ def test_default_open_auth_browser_handles_actual_baemin_auth_screen(monkeypatch
     assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
 
 
-def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl(monkeypatch):
+def test_open_auth_browser_for_coupang_does_not_run_email_2fa(monkeypatch):
+    """OPEN_AUTH_BROWSER opens/prepares browser only; automatic Coupang 2FA is a separate job.
+
+    crawl-coupang-auth-separation Task 2: ``default_open_auth_browser()`` for Coupang must
+    call ``prepare_chrome`` (open the profile browser) but must NOT call
+    ``recover_coupang_session_with_email_2fa`` (no IMAP/OTP/2FA submit). It returns ``None``
+    (manual-in-progress), not ``True`` from auto recovery.
+    """
     from types import SimpleNamespace
 
-    actions = []
-    recover_calls = []
-
     class FakePage:
-        url = "about:blank"
+        # 로그인 화면 — 자동 복구 없이 사람이 직접 조치하도록 그대로 둔다.
+        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
 
         def content(self):
-            return "<html>new tab</html>"
+            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
 
-        def goto(self, url, wait_until=None, timeout=None):
-            actions.append(("goto", url, wait_until, timeout))
+        def goto(self, *_args, **_kwargs):
+            raise AssertionError("login screen must not be navigated away by browser-open")
 
         def wait_for_load_state(self, *_args, **_kwargs):
-            actions.append(("wait_for_load_state",))
-
-        def wait_for_timeout(self, timeout):
-            actions.append(("wait_for_timeout", timeout))
+            return None
 
     class FakeContext:
         def __init__(self, page):
             self.pages = [page]
 
-        def new_page(self):
-            return self.pages[0]
-
     class FakeBrowser:
         def __init__(self, page):
             self.contexts = [FakeContext(page)]
 
-        def new_context(self):
-            return self.contexts[0]
-
     class FakePlaywright:
         def __init__(self, browser):
-            self.chromium = SimpleNamespace(connect_over_cdp=lambda cdp_url: browser)
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
 
         def __enter__(self):
             return self
@@ -723,10 +779,7 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
     page = FakePage()
     browser = FakeBrowser(page)
     prepare_calls = []
-
-    def recover(page_arg, config):
-        recover_calls.append((page_arg, config))
-        return True
+    recover_calls = []
 
     monkeypatch.setattr(
         "rider_agent.reuse.prepare_chrome",
@@ -734,7 +787,7 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
     )
     monkeypatch.setattr(
         "rider_agent.reuse.recover_coupang_session_with_email_2fa",
-        recover,
+        lambda *a, **k: recover_calls.append((a, k)) or True,
     )
     monkeypatch.setattr(
         "rider_agent.auth.baemin_auth._sync_playwright",
@@ -753,47 +806,35 @@ def test_default_open_auth_browser_coupang_runs_email_2fa_recovery_without_crawl
             "coupang_login_password_ref": "coupang-login-password",
             "verification_email_address_ref": "mailbox-ref",
             "verification_email_app_password_ref": "mail-app-password-ref",
-            "verification_email_subject_keyword": "보안코드",
-            "verification_email_sender_keyword": "wing",
             "coupang_auto_email_2fa_enabled": True,
         },
     )
-    default_open_auth_browser(job)
+    result = default_open_auth_browser(job)
 
+    # 브라우저는 열되(prepare_chrome 1회), 자동 2FA 복구는 호출하지 않는다(별도 job).
     assert len(prepare_calls) == 1
-    assert len(recover_calls) == 1
-    recovered_page, config = recover_calls[0]
-    assert recovered_page is page
-    assert config.platform_name == "coupang"
-    assert config.coupang_auto_email_2fa_enabled is True
-    assert config.coupang_login_id == "coupang-login-id"
-    assert config.coupang_login_password == "coupang-login-password"
-    assert config.verification_email_address == "mailbox-ref"
-    assert config.verification_email_app_password == "mail-app-password-ref"
-    assert not any(action[0] == "crawl_snapshot" for action in actions)
+    assert recover_calls == []
+    # 자동 복구의 True 가 아니라 None(수동 진행 중) — 사람-완료 감지는 호출자 polling 이 한다.
+    assert result is None
 
 
-def test_default_open_auth_browser_coupang_recovery_requires_ready_target(monkeypatch):
+def test_open_auth_browser_for_coupang_navigates_to_target_when_not_login_screen(monkeypatch):
+    """Non-login-screen Coupang open navigates to the target URL once, without driving 2FA."""
     from types import SimpleNamespace
 
-    class FakeText:
-        def wait_for(self, timeout=None):
-            raise RuntimeError("target not ready")
+    gotos = []
 
     class FakePage:
-        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
+        url = "https://partner.coupangeats.com/page/rider-performance"
 
         def content(self):
-            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
+            return "<html>partner page</html>"
 
         def goto(self, url, wait_until=None, timeout=None):
-            self.url = url
+            gotos.append((url, wait_until, timeout))
 
         def wait_for_load_state(self, *_args, **_kwargs):
             return None
-
-        def get_by_text(self, _text):
-            return FakeText()
 
     class FakeContext:
         def __init__(self, page):
@@ -814,79 +855,11 @@ def test_default_open_auth_browser_coupang_recovery_requires_ready_target(monkey
             return False
 
     page = FakePage()
-    browser = FakeBrowser(page)
+    recover_calls = []
     monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
     monkeypatch.setattr(
         "rider_agent.reuse.recover_coupang_session_with_email_2fa",
-        lambda page_arg, config: True,
-    )
-    monkeypatch.setattr(
-        "rider_agent.auth.baemin_auth._sync_playwright",
-        lambda: FakePlaywright(browser),
-    )
-
-    result = default_open_auth_browser(
-        _auth_job(
-            type=CAPABILITY_OPEN_AUTH_BROWSER,
-            payload={
-                "tenant_id": "tenant-fake-1",
-                "target_id": FAKE_TARGET,
-                "platform": "coupang",
-                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
-                "expected_display_name": "쿠팡상점A",
-                "coupang_login_id_ref": "coupang-login-id",
-                "coupang_login_password_ref": "coupang-login-password",
-                "verification_email_address_ref": "mailbox-ref",
-                "verification_email_app_password_ref": "mail-app-password-ref",
-                "coupang_auto_email_2fa_enabled": True,
-            },
-        )
-    )
-
-    assert result is False
-
-
-def test_default_open_auth_browser_coupang_recovery_rejects_unsupported_target_path(monkeypatch):
-    from types import SimpleNamespace
-
-    class FakePage:
-        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
-
-        def content(self):
-            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
-
-        def goto(self, url, wait_until=None, timeout=None):
-            self.url = url
-
-        def wait_for_load_state(self, *_args, **_kwargs):
-            return None
-
-        def get_by_text(self, _text):
-            raise AssertionError("unsupported path should not be treated as ready")
-
-    class FakeContext:
-        def __init__(self, page):
-            self.pages = [page]
-
-    class FakeBrowser:
-        def __init__(self, page):
-            self.contexts = [FakeContext(page)]
-
-    class FakePlaywright:
-        def __init__(self, browser):
-            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    page = FakePage()
-    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
-    monkeypatch.setattr(
-        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
-        lambda page_arg, config: True,
+        lambda *a, **k: recover_calls.append((a, k)) or True,
     )
     monkeypatch.setattr(
         "rider_agent.auth.baemin_auth._sync_playwright",
@@ -900,126 +873,15 @@ def test_default_open_auth_browser_coupang_recovery_rejects_unsupported_target_p
                 "tenant_id": "tenant-fake-1",
                 "target_id": FAKE_TARGET,
                 "platform": "coupang",
-                "primary_url": "https://partner.coupangeats.com/page/unknown-dashboard",
-                "expected_display_name": "쿠팡상점A",
-                "coupang_login_id_ref": "coupang-login-id",
-                "coupang_login_password_ref": "coupang-login-password",
-                "verification_email_address_ref": "mailbox-ref",
-                "verification_email_app_password_ref": "mail-app-password-ref",
-                "coupang_auto_email_2fa_enabled": True,
-            },
-        )
-    )
-
-    assert result is False
-
-
-def test_default_open_auth_browser_coupang_reuses_existing_login_tab(monkeypatch):
-    from types import SimpleNamespace
-
-    class FakePage:
-        def __init__(self, url, html=""):
-            self.url = url
-            self.html = html
-            self.gotos = []
-
-        def content(self):
-            return self.html
-
-        def goto(self, url, wait_until=None, timeout=None):
-            self.url = url
-            self.gotos.append((url, wait_until, timeout))
-
-        def wait_for_load_state(self, *_args, **_kwargs):
-            return None
-
-        def wait_for_timeout(self, _timeout):
-            return None
-
-        def get_by_text(self, _text):
-            page = self
-
-            class FakeText:
-                def wait_for(self, timeout=None):
-                    if "partner.coupangeats.com" not in page.url:
-                        raise RuntimeError("target not ready")
-                    return None
-
-            return FakeText()
-
-    class FakeContext:
-        def __init__(self, pages):
-            self.pages = pages
-            self.new_page_calls = 0
-
-        def new_page(self):
-            self.new_page_calls += 1
-            page = FakePage("about:blank")
-            self.pages.append(page)
-            return page
-
-    class FakeBrowser:
-        def __init__(self, context):
-            self.contexts = [context]
-
-    class FakePlaywright:
-        def __init__(self, browser):
-            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    blank_page = FakePage("about:blank", "<html>new tab</html>")
-    login_page = FakePage(
-        "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate",
-        "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>",
-    )
-    context = FakeContext([blank_page, login_page])
-    browser = FakeBrowser(context)
-    recover_calls = []
-
-    def recover(page_arg, config):
-        recover_calls.append((page_arg, config))
-        return True
-
-    monkeypatch.setattr(
-        "rider_agent.reuse.prepare_chrome",
-        lambda config, *, platform_name=None: "ok",
-    )
-    monkeypatch.setattr(
-        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
-        recover,
-    )
-    monkeypatch.setattr(
-        "rider_agent.auth.baemin_auth._sync_playwright",
-        lambda: FakePlaywright(browser),
-    )
-
-    result = default_open_auth_browser(
-        _auth_job(
-            type=CAPABILITY_OPEN_AUTH_BROWSER,
-            payload={
-                "tenant_id": "tenant-fake-1",
-                "target_id": FAKE_TARGET,
-                "platform": "coupang",
                 "primary_url": "https://partner.coupangeats.com/page/rider-performance",
                 "expected_display_name": "쿠팡상점A",
-                "coupang_login_id_ref": "coupang-login-id",
-                "coupang_login_password_ref": "coupang-login-password",
-                "verification_email_address_ref": "mailbox-ref",
-                "verification_email_app_password_ref": "mail-app-password-ref",
-                "coupang_auto_email_2fa_enabled": True,
             },
         )
     )
 
-    assert result is True
-    assert recover_calls[0][0] is login_page
-    assert blank_page.gotos == []
-    assert context.new_page_calls == 0
+    assert result is None
+    assert recover_calls == []  # 자동 2FA 복구 0
+    assert [g[0] for g in gotos] == ["https://partner.coupangeats.com/page/rider-performance"]
 
 
 def test_phone_code_request_texts_avoid_broad_generic_buttons():

@@ -8,14 +8,27 @@ from pathlib import Path
 
 from rider_server.queue import (
     JOB_STATUS_CLAIMED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     InMemoryQueueBackend,
 )
 from rider_server.queue import __main__ as queue_main
 from rider_server.queue.recovery import recover_once
-from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN
+from rider_server.queue.states import (
+    JOB_TYPE_AUTH_COUPANG_2FA,
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
+    RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+    RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED,
+    RESULT_REASON_STALE_CRAWL_SKIPPED,
+)
 
 _T0 = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def test_recover_once_recovers_expired_leases_without_claim_route():
@@ -34,6 +47,276 @@ def test_recover_once_recovers_expired_leases_without_claim_route():
 
         assert result.recovered_count == 1
         assert result.ran_at == _T0 + timedelta(seconds=31)
+        assert backend.job_status(job_id) == JOB_STATUS_PENDING
+
+    asyncio.run(_run())
+
+
+def test_recovery_expires_open_auth_browser_instead_of_repending() -> None:
+    """Expired auth browser jobs are terminal, not replayed after restart."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        # OPEN_AUTH_BROWSER 는 짧은 TTL — payload expires_at 가 이미 지났다.
+        expires_at = _T0 + timedelta(minutes=12)
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_OPEN_AUTH_BROWSER,
+            payload_json={
+                "job_type": JOB_TYPE_OPEN_AUTH_BROWSER,
+                "requested_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+        await backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        # lease 도 만료, payload expires_at 도 지난 시점에 recovery.
+        now = expires_at + timedelta(minutes=1)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.error_code  # 기존 safe failure category 보존(CRAWL_TIMEOUT).
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_AUTH_JOB_EXPIRED
+        assert snap.result_json["reason"] == "stale_auth_job_expired"
+
+        # 이후 claim 으로 다시 잡히지 않는다(다시 PENDING 안 됨 → 브라우저 안 열림).
+        claimed = await backend.claim(
+            agent_id="agent-2",
+            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            max_jobs=5,
+            lease_seconds=120,
+            now=now,
+        )
+        assert claimed == []
+
+    asyncio.run(_run())
+
+
+def test_stale_auth_coupang_2fa_is_not_retried_by_recovery_loop() -> None:
+    """Expired auth job does not trigger repeated OTP request.
+
+    crawl-coupang-auth-separation Task 8: AUTH_COUPANG_2FA 의 lease 가 만료되면(claim 된 상태)
+    payload TTL 과 무관하게 terminal FAILED 로 닫는다 — PENDING 재진입 0(중복 OTP 요청 차단).
+    """
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+            },
+            now=_T0,
+        )
+        await backend.claim(
+            agent_id="agent-auth",
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        # lease 만료 시점에 recovery — payload TTL 은 없지만 lease 만료만으로 terminal 종료.
+        now = _T0 + timedelta(seconds=121)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        # PENDING 재진입이 아니라 terminal FAILED.
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_AUTH_RECOVERY_ABANDONED
+
+        # 다시 claim 되지 않는다(중복 OTP 요청 차단).
+        claimed = await backend.claim(
+            agent_id="agent-auth-2",
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
+            max_jobs=5,
+            lease_seconds=120,
+            now=now,
+        )
+        assert claimed == []
+
+    asyncio.run(_run())
+
+
+def test_healthy_pending_auth_coupang_2fa_is_not_closed_by_recovery() -> None:
+    """A not-yet-claimed AUTH_COUPANG_2FA job is preserved (only claimed+expired is terminal)."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            payload_json={
+                "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+                "platform": "coupang",
+                "recovery_mode": "coupang_auto_email_2fa",
+            },
+            now=_T0,
+        )
+        # claim 하지 않은 채 recovery 를 돌려도 PENDING 보존.
+        result = await recover_once(backend, now=_T0 + timedelta(hours=1))
+
+        assert result.recovered_count == 0
+        assert backend.job_status(job_id) == JOB_STATUS_PENDING
+
+    asyncio.run(_run())
+
+
+def test_recovery_skips_expired_scheduled_crawl_instead_of_backlog_replay() -> None:
+    """Expired scheduled crawls are closed with a safe reason."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        expires_at = _T0 + timedelta(minutes=10)
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            payload_json={
+                "job_type": JOB_TYPE_CRAWL_COUPANG,
+                "job_origin": "scheduler",
+                "scheduled_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+        await backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_COUPANG],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0,
+        )
+
+        now = expires_at + timedelta(minutes=1)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        # 다시 PENDING 으로 돌아가지 않는다.
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.status != JOB_STATUS_PENDING
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_CRAWL_SKIPPED
+        # last_failed_at 또는 completed_at 이 now 로 기록된다.
+        assert snap.last_failed_at == now or snap.completed_at == now
+
+    asyncio.run(_run())
+
+
+def test_queue_recovery_closes_expired_pending_scheduled_crawls() -> None:
+    """Pending scheduled jobs with expired payload are not later claimed."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        expires_at = _T0 + timedelta(minutes=10)
+        # claim 하지 않은 채 PENDING 상태로 남아 있는 stale scheduled crawl(서버 downtime backlog).
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            payload_json={
+                "job_type": JOB_TYPE_CRAWL_COUPANG,
+                "job_origin": "scheduler",
+                "scheduled_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+
+        now = expires_at + timedelta(minutes=1)
+        result = await recover_once(backend, now=now)
+
+        assert result.recovered_count == 1
+        snap = backend.job_snapshot(job_id)
+        assert snap is not None
+        assert snap.status == JOB_STATUS_FAILED
+        assert snap.result_json["reason"] == RESULT_REASON_STALE_CRAWL_SKIPPED
+
+        # recovery 뒤에는 claim 으로 잡히지 않는다.
+        claimed = await backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_COUPANG],
+            max_jobs=5,
+            lease_seconds=120,
+            now=now,
+        )
+        assert claimed == []
+
+    asyncio.run(_run())
+
+
+def test_queue_recovery_leaves_active_pending_scheduled_crawl_claimable() -> None:
+    """A non-expired PENDING scheduled crawl is left untouched and still claimable."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        expires_at = _T0 + timedelta(minutes=30)
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            payload_json={
+                "job_type": JOB_TYPE_CRAWL_COUPANG,
+                "job_origin": "scheduler",
+                "scheduled_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+
+        # 아직 payload 유효 → recovery 가 건드리지 않는다.
+        result = await recover_once(backend, now=_T0 + timedelta(minutes=1))
+        assert result.recovered_count == 0
+        assert backend.job_status(job_id) == JOB_STATUS_PENDING
+
+        claimed = await backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_COUPANG],
+            max_jobs=1,
+            lease_seconds=120,
+            now=_T0 + timedelta(minutes=1),
+        )
+        assert len(claimed) == 1
+
+    asyncio.run(_run())
+
+
+def test_recovery_still_repends_non_expired_retryable_crawl() -> None:
+    """Non-expired retryable crawl jobs keep the existing retry behavior."""
+
+    async def _run():
+        backend = InMemoryQueueBackend()
+        # expires_at 이 아직 안 지난 scheduled crawl — 기존 retry(PENDING 재진입) 유지.
+        expires_at = _T0 + timedelta(minutes=30)
+        job_id = await backend.enqueue(
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            payload_json={
+                "job_type": JOB_TYPE_CRAWL_COUPANG,
+                "job_origin": "scheduler",
+                "scheduled_at": _iso(_T0),
+                "expires_at": _iso(expires_at),
+            },
+            now=_T0,
+        )
+        await backend.claim(
+            agent_id="agent-1",
+            capabilities=[JOB_TYPE_CRAWL_COUPANG],
+            max_jobs=1,
+            lease_seconds=30,
+            now=_T0,
+        )
+
+        # lease 만 만료(payload 는 아직 유효) → 기존 retry 정책으로 PENDING 재진입.
+        result = await recover_once(backend, now=_T0 + timedelta(seconds=31))
+
+        assert result.recovered_count == 1
         assert backend.job_status(job_id) == JOB_STATUS_PENDING
 
     asyncio.run(_run())

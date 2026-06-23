@@ -8,6 +8,7 @@ crawl job types away from ``default_execute_job`` and return the snapshot-shaped
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 from pathlib import Path
@@ -22,6 +23,7 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
 )
+from rider_agent.reuse import BrowserActionRequiredError
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
 from rider_agent.workers.crawl_worker import (
     AUTH_STATE_ACTIVE,
@@ -29,12 +31,15 @@ from rider_agent.workers.crawl_worker import (
     AUTH_STATE_CENTER_MISMATCH,
     ERROR_AUTH_REQUIRED,
     ERROR_CENTER_MISMATCH,
+    ERROR_CRAWL_FAILURE,
     ERROR_CRAWL_TIMEOUT,
+    ERROR_PAYLOAD_EXPIRED,
     ERROR_TARGET_VALIDATION_FAILURE,
     ERROR_PROFILE_UNAVAILABLE,
     CrawlWorker,
     build_execute_job,
 )
+from rider_crawl.redaction import REDACTED
 from rider_crawl.models import (
     CurrentScreenSnapshot,
     PeakDashboardSnapshot,
@@ -147,6 +152,78 @@ def test_baemin_success_returns_snapshot_payload() -> None:
     assert payload["artifact_refs"] == []
 
 
+def test_crawl_worker_rejects_expired_payload_before_profile_prepare() -> None:
+    """crawl_worker checks expires_at before ensure_profile."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    expired_at = now - timedelta(minutes=5)
+
+    base = _crawl_job()
+    job = ClaimedJob(
+        job_id=base.job_id,
+        type=base.type,
+        target_id=base.target_id,
+        lease_expires_at=base.lease_expires_at,
+        payload={
+            **base.payload,
+            "job_origin": "scheduler",
+            "expires_at": expired_at.isoformat().replace("+00:00", "Z"),
+        },
+    )
+
+    ensure_calls: list[tuple] = []
+    crawl_calls: list[str] = []
+
+    class _RecordingProfileManager:
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            ensure_calls.append((tenant_id, target_id))
+            raise AssertionError("ensure_profile must not be called for expired payload")
+
+    def fake_crawl(config, *, platform_name=None):
+        crawl_calls.append(platform_name)
+        return _baemin_snapshot()
+
+    worker = CrawlWorker(
+        profile_manager=_RecordingProfileManager(),
+        crawl_snapshot=fake_crawl,
+        now=lambda: now,
+    )
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PAYLOAD_EXPIRED
+    assert result.result_json["reason"] == "payload_expired"
+    # profile/browser/crawl 은 전혀 호출되지 않았다.
+    assert ensure_calls == []
+    assert crawl_calls == []
+
+
+def test_crawl_worker_runs_when_payload_not_expired() -> None:
+    """Non-expired payload still runs the crawl normally."""
+
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    base = _crawl_job()
+    job = ClaimedJob(
+        job_id=base.job_id,
+        type=base.type,
+        target_id=base.target_id,
+        lease_expires_at=base.lease_expires_at,
+        payload={
+            **base.payload,
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    worker = CrawlWorker(
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot(),
+        now=lambda: now,
+    )
+
+    result = worker.execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+
+
 def test_coupang_success_returns_snapshot_payload() -> None:
     worker = CrawlWorker(crawl_snapshot=lambda config, *, platform_name=None: _coupang_snapshot())
 
@@ -202,7 +279,9 @@ def test_coupang_job_refs_are_resolved_into_email_2fa_config() -> None:
     assert result.status == JOB_STATUS_SUCCESS
     config = captured["config"]
     assert captured["platform_name"] == "coupang"
-    assert config.coupang_auto_email_2fa_enabled is True
+    # crawl-coupang-auth-separation Task 4: 크롤 job 은 inline 2FA 를 하지 않는다. 자격 ref 는
+    # 여전히 해소돼 config 에 채워지지만(로컬 호환·센터 검증), 자동 email 2FA 는 강제로 꺼진다.
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "coupang-login-id"
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
@@ -252,7 +331,8 @@ def test_coupang_job_local_secret_refs_are_resolved_into_email_2fa_config() -> N
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
     assert config.verification_email_app_password == "mail-app-password"
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: 크롤 job 의 자동 email 2FA 는 강제 비활성(자격 ref 해소는 유지).
+    assert config.coupang_auto_email_2fa_enabled is False
 
 
 def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
@@ -288,7 +368,8 @@ def test_coupang_job_plaintext_credentials_flow_into_email_2fa_config() -> None:
 
     assert result.status == JOB_STATUS_SUCCESS
     config = captured["config"]
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: 평문 자격은 그대로 config 에 흘러들지만 자동 email 2FA 는 강제 비활성.
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "plain-coupang-login-id"
     assert config.coupang_login_password == "plain-coupang-login-password"
     assert config.verification_email_address == "myemail@gmail.com"
@@ -327,6 +408,86 @@ def test_coupang_job_defaults_email_2fa_disabled_when_flag_omitted() -> None:
     config = captured["config"]
     assert captured["platform_name"] == "coupang"
     assert config.coupang_auto_email_2fa_enabled is False
+
+
+def test_crawl_coupang_job_does_not_enable_email_2fa_from_payload(monkeypatch) -> None:
+    """Crawl jobs never run automatic Coupang email recovery.
+
+    crawl-coupang-auth-separation Task 4: payload 에 ``coupang_auto_email_2fa_enabled=True`` 가
+    있어도 ``AppConfig.coupang_auto_email_2fa_enabled`` 는 False 이고,
+    ``recover_coupang_session_with_email_2fa`` 는 호출되지 않는다.
+    """
+    captured = {}
+    recover_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda *a, **k: recover_calls.append((a, k)) or True,
+    )
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["config"].coupang_auto_email_2fa_enabled is False
+    assert recover_calls == []  # 크롤 경로는 자동 email 2FA 복구를 호출하지 않는다
+
+
+def test_crawl_coupang_login_screen_returns_auth_required_without_recovery(monkeypatch) -> None:
+    """Login screen in crawl path is surfaced to server as AUTH_REQUIRED (no auto recovery)."""
+    recover_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.recover_coupang_session_with_email_2fa",
+        lambda *a, **k: recover_calls.append((a, k)) or True,
+    )
+
+    def fake_crawl(config, *, platform_name=None):
+        raise BrowserActionRequiredError("coupang login required")
+
+    base_job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A"
+    )
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={
+            **base_job.payload,
+            "coupang_login_id_ref": "plain-coupang-login-id",
+            "coupang_login_password_ref": "plain-coupang-login-password",
+            "verification_email_address_ref": "myemail@gmail.com",
+            "verification_email_app_password_ref": "myapppassword",
+            "coupang_auto_email_2fa_enabled": True,
+        },
+    )
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(job)
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert recover_calls == []  # 로그인 화면을 만나도 자동 2FA 복구 시도 0
 
 
 def test_default_process_boundary_passes_plaintext_credentials(monkeypatch) -> None:
@@ -443,6 +604,54 @@ def test_profile_failure_is_fail_closed_before_crawl() -> None:
     assert result.error_code == ERROR_PROFILE_UNAVAILABLE
     assert calls == []
     assert "C:/secret/raw" not in (result.error_message_redacted or "")
+
+
+def test_unclassified_crawl_failure_persists_redacted_cause() -> None:
+    class RendererCrash(RuntimeError):
+        pass
+
+    def broken_crawl(config, *, platform_name=None):
+        raise RendererCrash("renderer crashed: token=raw-secret-123456")
+
+    worker = CrawlWorker(crawl_snapshot=broken_crawl)
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_FAILURE
+    assert "RendererCrash" in (result.error_message_redacted or "")
+    assert REDACTED in (result.error_message_redacted or "")
+    assert "raw-secret" not in (result.error_message_redacted or "")
+    diagnostics = result.result_json["diagnostics"]["agent_error"]
+    assert diagnostics["type"] == "RendererCrash"
+    assert REDACTED in diagnostics["message_redacted"]
+    assert "raw-secret" not in diagnostics["message_redacted"]
+
+
+def test_coupang_center_validation_exception_is_target_validation_failure() -> None:
+    class CoupangCenterValidationError(RuntimeError):
+        pass
+
+    def broken_crawl(config, *, platform_name=None):
+        raise CoupangCenterValidationError(
+            "쿠팡 센터 검증 실패: 피크 대시보드 화면에서 센터명을 확인하지 못했습니다.\n"
+            "설정 센터명: 쿠팡상점A"
+        )
+
+    worker = CrawlWorker(crawl_snapshot=broken_crawl)
+
+    result = worker.execute(
+        _crawl_job(CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A")
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_TARGET_VALIDATION_FAILURE
+    assert "CoupangCenterValidationError" in (result.error_message_redacted or "")
+    assert result.result_json["auth_state"] == AUTH_STATE_CENTER_MISMATCH
+    assert result.result_json["mismatch"] == ERROR_CENTER_MISMATCH
+    diagnostics = result.result_json["diagnostics"]["agent_error"]
+    assert diagnostics["type"] == "CoupangCenterValidationError"
+    assert "피크 대시보드" in diagnostics["message_redacted"]
 
 
 def test_crawl_timeout_returns_failure_without_hanging() -> None:
@@ -854,7 +1063,9 @@ def test_run_agent_passes_store_resolver_to_crawl_worker(tmp_path) -> None:
 
     config = captured["config"]
     assert summary.started is True
-    assert config.coupang_auto_email_2fa_enabled is True
+    # Task 4: store resolver 는 여전히 자격 ref 를 config 에 채우지만, 크롤 job 의 자동 email
+    # 2FA 는 강제 비활성(자동복구는 별도 AUTH_COUPANG_2FA job).
+    assert config.coupang_auto_email_2fa_enabled is False
     assert config.coupang_login_id == "coupang-login-id"
     assert config.coupang_login_password == "coupang-login-password"
     assert config.verification_email_address == "mailbox@example.invalid"
@@ -917,6 +1128,42 @@ def test_subprocess_timeout_kills_process_tree(monkeypatch) -> None:
     assert cleanup_called == [True]
     assert result.status == JOB_STATUS_FAILED
     assert result.error_code == ERROR_CRAWL_TIMEOUT
+
+
+def test_subprocess_failure_reports_redacted_stderr(monkeypatch) -> None:
+    import rider_agent.workers.crawl_process as cp
+
+    class _FailedProc:
+        pid = 4322
+        returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    def _fake_popen(argv, **kwargs):
+        kwargs["stderr"].write(b"Traceback token=raw-secret-123456\nRenderer crashed\n")
+        kwargs["stderr"].flush()
+        return _FailedProc()
+
+    monkeypatch.setattr(cp.subprocess, "Popen", _fake_popen)
+
+    job = ClaimedJob(
+        job_id="job-1", type="CRAWL_BAEMIN", target_id="target-1",
+        lease_expires_at=None, payload={"timeout_seconds": 0},
+    )
+    result = cp.run_crawl_in_subprocess(
+        job, timeout_seconds=1, target_id="target-1", platform="baemin",
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_CRAWL_FAILURE
+    diagnostics = result.result_json["diagnostics"]["subprocess"]
+    assert diagnostics["returncode"] == 1
+    assert REDACTED in diagnostics["stderr_tail"]
+    assert "raw-secret" not in diagnostics["stderr_tail"]
 
 
 def test_terminate_process_tree_is_best_effort_when_already_gone() -> None:

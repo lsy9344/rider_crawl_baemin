@@ -33,9 +33,15 @@ from rider_server.queue import (
 )
 from rider_server.queue.backend import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
 from rider_server.queue.retry import default_retry_decider
-from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_KAKAO_SEND
+from rider_server.queue.states import (
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_KAKAO_SEND,
+)
 from rider_server.queue.postgres_queue import (
+    COUPANG_AUTO_RECOVERY_COOLDOWN,
     _platform_account_auth_update,
+    coupang_recovery_state_values,
     kakao_delivery_log_values,
 )
 
@@ -745,6 +751,161 @@ def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
     assert _platform_account_auth_update(verified_job, None) == (
         "33333333-3333-3333-3333-333333333333",
         BaeminAuthState.AUTH_VERIFIED.value,
+    )
+
+
+# ── Task 4: Coupang 자동 복구 cooldown 영속(순수 함수, 항상 실행) ─────────────────
+
+
+_PA_ID = "33333333-3333-3333-3333-333333333333"
+
+
+def test_coupang_auto_recovery_failure_sets_cooldown_on_account() -> None:
+    """Failed auto recovery suppresses future scheduler attempts."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={
+            "platform_account_id": _PA_ID,
+            "recovery_mode": "coupang_auto_email_2fa",
+        },
+        result_json={"target_id": "mt-1", "auth_state": BaeminAuthState.AUTH_REQUIRED.value},
+    )
+
+    update = coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0)
+
+    assert update is not None
+    account_id, values = update
+    assert account_id == _PA_ID
+    assert values["auto_recovery_failed_at"] == _T0
+    assert values["auto_recovery_cooldown_until"] == _T0 + COUPANG_AUTO_RECOVERY_COOLDOWN
+    assert values["auto_recovery_attempted_at"] == _T0
+
+
+def test_coupang_auto_recovery_success_clears_cooldown_on_account() -> None:
+    """Successful recovery returns account to normal crawl scheduling."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={
+            "platform_account_id": _PA_ID,
+            "recovery_mode": "coupang_auto_email_2fa",
+        },
+        result_json={"target_id": "mt-1", "auth_state": BaeminAuthState.AUTH_VERIFIED.value},
+    )
+
+    update = coupang_recovery_state_values(job=job, status=JOB_STATUS_SUCCEEDED, now=_T0)
+
+    assert update is not None
+    account_id, values = update
+    assert account_id == _PA_ID
+    assert values["auto_recovery_cooldown_until"] is None
+    assert values["auto_recovery_failed_at"] is None
+
+
+def test_non_recovery_job_does_not_touch_cooldown() -> None:
+    """A normal (non-recovery) crawl completion leaves cooldown columns alone."""
+
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        payload_json={"platform_account_id": _PA_ID},
+        result_json={"target_id": "mt-1"},
+    )
+    assert coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0) is None
+    assert coupang_recovery_state_values(job=job, status=JOB_STATUS_SUCCEEDED, now=_T0) is None
+
+
+# ── Task 6: AUTH_COUPANG_2FA result → 계정 coarse gate + cooldown(순수 함수, 항상 실행) ──
+
+
+def _auth_2fa_completed_job(*, auth_state, auth_recovery_state, reason=None):
+    result = {
+        "target_id": "mt-1",
+        "platform": "coupang",
+        "platform_account_id": _PA_ID,
+        "auth_state": auth_state,
+        "auth_recovery_state": auth_recovery_state,
+        "recovery_mode": "coupang_auto_email_2fa",
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return SimpleNamespace(
+        type="AUTH_COUPANG_2FA",
+        payload_json={
+            "platform_account_id": _PA_ID,
+            "recovery_mode": "coupang_auto_email_2fa",
+        },
+        result_json=result,
+    )
+
+
+def test_auth_coupang_2fa_success_marks_account_active() -> None:
+    """AUTH_COUPANG_2FA success moves account to ACTIVE and clears cooldown."""
+    job = _auth_2fa_completed_job(
+        auth_state=BaeminAuthState.ACTIVE.value, auth_recovery_state="ACTIVE"
+    )
+
+    assert _platform_account_auth_update(job, None) == (_PA_ID, BaeminAuthState.ACTIVE.value)
+
+    cooldown = coupang_recovery_state_values(job=job, status=JOB_STATUS_SUCCEEDED, now=_T0)
+    assert cooldown is not None
+    _account, values = cooldown
+    assert values["auto_recovery_cooldown_until"] is None
+    assert values["auto_recovery_failed_at"] is None
+
+
+def test_auth_coupang_2fa_email_auth_required_keeps_account_auth_required_with_detail() -> None:
+    """Detailed Coupang recovery state is preserved without inventing retry."""
+    job = _auth_2fa_completed_job(
+        auth_state=BaeminAuthState.AUTH_REQUIRED.value,
+        auth_recovery_state="EMAIL_AUTH_REQUIRED",
+        reason="email_auth_required",
+    )
+
+    # 계정 coarse gate 는 AUTH_REQUIRED, 세부 상태는 result_json 에 보존된다(드롭 금지).
+    assert _platform_account_auth_update(job, "AUTH_REQUIRED") == (
+        _PA_ID,
+        BaeminAuthState.AUTH_REQUIRED.value,
+    )
+    assert job.result_json["auth_recovery_state"] == "EMAIL_AUTH_REQUIRED"
+    assert job.result_json["reason"] == "email_auth_required"
+
+    # 실패는 cooldown 을 켠다(즉시 재시도 폭주 방지).
+    cooldown = coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0)
+    assert cooldown is not None
+    _account, values = cooldown
+    assert values["auto_recovery_cooldown_until"] == _T0 + COUPANG_AUTO_RECOVERY_COOLDOWN
+
+
+def test_auth_coupang_2fa_user_action_required_marks_account_user_action_pending() -> None:
+    """Manual intervention states are visible to scheduler/dashboard."""
+    job = _auth_2fa_completed_job(
+        auth_state=BaeminAuthState.USER_ACTION_PENDING.value,
+        auth_recovery_state="USER_ACTION_REQUIRED",
+        reason="captcha_or_abnormal_login",
+    )
+
+    assert _platform_account_auth_update(job, "AUTH_REQUIRED") == (
+        _PA_ID,
+        BaeminAuthState.USER_ACTION_PENDING.value,
+    )
+    assert job.result_json["auth_recovery_state"] == "USER_ACTION_REQUIRED"
+
+
+def test_auth_coupang_2fa_detail_only_falls_back_to_gate_mapping() -> None:
+    """If only auth_recovery_state is present, gate state is derived deterministically."""
+    # coarse auth_state 가 없고 세부 상태만 온 경우의 결정적 fallback.
+    job = SimpleNamespace(
+        payload_json={"platform_account_id": _PA_ID, "recovery_mode": "coupang_auto_email_2fa"},
+        result_json={
+            "platform_account_id": _PA_ID,
+            "auth_recovery_state": "RECOVERY_FAILED",
+            "reason": "verification_mail_delayed",
+        },
+    )
+    assert _platform_account_auth_update(job, "AUTH_REQUIRED") == (
+        _PA_ID,
+        BaeminAuthState.AUTH_REQUIRED.value,
     )
 
 

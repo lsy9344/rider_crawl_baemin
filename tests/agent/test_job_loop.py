@@ -280,6 +280,96 @@ def test_compose_auth_worker_uses_crawl_profile_assignment_for_auth_jobs(tmp_pat
     )
 
 
+def test_compose_routes_auth_coupang_2fa_to_dedicated_worker(tmp_path):
+    # crawl-coupang-auth-separation Task 3: AUTH_COUPANG_2FA capability 가 있으면 전용 worker 로
+    # 라우팅되고(자동 email 2FA), AUTH_CHECK/OPEN_AUTH_BROWSER 는 baemin auth 라우터로 흐른다.
+    from types import SimpleNamespace
+
+    from rider_agent.heartbeat import (
+        CAPABILITY_AUTH_COUPANG_2FA,
+        CAPABILITY_CRAWL_COUPANG,
+        CAPABILITY_OPEN_AUTH_BROWSER,
+    )
+    from rider_agent.worker_composition import compose_execute_job
+
+    class Profiles:
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            profile_dir = tmp_path / "profiles" / tenant_id / target_id
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9450",
+                user_data_dir=profile_dir,
+            )
+            return SimpleNamespace(cdp_url=config.cdp_url, profile_dir=config.browser_user_data_dir)
+
+        def browser_profiles(self):
+            return []
+
+    recover_calls = []
+
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[
+            CAPABILITY_OPEN_AUTH_BROWSER,
+            CAPABILITY_AUTH_COUPANG_2FA,
+            CAPABILITY_CRAWL_COUPANG,
+        ],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_auth_worker=True,
+        start_crawl_worker=True,
+        crawl_profile_manager=Profiles(),
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+        secret_resolver={
+            "mailbox-ref": "operator@example.com",
+            "mail-app-password-ref": "fake app password",
+        }.get,
+    )
+
+    # AUTH_COUPANG_2FA 는 전용 worker 로 — recover 가 실제로 호출되는지 monkeypatch 로 가로채기는
+    # 어렵지만, result_json 형태가 전용 worker 의 것(auth_recovery_state 포함)임을 확인한다.
+    import rider_agent.auth.coupang_gmail_2fa as cg2fa
+
+    original = cg2fa.execute_auth_coupang_2fa_job
+
+    def spy(job, **kwargs):
+        recover_calls.append(job.type)
+        kwargs["recover"] = lambda: True
+        return original(job, **kwargs)
+
+    cg2fa.execute_auth_coupang_2fa_job = spy
+    try:
+        result = composition.execute_job(
+            ClaimedJob(
+                job_id="job-auth-2fa-1",
+                type=CAPABILITY_AUTH_COUPANG_2FA,
+                target_id="target-1",
+                lease_expires_at=FUTURE_LEASE,
+                payload={
+                    "target_id": "target-1",
+                    "tenant_id": "tenant-1",
+                    "platform": "coupang",
+                    "platform_account_id": "account-1",
+                    "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+                    "expected_display_name": "쿠팡상점A",
+                    "browser_profile_ref": "profile:target-1",
+                    "verification_email_address_ref": "mailbox-ref",
+                    "verification_email_app_password_ref": "mail-app-password-ref",
+                },
+            )
+        )
+    finally:
+        cg2fa.execute_auth_coupang_2fa_job = original
+
+    assert recover_calls == [CAPABILITY_AUTH_COUPANG_2FA]
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_recovery_state"] == "ACTIVE"
+    assert result.result_json["auth_state"] == "ACTIVE"
+
+
 def _runner(transport, **kwargs):
     """JobRunner 생성 헬퍼 — stop/sleep 기본 배선 + 주입 override."""
 
@@ -478,6 +568,61 @@ def test_runner_executes_only_claimed_job_then_completes():
     assert started[0][1]["event_type"] == EVENT_TYPE_JOB_STARTED
 
 
+def test_runner_does_not_call_worker_when_preflight_denies_job():
+    """Preflight denial completes safely without opening browser/profile."""
+
+    class _PreflightDenyTransport(FakeTransport):
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/preflight"):
+                self.calls.append((url, body, headers))
+                return {"allowed": False, "reason": "payload_expired", "server_time": "2026-06-14T12:00:00Z"}
+            return super().post_json(url, body, headers=headers)
+
+    transport = _PreflightDenyTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    executed: list[ClaimedJob] = []
+
+    def execute(job):
+        executed.append(job)
+        return make_success_result(result_json={"ok": True})
+
+    runner = _runner(transport, execute_job=execute)
+    runner.run()
+
+    # 워커(execute_job)는 호출되지 않는다(브라우저/profile 미오픈).
+    assert executed == []
+    # preflight 는 1회 호출됐다.
+    assert len(transport.calls_for("/preflight")) == 1
+    # complete 는 실패 status + result_json["reason"] 로 안전히 보고된다.
+    complete_calls = transport.calls_for("/complete")
+    assert len(complete_calls) == 1
+    complete_body = complete_calls[0][1]
+    assert complete_body["status"] == "failed"
+    assert complete_body["result_json"]["reason"] == "payload_expired"
+
+
+def test_runner_preflight_unavailable_is_fail_closed():
+    """Preflight transport failure stops the worker (fail-closed)."""
+
+    class _PreflightErrorTransport(FakeTransport):
+        def post_json(self, url, body, *, headers=None) -> dict:
+            if url.endswith("/preflight"):
+                self.calls.append((url, body, headers))
+                raise TransportError("preflight HTTP error", status_code=503)
+            return super().post_json(url, body, headers=headers)
+
+    transport = _PreflightErrorTransport(claim_script=[{"jobs": [dict(_JOB_DICT)]}])
+    executed: list[ClaimedJob] = []
+
+    runner = _runner(transport, execute_job=lambda j: executed.append(j))
+    runner.run()
+
+    assert executed == []
+    complete_calls = transport.calls_for("/complete")
+    assert len(complete_calls) == 1
+    assert complete_calls[0][1]["status"] == "failed"
+    assert complete_calls[0][1]["result_json"]["reason"] == "preflight_unavailable"
+
+
 def test_runner_empty_claim_skips_execute_and_sleeps():
     transport = FakeTransport(claim_script=[{"jobs": []}])
     executed: list[ClaimedJob] = []
@@ -671,6 +816,39 @@ def test_runner_records_lease_and_exposes_active_jobs_in_flight():
         {"job_id": "job-fake-1", "lease_expires_at": FUTURE_LEASE}
     ]
     # complete 후 in-flight 에서 제거.
+    assert runner.active_jobs() == []
+
+
+def test_auth_coupang_2fa_job_is_exposed_as_active_job_for_heartbeat():
+    """Long auth jobs are lease-extended while running.
+
+    crawl-coupang-auth-separation Task 8: AUTH_COUPANG_2FA 도 다른 job 과 동일하게 실행 중
+    in-flight 로 추적돼 heartbeat active_jobs 에 노출된다(서버가 lease 를 계속 연장 — 장시간
+    메일 대기 중 stale 회수로 중복 OTP 가 요청되지 않게).
+    """
+
+    auth_job = dict(
+        _JOB_DICT,
+        job_id="job-auth-2fa-9",
+        type="AUTH_COUPANG_2FA",
+        payload={"platform": "coupang", "recovery_mode": "coupang_auto_email_2fa"},
+    )
+    transport = FakeTransport(claim_script=[{"jobs": [auth_job]}])
+    captured: dict = {}
+    holder: dict = {}
+
+    def execute(job):
+        captured["active"] = holder["runner"].active_jobs()
+        return make_success_result()
+
+    runner = _runner(transport, execute_job=execute)
+    holder["runner"] = runner
+    runner.run()
+
+    # 실행 중 lease_expires_at 가 active_jobs 로 노출됨(heartbeat 연장 입력).
+    assert captured["active"] == [
+        {"job_id": "job-auth-2fa-9", "lease_expires_at": FUTURE_LEASE}
+    ]
     assert runner.active_jobs() == []
 
 

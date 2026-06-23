@@ -18,9 +18,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import asyncio
+from dataclasses import replace
+
 import pytest
 
 from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
+from rider_server.queue import InMemoryQueueBackend
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_PENDING,
@@ -36,6 +40,13 @@ from rider_server.scheduler.postgres_repository import (
     PostgresSchedulerRepository,
     _to_lifecycle_status,
     _to_subscription_status,
+)
+from rider_server.scheduler.service import (
+    REASON_ACTIVE_JOB_EXISTS,
+    DueTarget,
+    SchedulerRepository,
+    SchedulerService,
+    TenantGate,
 )
 
 
@@ -146,3 +157,79 @@ def test_capacity_snapshot_keeps_exact_two_minute_heartbeat_online() -> None:
     assert capacity.aggregate_capacity == 1
     assert capacity.capabilities == frozenset({JOB_TYPE_CRAWL_COUPANG})
     assert capacity.in_flight_by_job_type == {JOB_TYPE_CRAWL_COUPANG: 1}
+
+
+# ── Task 6: pending crawl coalescing(target/platform 당 활성 crawl 1건) ───────────
+
+
+class _CoalesceRepo(SchedulerRepository):
+    """최소 ``SchedulerRepository`` — 활성 crawl 이 있는 target 은 새 enqueue 를 막고 전진 안 함."""
+
+    def __init__(self, target: DueTarget, *, active: set[str]) -> None:
+        self._targets = {target.target_id: target}
+        self._active = set(active)
+        self.claim_calls = 0
+
+    async def due_targets(self, *, now, limit):
+        return [t for t in self._targets.values() if policy.is_due(t.next_run_at, now)][:limit]
+
+    async def tenant_gate(self, tenant_id):
+        return TenantGate(SubscriptionStatus.PAYMENT_ACTIVE, CustomerLifecycleState.ACTIVE)
+
+    async def tenant_gates(self, tenant_ids):
+        return {tid: TenantGate(SubscriptionStatus.PAYMENT_ACTIVE, CustomerLifecycleState.ACTIVE) for tid in tenant_ids}
+
+    async def platform_failure_window(self, platform, *, since, now):
+        return (0, 0)
+
+    async def has_active_crawl_job(self, target_id):
+        return target_id in self._active
+
+    async def active_crawl_job_target_ids(self, target_ids):
+        return {tid for tid in target_ids if tid in self._active}
+
+    async def capacity_snapshot(self, *, now):
+        return policy.CapacityPolicy(
+            aggregate_capacity=10,
+            aggregate_in_flight=0,
+            capabilities=frozenset({JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG}),
+        )
+
+    async def claim_due_target(self, target_id, *, now, next_run_at):
+        self.claim_calls += 1
+        target = self._targets.get(target_id)
+        if target is None or not policy.is_due(target.next_run_at, now):
+            return False
+        self._targets[target_id] = replace(target, next_run_at=next_run_at)
+        return True
+
+    async def release_due_target(self, target_id, *, claimed_next_run_at, restore_next_run_at):
+        return False
+
+    def next_run_at_of(self, target_id):
+        return self._targets[target_id].next_run_at
+
+
+def test_scheduler_does_not_create_second_pending_crawl_for_same_target_and_platform() -> None:
+    """Backlog is coalesced to one useful crawl per target/platform."""
+
+    now = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+    target = DueTarget(
+        target_id="t-c",
+        tenant_id="tn-1",
+        platform="COUPANG",
+        interval_minutes=10,
+        next_run_at=None,
+        auth_state="ACTIVE",
+    )
+    repo = _CoalesceRepo(target, active={"t-c"})
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=now))
+
+    # 활성 CRAWL_COUPANG 이 이미 있으면 두 번째를 만들지 않는다.
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_ACTIVE_JOB_EXISTS
+    # 같은 stale target 으로 매 tick 스핀하지 않는다(전진 안 함 → claim_due_target 호출 0).
+    assert repo.claim_calls == 0
+    assert repo.next_run_at_of("t-c") is None

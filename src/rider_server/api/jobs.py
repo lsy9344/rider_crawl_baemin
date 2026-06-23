@@ -34,6 +34,7 @@ from ..queue.backend import QueueBackend
 from ..queue.states import (
     UnknownAgentStatus,
     map_agent_status,
+    preflight_decision,
 )
 from ..services.job_completion_service import (
     JobCompletionConflict,
@@ -511,6 +512,41 @@ async def complete_job(
     except ValueError as exc:
         raise _invalid_job_id_http_error() from exc
     return {"job_id": result.job_id, "status": result.status}
+
+
+@router.post("/{job_id}/preflight")
+async def preflight_job(
+    request: Request,
+    job_id: str,
+    agent_id: str = Depends(resolve_agent),
+) -> dict:
+    """``POST /v1/jobs/{id}/preflight`` — 브라우저/profile 을 열기 전 server 측 유효성 확인.
+
+    Agent 는 claim 한 job 을 실행하기 직전 이 엔드포인트로 server 상태(payload TTL·서버 시각)를
+    재확인한다. payload ``expires_at`` 이 지났거나 더는 유효하지 않으면 ``allowed=false`` +
+    안전한 ``reason`` 을 돌려준다 — Agent 는 그러면 브라우저를 열지 않고 실패로 닫는다.
+
+    이 job 이 ``agent_id`` 소유 in-flight 가 아니면(미존재/재할당/만료/종료) **fail-closed**
+    (``allowed=false``, reason=``payload_expired``) 로 응답해 오래된 lease 가 부수효과를 내지 못하게
+    한다(서버가 lease 소유 판단의 단일 소유처).
+    """
+
+    now = datetime.now(timezone.utc)
+    server_time = _iso_utc(now)
+    backend = _backend(request)
+    try:
+        record = await backend.in_flight_job(job_id=job_id, agent_id=agent_id, now=now)
+    except ValueError as exc:
+        raise _invalid_job_id_http_error() from exc
+    if record is None:
+        # 소유 in-flight 아님 → fail-closed(브라우저 열기 금지).
+        return {"allowed": False, "reason": "payload_expired", "server_time": server_time}
+    allowed, reason = preflight_decision(
+        job_type=record.type,
+        payload_json=record.payload_json,
+        now=now,
+    )
+    return {"allowed": allowed, "reason": reason, "server_time": server_time}
 
 
 @router.post("/{job_id}/events", status_code=HTTPStatus.ACCEPTED)

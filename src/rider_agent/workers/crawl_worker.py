@@ -52,9 +52,14 @@ ERROR_CRAWL_TIMEOUT = "CRAWL_TIMEOUT"
 ERROR_CRAWL_FAILURE = "CRAWL_FAILURE"
 ERROR_PLAINTEXT_SECRET_NOT_ALLOWED = "PLAINTEXT_SECRET_NOT_ALLOWED"
 ERROR_SECRET_REF_UNRESOLVED = "SECRET_REF_UNRESOLVED"
+# payload TTL 이 지난 stale job 을 profile/browser 준비 전에 거르는 defensive 가드(server
+# preflight 가 우회돼도 브라우저를 열지 않게 — Task 5 defense-in-depth). secret 0.
+ERROR_PAYLOAD_EXPIRED = "PAYLOAD_EXPIRED"
+REASON_PAYLOAD_EXPIRED = "payload_expired"
 
 QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
+_MAX_DIAGNOSTIC_MESSAGE_LENGTH = 800
 
 
 class SecretRefUnresolved(RuntimeError):
@@ -81,6 +86,7 @@ class CrawlJobPayload:
     verification_email_subject_keyword: str = ""
     verification_email_sender_keyword: str = ""
     coupang_auto_email_2fa_enabled: bool = False
+    expires_at: str = ""
 
 
 class CrawlWorker:
@@ -96,6 +102,7 @@ class CrawlWorker:
         profile_idle_ttl_seconds: float | None = None,
         log: Callable[[str], None] | None = None,
         process_boundary_enabled: bool = True,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._profile_manager = profile_manager
         self._uses_default_crawl_snapshot = crawl_snapshot is None
@@ -105,6 +112,7 @@ class CrawlWorker:
         self._profile_idle_ttl_seconds = profile_idle_ttl_seconds
         self._log = log
         self._process_boundary_enabled = process_boundary_enabled
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     def execute(self, job: ClaimedJob) -> JobResult:
         """Execute a supported crawl job or return unsupported for other types."""
@@ -114,6 +122,18 @@ class CrawlWorker:
 
         raw_payload = _raw_payload(job)
         payload = payload_from_job(job)
+        # payload TTL 이 지났으면 profile/browser 를 준비하기 전에 fail-fast(server preflight 가
+        # 우회돼도 stale job 이 브라우저를 열지 않게 — Task 5 defense-in-depth).
+        if _payload_expired(payload.expires_at, now=self._now()):
+            return make_failure_result(
+                ERROR_PAYLOAD_EXPIRED,
+                "crawl payload expired before profile prepare",
+                result_json={
+                    "target_id": payload.target_id,
+                    "platform": payload.platform,
+                    "reason": REASON_PAYLOAD_EXPIRED,
+                },
+            )
         # 옵션 B: 평문 자격증명을 허용하므로 bare-key 평문 거부 가드를 두지 않는다.
         if payload.timeout_seconds > 0:
             if self._should_use_process_boundary():
@@ -144,17 +164,15 @@ class CrawlWorker:
                         result_json={"target_id": payload.target_id, "platform": payload.platform},
                     )
                 except Exception as exc:  # noqa: BLE001 - process setup is fail-closed.
+                    if _is_target_validation_error(exc):
+                        return _target_validation_failure(payload, exc)
                     if _is_missing_data_error(exc):
                         return make_failure_result(
                             ERROR_PARSER_MISSING_DATA,
                             "required crawl data missing",
                             result_json={"target_id": payload.target_id, "platform": payload.platform},
                         )
-                    return make_failure_result(
-                        ERROR_CRAWL_FAILURE,
-                        "crawl failed",
-                        result_json={"target_id": payload.target_id, "platform": payload.platform},
-                    )
+                    return _crawl_failure(payload, exc)
 
                 timeout_cleanup_ran = False
 
@@ -261,17 +279,15 @@ class CrawlWorker:
                 result_json={"target_id": payload.target_id, "platform": payload.platform},
             )
         except Exception as exc:  # noqa: BLE001 - classify known parser failures, fail closed otherwise.
+            if _is_target_validation_error(exc):
+                return _target_validation_failure(payload, exc)
             if _is_missing_data_error(exc):
                 return make_failure_result(
                     ERROR_PARSER_MISSING_DATA,
                     "required crawl data missing",
                     result_json={"target_id": payload.target_id, "platform": payload.platform},
                 )
-            return make_failure_result(
-                ERROR_CRAWL_FAILURE,
-                "crawl failed",
-                result_json={"target_id": payload.target_id, "platform": payload.platform},
-            )
+            return _crawl_failure(payload, exc)
         finally:
             self._cleanup_profiles()
 
@@ -302,6 +318,13 @@ class CrawlWorker:
         return default_execute_job(job)
 
     def _prepare_config(self, job: ClaimedJob, payload: CrawlJobPayload) -> AppConfig:
+        # crawl-coupang-auth-separation Task 4 / Decision 2: 크롤 job 은 inline email 2FA 를
+        # 직접 하지 않는다. payload 에 ``coupang_auto_email_2fa_enabled=True`` 가 와도 강제로
+        # 끈다(자동 OTP/IMAP/로그인 제출 0) — 로그인 화면을 만나면 BrowserActionRequiredError →
+        # AUTH_REQUIRED 로 표면화하고, 자동복구는 별도 ``AUTH_COUPANG_2FA`` job 이 담당한다.
+        # ``coupang_auto_email_2fa_enabled`` 는 crawl payload 에서 deprecated.
+        crawl_payload = dataclasses.replace(payload, coupang_auto_email_2fa_enabled=False)
+
         def build_config(
             *,
             tenant_id: str,
@@ -310,7 +333,7 @@ class CrawlWorker:
             user_data_dir: Path,
         ) -> AppConfig:
             return _build_config(
-                payload,
+                crawl_payload,
                 cdp_url=cdp_url,
                 user_data_dir=user_data_dir,
                 secret_resolver=self._secret_resolver,
@@ -432,7 +455,25 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
             if "coupang_auto_email_2fa_enabled" in raw
             else False
         ),
+        expires_at=str(raw.get("expires_at") or "").strip(),
     )
+
+
+def _payload_expired(expires_at: str, *, now: datetime) -> bool:
+    """payload ``expires_at``(ISO 8601 ``…Z``) 가 지났는가(없거나 파싱 실패면 False — 보수적)."""
+
+    text = str(expires_at or "").strip()
+    if not text:
+        return False
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return now >= parsed
 
 
 def _raw_payload(job: ClaimedJob) -> dict[str, Any]:
@@ -619,6 +660,54 @@ def _auth_failure(payload: CrawlJobPayload, auth_state: str) -> JobResult:
     )
 
 
+def _target_validation_failure(payload: CrawlJobPayload, exc: BaseException) -> JobResult:
+    return make_failure_result(
+        ERROR_TARGET_VALIDATION_FAILURE,
+        _exception_summary(exc),
+        result_json={
+            "target_id": payload.target_id,
+            "platform": payload.platform,
+            "auth_state": AUTH_STATE_CENTER_MISMATCH,
+            "mismatch": ERROR_CENTER_MISMATCH,
+            "diagnostics": {"agent_error": _exception_diagnostics(exc)},
+        },
+    )
+
+
+def _crawl_failure(payload: CrawlJobPayload, exc: BaseException) -> JobResult:
+    return make_failure_result(
+        ERROR_CRAWL_FAILURE,
+        _exception_summary(exc),
+        result_json={
+            "target_id": payload.target_id,
+            "platform": payload.platform,
+            "diagnostics": {"agent_error": _exception_diagnostics(exc)},
+        },
+    )
+
+
+def _exception_summary(exc: BaseException) -> str:
+    text = _redacted_exception_text(exc)
+    if text:
+        return f"{exc.__class__.__name__}: {text}"
+    return exc.__class__.__name__
+
+
+def _exception_diagnostics(exc: BaseException) -> dict[str, str]:
+    diagnostics = {"type": exc.__class__.__name__}
+    text = _redacted_exception_text(exc)
+    if text:
+        diagnostics["message_redacted"] = text
+    return diagnostics
+
+
+def _redacted_exception_text(exc: BaseException) -> str:
+    text = redact(str(exc)).strip()
+    if len(text) <= _MAX_DIAGNOSTIC_MESSAGE_LENGTH:
+        return text
+    return text[:_MAX_DIAGNOSTIC_MESSAGE_LENGTH] + "...<truncated>"
+
+
 def _display_name_mismatch(raw: Any, expected: str) -> bool:
     if not expected:
         return False
@@ -656,6 +745,12 @@ def _iso_utc(dt: datetime) -> str:
 
 def _is_missing_data_error(exc: BaseException) -> bool:
     return exc.__class__.__name__ == "MissingPerformanceDataError"
+
+
+def _is_target_validation_error(exc: BaseException) -> bool:
+    if exc.__class__.__name__ == "CoupangCenterValidationError":
+        return True
+    return "센터 검증 실패" in str(exc)
 
 
 _SENSITIVE_SNAPSHOT_KEY_PARTS = frozenset(

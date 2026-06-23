@@ -51,11 +51,57 @@ recover_coupang_mailbox = agent_email_2fa.recover_coupang_mailbox
 resolve_mailbox_app_password = agent_email_2fa.resolve_mailbox_app_password
 store_mailbox_app_password = agent_email_2fa.store_mailbox_app_password
 
+# crawl-coupang-auth-separation Task 3 — AUTH_COUPANG_2FA job 실행자 어휘.
+CAPABILITY_AUTH_COUPANG_2FA = agent_email_2fa.CAPABILITY_AUTH_COUPANG_2FA
+AUTH_STATE_ACTIVE = agent_email_2fa.AUTH_STATE_ACTIVE
+AUTH_STATE_AUTH_REQUIRED = agent_email_2fa.AUTH_STATE_AUTH_REQUIRED
+AUTH_STATE_USER_ACTION_PENDING = agent_email_2fa.AUTH_STATE_USER_ACTION_PENDING
+ERROR_AUTH_REQUIRED = agent_email_2fa.ERROR_AUTH_REQUIRED
+RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = agent_email_2fa.RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
+REASON_SECRET_REF_UNRESOLVED = agent_email_2fa.REASON_SECRET_REF_UNRESOLVED
+execute_auth_coupang_2fa_job = agent_email_2fa.execute_auth_coupang_2fa_job
+build_coupang_auth_execute_job = agent_email_2fa.build_coupang_auth_execute_job
+
+from rider_agent.job_loop import ClaimedJob
+
 FAKE_MBX_1 = "mailbox-fake-1"
 FAKE_MBX_2 = "mailbox-fake-2"
 FAKE_APP_PASSWORD = "fake app password value"
 FAKE_OTP = "otp-fake-654321"
 FAKE_EMAIL = "operator@example.com"
+
+# AUTH_COUPANG_2FA job 의 ref 해소용 가짜 secret_resolver(평문은 테스트 안에서만).
+_FAKE_SECRET_MAP = {
+    "coupang-login-id": "coupang-id-value",
+    "coupang-login-password": "coupang-pw-value",
+    "mailbox-ref": FAKE_EMAIL,
+    "mail-app-password-ref": FAKE_APP_PASSWORD,
+}
+
+
+def _auth_2fa_job(*, target_id="target-1", account_id="account-1", payload=None):
+    base = {
+        "tenant_id": "tenant-fake-1",
+        "target_id": target_id,
+        "platform": "coupang",
+        "platform_account_id": account_id,
+        "primary_url": "https://partner.coupangeats.com/page/rider-performance",
+        "expected_display_name": "쿠팡상점A",
+        "coupang_login_id_ref": "coupang-login-id",
+        "coupang_login_password_ref": "coupang-login-password",
+        "verification_email_address_ref": "mailbox-ref",
+        "verification_email_app_password_ref": "mail-app-password-ref",
+        "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
+    }
+    if payload:
+        base.update(payload)
+    return ClaimedJob(
+        job_id="job-auth-2fa-1",
+        type=CAPABILITY_AUTH_COUPANG_2FA,
+        target_id=target_id,
+        lease_expires_at=5_000_000_000.0,
+        payload=base,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
@@ -459,3 +505,190 @@ def test_module_imports_are_sync_unidirectional_rider_crawl_only():
     assert "rider_server" not in roots
     third_party = roots - set(sys.stdlib_module_names) - {"rider_agent", "__future__"}
     assert third_party <= {"rider_crawl"}, third_party
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 3 — AUTH_COUPANG_2FA job 실행자(기존 primitive 승격 · 결과 표면화 · secret 0)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_execute_auth_coupang_2fa_job_returns_active_on_recovered():
+    """Successful email 2FA reports account ACTIVE."""
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=lambda: True,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.error_code is None
+    assert result.result_json == {
+        "target_id": "target-1",
+        "platform": "coupang",
+        "platform_account_id": "account-1",
+        "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
+        "auth_state": AUTH_STATE_ACTIVE,
+        "auth_recovery_state": STATE_RECOVERED,
+    }
+
+
+def test_execute_auth_coupang_2fa_job_maps_false_to_user_action_pending():
+    """CAPTCHA/abnormal/manual screens stop without retry."""
+    calls = []
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=lambda: calls.append(1) or False,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    # queue retry category 는 AUTH_REQUIRED, account coarse gate 는 USER_ACTION_PENDING.
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_USER_ACTION_PENDING
+    assert result.result_json["auth_recovery_state"] == STATE_USER_ACTION_REQUIRED
+    assert result.result_json["reason"] == REASON_CAPTCHA_OR_ABNORMAL
+    assert result.result_json["recovery_mode"] == RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
+    assert calls == [1]  # false → 즉시 멈춤(재시도 0)
+
+
+def test_execute_auth_coupang_2fa_job_maps_mail_auth_to_auth_required_detail():
+    """Mailbox re-auth is visible as auth_recovery_state without leaking secrets."""
+
+    class _EmailAuthError(RuntimeError):
+        pass
+
+    def recover():
+        raise _EmailAuthError(f"auth failed pw={FAKE_APP_PASSWORD}")
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=recover,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        is_email_auth_required=lambda exc: isinstance(exc, _EmailAuthError),
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_EMAIL_AUTH_REQUIRED
+    assert result.result_json["reason"] == REASON_EMAIL_AUTH
+
+    blob = json.dumps(
+        {
+            "result_json": result.result_json,
+            "metrics": result.metrics,
+            "error_message_redacted": result.error_message_redacted,
+        },
+        ensure_ascii=False,
+    )
+    assert FAKE_APP_PASSWORD not in blob
+    assert FAKE_EMAIL not in blob  # 평문 이메일은 결과에 없다(ref 만)
+
+
+def test_execute_auth_coupang_2fa_job_mail_delay_is_recovery_failed():
+    """Slow mail beyond bounded timeout reports RECOVERY_FAILED / verification_mail_delayed."""
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=lambda: (_ for _ in ()).throw(RuntimeError("mail not arrived")),
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=1,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] == REASON_MAIL_DELAY
+
+
+def test_execute_auth_coupang_2fa_job_fails_closed_when_secret_ref_unresolved():
+    """Missing required refs fail closed with AUTH_REQUIRED + fixed reason; no recovery attempt."""
+    recover_calls = []
+    # 핸들 모양(dpapi:)인데 resolver 가 해소하지 못함 → verification_email_address 빈값.
+    job = _auth_2fa_job(
+        payload={"verification_email_address_ref": "dpapi:mailbox-handle-unresolvable"}
+    )
+    result = execute_auth_coupang_2fa_job(
+        job,
+        recover=lambda: recover_calls.append(1) or True,
+        secret_resolver=lambda _ref: None,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] == REASON_SECRET_REF_UNRESOLVED
+    assert recover_calls == []  # ref 미해소 → 브라우저/IMAP 미접근
+
+
+def test_auth_coupang_2fa_job_uses_mailbox_lock_once():
+    """Same mailbox is serialized and recovery is bounded."""
+    reg = MailboxLockRegistry()
+    state = {"active": 0, "max": 0}
+    guard = threading.Lock()
+
+    def recover():
+        with guard:
+            state["active"] += 1
+            state["max"] = max(state["max"], state["active"])
+        time.sleep(0.02)
+        with guard:
+            state["active"] -= 1
+        return True
+
+    results = []
+
+    def worker():
+        results.append(
+            execute_auth_coupang_2fa_job(
+                _auth_2fa_job(),
+                recover=recover,
+                secret_resolver=_FAKE_SECRET_MAP.get,
+                locks=reg,
+                sleep=lambda _s: None,
+            )
+        )
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # 같은 mailbox 는 직렬화 — 동시에 두 번 recover 가 돌지 않는다.
+    assert state["max"] == 1
+    assert all(r.status == JOB_STATUS_SUCCESS for r in results)
+
+
+def test_build_coupang_auth_execute_job_routes_only_auth_coupang_2fa():
+    """Router intercepts AUTH_COUPANG_2FA and passes everything else to fallback."""
+    fallback_jobs = []
+
+    def fallback(job):
+        fallback_jobs.append(job)
+        from rider_agent.job_loop import make_success_result
+
+        return make_success_result(result_json={"fallback": True})
+
+    execute = build_coupang_auth_execute_job(
+        fallback=fallback,
+        recover=lambda: True,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    auth_result = execute(_auth_2fa_job())
+    other = ClaimedJob(job_id="j2", type="OPEN_AUTH_BROWSER", target_id="t2", payload={})
+    other_result = execute(other)
+
+    assert auth_result.result_json["auth_state"] == AUTH_STATE_ACTIVE
+    assert auth_result.result_json["auth_recovery_state"] == STATE_RECOVERED
+    assert fallback_jobs == [other]  # AUTH_COUPANG_2FA 외 type 은 fallback 으로
+    assert other_result.result_json == {"fallback": True}

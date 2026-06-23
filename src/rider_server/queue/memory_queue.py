@@ -36,6 +36,7 @@ from .states import (
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
     assert_transition,
+    stale_recovery_reason,
 )
 
 STALE_LEASE_ERROR_CODE = "CRAWL_TIMEOUT"
@@ -298,14 +299,24 @@ class InMemoryQueueBackend(QueueBackend):
         recovered = 0
         limit = batch_size if batch_size is not None and batch_size > 0 else None
         with self._lock:
+            # (1) 만료 lease 의 CLAIMED/RUNNING job. (2) payload TTL 이 지난 **PENDING** scheduled
+            # crawl/auth job — 서버 downtime 뒤 누적된 stale backlog 가 한 번에 claim 되지 않게
+            # 미리 terminal 종료한다(Task 6). PENDING 은 lease 가 없으니 payload expires_at 로만
+            # stale 판정한다.
             stale_jobs = [
                 job
                 for job in self._jobs.values()
-                if job.status in (
-                    JOB_STATUS_CLAIMED,
-                    JOB_STATUS_RUNNING,
+                if (
+                    job.status in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                    and _lease_expired(job.lease_expires_at, now)
                 )
-                and _lease_expired(job.lease_expires_at, now)
+                or (
+                    job.status == JOB_STATUS_PENDING
+                    and stale_recovery_reason(
+                        job_type=job.type, payload_json=job.payload_json, now=now
+                    )
+                    is not None
+                )
             ]
             stale_jobs.sort(
                 key=lambda job: (
@@ -315,9 +326,23 @@ class InMemoryQueueBackend(QueueBackend):
             )
             for job in stale_jobs[:limit]:
                 next_attempt = job.attempts + 1
+                # 브라우저를 여는 interactive job / scheduled crawl 은 payload TTL 이 지났으면
+                # 재시도하지 않고 terminal FAILED + safe reason 으로 닫는다(무제한 재실행 차단).
+                # AUTH_COUPANG_2FA 는 CLAIMED/RUNNING lease 만료 자체로 terminal 종료(중복 OTP 방지).
+                stale_reason = stale_recovery_reason(
+                    job_type=job.type,
+                    payload_json=job.payload_json,
+                    now=now,
+                    job_status=job.status,
+                )
+                # PENDING job 은 lease 만료 retry 대상이 아니다 — stale 이면 terminal 종료만 한다.
                 retry_decision = (
                     self._retry_decider(STALE_LEASE_ERROR_CODE, next_attempt, now)
-                    if self._retry_decider is not None
+                    if (
+                        self._retry_decider is not None
+                        and stale_reason is None
+                        and job.status in (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+                    )
                     else None
                 )
                 if retry_decision is not None:
@@ -329,6 +354,9 @@ class InMemoryQueueBackend(QueueBackend):
                     job.status = JOB_STATUS_FAILED
                     job.run_after = None
                     job.completed_at = now
+                    if stale_reason is not None:
+                        existing = job.result_json if isinstance(job.result_json, dict) else {}
+                        job.result_json = {**existing, "reason": stale_reason}
                 job.attempts = next_attempt
                 job.agent_id = None
                 job.lease_expires_at = None

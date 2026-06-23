@@ -14,7 +14,7 @@ fake 값만(실제 토큰/전화/이메일/chat_id 형태 금지). 평면 ``test
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 
 import pytest
@@ -34,6 +34,7 @@ from rider_server.main import create_app
 from rider_server.queue.memory_queue import InMemoryQueueBackend
 from rider_server.queue.states import (
     InvalidJobTransition,
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_OPEN_AUTH_BROWSER,
     JOB_STATUS_FAILED,
@@ -693,6 +694,8 @@ def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
         "timeout_seconds": 60,
         "parser_version": "baemin-v1",
         "job_type": "OPEN_AUTH_BROWSER",
+        "requested_at": "2026-06-14T12:00:00Z",
+        "expires_at": "2026-06-14T12:12:00Z",
         "login_id_ref": "login-id-ref",
         "login_password_ref": "login-password-ref",
     }
@@ -700,7 +703,41 @@ def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
     assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
-def test_start_auth_enqueues_coupang_open_auth_browser_with_email_2fa_refs() -> None:
+def test_start_auth_payload_contains_requested_at_and_expires_at() -> None:
+    """OPEN_AUTH_BROWSER carries a short operator-intent TTL."""
+
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account())
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["job_type"] == "OPEN_AUTH_BROWSER"
+    # requested_at == injected at(분리된 시간 기준 — server/Agent 공용 stale 판정).
+    assert payload["requested_at"] == "2026-06-14T12:00:00Z"
+    requested_at = datetime.fromisoformat(payload["requested_at"].replace("Z", "+00:00"))
+    expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+    delta = expires_at - requested_at
+    assert timedelta(minutes=10) <= delta <= timedelta(minutes=15)
+    # start_auth 는 CRAWL_COUPANG job 을 만들지 않는다(인증 시작 != scheduled crawl).
+    assert all(
+        snap.type != JOB_TYPE_CRAWL_COUPANG
+        for snap in (queue.job_snapshot(job_id),)
+        if snap is not None
+    )
+
+
+def test_start_auth_for_coupang_enqueues_auth_coupang_2fa_when_auto_info_complete() -> None:
+    """Coupang auto auth uses AUTH_COUPANG_2FA, not OPEN_AUTH_BROWSER.
+
+    crawl-coupang-auth-separation Task 5: 로그인 ID/PW + 이메일 주소/앱비번이 모두 있으면 전용
+    인증 job 을 enqueue 한다. payload 는 recovery_mode 를 담고 자동 OTP/비번 평문은 담지 않는다.
+    """
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
     repo.seed_platform_account(
@@ -732,16 +769,51 @@ def test_start_auth_enqueues_coupang_open_auth_browser_with_email_2fa_refs() -> 
         "browser_profile_ref": "profile:mt-1",
         "timeout_seconds": 60,
         "parser_version": "coupang-v1",
-        "job_type": "OPEN_AUTH_BROWSER",
+        "job_type": "AUTH_COUPANG_2FA",
+        "requested_at": "2026-06-14T12:00:00Z",
+        "expires_at": "2026-06-14T12:12:00Z",
         "coupang_login_id_ref": "coupang-login-id-ref",
         "coupang_login_password_ref": "coupang-login-password-ref",
         "verification_email_address_ref": "mailbox-ref",
         "verification_email_app_password_ref": "mail-app-password-ref",
         "verification_email_subject_keyword": "보안코드",
         "verification_email_sender_keyword": "wing",
-        "coupang_auto_email_2fa_enabled": True,
+        "recovery_mode": "coupang_auto_email_2fa",
     }
+    # 자동 OTP/비번/앱비번 평문은 담기지 않는다(ref 만).
+    assert "coupang_auto_email_2fa_enabled" not in job.payload_json
+    assert "otp" not in job.payload_json
     assert repo.audits[-1].action == "AUTH_START"
+    assert repo.audits[-1].diff_redacted["job_type"] == "AUTH_COUPANG_2FA"
+
+
+def test_start_auth_for_coupang_manual_fallback_uses_open_auth_browser() -> None:
+    """Manual browser auth remains available when auto 2FA cannot run.
+
+    로그인 ID/PW 는 있으나 이메일 2FA 정보가 없으면 OPEN_AUTH_BROWSER 수동 폴백(자동 2FA 플래그·
+    recovery_mode 없음).
+    """
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-login-id-ref",
+            password="coupang-login-password-ref",
+        )
+    )
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json["job_type"] == "OPEN_AUTH_BROWSER"
+    assert job.payload_json["platform"] == "coupang"
+    assert job.payload_json["coupang_login_id_ref"] == "coupang-login-id-ref"
+    assert "coupang_auto_email_2fa_enabled" not in job.payload_json
+    assert "recovery_mode" not in job.payload_json
     assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
@@ -753,6 +825,20 @@ def test_start_auth_missing_credentials_is_rejected() -> None:
     svc = _service(repo, queue)
 
     with pytest.raises(ValueError, match="배민 로그인 ID/PW가 필요합니다"):
+        _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    assert queue.events == []
+    assert repo.audits == []
+
+
+def test_start_auth_missing_coupang_login_is_rejected() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account(platform=Platform.COUPANG, password=""))
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    with pytest.raises(ValueError, match="쿠팡 로그인 ID/PW가 필요합니다"):
         _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
 
     assert queue.events == []
@@ -872,7 +958,7 @@ def test_route_auth_start_triggers_baemin_open_auth_browser() -> None:
     assert "인증 시작" in resp.text
 
 
-def test_route_auth_start_triggers_coupang_open_auth_browser() -> None:
+def test_route_auth_start_triggers_coupang_auth_coupang_2fa() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
     repo.seed_platform_account(
@@ -891,6 +977,7 @@ def test_route_auth_start_triggers_coupang_open_auth_browser() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert "인증 시작" in resp.text
+    # 크롤 capability 만 가진 agent 는 이 job 을 claim 하지 못한다(인증 시작 != scheduled crawl).
     assert (
         _run(
             queue.claim(
@@ -906,18 +993,19 @@ def test_route_auth_start_triggers_coupang_open_auth_browser() -> None:
     claimed = _run(
         queue.claim(
             agent_id="agent-auth",
-            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            capabilities=[JOB_TYPE_AUTH_COUPANG_2FA],
             max_jobs=1,
             lease_seconds=60,
             now=_NOW,
         )
     )
     assert len(claimed) == 1
-    assert claimed[0].type == JOB_TYPE_OPEN_AUTH_BROWSER
-    assert claimed[0].payload_json["job_type"] == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert claimed[0].type == JOB_TYPE_AUTH_COUPANG_2FA
+    assert claimed[0].payload_json["job_type"] == JOB_TYPE_AUTH_COUPANG_2FA
     assert claimed[0].payload_json["platform"] == "coupang"
-    assert claimed[0].payload_json["coupang_auto_email_2fa_enabled"] is True
+    assert claimed[0].payload_json["recovery_mode"] == "coupang_auto_email_2fa"
     assert claimed[0].payload_json["verification_email_address_ref"] == "mailbox-ref"
+    assert "coupang_auto_email_2fa_enabled" not in claimed[0].payload_json
 
 
 def test_route_auth_start_missing_credentials_is_400() -> None:
@@ -935,7 +1023,9 @@ def test_route_auth_start_missing_credentials_is_400() -> None:
     assert queue.events == []
 
 
-def test_route_auth_start_missing_coupang_credentials_returns_action_fragment() -> None:
+def test_route_auth_start_coupang_without_email_2fa_falls_back_to_manual_browser() -> None:
+    # crawl-coupang-auth-separation Task 5: 이메일 2FA 정보가 없어도 로그인 ID/PW 가 있으면
+    # 수동 브라우저 열기(OPEN_AUTH_BROWSER)로 폴백한다(에러 아님 — 사람이 직접 조치 가능).
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())
     repo.seed_platform_account(_platform_account(platform=Platform.COUPANG))
@@ -944,9 +1034,34 @@ def test_route_auth_start_missing_coupang_credentials_returns_action_fragment() 
 
     resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
 
+    assert resp.status_code == HTTPStatus.OK
+    assert "인증 시작" in resp.text
+    claimed = _run(
+        queue.claim(
+            agent_id="agent-auth",
+            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            max_jobs=1,
+            lease_seconds=60,
+            now=_NOW,
+        )
+    )
+    assert len(claimed) == 1
+    assert claimed[0].type == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert "coupang_auto_email_2fa_enabled" not in claimed[0].payload_json
+
+
+def test_route_auth_start_missing_coupang_login_returns_action_fragment() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(_platform_account(platform=Platform.COUPANG, password=""))
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
+
+    resp = client.post("/admin/targets/mt-1/auth-start?tenant=tn-1", data=_confirmed())
+
     assert resp.status_code == HTTPStatus.BAD_REQUEST
     assert 'class="action-result err"' in resp.text
-    assert "쿠팡 자동인증 정보가 필요합니다" in resp.text
+    assert "쿠팡 로그인 ID/PW가 필요합니다" in resp.text
     assert repo.audits == []
     assert queue.events == []
 

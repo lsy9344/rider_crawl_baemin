@@ -47,7 +47,13 @@ from rider_server.queue.states import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
+    JOB_TYPE_AUTH_COUPANG_2FA,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
 )
+
+#: 인증 시작 계열 job type — 같은 대상에 둘 중 하나라도 진행 중이면 중복 인증 작업을 막는다
+#: (auto AUTH_COUPANG_2FA 와 manual OPEN_AUTH_BROWSER 가 동시에 돌지 않게 — Task 5 Step 3).
+_AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
 
 
 def _sub_to_domain(row: SubscriptionRow) -> Subscription:
@@ -287,12 +293,17 @@ class PostgresAdminActionRepository:
                     .limit(1)
                 )
             ).scalar_one_or_none()
+            # 인증 시작 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER)은 둘을 한 묶음으로 중복 차단한다.
+            # 그 외 job(test crawl 등)은 기존처럼 같은 type 만 본다.
+            duplicate_types = (
+                _AUTH_JOB_TYPES if job_type in _AUTH_JOB_TYPES else (job_type,)
+            )
             existing = (
                 await session.execute(
                     select(JobRow.id)
                     .where(
                         JobRow.target_id == target_uuid,
-                        JobRow.type == job_type,
+                        JobRow.type.in_(duplicate_types),
                         JobRow.status.in_(active_statuses),
                     )
                     .limit(1)

@@ -34,6 +34,13 @@ class PlatformAccount(Base):
     verification_email_subject_keyword: Mapped[str] = mapped_column(String, nullable=False, default="인증번호")
     verification_email_sender_keyword: Mapped[str] = mapped_column(String, nullable=False, default="coupang")
     auth_state: Mapped[str] = mapped_column(String, nullable=False)  # BaeminAuthState 값
+    # ── Coupang 자동 복구 상태(0022 마이그레이션, additive) ─────────────────────
+    # "한 번만 자동 복구 + 실패 뒤 cooldown" 을 계정 단위로 강제하는 시간 facts. nullable=즉시
+    # 복구 가능/시도 이력 없음. scheduler 가 auto_recovery_cooldown_until 로 enqueue 를 막고,
+    # result ingest 가 복구 결과로 이 컬럼들을 셋/클리어한다(secret 0 — 시각만).
+    auto_recovery_attempted_at: Mapped[datetime | None] = ts(nullable=True)
+    auto_recovery_failed_at: Mapped[datetime | None] = ts(nullable=True)
+    auto_recovery_cooldown_until: Mapped[datetime | None] = ts(nullable=True)
 
 
 class MonitoringTarget(Base):

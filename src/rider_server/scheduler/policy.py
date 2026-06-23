@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from rider_server.domain import (
+    BaeminAuthState,
     CustomerLifecycleState,
     FailureCategory,
     Platform,
@@ -131,6 +132,97 @@ def decide_schedule(
     return SchedulerDecision(
         allow_new_crawl_job=True, warn_admin=gate.warn_admin, reason=gate.reason
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task 3 — 인증 상태 게이트 + Coupang 자동 복구(한 번만 + cooldown)
+# ══════════════════════════════════════════════════════════════════════════
+
+# 인증 게이트 차단/허용 사유(평문 상수, secret 0). service 의 REASON_* 와 같은 문자열로 reconcile.
+AUTH_GATE_REASON_OK = "AUTH_OK"
+AUTH_GATE_REASON_RECOVERY = "AUTH_RECOVERY"
+AUTH_GATE_REASON_REQUIRED_NO_AUTO_RECOVERY = "AUTH_REQUIRED_NO_AUTO_RECOVERY"
+AUTH_GATE_REASON_USER_ACTION_PENDING = "AUTH_STATE_USER_ACTION_PENDING"
+AUTH_GATE_REASON_BLOCKED_OR_CAPTCHA = "AUTH_STATE_BLOCKED_OR_CAPTCHA"
+AUTH_GATE_REASON_UNKNOWN = "AUTH_STATE_UNKNOWN"
+AUTH_GATE_REASON_COOLDOWN = "COUPANG_AUTO_RECOVERY_COOLDOWN"
+
+# 인증이 정상이라 normal scheduled crawl 을 그대로 허용하는 auth_state 집합.
+# CENTER_MISMATCH 는 "로그인은 됐는데 센터/상점 검증 실패"라 인증 문제가 아니다 — crawl 은 돌고
+# target validation 결과로 운영자가 별도 조치한다(인증 게이트로 막지 않는다).
+_AUTH_OK_STATES: frozenset[str] = frozenset(
+    {
+        BaeminAuthState.ACTIVE.value,
+        BaeminAuthState.AUTH_VERIFIED.value,
+        BaeminAuthState.CENTER_MISMATCH.value,
+    }
+)
+
+
+@dataclass(frozen=True)
+class AuthGateDecision:
+    """인증 상태 게이트 합성 결정(불변).
+
+    ``allow`` 가 True 면 enqueue 허용. ``recovery`` 가 True 면 그 enqueue 는 normal crawl 이 아니라
+    Coupang 자동 이메일 2FA **인증 job(AUTH_COUPANG_2FA)** 이다(crawl-coupang-auth-separation
+    Decision 6 — recovery crawl 표현을 인증 job 으로 대체). ``reason`` 은 ``UPPER_SNAKE`` 기계가독
+    코드(secret 0).
+    """
+
+    allow: bool
+    recovery: bool
+    reason: str
+
+
+def decide_auth_gate(
+    *,
+    auth_state: str | None,
+    platform: Platform | str,
+    auto_2fa_complete: bool,
+    cooldown_until: datetime | None,
+    now: datetime,
+) -> AuthGateDecision:
+    """계정 인증 상태로 scheduled crawl enqueue 허용 여부를 판정한다(Task 3).
+
+    - ``ACTIVE``/``AUTH_VERIFIED``/``CENTER_MISMATCH`` → 허용(normal crawl).
+    - ``USER_ACTION_PENDING`` / ``BLOCKED_OR_CAPTCHA`` → 차단(운영자 조치 필요 — 자동 재시도 0).
+    - ``UNKNOWN`` 또는 미매핑 → 차단(fail-closed).
+    - ``AUTH_REQUIRED``:
+        * Coupang + 자동 이메일 2FA 설정 완전(``auto_2fa_complete``) + cooldown 없음
+          → **자동 복구 인증 job(AUTH_COUPANG_2FA) 허용**(``allow=True, recovery=True``).
+            crawl 이 아니라 전용 인증 job 을 만든다(Decision 6).
+        * cooldown 중(``cooldown_until > now``) → 차단(``COUPANG_AUTO_RECOVERY_COOLDOWN``).
+        * 그 외(Baemin·설정 불완전) → 차단(``AUTH_REQUIRED_NO_AUTO_RECOVERY``) — 자동 복구는
+          사람 개입이 필요하므로 scheduled crawl 도 자동 인증 job 도 만들지 않는다.
+    """
+
+    normalized = str(auth_state or "").strip().upper() or BaeminAuthState.UNKNOWN.value
+    if normalized in _AUTH_OK_STATES:
+        return AuthGateDecision(allow=True, recovery=False, reason=AUTH_GATE_REASON_OK)
+    if normalized == BaeminAuthState.USER_ACTION_PENDING.value:
+        return AuthGateDecision(
+            allow=False, recovery=False, reason=AUTH_GATE_REASON_USER_ACTION_PENDING
+        )
+    if normalized == BaeminAuthState.BLOCKED_OR_CAPTCHA.value:
+        return AuthGateDecision(
+            allow=False, recovery=False, reason=AUTH_GATE_REASON_BLOCKED_OR_CAPTCHA
+        )
+    if normalized == BaeminAuthState.AUTH_REQUIRED.value:
+        platform_key = platform.value if isinstance(platform, Platform) else str(platform or "")
+        is_coupang = platform_key.strip().casefold() == Platform.COUPANG.value.casefold()
+        if not (is_coupang and auto_2fa_complete):
+            return AuthGateDecision(
+                allow=False,
+                recovery=False,
+                reason=AUTH_GATE_REASON_REQUIRED_NO_AUTO_RECOVERY,
+            )
+        if cooldown_until is not None and now < cooldown_until:
+            return AuthGateDecision(
+                allow=False, recovery=False, reason=AUTH_GATE_REASON_COOLDOWN
+            )
+        return AuthGateDecision(allow=True, recovery=True, reason=AUTH_GATE_REASON_RECOVERY)
+    # UNKNOWN 및 그 외 미정의 상태는 fail-closed 차단.
+    return AuthGateDecision(allow=False, recovery=False, reason=AUTH_GATE_REASON_UNKNOWN)
 
 
 # ══════════════════════════════════════════════════════════════════════════

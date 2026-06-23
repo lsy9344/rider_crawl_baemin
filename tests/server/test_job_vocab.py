@@ -26,6 +26,11 @@ from rider_server.queue.states import (
     JOB_STATUS_SUCCEEDED,
     JOB_STATUSES,
     JOB_TYPES,
+    RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+    RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+    RESULT_REASON_PAYLOAD_EXPIRED,
+    RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+    RESULT_REASON_STALE_CRAWL_SKIPPED,
     InvalidJobTransition,
     UnknownAgentStatus,
     assert_transition,
@@ -43,8 +48,8 @@ _LEGACY_NAMES = {"CRAWL", "RENDER", "DISPATCH_TELEGRAM", "BAEMIN_AUTH_OPEN"}
 
 def test_job_types_mirror_agent_default_capabilities():
     # 문자열 값이 1:1 일치(import 강결합이 아니라 값 미러 — 같은 문자열이어야 claim 매칭됨).
+    # count-lock 은 두지 않는다(superset 허용) — 후속 type 확장 시 이 단언만 같이 자란다.
     assert set(JOB_TYPES) == set(DEFAULT_CAPABILITIES)
-    assert len(JOB_TYPES) == 6
 
 
 def test_canonical_job_types_exact_set():
@@ -53,9 +58,23 @@ def test_canonical_job_types_exact_set():
         "CRAWL_COUPANG",
         "AUTH_CHECK",
         "OPEN_AUTH_BROWSER",
+        "AUTH_COUPANG_2FA",
         "KAKAO_SEND",
         "CAPTURE_DIAGNOSTIC",
     }
+
+
+def test_auth_coupang_2fa_vocabulary_is_mirrored_between_server_and_agent():
+    # crawl-coupang-auth-separation Task 1: 서버 job type 과 Agent capability 가 같은 문자열로
+    # AUTH_COUPANG_2FA 를 이해해야 claim 매칭이 된다(import 강결합 금지 — 값만 미러).
+    from rider_agent.heartbeat import CAPABILITY_AUTH_COUPANG_2FA
+    from rider_server.queue.states import JOB_TYPE_AUTH_COUPANG_2FA
+
+    assert JOB_TYPE_AUTH_COUPANG_2FA == "AUTH_COUPANG_2FA"
+    assert CAPABILITY_AUTH_COUPANG_2FA == "AUTH_COUPANG_2FA"
+    assert JOB_TYPE_AUTH_COUPANG_2FA == CAPABILITY_AUTH_COUPANG_2FA
+    assert "AUTH_COUPANG_2FA" in JOB_TYPES
+    assert "AUTH_COUPANG_2FA" in DEFAULT_CAPABILITIES
 
 
 def test_no_legacy_job_type_names():
@@ -117,6 +136,47 @@ def test_succeeded_is_terminal():
         assert not is_allowed_transition(JOB_STATUS_SUCCEEDED, target)
     with pytest.raises(InvalidJobTransition):
         assert_transition(JOB_STATUS_SUCCEEDED, JOB_STATUS_PENDING)
+
+
+def test_pending_to_failed_allowed_for_stale_backlog_cleanup():
+    # Task 6: payload TTL 만료 PENDING scheduled crawl 을 recovery 가 terminal 종료한다.
+    assert is_allowed_transition(JOB_STATUS_PENDING, JOB_STATUS_FAILED)
+
+
+# ── Task 1: stale/expired job safe reason vocabulary(secret 0 분류 코드) ───────────
+
+
+def test_safe_result_reason_constants_are_machine_readable_and_distinct():
+    reasons = [
+        RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+        RESULT_REASON_STALE_CRAWL_SKIPPED,
+        RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+        RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+        RESULT_REASON_PAYLOAD_EXPIRED,
+    ]
+    # 모두 distinct, 비어있지 않은 소문자 snake-case 분류 코드.
+    assert len(set(reasons)) == len(reasons)
+    for reason in reasons:
+        assert reason and reason == reason.strip()
+        assert " " not in reason
+    # 정본 값(server/Agent/문서가 같은 문자열을 쓴다 — 중복 정의 금지).
+    assert RESULT_REASON_STALE_AUTH_JOB_EXPIRED == "stale_auth_job_expired"
+    assert RESULT_REASON_STALE_CRAWL_SKIPPED == "stale_crawl_skipped"
+    assert RESULT_REASON_PAYLOAD_EXPIRED == "payload_expired"
+
+
+def test_safe_result_reasons_contain_no_obvious_secret_tokens():
+    # tenant/account/email/password/code 같은 secret 값을 담지 않는다(분류 코드만).
+    forbidden = ("tenant", "account", "email", "password", "@", "token")
+    for reason in (
+        RESULT_REASON_STALE_AUTH_JOB_EXPIRED,
+        RESULT_REASON_STALE_CRAWL_SKIPPED,
+        RESULT_REASON_CRAWL_RECOVERY_COOLDOWN,
+        RESULT_REASON_CRAWL_RECOVERY_NOT_ALLOWED,
+        RESULT_REASON_PAYLOAD_EXPIRED,
+    ):
+        lowered = reason.lower()
+        assert not any(part in lowered for part in forbidden)
 
 
 # ── 단방향 import: rider_server.queue/api 는 rider_agent 를 import 하지 않는다 ──────

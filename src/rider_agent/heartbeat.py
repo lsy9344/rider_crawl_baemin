@@ -64,15 +64,21 @@ CAPABILITY_CRAWL_BAEMIN = "CRAWL_BAEMIN"
 CAPABILITY_CRAWL_COUPANG = "CRAWL_COUPANG"
 CAPABILITY_AUTH_CHECK = "AUTH_CHECK"
 CAPABILITY_OPEN_AUTH_BROWSER = "OPEN_AUTH_BROWSER"
+# 쿠팡 email 2FA 자동복구 전용 job(OPEN_AUTH_BROWSER 의 수동 브라우저 열기와 분리). 이 Agent 가
+# auth worker 를 시작하지 않으면 fallback 이 UNSUPPORTED 를 돌려줄 수 있으므로, 실제 실행 배선은
+# ``worker_composition`` 의 auth worker 합성에서 한다.
+CAPABILITY_AUTH_COUPANG_2FA = "AUTH_COUPANG_2FA"
 CAPABILITY_KAKAO_SEND = "KAKAO_SEND"
 CAPABILITY_CAPTURE_DIAGNOSTIC = "CAPTURE_DIAGNOSTIC"
 
-#: capabilities 기본값(6종). tuple 로 두어 모듈 상수의 우발적 변이를 막는다(superset 허용).
+#: capabilities 기본값. tuple 로 두어 모듈 상수의 우발적 변이를 막는다(superset 허용 — "정확히
+#: N" lock 금지라 후속 워커가 job type 을 늘려도 무탈).
 DEFAULT_CAPABILITIES: tuple[str, ...] = (
     CAPABILITY_CRAWL_BAEMIN,
     CAPABILITY_CRAWL_COUPANG,
     CAPABILITY_AUTH_CHECK,
     CAPABILITY_OPEN_AUTH_BROWSER,
+    CAPABILITY_AUTH_COUPANG_2FA,
     CAPABILITY_KAKAO_SEND,
     CAPABILITY_CAPTURE_DIAGNOSTIC,
 )
