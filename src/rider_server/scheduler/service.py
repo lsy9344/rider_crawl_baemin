@@ -70,6 +70,9 @@ DEFAULT_BREAKER_WINDOW = timedelta(minutes=15)
 #: 위해 payload 에 ``expires_at`` 를 싣고, Agent preflight·queue recovery 가 이 값으로 stale 을 닫는다.
 AUTH_COUPANG_2FA_PAYLOAD_TTL = timedelta(minutes=5)
 
+#: Scheduled Coupang crawl timeout when inline email 2FA can run inside the crawl job.
+COUPANG_INLINE_2FA_CRAWL_TIMEOUT_SECONDS = 180
+
 
 @dataclass(frozen=True)
 class DueTarget:
@@ -535,8 +538,9 @@ def _iso_utc(dt: datetime) -> str:
 def _coupang_auto_2fa_complete(target: DueTarget) -> bool:
     """대상의 Coupang 자동 이메일 2FA 설정이 완전한가(로그인 + 이메일 ref 4종 모두 존재).
 
-    auth gate 가 AUTH_REQUIRED Coupang 계정에 복구 crawl 을 허용할지 판단하는 입력이다.
-    값(ref 문자열) 존재 여부만 보고 평문 secret 을 노출하지 않는다.
+    auth gate 가 AUTH_REQUIRED Coupang 계정에 복구 crawl 을 허용할지 판단하고, ACTIVE scheduled
+    crawl payload 의 inline 2FA timeout/flag 적용 여부도 같은 기준으로 정한다. 값(ref 문자열)
+    존재 여부만 보고 평문 secret 을 노출하지 않는다.
     """
 
     return bool(
@@ -555,6 +559,15 @@ def _crawl_job_payload(
     interval_seconds: int,
 ) -> dict[str, object]:
     platform = str(target.platform or "").strip().casefold()
+    coupang_auto_2fa_complete = (
+        platform == "coupang" and _coupang_auto_2fa_complete(target)
+    )
+    timeout_seconds = (
+        COUPANG_INLINE_2FA_CRAWL_TIMEOUT_SECONDS
+        if coupang_auto_2fa_complete
+        else 60
+    )
+    expires_in_seconds = max(max(0, interval_seconds), timeout_seconds)
     payload: dict[str, object] = {
         "target_id": target.target_id,
         "tenant_id": target.tenant_id,
@@ -563,15 +576,15 @@ def _crawl_job_payload(
         "primary_url": target.primary_url,
         "expected_display_name": target.expected_display_name,
         "browser_profile_ref": f"profile:{target.target_id}",
-        "timeout_seconds": 60,
+        "timeout_seconds": timeout_seconds,
         "parser_version": f"{platform}-v1",
         "job_type": job_type,
         # scheduled crawl 의 출처/시간 경계 — recovery 가 stale backlog 를 안전하게 닫는 기준.
-        # expires_at 은 scheduled_at 으로부터 최대 1 interval 뒤(다음 due 윈도가 열리기 전까지만
-        # 유효 — 서버 downtime 뒤 누적된 missed-interval job 이 한 번에 재생되는 것을 막는다).
+        # expires_at 은 기본적으로 다음 due 윈도 전까지만 유효하되, inline email 2FA crawl 은
+        # timeout 보다 먼저 만료되지 않게 한다.
         "job_origin": JOB_ORIGIN_SCHEDULER,
         "scheduled_at": _iso_utc(now),
-        "expires_at": _iso_utc(now + timedelta(seconds=max(0, interval_seconds))),
+        "expires_at": _iso_utc(now + timedelta(seconds=expires_in_seconds)),
     }
     if platform == "coupang":
         payload.update(
@@ -582,12 +595,7 @@ def _crawl_job_payload(
                 "verification_email_app_password_ref": target.verification_email_app_password,
                 "verification_email_subject_keyword": target.verification_email_subject_keyword,
                 "verification_email_sender_keyword": target.verification_email_sender_keyword,
-                "coupang_auto_email_2fa_enabled": bool(
-                    target.username
-                    and target.password
-                    and target.verification_email_address
-                    and target.verification_email_app_password
-                ),
+                "coupang_auto_email_2fa_enabled": coupang_auto_2fa_complete,
             }
         )
     return payload

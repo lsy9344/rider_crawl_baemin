@@ -312,6 +312,7 @@ def test_scheduler_enqueues_coupang_secret_refs_without_plaintext_values() -> No
     assert job.payload_json["verification_email_subject_keyword"] == "보안코드"
     assert job.payload_json["verification_email_sender_keyword"] == "wing"
     assert job.payload_json["coupang_auto_email_2fa_enabled"] is True
+    assert job.payload_json["timeout_seconds"] == 180
     assert "username" not in job.payload_json
     assert "password" not in job.payload_json
     assert "coupang_login_id" not in job.payload_json
@@ -346,14 +347,66 @@ def test_scheduler_crawl_payload_contains_scheduled_at_expires_at_and_origin() -
     assert payload["job_origin"] == "scheduler"
     # scheduled_at == tick now.
     assert payload["scheduled_at"] == "2026-06-14T12:00:00Z"
+    assert payload["timeout_seconds"] == 180
     scheduled_at = datetime.fromisoformat(payload["scheduled_at"].replace("Z", "+00:00"))
     expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
-    # expires_at 은 scheduled_at 으로부터 최대 1 interval 뒤.
-    assert scheduled_at < expires_at <= scheduled_at + timedelta(minutes=_INTERVAL_MIN)
+    # 긴 interval 은 inline email 2FA timeout 보다 길면 그대로 존중한다.
+    assert expires_at == scheduled_at + timedelta(minutes=_INTERVAL_MIN)
     # coupang 자동 2FA 플래그는 유지하되 인증번호 값은 저장하지 않는다.
     assert payload["coupang_auto_email_2fa_enabled"] is True
     assert "verification_code" not in payload
     assert not any("code" in str(k).casefold() and "keyword" not in str(k).casefold() for k in payload)
+
+
+def test_scheduler_coupang_incomplete_2fa_config_uses_default_crawl_timeout() -> None:
+    target = _target(
+        "t-c-incomplete",
+        platform="COUPANG",
+        username="vault://coupang/login-id",
+        password="vault://coupang/login-password",
+        verification_email_address="vault://mail/address",
+    )
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["job_type"] == JOB_TYPE_CRAWL_COUPANG
+    assert payload["timeout_seconds"] == 60
+    assert payload["coupang_auto_email_2fa_enabled"] is False
+
+
+def test_scheduler_coupang_inline_2fa_expiry_uses_timeout_when_interval_is_short() -> None:
+    target = _target(
+        "t-c-short",
+        platform="COUPANG",
+        interval=1,
+        username="vault://coupang/login-id",
+        password="vault://coupang/login-password",
+        verification_email_address="vault://mail/address",
+        verification_email_app_password="vault://mail/app-password",
+    )
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["timeout_seconds"] == 180
+    assert payload["expires_at"] == "2026-06-14T12:03:00Z"
 
 
 # ── AC2: 중지/비활성 고객 제외 ────────────────────────────────────────────────
@@ -1014,6 +1067,7 @@ def test_scheduler_enqueues_auth_coupang_2fa_instead_of_crawl_when_auth_required
     assert payload["recovery_mode"] == "coupang_auto_email_2fa"
     assert payload["coupang_login_id_ref"] == "vault://coupang/login-id"
     assert payload["verification_email_address_ref"] == "vault://mail/address"
+    assert payload["timeout_seconds"] == 60
     # payload TTL — 오래된 인증 job 이 downtime 뒤 실행돼 중복 OTP 를 요청하는 것을 막는다(검토 High).
     scheduled_at = datetime.fromisoformat(payload["scheduled_at"].replace("Z", "+00:00"))
     expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))

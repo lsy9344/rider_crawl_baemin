@@ -781,7 +781,12 @@ class AdminActionService:
         at: datetime,
         source: str | None = None,
     ) -> str:
-        """대상 인증을 시작한다. Baemin/Coupang 모두 ``OPEN_AUTH_BROWSER`` 인증 전용 job 을 쓴다."""
+        """대상 인증을 시작한다.
+
+        Baemin 은 ``OPEN_AUTH_BROWSER`` job 을 쓴다. Coupang 은 로그인 ID/PW 와 email 2FA
+        정보가 모두 있으면 ``AUTH_COUPANG_2FA`` 를 쓰고, email 2FA 정보가 없으면
+        ``OPEN_AUTH_BROWSER`` 로 폴백한다.
+        """
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         account = await self._scoped_platform_account(target.platform_account_id, tenant_id=tenant_id)
