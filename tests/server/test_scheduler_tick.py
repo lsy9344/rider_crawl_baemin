@@ -20,6 +20,7 @@ from rider_server.queue.states import JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUP
 from rider_server.scheduler import policy
 from rider_server.scheduler.service import (
     REASON_ACTIVE_JOB_EXISTS,
+    REASON_AUTH_JOB_ALREADY_ACTIVE,
     REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY,
     REASON_AUTH_STATE_BLOCKED_OR_CAPTCHA,
     REASON_AUTH_STATE_UNKNOWN,
@@ -27,6 +28,8 @@ from rider_server.scheduler.service import (
     REASON_BREAKER_OPEN,
     REASON_COUPANG_AUTO_RECOVERY_COOLDOWN,
     REASON_ENQUEUED,
+    REASON_ENQUEUED_AUTH_COUPANG_2FA,
+    REASON_ENQUEUED_CRAWL,
     REASON_RACE_LOST,
     REASON_THROTTLED_CAPACITY,
     REASON_UNKNOWN_PLATFORM,
@@ -61,12 +64,14 @@ class FakeSchedulerRepo(SchedulerRepository):
         gates,
         failure_windows=None,
         active_jobs=(),
+        active_auth_jobs=(),
         capacity,
     ) -> None:
         self._targets = {t.target_id: t for t in targets}
         self._gates = dict(gates)
         self._failure_windows = dict(failure_windows or {})
         self._active_jobs = set(active_jobs)
+        self._active_auth_jobs = set(active_auth_jobs)
         self._capacity = capacity
         self.claim_wins: list[str] = []
         self.release_calls: list[tuple[str, datetime, datetime | None]] = []
@@ -74,6 +79,8 @@ class FakeSchedulerRepo(SchedulerRepository):
         self.bulk_tenant_gate_calls = 0
         self.has_active_crawl_job_calls = 0
         self.bulk_active_job_calls = 0
+        self.bulk_active_auth_job_calls = 0
+        self.auth_enqueues: list[tuple[str, dict]] = []
 
     async def due_targets(self, *, now, limit):
         return [
@@ -101,6 +108,22 @@ class FakeSchedulerRepo(SchedulerRepository):
     async def active_crawl_job_target_ids(self, target_ids):
         self.bulk_active_job_calls += 1
         return {target_id for target_id in target_ids if target_id in self._active_jobs}
+
+    async def active_auth_job_target_ids(self, target_ids):
+        self.bulk_active_auth_job_calls += 1
+        return {target_id for target_id in target_ids if target_id in self._active_auth_jobs}
+
+    async def enqueue_auth_coupang_2fa_job(self, queue_backend, target, *, payload_json, now):
+        # crawl next_run_at 은 전진시키지 않는다(인증 성공 후 다음 tick 이 crawl 재개).
+        self.auth_enqueues.append((target.target_id, dict(payload_json)))
+        return await queue_backend.enqueue(
+            job_type="AUTH_COUPANG_2FA",
+            target_id=target.target_id,
+            payload_json=payload_json,
+            assigned_agent_id=target.assigned_agent_id or None,
+            run_after=now,
+            now=now,
+        )
 
     async def capacity_snapshot(self, *, now):
         return self._capacity
@@ -150,6 +173,7 @@ def _target(
     auto_recovery_attempted_at=None,
     auto_recovery_failed_at=None,
     auto_recovery_cooldown_until=None,
+    active_auth_job_count=0,
 ):
     return DueTarget(
         target_id=tid,
@@ -171,6 +195,7 @@ def _target(
         auto_recovery_attempted_at=auto_recovery_attempted_at,
         auto_recovery_failed_at=auto_recovery_failed_at,
         auto_recovery_cooldown_until=auto_recovery_cooldown_until,
+        active_auth_job_count=active_auth_job_count,
     )
 
 
@@ -599,9 +624,9 @@ def test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_jitter_spread
     assert result.enqueued_count == 100
     assert len(result.outcomes) == 100
 
-    # (2) 모든 결정이 ENQUEUED — race loss / capacity throttle / 미지 플랫폼 0.
+    # (2) 모든 결정이 ENQUEUED_CRAWL — race loss / capacity throttle / 미지 플랫폼 0.
     reasons = {o.reason for o in result.outcomes}
-    assert reasons == {REASON_ENQUEUED}
+    assert reasons == {REASON_ENQUEUED_CRAWL}
     assert all(o.enqueued for o in result.outcomes)
     assert all(o.reason != REASON_RACE_LOST for o in result.outcomes)
     assert all(o.reason != REASON_THROTTLED_CAPACITY for o in result.outcomes)
@@ -963,8 +988,12 @@ def test_scheduler_blocks_crawl_for_user_action_pending_blocked_and_unknown() ->
     assert reasons["t-unk"] == REASON_AUTH_STATE_UNKNOWN
 
 
-def test_scheduler_allows_one_coupang_recovery_crawl_when_auto_2fa_ready() -> None:
-    """Complete auto 2FA allows one bounded recovery crawl."""
+def test_scheduler_enqueues_auth_coupang_2fa_instead_of_crawl_when_auth_required() -> None:
+    """AUTH_REQUIRED Coupang account gets auth job, not crawl job.
+
+    crawl-coupang-auth-separation Task 7: 자동 2FA 설정이 완전하고 cooldown 이 없으면 scheduler 는
+    recovery crawl 이 아니라 전용 인증 job(AUTH_COUPANG_2FA)을 만든다.
+    """
 
     target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True, cooldown=None)
     repo = FakeSchedulerRepo(
@@ -975,21 +1004,96 @@ def test_scheduler_allows_one_coupang_recovery_crawl_when_auto_2fa_ready() -> No
 
     assert result.enqueued_count == 1
     assert result.outcomes[0].enqueued is True
-    assert result.outcomes[0].reason == REASON_ENQUEUED
+    assert result.outcomes[0].reason == REASON_ENQUEUED_AUTH_COUPANG_2FA
+    assert result.outcomes[0].job_type == "AUTH_COUPANG_2FA"
     job = backend.job_snapshot(result.outcomes[0].job_id)
     assert job is not None
     payload = job.payload_json
+    assert payload["job_type"] == "AUTH_COUPANG_2FA"
     assert payload["job_origin"] == "scheduler"
     assert payload["recovery_mode"] == "coupang_auto_email_2fa"
-    assert payload["recovery_attempt"] == 1
-    assert payload["coupang_auto_email_2fa_enabled"] is True
-    assert "expires_at" in payload
-    # 인증번호 값은 싣지 않는다.
+    assert payload["coupang_login_id_ref"] == "vault://coupang/login-id"
+    assert payload["verification_email_address_ref"] == "vault://mail/address"
+    # crawl 전용 플래그·인증번호 값은 싣지 않는다(auth job 은 recovery_mode 로 식별).
+    assert "coupang_auto_email_2fa_enabled" not in payload
     assert "verification_code" not in payload
+    # crawl next_run_at 은 전진하지 않는다(인증 성공 후 다음 tick 이 crawl 재개).
+    assert repo.next_run_at_of(target.target_id) == target.next_run_at
+
+
+def test_scheduler_blocks_coupang_crawl_while_auth_job_active() -> None:
+    """Duplicate auth jobs and crawl jobs are both suppressed.
+
+    이미 진행 중인 인증 job 이 있으면 새 AUTH_COUPANG_2FA 를 만들지 않는다(중복 OTP 요청 방지).
+    """
+
+    target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True)
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        active_auth_jobs=[target.target_id],
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_AUTH_JOB_ALREADY_ACTIVE
+    assert repo.auth_enqueues == []
+
+
+def test_scheduler_blocks_auth_job_when_active_auth_job_count_positive() -> None:
+    """DueTarget.active_auth_job_count facts also suppress a duplicate auth job."""
+
+    target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True)
+    target = replace(target, active_auth_job_count=1)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_AUTH_JOB_ALREADY_ACTIVE
+
+
+def test_scheduler_resumes_crawl_after_coupang_auth_active() -> None:
+    """ACTIVE auth state allows normal crawl scheduling again."""
+
+    target = _coupang_target(auth_state="ACTIVE", auto_2fa=True)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 1
+    assert result.outcomes[0].reason == REASON_ENQUEUED_CRAWL
+    assert result.outcomes[0].job_type == JOB_TYPE_CRAWL_COUPANG
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    assert job.payload_json["job_type"] == JOB_TYPE_CRAWL_COUPANG
+    # crawl 은 next_run_at 을 전진시킨다(정상 스케줄).
+    assert repo.next_run_at_of(target.target_id) != target.next_run_at
+
+
+def test_scheduler_requires_manual_action_for_user_action_pending() -> None:
+    """CAPTCHA/manual states do not create auto 2FA attempts."""
+
+    target = _coupang_target(auth_state="USER_ACTION_PENDING", auto_2fa=True)
+    repo = FakeSchedulerRepo(
+        targets=[target], gates={target.tenant_id: _ACTIVE_GATE}, capacity=_capacity()
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_AUTH_STATE_USER_ACTION_PENDING
+    assert repo.auth_enqueues == []
 
 
 def test_scheduler_blocks_coupang_recovery_during_cooldown() -> None:
-    """Recent failed recovery suppresses new crawl attempts."""
+    """Recent failed recovery suppresses new auth job attempts."""
 
     cooldown_until = _NOW + timedelta(minutes=30)
     target = _coupang_target(
@@ -1005,8 +1109,8 @@ def test_scheduler_blocks_coupang_recovery_during_cooldown() -> None:
     assert result.outcomes[0].reason == REASON_COUPANG_AUTO_RECOVERY_COOLDOWN
 
 
-def test_scheduler_recovery_crawl_keeps_target_affinity() -> None:
-    """Recovery crawl uses the same target affinity as normal scheduled crawl."""
+def test_scheduler_auth_job_keeps_target_affinity() -> None:
+    """Auth job uses the same target affinity as normal scheduled crawl."""
 
     target = _coupang_target(auth_state="AUTH_REQUIRED", auto_2fa=True)
     target = replace(target, assigned_agent_id="agent-7")

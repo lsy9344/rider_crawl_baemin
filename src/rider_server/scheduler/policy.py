@@ -163,8 +163,10 @@ _AUTH_OK_STATES: frozenset[str] = frozenset(
 class AuthGateDecision:
     """인증 상태 게이트 합성 결정(불변).
 
-    ``allow`` 가 True 면 enqueue 허용. ``recovery`` 가 True 면 그 enqueue 는 Coupang 자동 복구
-    crawl(한 번만, bounded)이다. ``reason`` 은 ``UPPER_SNAKE`` 기계가독 코드(secret 0).
+    ``allow`` 가 True 면 enqueue 허용. ``recovery`` 가 True 면 그 enqueue 는 normal crawl 이 아니라
+    Coupang 자동 이메일 2FA **인증 job(AUTH_COUPANG_2FA)** 이다(crawl-coupang-auth-separation
+    Decision 6 — recovery crawl 표현을 인증 job 으로 대체). ``reason`` 은 ``UPPER_SNAKE`` 기계가독
+    코드(secret 0).
     """
 
     allow: bool
@@ -187,10 +189,11 @@ def decide_auth_gate(
     - ``UNKNOWN`` 또는 미매핑 → 차단(fail-closed).
     - ``AUTH_REQUIRED``:
         * Coupang + 자동 이메일 2FA 설정 완전(``auto_2fa_complete``) + cooldown 없음
-          → **복구 crawl 1건 허용**(``recovery=True``).
+          → **자동 복구 인증 job(AUTH_COUPANG_2FA) 허용**(``allow=True, recovery=True``).
+            crawl 이 아니라 전용 인증 job 을 만든다(Decision 6).
         * cooldown 중(``cooldown_until > now``) → 차단(``COUPANG_AUTO_RECOVERY_COOLDOWN``).
         * 그 외(Baemin·설정 불완전) → 차단(``AUTH_REQUIRED_NO_AUTO_RECOVERY``) — 자동 복구는
-          사람 개입이 필요하므로 scheduled crawl 을 만들지 않는다.
+          사람 개입이 필요하므로 scheduled crawl 도 자동 인증 job 도 만들지 않는다.
     """
 
     normalized = str(auth_state or "").strip().upper() or BaeminAuthState.UNKNOWN.value

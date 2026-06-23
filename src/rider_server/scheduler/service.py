@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from rider_server.queue.backend import QueueBackend
+from rider_server.queue.states import JOB_TYPE_AUTH_COUPANG_2FA
 
 from . import policy
 
@@ -39,14 +40,23 @@ RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = "coupang_auto_email_2fa"
 
 # 신규 enqueue 결과/차단 사유 코드(UPPER_SNAKE — 평문 secret 없음, 결정 결과 가시성).
 REASON_ENQUEUED = "ENQUEUED"
+#: crawl-coupang-auth-separation Task 7: enqueue 결과를 crawl/auth 로 구분해 운영 가시성을 준다.
+#: ``REASON_ENQUEUED`` 는 normal crawl 호환을 위해 유지하고, 신규 분기는 아래 둘을 쓴다.
+REASON_ENQUEUED_CRAWL = "ENQUEUED_CRAWL"
+REASON_ENQUEUED_AUTH_COUPANG_2FA = "ENQUEUED_AUTH_COUPANG_2FA"
 REASON_BREAKER_OPEN = "BREAKER_OPEN"
 REASON_ACTIVE_JOB_EXISTS = "ACTIVE_JOB_EXISTS"
+#: 이미 진행 중인 인증 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER)이 있어 새 auth job 을 만들지 않음.
+REASON_AUTH_JOB_ALREADY_ACTIVE = "AUTH_JOB_ALREADY_ACTIVE"
 REASON_THROTTLED_CAPACITY = "THROTTLED_CAPACITY"
 REASON_UNKNOWN_PLATFORM = "UNKNOWN_PLATFORM"
 REASON_RACE_LOST = "RACE_LOST"
-# ── 인증 상태 게이트 차단/허용 사유(Task 3) — 인증이 필요한 계정에 scheduled crawl 이 반복
-# 생성되는 것을 scheduler 단계에서 막는다. 자동 복구는 한 번만 안전하게 허용한다. secret 0.
+# ── 인증 상태 게이트 차단/허용 사유(Task 3/7) — 인증이 필요한 계정에 scheduled crawl 이 반복
+# 생성되는 것을 scheduler 단계에서 막는다. 자동 복구가 가능하면 crawl 대신 AUTH_COUPANG_2FA 를
+# 만든다(Decision 6). secret 0.
 REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY = "AUTH_REQUIRED_NO_AUTO_RECOVERY"
+#: work order 어휘 별칭 — AUTH_REQUIRED 인데 자동 2FA 설정이 불완전한 경우(같은 의미).
+REASON_AUTH_STATE_AUTH_REQUIRED_NO_AUTO_CONFIG = REASON_AUTH_REQUIRED_NO_AUTO_RECOVERY
 REASON_AUTH_STATE_USER_ACTION_PENDING = "AUTH_STATE_USER_ACTION_PENDING"
 REASON_AUTH_STATE_BLOCKED_OR_CAPTCHA = "AUTH_STATE_BLOCKED_OR_CAPTCHA"
 REASON_AUTH_STATE_UNKNOWN = "AUTH_STATE_UNKNOWN"
@@ -83,6 +93,10 @@ class DueTarget:
     auto_recovery_attempted_at: datetime | None = None
     auto_recovery_failed_at: datetime | None = None
     auto_recovery_cooldown_until: datetime | None = None
+    # crawl-coupang-auth-separation Task 7: 같은 계정/대상에 이미 진행 중인 인증 job
+    # (AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER) 수 — 자동 복구 enqueue 직전 중복 방지에 쓴다.
+    # repository 가 같은 쿼리/bulk 로 채운다(target-by-target N+1 회피).
+    active_auth_job_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,6 +163,18 @@ class SchedulerRepository(abc.ABC):
     @abc.abstractmethod
     async def active_crawl_job_target_ids(self, target_ids: list[str]) -> set[str]:
         """여러 target 중 활성 CrawlJob 이 있는 target id 집합을 bulk 조회한다."""
+
+    async def active_auth_job_target_ids(self, target_ids: list[str]) -> set[str]:
+        """여러 target 중 활성 인증 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER)이 있는 target id 집합.
+
+        crawl-coupang-auth-separation Task 7: 같은 대상에 자동 복구 auth job 을 중복 생성하지
+        않도록 tick 이 bulk 로 조회한다. 기본 구현은 ``DueTarget.active_auth_job_count`` 를 쓰는
+        backend-중립 fallback 이다(repository 가 이미 채워 둔 facts 사용 — 추가 N+1 회피).
+        PostgreSQL 구현은 실제 jobs 테이블을 bulk 조회해 override 할 수 있다.
+        """
+
+        # 기본 fallback 은 빈 집합(due_targets 가 채운 active_auth_job_count 를 tick 이 직접 본다).
+        return set()
 
     @abc.abstractmethod
     async def capacity_snapshot(self, *, now: datetime) -> policy.CapacityPolicy:
@@ -217,6 +243,32 @@ class SchedulerRepository(abc.ABC):
             )
             raise
 
+    async def enqueue_auth_coupang_2fa_job(
+        self,
+        queue_backend: QueueBackend,
+        target: DueTarget,
+        *,
+        payload_json: dict[str, object],
+        now: datetime,
+    ) -> str | None:
+        """AUTH_COUPANG_2FA 인증 job 을 enqueue 한다(crawl next_run_at 은 전진시키지 않는다).
+
+        crawl-coupang-auth-separation Task 7: 인증 필요 계정에는 scheduled crawl 대신 인증 job 을
+        만든다. crawl 스케줄(``next_run_at``)은 **그대로 둔다** — 인증이 성공해 계정이 ACTIVE 가
+        되면 다음 tick 이 정상 crawl 을 재개한다. 중복 방지는 tick 의 active-auth-job 게이트가
+        담당한다. 기본 구현은 backend-중립 enqueue 다. PostgreSQL 구현은 active auth job 중복을
+        같은 transaction 으로 다시 확인해 override 할 수 있다.
+        """
+
+        return await queue_backend.enqueue(
+            job_type=JOB_TYPE_AUTH_COUPANG_2FA,
+            target_id=target.target_id,
+            payload_json=payload_json,
+            assigned_agent_id=target.assigned_agent_id or None,
+            run_after=now,
+            now=now,
+        )
+
 
 class SchedulerService:
     """scheduler tick 오케스트레이터(정책↔포트↔queue 조립)."""
@@ -266,6 +318,15 @@ class SchedulerService:
         active_target_ids = await repo.active_crawl_job_target_ids(
             [target.target_id for target in due]
         )
+        # crawl-coupang-auth-separation Task 7: 같은 대상에 이미 진행 중인 인증 job 이 있으면
+        # 자동 복구 auth job 을 또 만들지 않는다(중복 OTP 요청 방지). repository 가 bulk 로 채운
+        # active_auth_job_count 와 합집합으로 본다(둘 중 하나만 있어도 active 로 취급).
+        active_auth_target_ids = set(
+            await repo.active_auth_job_target_ids([target.target_id for target in due])
+        )
+        active_auth_target_ids |= {
+            target.target_id for target in due if target.active_auth_job_count > 0
+        }
 
         # ── 플랫폼별 breaker 를 tick 당 1회만 평가(대상별 중복 집계 회피, AC3) ──
         since = now - self._breaker_window
@@ -321,9 +382,9 @@ class SchedulerService:
                 )
                 continue
 
-            # ③-b 인증 상태 게이트(Task 3) — 인증 필요/막힘/미상 계정에는 scheduled crawl 을
+            # ③-b 인증 상태 게이트(Task 3/7) — 인증 필요/막힘/미상 계정에는 scheduled crawl 을
             # 만들지 않는다. AUTH_REQUIRED Coupang 은 자동 2FA 설정 완전 + cooldown 없을 때만
-            # 복구 crawl 1건을 받는다(한 번만 안전하게).
+            # 자동 복구 인증 job(AUTH_COUPANG_2FA)을 받는다(crawl 아님 — Decision 6).
             auth_decision = policy.decide_auth_gate(
                 auth_state=target.auth_state,
                 platform=target.platform,
@@ -338,6 +399,22 @@ class SchedulerService:
                         warn_admin=decision.warn_admin,
                     )
                 )
+                continue
+
+            # ③-c 인증 필요 → 자동 복구 인증 job 경로(crawl 을 만들지 않는다).
+            if auth_decision.recovery:
+                outcome = await self._enqueue_auth_recovery(
+                    repo,
+                    queue_backend,
+                    target,
+                    now=now,
+                    active_auth_target_ids=active_auth_target_ids,
+                    active_crawl_target_ids=active_target_ids,
+                    warn_admin=decision.warn_admin,
+                )
+                if outcome.enqueued:
+                    enqueued_count += 1
+                outcomes.append(outcome)
                 continue
 
             # ⑤-a 멱등성: 활성 CrawlJob 이 있으면 두 번째를 만들지 않는다(전진도 안 함 — 재진입 차단).
@@ -368,15 +445,6 @@ class SchedulerService:
             crawl_payload = _crawl_job_payload(
                 target, job_type, now=now, interval_seconds=interval_seconds
             )
-            if auth_decision.recovery:
-                # 허용된 Coupang 자동 복구 crawl — bounded recovery metadata 를 더한다.
-                # 인증번호 값은 싣지 않는다(자동 2FA 플래그만). target/platform payload 는 normal
-                # crawl 과 동일(같은 affinity·payload 계약).
-                crawl_payload = {
-                    **crawl_payload,
-                    "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
-                    "recovery_attempt": 1,
-                }
             job_id = await repo.claim_due_target_and_enqueue(
                 queue_backend,
                 target,
@@ -399,12 +467,53 @@ class SchedulerService:
             enqueued_count += 1
             outcomes.append(
                 ScheduleOutcome(
-                    target.target_id, True, REASON_ENQUEUED,
+                    target.target_id, True, REASON_ENQUEUED_CRAWL,
                     job_id=job_id, job_type=job_type, warn_admin=decision.warn_admin,
                 )
             )
 
         return TickResult(tuple(outcomes), enqueued_count)
+
+    async def _enqueue_auth_recovery(
+        self,
+        repo: "SchedulerRepository",
+        queue_backend: QueueBackend,
+        target: DueTarget,
+        *,
+        now: datetime,
+        active_auth_target_ids: set[str],
+        active_crawl_target_ids: set[str],
+        warn_admin: bool,
+    ) -> ScheduleOutcome:
+        """AUTH_REQUIRED Coupang 계정에 자동 복구 인증 job 을 만든다(중복 방지·crawl 미생성).
+
+        같은 대상에 이미 인증 job 또는 활성 crawl 이 있으면 ``AUTH_JOB_ALREADY_ACTIVE`` 로 보류한다
+        (중복 OTP 요청·동시 복구 방지). crawl ``next_run_at`` 은 전진시키지 않는다 — 인증이 성공해
+        계정이 ACTIVE 가 되면 다음 tick 이 정상 crawl 을 재개한다.
+        """
+
+        if (
+            target.target_id in active_auth_target_ids
+            or target.target_id in active_crawl_target_ids
+        ):
+            return ScheduleOutcome(
+                target.target_id, False, REASON_AUTH_JOB_ALREADY_ACTIVE,
+                warn_admin=warn_admin,
+            )
+        payload = _auth_coupang_2fa_payload(target, now=now)
+        job_id = await repo.enqueue_auth_coupang_2fa_job(
+            queue_backend, target, payload_json=payload, now=now
+        )
+        if job_id is None:
+            # 동시 tick/저장소가 이미 같은 auth job 을 선점함 → 중복 생성 차단.
+            return ScheduleOutcome(
+                target.target_id, False, REASON_AUTH_JOB_ALREADY_ACTIVE,
+                warn_admin=warn_admin,
+            )
+        return ScheduleOutcome(
+            target.target_id, True, REASON_ENQUEUED_AUTH_COUPANG_2FA,
+            job_id=job_id, job_type=JOB_TYPE_AUTH_COUPANG_2FA, warn_admin=warn_admin,
+        )
 
 
 def _iso_utc(dt: datetime) -> str:
@@ -477,3 +586,34 @@ def _crawl_job_payload(
             }
         )
     return payload
+
+
+def _auth_coupang_2fa_payload(target: DueTarget, *, now: datetime) -> dict[str, object]:
+    """AUTH_COUPANG_2FA 인증 job payload(secret ref 만, 인증번호/평문 값 0).
+
+    crawl-coupang-auth-separation Task 7: 자동 복구 인증 job 은 crawl payload 가 아니라 auth job
+    payload 에 ``recovery_mode`` 를 둔다(Decision 6). 로그인/이메일 ref, 계정 id, primary_url,
+    browser profile ref 를 싣되 OTP·평문 비밀번호는 싣지 않는다.
+    """
+
+    return {
+        "target_id": target.target_id,
+        "tenant_id": target.tenant_id,
+        "platform": "coupang",
+        "platform_account_id": target.platform_account_id,
+        "primary_url": target.primary_url,
+        "expected_display_name": target.expected_display_name,
+        "browser_profile_ref": f"profile:{target.target_id}",
+        "timeout_seconds": 60,
+        "parser_version": "coupang-v1",
+        "job_type": JOB_TYPE_AUTH_COUPANG_2FA,
+        "job_origin": JOB_ORIGIN_SCHEDULER,
+        "scheduled_at": _iso_utc(now),
+        "coupang_login_id_ref": target.username,
+        "coupang_login_password_ref": target.password,
+        "verification_email_address_ref": target.verification_email_address,
+        "verification_email_app_password_ref": target.verification_email_app_password,
+        "verification_email_subject_keyword": target.verification_email_subject_keyword,
+        "verification_email_sender_keyword": target.verification_email_sender_keyword,
+        "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
+    }

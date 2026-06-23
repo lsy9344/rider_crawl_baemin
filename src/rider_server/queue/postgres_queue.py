@@ -129,6 +129,18 @@ def kakao_delivery_log_values(
     return None
 
 
+# ── Coupang 2FA 세부 복구 상태(result_json.auth_recovery_state) → 계정 coarse gate ─────
+# crawl-coupang-auth-separation Decision 3: 계정 auth_state 는 coarse gate, job result 는 세부
+# 복구 상태. AUTH_COUPANG_2FA result 가 coarse auth_state 를 같이 실어 보내므로 보통 그 값을
+# 그대로 쓰지만, 세부 상태만 온 경우를 대비해 결정적 fallback 매핑을 둔다(세부→gate).
+_COUPANG_RECOVERY_STATE_TO_GATE: dict[str, str] = {
+    "ACTIVE": BaeminAuthState.ACTIVE.value,
+    "USER_ACTION_REQUIRED": BaeminAuthState.USER_ACTION_PENDING.value,
+    "EMAIL_AUTH_REQUIRED": BaeminAuthState.AUTH_REQUIRED.value,
+    "RECOVERY_FAILED": BaeminAuthState.AUTH_REQUIRED.value,
+}
+
+
 def _platform_account_auth_update(
     job: Job,
     error_code: str | None,
@@ -153,6 +165,12 @@ def _platform_account_auth_update(
         BaeminAuthState.BLOCKED_OR_CAPTCHA.value,
     }:
         return str(platform_account_id), str(auth_state)
+
+    # AUTH_COUPANG_2FA 가 coarse auth_state 없이 세부 상태만 실어 보낸 경우의 결정적 fallback.
+    recovery_state = result_json.get("auth_recovery_state")
+    gate = _COUPANG_RECOVERY_STATE_TO_GATE.get(str(recovery_state or ""))
+    if gate is not None:
+        return str(platform_account_id), gate
 
     if result_json.get("mismatch") == BaeminAuthState.CENTER_MISMATCH.value:
         return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
