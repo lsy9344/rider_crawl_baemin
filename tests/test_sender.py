@@ -347,6 +347,25 @@ def test_open_from_main_focuses_main_window_not_arbitrary_kakao(monkeypatch):
     assert focused == [main_window]
 
 
+def test_open_from_main_searches_with_ctrl_f_without_ctrl_a(monkeypatch):
+    main_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
+    _patch_desktop(monkeypatch, lambda backend: [main_window])
+
+    pyautogui = _RecordingPyAutoGui()
+    monkeypatch.setattr(sender_module, "_bring_window_to_front", lambda _window: None)
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setitem(sys.modules, "pyperclip", _FakePyperclip())
+
+    sender_module._open_kakao_chat_window_from_main("실적봇_A")
+
+    assert pyautogui.actions == [
+        ("hotkey", ("ctrl", "f")),
+        ("hotkey", ("ctrl", "v")),
+        ("press", ("enter",)),
+    ]
+
+
 def _patch_kakao_send_window(monkeypatch, message_input):
     selected = _FakeKakaoWindow("실적봇_A", handle=11, with_input=True)
     monkeypatch.setattr(sender_module, "_find_or_open_kakao_chat_window", lambda _chat: selected)

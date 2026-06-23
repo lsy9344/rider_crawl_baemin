@@ -130,6 +130,41 @@ def test_signals_kakao_misdelivery_risk_from_kakao_failure() -> None:
     assert s.kakao_misdelivery_risk is True
 
 
+def test_resolved_kakao_failure_after_center_fixed_labels_kakao_not_validation() -> None:
+    # 회귀: 센터 검증을 통과(계정 auth_state ACTIVE)시킨 뒤 카카오 전송이 실패하면, 카드는
+    # 더 오래된 '대상 검증 실패'가 아니라 현재 실패인 '카카오 오발송 위험'으로 라벨링돼야 한다.
+    # latest_failure_code 가 KAKAO_FAILURE 로 올바르게 뽑히면(쿼리 fix) target_validation 은
+    # 꺼지고 kakao 만 켜진다 → _display_severity 가 kakao 라벨을 돌려준다.
+    from rider_server.admin.routes import _display_severity
+    from rider_server.admin.severity import SEVERITY_KAKAO_MISDELIVERY_RISK
+    from rider_server.admin.dashboard_service import TargetHealthFacts
+
+    s = failclosed_signals_from(
+        account_auth_state="ACTIVE",
+        lifecycle_state="ACTIVE",
+        latest_failure_code="KAKAO_FAILURE",
+    )
+    assert s.kakao_misdelivery_risk is True
+    assert s.target_validation_failed is False
+
+    # 카카오 실패가 마지막 성공보다 뒤(재검증 crawl 성공 → 그 후 카카오 전송 실패)라 active.
+    facts = TargetHealthFacts(
+        target_id="t1",
+        tenant_id="tn1",
+        name="HJ",
+        center_name="의정부남부",
+        platform="COUPANG",
+        interval_minutes=10,
+        last_success_at=_ago(5),
+        last_delivery_at=None,
+        last_failure_code="KAKAO_FAILURE",
+        account_auth_state="ACTIVE",
+        lifecycle_state="ACTIVE",
+        last_failure_at=_NOW,
+    )
+    assert _display_severity(SEVERITY_STOPPED, facts) == SEVERITY_KAKAO_MISDELIVERY_RISK
+
+
 def test_signals_clean_has_no_signal() -> None:
     s = failclosed_signals_from(
         account_auth_state="ACTIVE", lifecycle_state="ACTIVE", latest_failure_code="CRAWL_FAILURE"

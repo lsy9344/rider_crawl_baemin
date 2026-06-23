@@ -337,8 +337,14 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             .where(Job.target_id.in_(target_ids), Job.error_code.is_not(None))
         )
+        # 실패 delivery_log 는 sent_at 이 NULL 이다 — 실패 시각은 last_failed_at(없으면
+        # send_attempted_at)에 있다. sent_at 만 보면 실패 행 ts 가 NULL 이라 최신 비교에서 항상
+        # 져, 더 오래된 job 실패 코드가 잘못 이긴다. coalesce 로 실패 시각을 ts 로 쓴다.
+        delivery_ts = func.coalesce(
+            DeliveryLog.last_failed_at, DeliveryLog.sent_at, DeliveryLog.send_attempted_at
+        )
         delivery_stmt = (
-            select(Snapshot.target_id, DeliveryLog.error_code, DeliveryLog.sent_at.label("ts"))
+            select(Snapshot.target_id, DeliveryLog.error_code, delivery_ts.label("ts"))
             .join(Message, DeliveryLog.message_id == Message.id)
             .join(Snapshot, Message.snapshot_id == Snapshot.id)
             .where(
@@ -411,15 +417,20 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             .limit(1)
         )
+        # 실패 delivery_log 는 sent_at 이 NULL 이라 실패 시각(last_failed_at)을 ts 로 써야
+        # 최신-실패 비교에서 올바르게 이긴다(_latest_failure_codes 와 동일 규칙).
+        delivery_ts = func.coalesce(
+            DeliveryLog.last_failed_at, DeliveryLog.sent_at, DeliveryLog.send_attempted_at
+        )
         delivery_stmt = (
-            select(DeliveryLog.error_code, DeliveryLog.sent_at.label("ts"))
+            select(DeliveryLog.error_code, delivery_ts.label("ts"))
             .join(Message, DeliveryLog.message_id == Message.id)
             .join(Snapshot, Message.snapshot_id == Snapshot.id)
             .where(
                 Snapshot.target_id == target_id,
                 DeliveryLog.error_code.is_not(None),
             )
-            .order_by(DeliveryLog.sent_at.desc().nullslast())
+            .order_by(delivery_ts.desc().nullslast())
             .limit(1)
         )
         job_row = (await session.execute(job_stmt)).first()

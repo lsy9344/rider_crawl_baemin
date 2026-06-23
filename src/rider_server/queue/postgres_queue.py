@@ -137,6 +137,10 @@ def kakao_delivery_log_values(
             "status": DeliveryStatus.FAILED.value,
             "error_code": error_code or FailureCategory.KAKAO_FAILURE.value,
             "sent_at": None,
+            # 실패 delivery_log 에 정본 실패 시각을 남긴다 — 이게 없으면 sent_at·last_failed_at 둘
+            # 다 NULL 이라 대시보드 최신-실패 집계가 이 실패를 "시각 없음"으로 보고 무시해, 더
+            # 오래된 실패 코드(예: 해소된 TARGET_VALIDATION_FAILURE)가 카드에 굳는다.
+            "last_failed_at": now,
         }
     return None
 

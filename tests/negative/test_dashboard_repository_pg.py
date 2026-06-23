@@ -116,8 +116,12 @@ async def _seed(session_factory) -> None:
         session.add(_dlog("d1111111-1111-1111-1111-111111111111", "11111111-aaaa-1111-1111-111111111111", "SENT", _T0 - timedelta(minutes=4), None, "k1"))
         session.add(_dlog("d2222222-2222-2222-2222-222222222222", "22222222-aaaa-2222-2222-222222222222", "SENT", _T0 - timedelta(minutes=2), None, "k2"))
         # FAILED 행: 시도 시각(sent_at)과 실패 시각(last_failed_at)을 모두 둔다 —
-        # telegram error 윈도는 last_failed_at, 최신 실패 사유는 sent_at 으로 각각 집계된다.
+        # telegram error 윈도는 last_failed_at 으로 집계된다.
         session.add(_dlog("d3333333-3333-3333-3333-333333333333", "22222222-aaaa-2222-2222-222222222222", "FAILED", _T0 - timedelta(minutes=1), "TELEGRAM_FAILURE", "k3", last_failed_at=_T0 - timedelta(minutes=1)))
+        # 카카오 전송 실패(-30s): sent_at=None, last_failed_at 만 있다(실 KAKAO_SEND 실패 형태).
+        # 최신 실패 집계가 sent_at 만 보면 ts=None 이라 이 행이 무시돼 더 오래된 실패가 굳는다 —
+        # coalesce(last_failed_at, …) 로 이 -30s 실패가 최신으로 올바르게 이겨야 한다(회귀 잠금).
+        session.add(_dlog("d4444444-4444-4444-4444-444444444444", "22222222-aaaa-2222-2222-222222222222", "FAILED", None, "KAKAO_FAILURE", "k4", last_failed_at=_T0 - timedelta(seconds=30)))
         # ── jobs: crawl FAILED(-6min) + 2 KAKAO_SEND PENDING(run_after -120s/-60s) ──
         session.add(Job(id=uuid.uuid4(), type="CRAWL_BAEMIN", target_id=uuid.UUID(_T1), status="FAILED", error_code="CRAWL_FAILURE", claimed_at=_T0 - timedelta(minutes=6), attempts=1))
         session.add(Job(id=uuid.uuid4(), type=JOB_TYPE_KAKAO_SEND, target_id=uuid.UUID(_T1), status="PENDING", run_after=_T0 - timedelta(seconds=120), attempts=0))
@@ -184,8 +188,11 @@ def test_target_health_derives_last_success_delivery_and_failure(pg_repo) -> Non
     assert t1.last_success_at == _T0 - timedelta(minutes=3)
     # 전송 성공 = SENT 최신(-2min). FAILED 는 제외.
     assert t1.last_delivery_at == _T0 - timedelta(minutes=2)
-    # 최신 실패 = delivery TELEGRAM_FAILURE(-1min) > job CRAWL_FAILURE(-6min).
-    assert t1.last_failure_code == "TELEGRAM_FAILURE"
+    # 최신 실패 = sent_at=None 인 KAKAO_FAILURE(last_failed_at -30s) > TELEGRAM_FAILURE(-1min) >
+    # job CRAWL_FAILURE(-6min). coalesce(last_failed_at,…) 로 sent_at 없는 실패가 최신으로 잡힌다.
+    assert t1.last_failure_code == "KAKAO_FAILURE"
+    # 실패 발생 시각도 그 행의 last_failed_at(-30s)로 노출(severity stale 판정 입력).
+    assert t1.last_failure_at == _T0 - timedelta(seconds=30)
     # 인증 필요 대상의 계정 auth_state 노출.
     assert by_id[_T2].account_auth_state == "AUTH_REQUIRED"
 

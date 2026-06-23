@@ -899,7 +899,6 @@ def _open_kakao_chat_window_from_main(chat_name: str) -> None:
     pyperclip.copy(chat_name)
     pyautogui.hotkey("ctrl", "f")
     time.sleep(0.2)
-    pyautogui.hotkey("ctrl", "a")
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.5)
     pyautogui.press("enter")

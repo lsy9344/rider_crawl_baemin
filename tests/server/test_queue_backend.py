@@ -278,7 +278,14 @@ def test_kakao_delivery_log_values_map_complete_status() -> None:
     )
 
     assert sent == {"status": "SENT", "error_code": None, "sent_at": _T0}
-    assert failed == {"status": "FAILED", "error_code": "KAKAO_FAILURE", "sent_at": None}
+    # 실패는 sent_at 없이 last_failed_at 에 실패 시각을 남긴다 — 대시보드 최신-실패 집계가 이
+    # 실패를 "시각 없음"으로 보고 무시하지 않게(오래된 실패 코드가 카드에 굳는 회귀 차단).
+    assert failed == {
+        "status": "FAILED",
+        "error_code": "KAKAO_FAILURE",
+        "sent_at": None,
+        "last_failed_at": _T0,
+    }
 
 
 def test_postgres_emit_event_records_agent_audit_log() -> None:
