@@ -291,6 +291,17 @@ jobs:
           cd /opt/rider-server/repo
           git fetch origin main
           git checkout -B main -f FETCH_HEAD
+          for i in $(seq 1 60); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "::error::docker daemon did not become ready"
+              exit 1
+            fi
+            sleep 2
+          done
           docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up --build -d --remove-orphans
           docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml ps
           for i in $(seq 1 60); do
@@ -328,7 +339,7 @@ jobs:
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Notify Slack
-        if: always()
+        if: ${{ always() && !cancelled() }}
         shell: pwsh
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

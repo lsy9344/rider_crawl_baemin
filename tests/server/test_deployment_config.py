@@ -174,6 +174,27 @@ def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
     assert "Production deploy" in workflow
 
 
+def test_ci_deploy_waits_for_docker_daemon_before_compose() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    deploy_script = workflow[workflow.index("Deploy local EC2 compose stack") :]
+    deploy_script = deploy_script[: deploy_script.index("\n  ci-summary:")]
+
+    assert "docker info >/dev/null 2>&1" in deploy_script
+    assert "docker daemon did not become ready" in deploy_script
+    assert deploy_script.index("docker info >/dev/null 2>&1") < deploy_script.index(
+        "docker compose --env-file .env -p rider"
+    )
+
+
+def test_ci_slack_notification_skips_cancelled_workflow_runs() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    notify_step = workflow[workflow.index("      - name: Notify Slack") :]
+
+    assert "if: ${{ always() && !cancelled() }}" in notify_step
+
+
 def test_compose_backend_host_port_is_configurable() -> None:
     compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
 
