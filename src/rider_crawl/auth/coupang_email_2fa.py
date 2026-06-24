@@ -322,15 +322,53 @@ def _has_visible_input(page: Any, selectors: tuple[str, ...]) -> bool:
     return False
 
 
+# 로그인 제출 → 2FA 화면 전환 대기 상한. networkidle 은 쿠팡 페이지에서 안 떠 항상
+# timeout 까지 헛대기하므로(라이브 측정 3.0s 통째), '이메일로 인증' 요소가 보일 때까지
+# 대기하는 방식으로 바꾼다. 요소 기반이라 전환이 빠르면 즉시 진행하고(라이브 0.01s로
+# 등장→최대 3s 단축), 느려도 이 상한까지 기다려 아직 안 뜬 버튼을 성급히 클릭해 실패하던
+# 위험을 없앤다. 상한은 구 networkidle(3s)과 비슷한 4s — 빠른 케이스 이득은 살리되 느린
+# 케이스에서 구버전보다 크게 느려지지 않게 한다(8s 는 과해 평시 손해라 낮춤).
+_EMAIL_METHOD_READY_TIMEOUT_MS = 4_000
+
+
 def _wait_after_action(page: Any, config: AppConfig) -> None:
+    """로그인 제출 후 '이메일로 인증' 요소가 보일 때까지 대기(없으면 상한까지).
+
+    고정 networkidle(항상 상한 헛대기) 대신 다음 단계 요소를 직접 기다린다 — 빠르면
+    즉시 진행하고, 전환이 느려도 요소가 뜰 때까지 기다려 성급한 클릭 실패를 막는다.
+    어떤 신호도 못 잡으면 예외를 삼켜 호출자가 그대로 진행한다(무회귀)."""
+
+    timeout_ms = min(config.page_timeout_seconds, _EMAIL_METHOD_READY_TIMEOUT_MS)
+    if _wait_for_any_text_visible(page, _EMAIL_METHOD_TEXTS, timeout_ms):
+        return
+    # 폴백: 요소 신호를 못 잡았으면 과거처럼 짧게 한 번 더 settle 을 시도한다.
     try:
-        page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 3_000))
+        page.wait_for_load_state("networkidle", timeout=min(config.page_timeout_seconds, 1_000))
     except Exception:
         pass
+
+
+def _wait_for_any_text_visible(page: Any, texts: tuple[str, ...], timeout_ms: int) -> bool:
+    """texts 중 하나라도 (tab/button role 또는 본문 text 로) visible 해질 때까지 대기. 보이면 True.
+
+    주의: Playwright 의 wait_for_selector 는 서로 다른 엔진(text=/role=)을 쉼표로 섞은
+    selector 를 OR 로 처리하지 못한다(라이브 검증: 혼합 쉼표는 요소가 있어도 timeout).
+    그래서 get_by_role(...).or_(...) 체인으로 합쳐 단일 locator 를 한 번만 기다린다."""
     try:
-        page.wait_for_timeout(300)
+        candidate = None
+        for t in texts:
+            for loc in (
+                page.get_by_role("tab", name=t),
+                page.get_by_role("button", name=t),
+                page.get_by_text(t, exact=False),
+            ):
+                candidate = loc if candidate is None else candidate.or_(loc)
+        if candidate is None:
+            return False
+        candidate.first.wait_for(state="visible", timeout=timeout_ms)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _click_first_by_text(

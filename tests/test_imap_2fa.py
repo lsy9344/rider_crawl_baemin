@@ -270,6 +270,24 @@ def test_candidate_folders_excludes_sent_drafts_trash_keeps_spam_and_promotions(
     assert "Deleted Messages" not in folders
 
 
+def test_candidate_folders_excludes_gmail_virtual_labels_important_and_flagged():
+    # Gmail '중요'(\Important)·'별표'(\Flagged)는 INBOX/전체메일의 부분집합인 가상
+    # 라벨이라, 순회하면 같은 메일을 중복 select/search/fetch 한다(라이브 측정상 폴더당
+    # ~1초). 인증 메일이 이 라벨에만 있을 수 없으므로 제외해도 코드를 놓치지 않는다.
+    listed = [
+        ((b"\\HasNoChildren",), "/", "INBOX"),
+        ((b"\\Important",), "/", "[Gmail]/중요"),
+        ((b"\\Flagged",), "/", "[Gmail]/별표편지함"),
+        ((b"\\Junk",), "/", "[Gmail]/스팸함"),
+    ]
+    folders = imap_2fa._candidate_folders(_FolderStub(listed))
+
+    assert folders[0] == "INBOX"
+    assert "[Gmail]/스팸함" in folders
+    assert "[Gmail]/중요" not in folders
+    assert "[Gmail]/별표편지함" not in folders
+
+
 def test_candidate_folders_falls_back_to_inbox_when_list_fails():
     class _Boom:
         def list_folders(self):

@@ -153,6 +153,34 @@ _BAEMIN_PHONE_CODE_READY_SELECTORS = (
     "input[name='verificationCode']",
 )
 
+# 인증 화면이 '입력 가능' 상태가 됐는지 판정해 대기하는 selector 모음(로그인/2FA 공통).
+# networkidle 대신 이 요소들이 보이면 바로 진행한다 — 쿠팡 partner 페이지는 백그라운드
+# 폴링 탓에 networkidle 이 안 떠 매번 timeout 까지 헛대기했다(라이브 측정: networkidle 5초
+# 통째 헛대기 vs 입력칸 등장 ~1초).
+_AUTH_READY_SELECTORS = (
+    "input[name='username']",
+    "input[name='loginId']",
+    "input[type='password']",
+    "input[placeholder*='아이디']",
+    "input[placeholder*='비밀번호']",
+    "input[name='verificationCode']",
+    "input[placeholder*='인증번호']",
+)
+
+
+def _wait_for_auth_screen_ready(page: Any, timeout_ms: int) -> bool:
+    """인증/로그인 입력 요소가 visible 해질 때까지 (timeout_ms 상한) 대기. 보이면 True.
+
+    networkidle(상한까지 헛대기) 대체용. 어떤 입력칸도 못 찾으면 상한 후 False 를 돌려주되,
+    예외는 삼켜 호출자가 그대로 진행하게 한다(과다 대기 0, 무회귀)."""
+
+    deadline_selector = ",".join(_AUTH_READY_SELECTORS)
+    try:
+        page.wait_for_selector(deadline_selector, state="visible", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
 
 # ── 분류기(auth-required 신호 → 평문 상태) ─────────────────────────────────────
 
@@ -310,10 +338,9 @@ def _open_coupang_auth_browser_only(config: Any) -> None:
                 pass
             except Exception:
                 return
-            try:
-                page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
-            except timeout_errors:
-                pass
+            # networkidle 대신 입력칸 등장까지만 대기 — 쿠팡 페이지는 idle 이 안 떠
+            # timeout 까지 헛대기했다(라이브 측정). 입력칸이 보이면 즉시 진행한다.
+            _wait_for_auth_screen_ready(page, _AUTH_NETWORKIDLE_TIMEOUT_MS)
 
 
 def default_detect_completion(

@@ -320,6 +320,7 @@ def _coupang_auth_page(config: Any) -> Iterator[Any | None]:
         _first_browser_page,
         _playwright_timeout_errors,
         _sync_playwright,
+        _wait_for_auth_screen_ready,
     )
     from rider_crawl.platforms.coupang import crawler as coupang_crawler
 
@@ -349,10 +350,8 @@ def _coupang_auth_page(config: Any) -> Iterator[Any | None]:
             except Exception:
                 yield page
                 return
-            try:
-                page.wait_for_load_state("networkidle", timeout=_AUTH_NETWORKIDLE_TIMEOUT_MS)
-            except timeout_errors:
-                pass
+            # networkidle 대신 입력칸 등장까지만 대기(공통 헬퍼) — idle 헛대기 제거.
+            _wait_for_auth_screen_ready(page, _AUTH_NETWORKIDLE_TIMEOUT_MS)
         yield page
 
 

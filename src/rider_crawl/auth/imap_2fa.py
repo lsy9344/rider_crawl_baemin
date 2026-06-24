@@ -98,7 +98,11 @@ def fetch_latest_verification_code(
     )
 
 
-_SKIP_FOLDER_SPECIAL = {"\\sent", "\\drafts", "\\trash", "\\all", "\\archive", "\\noselect"}
+# Gmail 의 "중요"(\\Important)·"별표"(\\Flagged)는 실제 메일함이 아니라 INBOX/전체메일의
+# 가상 라벨(부분집합)이라, 순회하면 같은 인증 메일을 한 번 더 select/search/fetch 해
+# 폴링 1회가 폴더당 ~1초씩 늘어난다(라이브 측정). 인증 메일이 이 라벨에만 있을 수는
+# 없으므로 제외해도 코드를 놓치지 않는다.
+_SKIP_FOLDER_SPECIAL = {"\\sent", "\\drafts", "\\trash", "\\all", "\\archive", "\\noselect", "\\important", "\\flagged"}
 _SKIP_FOLDER_NAMES = {
     "sent",
     "sent messages",
