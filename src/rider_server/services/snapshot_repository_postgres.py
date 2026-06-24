@@ -30,6 +30,7 @@ from rider_server.db.models.messaging import (
     MessengerChannel as MessengerChannelRow,
     Snapshot as SnapshotRow,
 )
+from rider_server.db.models.tenancy import Tenant as TenantRow
 from rider_server.domain import (
     DeliveryLog,
     DeliveryStatus,
@@ -298,12 +299,22 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         ):
             return
 
-        # 전역 전송 kill switch. ``sending_enabled`` 가 꺼져 있으면(복구/신규 환경 기본 OFF)
-        # snapshot/message 저장은 이미 끝났으니 조용히 반환하고 dispatch fan-out 만 만들지 않는다.
-        # 반드시 delivery log 예약행과 KAKAO_SEND job insert 앞에서 막아야 한다 — 차단 시
-        # delivery log 예약행을 만들면 dedup key 가 소비돼 전송 ON 후 정상 fan-out 이 막힌다.
+        # 전송 kill switch — 두 스코프를 ``effective_send_enabled`` 로 AND compose 한다(다른 실 send
+        # 호출부·Admin 대시보드의 ``send_enabled`` 정의와 동일):
+        #   send_enabled     = tenant.sending_enabled  (고객별 전송 게이트 — fail-closed 기본 OFF)
+        #   sending_enabled  = self._sending_enabled    (환경 전역 복구 플래그 — fail-closed 기본 OFF)
+        # 둘 중 하나라도 꺼져 있으면 snapshot/message 저장만 끝낸 채 조용히 반환하고 dispatch fan-out
+        # 은 만들지 않는다. 반드시 delivery log 예약행과 KAKAO_SEND job insert 앞에서 막아야 한다 —
+        # 차단 시 delivery log 예약행을 만들면 dedup key 가 소비돼 전송 ON 후 정상 fan-out 이 막힌다.
+        tenant_sending_enabled = (
+            await session.execute(
+                select(TenantRow.sending_enabled).where(
+                    TenantRow.id == _uuid(record.tenant_id)
+                )
+            )
+        ).scalar_one_or_none()
         if not effective_send_enabled(
-            send_enabled=True,
+            send_enabled=bool(tenant_sending_enabled),
             sending_enabled=self._sending_enabled,
         ):
             return

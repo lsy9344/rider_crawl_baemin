@@ -70,6 +70,10 @@
 
 ### Snapshot fan-out enqueue
 
-`RIDER_SENDING_ENABLED`가 꺼져 있으면 snapshot과 message 저장은 계속 수행하지만 dispatch fan-out은 만들지 않는다.
-즉 `delivery_logs` 예약행과 `KAKAO_SEND` job을 생성하지 않는다. 차단 시 dedup key를 소비하지 않아야 하므로,
-운영자가 전송을 다시 켠 뒤 같은 snapshot 흐름이 정상적으로 fan-out될 수 있다.
+snapshot ingest 의 dispatch fan-out 은 다른 실 send 호출부와 동일하게 **두 전송 게이트를 AND
+compose** 한다 — 환경 전역 `RIDER_SENDING_ENABLED`(`Settings.sending_enabled`)와 **고객별
+`tenants.sending_enabled`**(Admin 대시보드의 "전송 ON/OFF" 정의: `tenant.sending_enabled AND ≥1
+enabled rule → ACTIVE channel`). 둘 중 하나라도 꺼져 있으면 snapshot과 message 저장은 계속
+수행하지만 dispatch fan-out 은 만들지 않는다 — 즉 `delivery_logs` 예약행과 `KAKAO_SEND` job 을
+생성하지 않는다. 차단 시 dedup key 를 소비하지 않아야 하므로, 운영자가 전송을 다시 켠 뒤 같은
+snapshot 흐름이 정상적으로 fan-out 될 수 있다.

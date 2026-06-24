@@ -37,14 +37,19 @@ _CHANNEL = "e0000000-0000-0000-0000-000000000001"
 _RULE = "f0000000-0000-0000-0000-000000000001"
 
 
-async def _seed(session_factory) -> None:
+async def _seed(session_factory, *, tenant_sending_enabled: bool) -> None:
     from rider_server.db.models.account import MonitoringTarget, PlatformAccount
     from rider_server.db.models.agent import Agent, Job
     from rider_server.db.models.messaging import DeliveryRule, MessengerChannel
     from rider_server.db.models.tenancy import Subscription, Tenant
 
     async with session_factory() as session:
-        session.add(Tenant(id=uuid.UUID(_TENANT), name="t", status="ACTIVE", created_at=_T0))
+        session.add(
+            Tenant(
+                id=uuid.UUID(_TENANT), name="t", status="ACTIVE", created_at=_T0,
+                sending_enabled=tenant_sending_enabled,
+            )
+        )
         await session.flush()
         session.add(
             Subscription(
@@ -125,7 +130,7 @@ def _record():
     )
 
 
-def _fresh_pg(*, sending_enabled: bool):
+def _fresh_pg(*, sending_enabled: bool, tenant_sending_enabled: bool = True):
     from alembic import command
     from alembic.config import Config
     from sqlalchemy.pool import NullPool
@@ -145,7 +150,7 @@ def _fresh_pg(*, sending_enabled: bool):
 
     engine = create_engine(_TEST_DB_URL, poolclass=NullPool)
     factory = create_session_factory(engine)
-    asyncio.run(_seed(factory))
+    asyncio.run(_seed(factory, tenant_sending_enabled=tenant_sending_enabled))
     repo = PostgresSnapshotIngestRepository(factory, sending_enabled=sending_enabled)
 
     def _teardown() -> None:
@@ -195,7 +200,8 @@ def test_snapshot_ingest_sending_disabled_does_not_create_delivery_log_or_kakao_
     from rider_server.queue import COMPLETE_ACCEPTED
     from rider_server.queue.states import JOB_STATUS_SUCCEEDED
 
-    repo, factory, teardown = _fresh_pg(sending_enabled=False)
+    # tenant 전송은 ON 이지만 환경 전역 kill switch 가 OFF → fan-out 차단(전역 게이트 단독 효과 확인).
+    repo, factory, teardown = _fresh_pg(sending_enabled=False, tenant_sending_enabled=True)
     try:
 
         async def _run():
@@ -225,7 +231,7 @@ def test_snapshot_ingest_sending_disabled_does_not_create_delivery_log_or_kakao_
 
 @_pg_gate
 def test_snapshot_ingest_sending_enabled_creates_kakao_job() -> None:
-    """Global sending ON keeps the existing Kakao fan-out behavior."""
+    """Global sending ON + tenant sending ON keeps the existing Kakao fan-out behavior."""
     from rider_server.db.models.messaging import (
         DeliveryLog as DeliveryLogRow,
         Message as MessageRow,
@@ -234,7 +240,7 @@ def test_snapshot_ingest_sending_enabled_creates_kakao_job() -> None:
     from rider_server.queue import COMPLETE_ACCEPTED
     from rider_server.queue.states import JOB_STATUS_SUCCEEDED
 
-    repo, factory, teardown = _fresh_pg(sending_enabled=True)
+    repo, factory, teardown = _fresh_pg(sending_enabled=True, tenant_sending_enabled=True)
     try:
 
         async def _run():
@@ -256,6 +262,49 @@ def test_snapshot_ingest_sending_enabled_creates_kakao_job() -> None:
             assert message_count == 1
             assert delivery_log_count == 1
             assert kakao_send_job_count == 1
+
+        asyncio.run(_run())
+    finally:
+        teardown()
+
+
+@_pg_gate
+def test_snapshot_ingest_tenant_sending_disabled_global_on_does_not_create_dispatch_work() -> None:
+    """Tenant 'send OFF' blocks fan-out even when the env-global switch is ON.
+
+    Admin 대시보드의 ``send_enabled`` 는 ``tenant.sending_enabled AND …`` 라 고객별 OFF 면 전송
+    OFF 로 표시된다. 그 의미를 enqueue 경로가 존중해야 한다 — 전역 ON 만으로 enqueue 되면 안 된다.
+    """
+    from rider_server.db.models.messaging import (
+        DeliveryLog as DeliveryLogRow,
+        Message as MessageRow,
+        Snapshot as SnapshotRow,
+    )
+    from rider_server.queue import COMPLETE_ACCEPTED
+    from rider_server.queue.states import JOB_STATUS_SUCCEEDED
+
+    repo, factory, teardown = _fresh_pg(sending_enabled=True, tenant_sending_enabled=False)
+    try:
+
+        async def _run():
+            outcome = await repo.complete_snapshot_job(
+                _record(), agent_id=_AGENT, status=JOB_STATUS_SUCCEEDED,
+                result_json={"result_type": "snapshot", "auth_state": "ACTIVE"},
+                error_code=None, duration_ms=10, result_schema_version="1",
+                completion_id="c1", completion_payload_hash="h1", now=_T0,
+            )
+            assert outcome.result == COMPLETE_ACCEPTED
+            assert outcome.final_status == JOB_STATUS_SUCCEEDED
+
+            snapshot_count = await _count(factory, SnapshotRow)
+            message_count = await _count(factory, MessageRow)
+            delivery_log_count = await _count(factory, DeliveryLogRow)
+            kakao_send_job_count = await _kakao_send_job_count(factory)
+
+            assert snapshot_count == 1
+            assert message_count == 1
+            assert delivery_log_count == 0
+            assert kakao_send_job_count == 0
 
         asyncio.run(_run())
     finally:
