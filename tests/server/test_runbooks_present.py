@@ -57,6 +57,15 @@ def test_seven_runbooks_cover_all_seven_failure_categories() -> None:
     assert len(_REQUIRED) == 7
 
 
+def test_backup_restore_runbook_mentions_snapshot_dispatch_enqueue_kill_switch() -> None:
+    text = Path("docs/runbooks/backup-restore.md").read_text(encoding="utf-8")
+
+    assert "snapshot" in text.lower()
+    assert "enqueue" in text.lower()
+    assert "RIDER_SENDING_ENABLED" in text
+    assert "delivery log" in text.lower() or "delivery_log" in text.lower()
+
+
 def _ec2_memory_runbook() -> str:
     return (_RUNBOOK_DIR / "ec2-memory-hardening-plan.md").read_text(
         encoding="utf-8"

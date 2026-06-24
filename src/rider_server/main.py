@@ -225,7 +225,10 @@ def _default_job_result_ingest_service(
 
     if settings.database_url:
         factory = _postgres_session_factory(settings, session_factory)
-        return PostgresSnapshotIngestRepository(factory)
+        return PostgresSnapshotIngestRepository(
+            factory,
+            sending_enabled=settings.sending_enabled,
+        )
     return None
 
 

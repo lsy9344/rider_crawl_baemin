@@ -202,6 +202,22 @@ def test_snapshot_enqueue_checks_target_send_window_before_delivery_log_insert()
     )
 
 
+def test_snapshot_enqueue_checks_global_sending_enabled_before_delivery_log_insert() -> None:
+    source = _source("src/rider_server/services/snapshot_repository_postgres.py")
+    enqueue_body = source[
+        source.index("async def _enqueue_dispatch_records") : source.index(
+            "def _record_scoped_to_locked_job"
+        )
+    ]
+
+    assert "effective_send_enabled" in source
+    assert "self._sending_enabled" in source
+    assert "effective_send_enabled(" in enqueue_body
+    assert enqueue_body.index("effective_send_enabled(") < enqueue_body.index(
+        "pg_insert(DeliveryLogRow)"
+    )
+
+
 def test_queue_complete_marks_auth_required_platform_account() -> None:
     source = _source("src/rider_server/queue/postgres_queue.py")
 

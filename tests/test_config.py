@@ -132,7 +132,7 @@ def test_app_config_email_2fa_defaults_ignore_gmail_oauth_env(monkeypatch):
     assert config.verification_email_subject_keyword == "인증번호"
     assert config.verification_email_sender_keyword == "coupang"
     assert config.email_2fa_poll_seconds == 120
-    assert config.email_2fa_poll_interval_seconds == 5
+    assert config.email_2fa_poll_interval_seconds == 2
     assert config.coupang_2fa_code_digits == 6
 
 

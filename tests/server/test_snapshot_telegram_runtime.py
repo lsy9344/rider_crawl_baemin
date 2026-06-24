@@ -522,9 +522,10 @@ def test_snapshot_repository_no_longer_owns_post_commit_telegram_delivery() -> N
 def test_default_snapshot_ingest_no_longer_wires_telegram_sender(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_repo(session_factory, *, telegram_sender=None):
+    def fake_repo(session_factory, *, telegram_sender=None, sending_enabled=False):
         captured["session_factory"] = session_factory
         captured["telegram_sender"] = telegram_sender
+        captured["sending_enabled"] = sending_enabled
         return object()
 
     monkeypatch.setattr("rider_server.main.create_engine", lambda _url, **_kwargs: object())
@@ -541,9 +542,10 @@ def test_default_snapshot_ingest_keeps_sender_out_when_global_gate_off(monkeypat
     """Snapshot ingest stores outbox work; a dispatch worker owns Telegram send."""
     captured: dict[str, object] = {}
 
-    def fake_repo(session_factory, *, telegram_sender=None):
+    def fake_repo(session_factory, *, telegram_sender=None, sending_enabled=False):
         captured["session_factory"] = session_factory
         captured["telegram_sender"] = telegram_sender
+        captured["sending_enabled"] = sending_enabled
         return object()
 
     monkeypatch.setattr("rider_server.main.create_engine", lambda _url, **_kwargs: object())
@@ -554,3 +556,43 @@ def test_default_snapshot_ingest_keeps_sender_out_when_global_gate_off(monkeypat
 
     assert captured["session_factory"] == "sessions"
     assert captured["telegram_sender"] is None
+
+
+def test_default_snapshot_ingest_wires_global_sending_enabled(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_repo(session_factory, *, telegram_sender=None, sending_enabled=False):
+        captured["session_factory"] = session_factory
+        captured["telegram_sender"] = telegram_sender
+        captured["sending_enabled"] = sending_enabled
+        return object()
+
+    monkeypatch.setattr("rider_server.main.create_engine", lambda _url, **_kwargs: object())
+    monkeypatch.setattr("rider_server.main.create_session_factory", lambda _engine: "sessions")
+    monkeypatch.setattr("rider_server.main.PostgresSnapshotIngestRepository", fake_repo)
+
+    _default_job_result_ingest_service(_settings(sending_enabled=False))
+
+    assert captured["session_factory"] == "sessions"
+    assert captured["telegram_sender"] is None
+    assert captured["sending_enabled"] is False
+
+
+def test_default_snapshot_ingest_wires_global_sending_enabled_on(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_repo(session_factory, *, telegram_sender=None, sending_enabled=False):
+        captured["session_factory"] = session_factory
+        captured["telegram_sender"] = telegram_sender
+        captured["sending_enabled"] = sending_enabled
+        return object()
+
+    monkeypatch.setattr("rider_server.main.create_engine", lambda _url, **_kwargs: object())
+    monkeypatch.setattr("rider_server.main.create_session_factory", lambda _engine: "sessions")
+    monkeypatch.setattr("rider_server.main.PostgresSnapshotIngestRepository", fake_repo)
+
+    _default_job_result_ingest_service(_settings(sending_enabled=True))
+
+    assert captured["session_factory"] == "sessions"
+    assert captured["telegram_sender"] is None
+    assert captured["sending_enabled"] is True

@@ -21,7 +21,12 @@ DEFAULT_PLATFORM_NAME = "baemin"
 DEFAULT_EMAIL_2FA_SUBJECT_KEYWORD = "인증번호"
 DEFAULT_EMAIL_2FA_SENDER_KEYWORD = "coupang"
 DEFAULT_EMAIL_2FA_POLL_SECONDS = 120
-DEFAULT_EMAIL_2FA_POLL_INTERVAL_SECONDS = 5
+# 메일 도착 감지 지연을 줄이려고 폴링 간격을 짧게 둔다(5->2초). 평균 감지 지연이
+# interval/2 이므로 2.5초->1초로 떨어진다. 코드 발송 요청 후 메일이 화면에 늦게
+# 반영된다는 체감의 주원인이 이 폴링 간격이었다(메일 자체는 빨리 도착하나 다음
+# 폴링까지 감지가 미뤄짐). 폴링이 잦아진 만큼 IMAP 왕복은 늘지만, 인증 복구는
+# 짧게 끝나는 일회성 흐름이라 부하 영향은 미미하다.
+DEFAULT_EMAIL_2FA_POLL_INTERVAL_SECONDS = 2
 DEFAULT_COUPANG_2FA_CODE_DIGITS = 6
 
 

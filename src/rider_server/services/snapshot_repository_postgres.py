@@ -55,6 +55,7 @@ from rider_server.queue.states import (
 )
 from rider_server.services.idempotency import IdempotentDeliveryService
 from rider_server.services.message_render_service import MessageRenderService
+from rider_server.services.recovery import effective_send_enabled
 
 from .delivery_failure_policy import DeliveryFailurePolicy
 from .dispatch_fanout_service import DispatchJob
@@ -144,10 +145,12 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         session_factory: async_sessionmaker[AsyncSession],
         *,
         telegram_sender: TelegramSender | None = None,
+        sending_enabled: bool = False,
     ) -> None:
         super().__init__(save_snapshot=self.save_snapshot)
         self._session_factory = session_factory
         self._telegram_sender = telegram_sender
+        self._sending_enabled = bool(sending_enabled)
 
     async def save_snapshot(self, record: SnapshotIngestRecord) -> None:
         async with self._session_factory() as session:
@@ -292,6 +295,16 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
             schedule_enabled=bool(window[0]),
             start_time=window[1] or "",
             stop_time=window[2] or "",
+        ):
+            return
+
+        # 전역 전송 kill switch. ``sending_enabled`` 가 꺼져 있으면(복구/신규 환경 기본 OFF)
+        # snapshot/message 저장은 이미 끝났으니 조용히 반환하고 dispatch fan-out 만 만들지 않는다.
+        # 반드시 delivery log 예약행과 KAKAO_SEND job insert 앞에서 막아야 한다 — 차단 시
+        # delivery log 예약행을 만들면 dedup key 가 소비돼 전송 ON 후 정상 fan-out 이 막힌다.
+        if not effective_send_enabled(
+            send_enabled=True,
+            sending_enabled=self._sending_enabled,
         ):
             return
 

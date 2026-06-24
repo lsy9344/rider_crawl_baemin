@@ -67,3 +67,9 @@
 
 > 의심스러우면 OFF 를 유지한다. 전역 pause/kill switch 의 전체 매트릭스는 Story 5.10 소유이며,
 > 본 runbook 은 "복구 시 기본 차단 + 명시적 활성화"만 정의한다.
+
+### Snapshot fan-out enqueue
+
+`RIDER_SENDING_ENABLED`가 꺼져 있으면 snapshot과 message 저장은 계속 수행하지만 dispatch fan-out은 만들지 않는다.
+즉 `delivery_logs` 예약행과 `KAKAO_SEND` job을 생성하지 않는다. 차단 시 dedup key를 소비하지 않아야 하므로,
+운영자가 전송을 다시 켠 뒤 같은 snapshot 흐름이 정상적으로 fan-out될 수 있다.

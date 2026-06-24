@@ -54,6 +54,59 @@
 - 상세 정책: `docs/operations/queue-backlog-handling-policy.md`,
   `docs/goal/crawl-coupang-auth-separation-work-order-2026-06-23.md` 참조.
 
+## CENTER_MISMATCH('대상 검증 실패') 고착 해제 (2026-06-24)
+
+`platform_accounts.auth_state='CENTER_MISMATCH'`('대상 검증 실패' 카드)는 "로그인은 됐고 센터만
+불일치" 상태로 취급되어 scheduled crawl 을 계속 허용한다(설계 의도, 의미 변경 금지). 신버전 서버는
+**성공 crawl 1건**(`result_json.auth_state=ACTIVE`)을 받으면 계정을 자동으로 `ACTIVE` 로 되돌린다
+(`_platform_account_auth_update`). 따라서 해제는 **자동 해제 우선**, 즉시 해제가 필요할 때만 **승인된
+1회 수동 보정**으로 다룬다 — 새 해제 로직을 만들지 않는다.
+
+### 1. 자동 해제 우선 (권장)
+
+crawl timeout 등 근본 원인을 먼저 해소한 뒤(아래 한계 참조) 성공 crawl 을 1건 흘려보낸다. EC2 DB 확인:
+
+```bash
+sudo docker exec -i rider-db-1 psql -U rider -d rider -c "
+SELECT pa.id, pa.auth_state, j.id AS latest_job_id, j.status, j.result_json->>'auth_state' AS result_auth_state
+  FROM platform_accounts pa
+  LEFT JOIN jobs j ON j.payload_json->>'platform_account_id' = pa.id::text
+ WHERE pa.id='3e703327-84ea-42ce-bf4a-2282848f6bfa'
+ ORDER BY COALESCE(j.completed_at, j.claimed_at, j.run_after) DESC
+ LIMIT 5;"
+```
+
+기대: 새 성공 crawl 의 `result_auth_state=ACTIVE`, `platform_accounts.auth_state` 가 `ACTIVE` 로 전환.
+
+### 2. 수동 UPDATE 전 검증 쿼리
+
+운영자가 즉시 해제를 수용할 때만 실행한다. 정확히 의도한 target/account 쌍 1건만 나오는지 확인한다.
+
+```sql
+SELECT mt.id AS target_id, mt.name AS target_name, pa.id AS account_id, pa.auth_state
+  FROM monitoring_targets mt
+  JOIN platform_accounts pa
+    ON pa.id = mt.platform_account_id
+   AND pa.tenant_id = mt.tenant_id
+ WHERE pa.id='3e703327-84ea-42ce-bf4a-2282848f6bfa';
+```
+
+### 3. 승인된 1회 UPDATE
+
+실제 센터 불일치가 아님을 운영자가 확인한 뒤에만(오발송 위험 회피) 1회 실행한다.
+
+```sql
+UPDATE platform_accounts
+   SET auth_state='ACTIVE'
+ WHERE id='3e703327-84ea-42ce-bf4a-2282848f6bfa'
+   AND auth_state='CENTER_MISMATCH';
+```
+
+기대: `UPDATE 1`. `UPDATE 0` 이면 멈추고 계정 상태를 다시 확인한다. **WHERE 조건을 넓히지 않는다.**
+
+> 주의: crawl 이 계속 실패하면 카드는 다른 사유로 다시 STOPPED 가 될 수 있다. 수동 UPDATE 는
+> 근본 원인(crawl timeout) 해소를 대체하지 않는다.
+
 ## 에스컬레이션
 
 - 동일 계정이 짧은 주기로 반복 `AUTH_REQUIRED` → 계정 차단/패턴 변화 의심, 운영 책임자 보고.
