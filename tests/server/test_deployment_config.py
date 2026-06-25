@@ -198,6 +198,8 @@ def test_ci_deploy_waits_for_docker_daemon_before_remote_compose() -> None:
 
     assert "bash <<'BASH'" in deploy_script
     assert "\n          BASH" in deploy_script
+    assert "export HOME=/root" in deploy_script
+    assert "git config --global --add safe.directory /opt/rider-server/repo" in deploy_script
     assert "docker info >/dev/null 2>&1" in deploy_script
     assert "docker daemon did not become ready" in deploy_script
     assert deploy_script.index("docker info >/dev/null 2>&1") < deploy_script.index(

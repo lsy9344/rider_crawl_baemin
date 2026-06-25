@@ -347,8 +347,10 @@ jobs:
           remote_command="$(cat <<'REMOTE'
           bash <<'BASH'
           set -euo pipefail
+          export HOME=/root
           export AWS_REGION="__AWS_REGION__"
           export AWS_DEFAULT_REGION="__AWS_REGION__"
+          git config --global --add safe.directory /opt/rider-server/repo
           cd /opt/rider-server/repo
           git fetch origin main
           git checkout -B main -f FETCH_HEAD
