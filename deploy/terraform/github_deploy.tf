@@ -116,6 +116,15 @@ data "aws_iam_policy_document" "github_actions_deploy" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid     = "ReadProductionHostAlarms"
+    actions = ["cloudwatch:DescribeAlarms"]
+    resources = [
+      "arn:aws:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.project}-host-mem-available-low",
+      "arn:aws:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.project}-host-swap-used-high",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "github_actions_deploy" {

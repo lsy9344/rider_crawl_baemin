@@ -392,6 +392,7 @@ def test_terraform_defines_github_oidc_ecr_and_ssm_deploy_role() -> None:
     assert "ssm:SendCommand" in deploy
     assert "ssm:GetCommandInvocation" in deploy
     assert "AWS-RunShellScript" in deploy
+    assert "cloudwatch:DescribeAlarms" in deploy
     assert "ecr:GetAuthorizationToken" in deploy
     assert "ecr:PutImage" in deploy
     assert "ecr:BatchGetImage" in deploy
