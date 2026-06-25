@@ -37,7 +37,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   PYTHON_VERSION: "3.11"
@@ -218,6 +218,17 @@ jobs:
           RIDER_DB_RESERVED_CONNECTIONS: "10"
         run: RIDER_UVICORN_WORKERS=1 RIDER_DB_POOL_SIZE=2 RIDER_DB_MAX_OVERFLOW=2 python scripts/check_db_connection_budget.py --postgres-max-connections 100
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate Terraform config
+        run: |
+          terraform -chdir=deploy/terraform init -backend=false
+          terraform -chdir=deploy/terraform fmt -check
+          terraform -chdir=deploy/terraform validate
+
       - name: Pre-pull BuildKit image
         shell: bash
         run: |
@@ -283,6 +294,9 @@ jobs:
     timeout-minutes: 20
     needs: [local-tests, postgres-tests, deployment-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: production-deploy-main
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -354,6 +368,7 @@ jobs:
           cd /opt/rider-server/repo
           git fetch origin main
           git checkout -B main -f FETCH_HEAD
+          bash scripts/production_deploy_preflight.sh
           for i in $(seq 1 60); do
             if docker info >/dev/null 2>&1; then
               echo "docker daemon ready after ${i}s"

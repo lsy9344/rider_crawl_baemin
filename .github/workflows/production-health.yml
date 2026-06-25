@@ -1,0 +1,101 @@
+name: Production Health
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-health
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  DEPLOY_AWS_ROLE_ARN: ${{ secrets.DEPLOY_AWS_ROLE_ARN }}
+  DEPLOY_EC2_INSTANCE_ID: ${{ secrets.DEPLOY_EC2_INSTANCE_ID }}
+
+jobs:
+  production-health:
+    name: Production EC2 health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify deploy secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_AWS_ROLE_ARN" ] || [ -z "$DEPLOY_EC2_INSTANCE_ID" ]; then
+            echo "::error::DEPLOY_AWS_ROLE_ARN and DEPLOY_EC2_INSTANCE_ID secrets must be configured"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run production health check through SSM
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_command="$(cat <<'REMOTE'
+          bash <<'BASH'
+          set -euo pipefail
+          export HOME=/root
+          git config --global --add safe.directory /opt/rider-server/repo
+          cd /opt/rider-server/repo
+          bash scripts/production_health_check.sh
+          BASH
+          REMOTE
+          )"
+
+          jq -n --arg cmd "$remote_command" '{commands: [$cmd]}' > ssm-parameters.json
+          command_id="$(
+            aws ssm send-command \
+              --instance-ids "$DEPLOY_EC2_INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters file://ssm-parameters.json \
+              --comment "Rider production health check" \
+              --query "Command.CommandId" \
+              --output text
+          )"
+          echo "SSM command id: $command_id"
+          set +e
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$DEPLOY_EC2_INSTANCE_ID"
+          wait_rc=$?
+          set -e
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "$DEPLOY_EC2_INSTANCE_ID" \
+            --query '{Status:Status,ResponseCode:ResponseCode,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json
+          if [ "$wait_rc" -ne 0 ]; then
+            exit "$wait_rc"
+          fi
+
+      - name: Check production CloudWatch alarms
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudwatch describe-alarms \
+            --region "$AWS_REGION" \
+            --alarm-names \
+              rider-server-host-mem-available-low \
+              rider-server-host-swap-used-high \
+            --query 'MetricAlarms[?StateValue!=`OK`].{Name:AlarmName,State:StateValue,Reason:StateReason}' \
+            --output json > alarm-states.json
+
+          cat alarm-states.json
+          if [ "$(jq 'length' alarm-states.json)" -ne 0 ]; then
+            echo "::error::one or more production host alarms are not OK"
+            exit 1
+          fi

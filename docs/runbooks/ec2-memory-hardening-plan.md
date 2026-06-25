@@ -15,10 +15,10 @@
 | --- | --- |
 | EC2 instance | `i-0e6a710a505e6b3c4` |
 | Region | `ap-northeast-2` |
-| Instance type | `t4g.micro` |
+| Instance type | `t4g.small` 적용 완료. 장애 조사 당시에는 `t4g.micro` |
 | Public IP / EIP | `54.116.103.149` |
 | Root disk | 20GB, 약 15GB 여유 |
-| Swap | 없음 |
+| Swap | 2GB `/swapfile` 적용 완료 |
 | PostgreSQL 위치 | EC2 내부 Docker container |
 | 전체 DB 크기 | 약 9.7MB |
 | Docker DB volume | 약 67MB |
@@ -34,6 +34,20 @@ actions.runner.lsy9344-rider_crawl_baemin.ip-10-50-1-8.service
 주의: `.github/workflows/test.yml`의 `deploy-production` job은 GitHub-hosted runner + AWS SSM
 방식이어야 한다. GitHub Actions가 ECR에 ARM64 image를 push하고, EC2는 SSM 명령으로 해당
 image를 pull한 뒤 `docker compose ... up -d --no-build --remove-orphans`만 실행한다.
+
+재발 방지용 CI/운영 guardrail:
+
+- `main` branch 배포 run은 중간 취소하지 않고 직렬 실행한다. 배포 중 새 commit이 push되어도 기존 배포를
+  끊지 않아 SSM 명령이 애매하게 남는 일을 줄인다.
+- deployment config gate는 `docker compose config`, DB connection budget, Docker image build에 더해
+  Terraform `init -backend=false`, `fmt -check`, `validate`를 실행한다. 이 검사는 live AWS state를 바꾸지
+  않고 설정 문법과 provider wiring만 확인한다.
+- production deploy는 EC2에서 compose를 실행하기 전에 `scripts/production_deploy_preflight.sh`를 실행한다.
+  이 스크립트는 Docker daemon, `MemAvailable`, root disk free space, production EC2의 GitHub self-hosted
+  runner process/service 여부를 확인한다.
+- `.github/workflows/production-health.yml`은 30분마다 SSM으로
+  `scripts/production_health_check.sh`를 실행한다. `/health`, compose service 상태, 메모리, 디스크, OOM
+  kernel log, runner 재기동 여부, CloudWatch host memory/swap alarm 상태를 확인한다.
 
 ## 3. 목표 상태
 

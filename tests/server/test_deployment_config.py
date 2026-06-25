@@ -207,6 +207,82 @@ def test_ci_deploy_waits_for_docker_daemon_before_remote_compose() -> None:
     )
 
 
+def test_ci_serializes_main_production_deploys_without_cancelling_them() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
+
+    deploy_job = workflow[workflow.index("deploy-production:") :]
+    deploy_job = deploy_job[: deploy_job.index("\n  ci-summary:")]
+
+    assert "concurrency:" in deploy_job
+    assert "group: production-deploy-main" in deploy_job
+    assert "cancel-in-progress: false" in deploy_job
+
+
+def test_ci_validates_terraform_without_touching_live_aws_state() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "Validate Terraform config" in workflow
+    assert "hashicorp/setup-terraform" in workflow
+    assert "terraform -chdir=deploy/terraform init -backend=false" in workflow
+    assert "terraform -chdir=deploy/terraform fmt -check" in workflow
+    assert "terraform -chdir=deploy/terraform validate" in workflow
+    assert "terraform apply" not in workflow
+
+
+def test_ci_deploy_runs_host_preflight_before_remote_compose() -> None:
+    workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    deploy_script = workflow[workflow.index("Deploy production through SSM") :]
+    deploy_script = deploy_script[: deploy_script.index("\n  ci-summary:")]
+
+    assert "bash scripts/production_deploy_preflight.sh" in deploy_script
+    assert deploy_script.index("bash scripts/production_deploy_preflight.sh") < deploy_script.index(
+        "docker compose --env-file .env -p rider"
+    )
+
+
+def test_production_health_workflow_checks_ec2_ssm_health_and_cloudwatch() -> None:
+    workflow = Path(".github/workflows/production-health.yml").read_text(encoding="utf-8")
+
+    assert "name: Production Health" in workflow
+    assert "schedule:" in workflow
+    assert "concurrency:" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "aws-actions/configure-aws-credentials" in workflow
+    assert "aws ssm send-command" in workflow
+    assert "AWS-RunShellScript" in workflow
+    assert "bash scripts/production_health_check.sh" in workflow
+    assert "aws cloudwatch describe-alarms" in workflow
+    assert "rider-server-host-mem-available-low" in workflow
+    assert "rider-server-host-swap-used-high" in workflow
+
+
+def test_production_operation_scripts_guard_memory_runner_disk_and_oom() -> None:
+    preflight = Path("scripts/production_deploy_preflight.sh").read_text(encoding="utf-8")
+    health = Path("scripts/production_health_check.sh").read_text(encoding="utf-8")
+
+    assert "MemAvailable" in preflight
+    assert "df -Pk" in preflight
+    assert "Runner.Listener|Runner.Worker|actions-runner" in preflight
+    assert "docker info" in preflight
+
+    assert "curl -fsS http://127.0.0.1:8000/health" in health
+    assert "docker compose --env-file .env -p rider" in health
+    assert "journalctl -k --since" in health
+    assert "out of memory|oom|killed process" in health
+    assert "MemAvailable" in health
+
+
+def test_git_attributes_keep_linux_runner_files_lf_normalized() -> None:
+    attributes = Path(".gitattributes").read_text(encoding="utf-8")
+
+    assert "*.sh text eol=lf" in attributes
+    assert "*.yml text eol=lf" in attributes
+    assert "*.yaml text eol=lf" in attributes
+
+
 def test_ci_slack_notification_skips_cancelled_workflow_runs() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
