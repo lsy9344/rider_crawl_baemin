@@ -279,15 +279,76 @@ jobs:
 
   deploy-production:
     name: Deploy production
-    runs-on: [self-hosted, Linux, ARM64, rider-prod]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [local-tests, postgres-tests, deployment-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-2
+      ECR_REPOSITORY: rider-server
+      DEPLOY_AWS_ROLE_ARN: ${{ secrets.DEPLOY_AWS_ROLE_ARN }}
+      DEPLOY_EC2_INSTANCE_ID: ${{ secrets.DEPLOY_EC2_INSTANCE_ID }}
 
     steps:
-      - name: Deploy local EC2 compose stack
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set production image URI
+        id: image
+        shell: bash
         run: |
           set -euo pipefail
+          image="${{ steps.ecr-login.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.server
+          platforms: linux/arm64
+          tags: ${{ steps.image.outputs.image }}
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy production through SSM
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          RIDER_SERVER_IMAGE: ${{ steps.image.outputs.image }}
+          DEPLOY_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_AWS_ROLE_ARN" ] || [ -z "$DEPLOY_EC2_INSTANCE_ID" ]; then
+            echo "::error::DEPLOY_AWS_ROLE_ARN and DEPLOY_EC2_INSTANCE_ID secrets must be configured"
+            exit 1
+          fi
+
+          remote_command="$(cat <<'REMOTE'
+          bash <<'BASH'
+          set -euo pipefail
+          export AWS_REGION="__AWS_REGION__"
+          export AWS_DEFAULT_REGION="__AWS_REGION__"
           cd /opt/rider-server/repo
           git fetch origin main
           git checkout -B main -f FETCH_HEAD
@@ -302,7 +363,10 @@ jobs:
             fi
             sleep 2
           done
-          docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up --build -d --remove-orphans
+          aws ecr get-login-password --region "__AWS_REGION__" | docker login --username AWS --password-stdin "__ECR_REGISTRY__"
+          export RIDER_SERVER_IMAGE="__RIDER_SERVER_IMAGE__"
+          docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml pull migrate backend-api scheduler queue-recovery telegram-dispatch
+          docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml up -d --no-build --remove-orphans
           docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml ps
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8000/health; then
@@ -314,6 +378,36 @@ jobs:
           docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml ps
           docker compose --env-file .env -p rider -f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml logs --tail=80 backend-api
           exit 1
+          BASH
+          REMOTE
+          )"
+          remote_command="${remote_command//__AWS_REGION__/$AWS_REGION}"
+          remote_command="${remote_command//__ECR_REGISTRY__/$ECR_REGISTRY}"
+          remote_command="${remote_command//__RIDER_SERVER_IMAGE__/$RIDER_SERVER_IMAGE}"
+
+          jq -n --arg cmd "$remote_command" '{commands: [$cmd]}' > ssm-parameters.json
+          command_id="$(
+            aws ssm send-command \
+              --instance-ids "$DEPLOY_EC2_INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters file://ssm-parameters.json \
+              --comment "Deploy rider-server ${DEPLOY_SHA}" \
+              --query "Command.CommandId" \
+              --output text
+          )"
+          echo "SSM command id: $command_id"
+          set +e
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$DEPLOY_EC2_INSTANCE_ID"
+          wait_rc=$?
+          set -e
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "$DEPLOY_EC2_INSTANCE_ID" \
+            --query '{Status:Status,ResponseCode:ResponseCode,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json
+          if [ "$wait_rc" -ne 0 ]; then
+            exit "$wait_rc"
+          fi
 
   ci-summary:
     name: CI summary

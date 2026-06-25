@@ -10,6 +10,24 @@ variable "project" {
   default     = "rider-server"
 }
 
+variable "github_repository" {
+  description = "GitHub Actions OIDC 배포를 허용할 owner/repo."
+  type        = string
+  default     = "lsy9344/rider_crawl_baemin"
+}
+
+variable "github_deploy_branch" {
+  description = "프로덕션 배포를 허용할 GitHub branch."
+  type        = string
+  default     = "main"
+}
+
+variable "server_ecr_repository_name" {
+  description = "서버 Docker image 를 저장할 ECR repository 이름."
+  type        = string
+  default     = "rider-server"
+}
+
 variable "instance_type" {
   description = "EC2 인스턴스 타입. 기본은 비용 최소 예시(t4g.micro), 운영 memory hardening은 tfvars에서 t4g.small로 고정."
   type        = string

@@ -25,7 +25,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    image: rider-server:dev
+    image: ${RIDER_SERVER_IMAGE:-rider-server:dev}
     command: python -m rider_server.db.migrate upgrade head
     env_file:
       - ./env/backend-api.env
@@ -41,7 +41,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    image: rider-server:dev
+    image: ${RIDER_SERVER_IMAGE:-rider-server:dev}
     command:
       - sh
       - -c
@@ -78,7 +78,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    image: rider-server:dev
+    image: ${RIDER_SERVER_IMAGE:-rider-server:dev}
     command: python -m rider_server.scheduler
     env_file:
       - ./env/backend-api.env
@@ -109,7 +109,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    image: rider-server:dev
+    image: ${RIDER_SERVER_IMAGE:-rider-server:dev}
     command: python -m rider_server.queue
     env_file:
       - ./env/backend-api.env
@@ -140,7 +140,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
-    image: rider-server:dev
+    image: ${RIDER_SERVER_IMAGE:-rider-server:dev}
     command: python -m rider_server.dispatch
     env_file:
       - ./env/backend-api.env

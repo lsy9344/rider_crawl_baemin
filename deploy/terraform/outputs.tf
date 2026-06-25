@@ -42,3 +42,13 @@ output "host_memory_metric_names" {
     "HostSwapUsedPercent",
   ]
 }
+
+output "github_deploy_role_arn" {
+  description = "GitHub Actions OIDC deploy role ARN. GitHub secret DEPLOY_AWS_ROLE_ARN 에 넣는다."
+  value       = aws_iam_role.github_actions_deploy.arn
+}
+
+output "server_ecr_repository_url" {
+  description = "서버 Docker image ECR repository URL."
+  value       = aws_ecr_repository.server.repository_url
+}

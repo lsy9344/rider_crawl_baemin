@@ -90,19 +90,19 @@ def test_ec2_memory_runbook_uses_repo_root_env_for_production_deploy() -> None:
     assert "|| echo 'RIDER_DB_POOL_SIZE=5' | sudo tee -a .env" not in runbook
 
 
-def test_ec2_memory_runbook_blocks_runner_shutdown_without_deploy_replacement() -> None:
-    """Runner shutdown requires confirmed production deploy replacement."""
+def test_ec2_memory_runbook_documents_runner_shutdown_after_ssm_deploy_replacement() -> None:
+    """Runner shutdown is allowed after GitHub-hosted + SSM deploy replacement."""
 
     runbook = _ec2_memory_runbook()
 
     assert ".github/workflows/test.yml" in runbook
     assert "deploy-production" in runbook
-    assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" in runbook
-    assert "systemctl disable" in runbook
-    assert (
-        "blocked until manual deploy or GitHub-hosted + SSH/SSM deploy is verified"
-        in runbook
-    )
+    assert "GitHub-hosted runner + AWS SSM" in runbook
+    assert "aws ssm send-command" in runbook
+    assert "docker compose --env-file /opt/rider-server/repo/.env" in runbook
+    assert "up -d --no-build --remove-orphans" in runbook
+    assert "systemctl disable --now actions.runner" in runbook
+    assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" not in runbook
 
 
 def test_ec2_memory_runbook_has_idempotent_swap_commands() -> None:

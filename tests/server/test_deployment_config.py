@@ -147,39 +147,57 @@ def test_ci_runs_backend_health_smoke_off_pr_path() -> None:
     assert "docker run -d --name rider-health-smoke" in workflow
 
 
-def test_ci_deploys_main_to_ec2_after_quality_gates() -> None:
+def test_ci_deploys_main_to_ec2_via_github_hosted_ssm_after_quality_gates() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
     assert "deploy-production:" in workflow
     assert "needs: [local-tests, postgres-tests, deployment-config]" in workflow
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
-    assert "runs-on: [self-hosted, Linux, ARM64, rider-prod]" in workflow
-    assert "Deploy local EC2 compose stack" in workflow
-    assert "cd /opt/rider-server/repo" in workflow
-    assert "git fetch origin main" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "permissions:" in workflow
+    assert "id-token: write" in workflow
+    assert "aws-actions/configure-aws-credentials" in workflow
+    assert "docker/build-push-action" in workflow
+    assert "push: true" in workflow
+    assert "linux/arm64" in workflow
+    assert "aws ssm send-command" in workflow
+    assert "AWS-RunShellScript" in workflow
+    assert "aws ssm wait command-executed" in workflow
+    assert "aws ssm get-command-invocation" in workflow
+    assert "Deploy production through SSM" in workflow
     assert "ssh-keyscan" not in workflow
+    assert "DEPLOY_EC2_INSTANCE_ID" in workflow
+    assert "DEPLOY_AWS_ROLE_ARN" in workflow
+    assert "ECR_REPOSITORY" in workflow
+    assert "RIDER_SERVER_IMAGE=" in workflow
+    assert "git fetch origin main" in workflow
     assert "git checkout -B main -f FETCH_HEAD" in workflow
     compose_files = "-f deploy/docker-compose.yml -f deploy/docker-compose.dev-public-admin.yml"
     assert "set -a" not in workflow
     assert ". ./.env" not in workflow
     assert (
         f"docker compose --env-file .env -p rider {compose_files} "
-        "up --build -d --remove-orphans"
+        "up -d --no-build --remove-orphans"
     ) in workflow
     assert f"docker compose --env-file .env -p rider {compose_files} ps" in workflow
-    assert "for i in $(seq 1 60)" in workflow
+    deploy_job = workflow[workflow.index("deploy-production:") :]
+    deploy_job = deploy_job[: deploy_job.index("\n  ci-summary:")]
+    assert "self-hosted" not in deploy_job
+    assert "up --build" not in deploy_job
     assert "production health ok after ${i}s" in workflow
     assert "logs --tail=80 backend-api" in workflow
     assert "curl -fsS http://127.0.0.1:8000/health" in workflow
     assert "Production deploy" in workflow
 
 
-def test_ci_deploy_waits_for_docker_daemon_before_compose() -> None:
+def test_ci_deploy_waits_for_docker_daemon_before_remote_compose() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
-    deploy_script = workflow[workflow.index("Deploy local EC2 compose stack") :]
+    deploy_script = workflow[workflow.index("Deploy production through SSM") :]
     deploy_script = deploy_script[: deploy_script.index("\n  ci-summary:")]
 
+    assert "bash <<'BASH'" in deploy_script
+    assert "\n          BASH" in deploy_script
     assert "docker info >/dev/null 2>&1" in deploy_script
     assert "docker daemon did not become ready" in deploy_script
     assert deploy_script.index("docker info >/dev/null 2>&1") < deploy_script.index(
@@ -193,6 +211,17 @@ def test_ci_slack_notification_skips_cancelled_workflow_runs() -> None:
     notify_step = workflow[workflow.index("      - name: Notify Slack") :]
 
     assert "if: ${{ always() && !cancelled() }}" in notify_step
+
+
+def test_compose_server_services_can_use_prebuilt_image_without_production_build() -> None:
+    compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+
+    for service in ("migrate", "backend-api", "scheduler", "queue-recovery", "telegram-dispatch"):
+        block = compose[compose.index(f"\n  {service}:\n") :]
+        next_service = re.search(r"\n  [a-z0-9-]+:\n", block[len(f"\n  {service}:\n") :])
+        if next_service:
+            block = block[: len(f"\n  {service}:\n") + next_service.start()]
+        assert "image: ${RIDER_SERVER_IMAGE:-rider-server:dev}" in block
 
 
 def test_compose_backend_host_port_is_configurable() -> None:
@@ -268,6 +297,28 @@ def test_terraform_prevents_accidental_ec2_destroy_with_local_postgres() -> None
     assert "delete_on_termination = true" in app_resource
     assert "root volume local PostgreSQL data" in readme
     assert "-/+ aws_instance.app" in readme
+
+
+def test_terraform_defines_github_oidc_ecr_and_ssm_deploy_role() -> None:
+    deploy = Path("deploy/terraform/github_deploy.tf").read_text(encoding="utf-8")
+    variables = Path("deploy/terraform/variables.tf").read_text(encoding="utf-8")
+    outputs = Path("deploy/terraform/outputs.tf").read_text(encoding="utf-8")
+
+    assert "aws_iam_openid_connect_provider" in deploy
+    assert "token.actions.githubusercontent.com" in deploy
+    assert 'default     = "lsy9344/rider_crawl_baemin"' in variables
+    assert 'default     = "main"' in variables
+    assert 'default     = "rider-server"' in variables
+    assert "repo:${var.github_repository}:ref:refs/heads/${var.github_deploy_branch}" in deploy
+    assert "aws_ecr_repository" in deploy
+    assert "ssm:SendCommand" in deploy
+    assert "ssm:GetCommandInvocation" in deploy
+    assert "AWS-RunShellScript" in deploy
+    assert "ecr:GetAuthorizationToken" in deploy
+    assert "ecr:PutImage" in deploy
+    assert "ecr:BatchGetImage" in deploy
+    assert "github_deploy_role_arn" in outputs
+    assert "server_ecr_repository_url" in outputs
 
 
 def test_terraform_readme_documents_public_https_boundary() -> None:

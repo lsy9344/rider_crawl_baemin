@@ -166,3 +166,75 @@ Do not reproduce OOM on production. In staging, run the same compose stack on a 
 
 - Confirmed: `rider-metrics.service` has `MemoryMax=64M`, so the pusher is not likely the main memory cause.
 - Confirmed: the custom metric pusher had repeated `NoCredentials` failures before reboot, so monitoring was impaired during part of the incident window.
+
+## Follow-up: 2026-06-24
+
+### New Evidence
+
+- Confirmed: GitHub Actions deploy job `28085428323` started the self-hosted runner production deploy at `2026-06-24 08:27:00 UTC`. EC2 journal shows `runsvc.sh ... Running job: Deploy production` at the same timestamp.
+- Confirmed: Immediately after deploy started, Docker/BuildKit activity began. Journal shows several `var-lib-docker-tmp-buildkit...mount` entries at `08:27:09 UTC`.
+- Confirmed: Docker reported healthcheck failures during the deploy window:
+  - `08:27:10 UTC`: `transport: Error while dialing: only one connection allowed`
+  - `08:27:15 UTC`: `healthcheck failed fatally`
+  - `08:28:04 UTC`: `context deadline exceeded`
+- Confirmed: App metrics started failing after deploy began. `rider-push-metrics.sh` reported `curl failed` at `08:28:15`, `08:36:03`, and `08:38:15 UTC`.
+- Confirmed: sysstat shows severe host pressure after deploy started:
+  - `08:20:02 UTC`: `kbavail=167820`, load `0.09`, blocked `0`, iowait `1.32%`
+  - `08:33:48 UTC`: `kbavail=17268`, load `32.32`, blocked `27`, iowait `36.23%`
+  - swap was absent: `kbswpfree=0`, `kbswpused=0`
+  - disk reads jumped from about `1.9MB/s` to about `125MB/s`, and root NVMe utilization rose to about `45%`.
+- Confirmed: AWS EC2 `StatusCheckFailed` stayed `0` during `08:10-08:45 UTC`, so AWS saw the instance as healthy even while services inside it were unresponsive.
+- Confirmed: No kernel OOM kill line was found in the `2026-06-24 08:15-08:39 UTC` kernel journal window.
+
+### Additional Findings
+
+### Finding 7: The June 24 deploy incident was a resource-starvation hang, not a confirmed kernel OOM
+
+**Evidence:** EC2 journal and sysstat around `2026-06-24 08:27-08:38 UTC`.
+
+**Detail:** The runner started a deploy, Docker/BuildKit began work, memory availability collapsed to about 17 MiB, load average rose to 32, and 27 processes were blocked. The app stopped responding to local curl checks, but the kernel did not record an OOM kill.
+
+### Finding 8: Production deploy builds on the same low-memory production host
+
+**Evidence:** `.github/workflows/test.yml` deploy-production job runs on `[self-hosted, Linux, ARM64, rider-prod]` and executes `docker compose ... up --build`.
+
+**Detail:** The same EC2 host runs PostgreSQL, four application containers, Docker/containerd, host services, and the GitHub Actions runner. During deploy it also performs image build work, which adds memory and disk pressure.
+
+### Updated Hypotheses
+
+### Hypothesis 2: Docker build/read pressure caused host-wide service starvation during deploy
+
+**Status:** Confirmed
+
+**Theory:** On a `t4g.micro` with no swap, `docker compose up --build` started BuildKit work while the app stack and runner were already resident. The host did not immediately kill a process, but memory and I/O pressure grew enough that Docker healthchecks, app curls, and SSH/runner responsiveness degraded or stopped.
+
+**Supporting indicators:** BuildKit mounts at `08:27:09 UTC`, Docker healthcheck failures by `08:27:10-08:28:04 UTC`, app metric curl failures from `08:28:15 UTC`, sysstat at `08:33:48 UTC` showing `kbavail=17268`, load `32.32`, blocked `27`, iowait `36.23%`, and no EC2 status-check failure.
+
+**Would confirm:** Already confirmed by matching timeline and sysstat pressure data.
+
+**Would refute:** A kernel panic, OOM kill, AWS host status failure, or manual shutdown at the same time. None was found in the available logs.
+
+**Resolution:** Confirmed as the best root cause for the June 24 CI/deploy hang. The direct mechanism is host resource starvation during Docker deploy build, not a code-level application crash.
+
+### Backlog Changes
+
+- Done: Add 2 GiB swap on the EC2 host. Verified with `swapon --show`.
+- Done: Harden CI deploy script to wait for Docker daemon readiness before running compose.
+- Done: Move production deploy off the production EC2 runner path. The replacement design builds the ARM64 image on GitHub-hosted Actions, pushes it to ECR, and deploys through SSM with `docker compose ... up -d --no-build`.
+- Done: Keep host memory/swap CloudWatch metrics visible. The EC2 pusher was updated to publish `HostMemAvailablePercent` and `HostSwapUsedPercent`, and Terraform now manages the matching low-memory/high-swap alarms.
+
+### Updated Conclusion
+
+**Confidence:** High for the June 24 deploy incident.
+
+The server did not show evidence of an AWS host failure or a kernel OOM kill on June 24. It became internally unresponsive because the production EC2 was too small for its combined workload: app containers, local PostgreSQL, Docker, host services, and a GitHub Actions runner all shared a `t4g.micro` with no swap, and the deploy job added Docker build pressure. The host entered severe memory/I/O starvation, causing Docker healthchecks and app curl checks to fail while AWS still considered the instance running.
+
+## Remediation Applied: 2026-06-25
+
+- EC2 was changed from `t4g.micro` to `t4g.small`.
+- A pre-change PostgreSQL dump was written on the host, and root EBS snapshot `snap-03d303d51f094afad` completed before the resize.
+- Production `.env` was updated to `RIDER_UVICORN_WORKERS=1`, `RIDER_DB_POOL_SIZE=2`, and `RIDER_DB_MAX_OVERFLOW=2`.
+- Optional host services `fwupd`, `fwupd-refresh.timer`, `ModemManager`, and `udisks2` were disabled and masked.
+- The installed `rider-push-metrics.sh` was updated to the host memory/swap-aware version and pushed 18 metrics to CloudWatch.
+- SSM was enabled through the EC2 instance profile and verified with a successful `AWS-RunShellScript` command.
+- Terraform now manages the ECR repository, GitHub OIDC deploy role, EC2 ECR pull permission, SSM core policy attachment, and host memory/swap alarms.
