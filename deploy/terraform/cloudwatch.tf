@@ -230,8 +230,9 @@ resource "aws_cloudwatch_metric_alarm" "auth_required" {
   threshold           = var.auth_required_alarm_threshold
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "breaching"
-  alarm_actions       = local.alarm_actions
-  ok_actions          = local.alarm_actions
+  # CloudWatch 상태 확인용으로만 유지하고 이메일/SNS 알림은 보내지 않는다.
+  alarm_actions = []
+  ok_actions    = []
   tags                = { Name = "${var.project}-auth-required" }
 }
 
