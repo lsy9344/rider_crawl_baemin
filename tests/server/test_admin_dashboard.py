@@ -410,6 +410,26 @@ def test_jobs_fragment_route_shows_failed_reason() -> None:
     assert "실패" in body
     assert "브라우저 연결 실패" in body
     assert 'class="job-failed"' in body
+    assert 'data-queue-active="0"' in body
+    assert 'data-queue-failed="1"' in body
+
+
+def test_dashboard_queue_summary_counts_recent_failure_separately() -> None:
+    repo = _seeded_repo()
+    repo.seed_active_job(
+        _job(
+            job_id="f1",
+            status="FAILED",
+            recently_failed=True,
+            error_code="AGENT_JOB_EXECUTION_ERROR",
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert "실시간 큐" in body
+    assert "0건 처리 중 · 최근 실패 1건 · 5s" in body
+    assert "syncQueueSummaryFromFragment" in body
 
 
 def test_in_memory_dashboard_all_tenants_returns_targets_and_aggregates_channels() -> None:

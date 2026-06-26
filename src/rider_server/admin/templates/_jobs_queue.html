@@ -1,7 +1,14 @@
 {# 실시간 큐(active job) 부분 fragment(HTMX swap 대상). 읽기 전용 — 상태 변경 없음.
    "이미 진행 중인 수집 작업이 있습니다"의 실체를 운영자가 직접 본다: 어떤 job 이 어떤 상태로
    막혀 있고, 배정 Agent 가 살아있는지, 멈춘(stuck) job 인지. secret 0(분류 코드/이름/시각만). #}
-<div class="table-wrap">
+{% set queue_jobs = (jobs | default([])) | list %}
+{% set queue_active = queue_jobs | rejectattr('recently_failed') | list | length %}
+{% set queue_failed = queue_jobs | selectattr('recently_failed') | list | length %}
+{% set queue_stuck = queue_jobs | selectattr('stuck') | list | length %}
+<div class="table-wrap"
+     data-queue-active="{{ queue_active }}"
+     data-queue-failed="{{ queue_failed }}"
+     data-queue-stuck="{{ queue_stuck }}">
 <table>
   <thead>
     <tr>
@@ -14,7 +21,7 @@
     </tr>
   </thead>
   <tbody>
-    {% for j in jobs %}
+    {% for j in queue_jobs %}
     <tr{% if j.stuck %} class="job-stuck"{% elif j.recently_failed %} class="job-failed"{% endif %}>
       <td>{{ j.job_type | job_type_label }}</td>
       <td>

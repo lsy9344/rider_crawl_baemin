@@ -341,8 +341,10 @@
   {% set ag_offline = ag_total - ag_online %}
   {% set auth_n = auth_required | list | length %}
   {% set auth_targetless = auth_required | selectattr('target_id', 'none') | list | length %}
-  {% set jobs_n = (jobs | default([])) | list | length %}
-  {% set jobs_stuck = (jobs | default([])) | selectattr('stuck') | list | length %}
+  {% set queue_jobs = (jobs | default([])) | list %}
+  {% set jobs_n = queue_jobs | rejectattr('recently_failed') | list | length %}
+  {% set jobs_recent_failed = queue_jobs | selectattr('recently_failed') | list | length %}
+  {% set jobs_stuck = queue_jobs | selectattr('stuck') | list | length %}
   {% set attention = tg_critical + tg_stopped + ag_offline + auth_targetless %}
 
   <header class="topbar">
@@ -436,7 +438,7 @@
     {# 실시간 큐: active(대기/배정/실행/재시도) job 을 5초 주기로 갱신. 멈춘(stuck) job 이 있으면
        펼친 상태로 둬 "왜 진행 중이라고 뜨는지"를 운영자가 바로 본다. #}
     <details class="aux" {% if jobs_stuck %}open{% endif %}>
-      <summary>실시간 큐 <span class="tag">{{ jobs_n }}건 처리 중{% if jobs_stuck %} · ⚠ 멈춤 {{ jobs_stuck }}{% endif %} · 5s</span></summary>
+      <summary>실시간 큐 <span class="tag" id="queue-summary-tag">{{ jobs_n }}건 처리 중{% if jobs_recent_failed %} · 최근 실패 {{ jobs_recent_failed }}건{% endif %}{% if jobs_stuck %} · ⚠ 멈춤 {{ jobs_stuck }}{% endif %} · 5s</span></summary>
       <div class="aux-body">
         <div id="jobs-queue" hx-get="/admin/jobs?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% with jobs = jobs | default([]) %}{% include "_jobs_queue.html" %}{% endwith %}</div>
       </div>
@@ -536,10 +538,29 @@
       var seg = document.getElementById("agent-summary-seg");
       if (seg) seg.classList.toggle("bad", online < total);
     }
+    function queueSummaryText(active, failed, stuck) {
+      var text = active + "건 처리 중";
+      if (failed > 0) text += " · 최근 실패 " + failed + "건";
+      if (stuck > 0) text += " · ⚠ 멈춤 " + stuck;
+      return text + " · 5s";
+    }
+    function syncQueueSummaryFromFragment() {
+      var source = document.querySelector("#jobs-queue [data-queue-active][data-queue-failed][data-queue-stuck]");
+      if (!source) return;
+      setText(
+        "queue-summary-tag",
+        queueSummaryText(
+          readCount(source, "queueActive"),
+          readCount(source, "queueFailed"),
+          readCount(source, "queueStuck")
+        )
+      );
+    }
     document.body.addEventListener("htmx:afterSwap", function (e) {
       stampUpdated();
       if (e.target && e.target.id === "targets") { syncTargetSummaryFromRows(); applyFilter(); syncOpenDrawerFromRows(); }
       if (e.target && e.target.id === "agents") syncAgentSummaryFromFragment();
+      if (e.target && e.target.id === "jobs-queue") syncQueueSummaryFromFragment();
       if (isActionResultTarget(e.target)) triggerAdminRefreshBurst();
     });
     function triggerAdminRefreshBurst() {
