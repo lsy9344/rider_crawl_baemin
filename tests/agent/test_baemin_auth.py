@@ -476,6 +476,67 @@ def test_default_detect_completion_coupang_rejects_unsupported_target_path(monke
     assert completed is False
 
 
+def test_default_detect_completion_coupang_true_when_ready_target_and_stale_login_tab(monkeypatch):
+    # 사람이 재로그인을 끝내 대상 탭은 준비됐지만, 리다이렉트로 남은 옛 로그인 탭이
+    # 같은 브라우저에 함께 열려 있는 흔한 상황. 옛 로그인 탭 하나 때문에 완료를
+    # 거부하면 OPEN_AUTH_BROWSER 가 매번 auth_timeout→AUTH_REQUIRED 로 고착된다.
+    # 준비된 대상 탭이라는 긍정 신호가 있으면 완료로 판정해야 한다(회귀 방지).
+    from types import SimpleNamespace
+
+    class FakeText:
+        def wait_for(self, timeout=None):
+            return None
+
+    class FakeLoginPage:
+        url = "https://xauth.coupang.com/auth/realms/eats-partner/login-actions/authenticate"
+
+        def content(self):
+            return "<html>Vendor Portal 아이디 입력 비밀번호 입력 로그인</html>"
+
+    class FakeReadyPage:
+        url = "https://partner.coupangeats.com/page/peak-dashboard"
+
+        def content(self):
+            return "<html>피크타임별 현황</html>"
+
+        def get_by_text(self, text):
+            assert text == "피크타임별 현황"
+            return FakeText()
+
+    class FakeContext:
+        # 옛 로그인 탭이 준비된 대상 탭보다 앞에 있어도 완료로 판정해야 한다.
+        pages = [FakeLoginPage(), FakeReadyPage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+            },
+        )
+    )
+
+    assert completed is True
+
+
 def test_open_auth_browser_signature_has_no_otp_or_code_input_param():
     # 인증번호(OTP) 취득·입력·우회 0(ADD-15): 실행자는 open/detect 만 받는다 — OTP/코드 입력
     # 주입점이 시그니처에 존재하지 않음을 정적으로 단언(자동입력 경로 부재).

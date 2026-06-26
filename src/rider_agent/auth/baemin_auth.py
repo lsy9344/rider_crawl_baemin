@@ -375,25 +375,35 @@ def _detect_coupang_completion(
             browser = playwright.chromium.connect_over_cdp(config.cdp_url)
             timeout_errors = _playwright_timeout_errors()
             pages = coupang_crawler._browser_pages(browser)
+
+            # 완료는 **긍정 신호**(준비된 대상 탭)로 판정한다. 로그인 탭 존재 여부로
+            # 먼저 거부하면, 사람이 재로그인을 끝냈는데도 리다이렉트로 남은 옛 로그인
+            # 탭 하나 때문에 영원히 미완료로 보고돼 OPEN_AUTH_BROWSER 가 매번
+            # auth_timeout→AUTH_REQUIRED 로 고착됐다(재인증 후에도 '인증 필요' 해소
+            # 안 됨). 그래서 대상 탭 준비를 먼저 확인하고, 로그인 탭은 준비된 대상이
+            # 전혀 없을 때만 미완료로 본다.
+            if target_url and _coupang_target_url_has_readiness_signal(target_url):
+                page = coupang_crawler._select_page_by_url(pages, target_url)
+                if page is not None:
+                    try:
+                        coupang_crawler._wait_for_target_page_ready(
+                            page,
+                            config,
+                            target_url=target_url,
+                            timeout_errors=timeout_errors,
+                        )
+                        return True
+                    except BrowserActionRequiredError:
+                        return False
+                    except Exception:
+                        return False
+
+            # 준비된 대상 탭을 확인하지 못했다. 로그인 화면이 남아 있으면 아직 미완료다.
             if coupang_crawler._login_required_page(pages) is not None:
                 return False
+            # 대상 URL 이 지원 경로가 아니면(준비 텍스트로 검증 불가) 보수적으로 미완료.
             if target_url and not _coupang_target_url_has_readiness_signal(target_url):
                 return False
-
-            page = coupang_crawler._select_page_by_url(pages, target_url) if target_url else None
-            if page is not None and target_url:
-                try:
-                    coupang_crawler._wait_for_target_page_ready(
-                        page,
-                        config,
-                        target_url=target_url,
-                        timeout_errors=timeout_errors,
-                    )
-                    return True
-                except BrowserActionRequiredError:
-                    return False
-                except Exception:
-                    return False
 
             return _has_coupang_partner_session(pages)
     except Exception:

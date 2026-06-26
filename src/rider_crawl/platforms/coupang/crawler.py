@@ -249,6 +249,18 @@ def _coupang_center_from_heading(heading: str) -> str:
     match = re.match(rf"(?P<center>.+?)\s+{_COUPANG_SHIFT_PATTERN}\s*\(\d{{2}}:\d{{2}}~\d{{2}}:\d{{2}}\)", text)
     if match:
         return match.group("center").strip()
+    # 알려진 시프트 패턴이 안 맞아도, ``(HH:MM~HH:MM)`` 시간 범위가 붙어 있으면 그건
+    # 시프트 라벨이다. 쿠팡이 새 시프트명("밤논피크"→"심야논피크"처럼 표기를 또 바꾸거나
+    # 신규 시프트를 추가)을 쓰면 allowlist가 못 따라가 정상 화면을 '센터 불일치'로
+    # 오발(오발송 위험으로 표시)했다. 시간 범위를 앵커로 앞쪽 시프트 토큰만 떼어내
+    # allowlist 없이도 센터명을 복원한다. 시프트 라벨은 "…피크/…논피크/아침"으로 끝나고
+    # 센터명은 그렇게 끝나지 않으므로, 이 절단이 다른 센터를 잘못 통과시키지 않는다
+    # (센터명 자체는 그대로 남아 이후 exact 비교가 막는다).
+    time_range = re.search(r"\(\d{2}:\d{2}~\d{2}:\d{2}\)", text)
+    if time_range:
+        before = text[: time_range.start()].rstrip()
+        center = re.sub(r"(?:\s+\S*(?:피크|아침))+$", "", before).strip()
+        return center or text
     return text
 
 
