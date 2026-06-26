@@ -36,6 +36,7 @@ from rider_server.db.models.tenancy import Subscription, Tenant
 from rider_server.domain import (
     BaeminAuthState,
     CustomerLifecycleState,
+    FailureCategory,
     MonitoringTargetStatus,
     SubscriptionStatus,
 )
@@ -56,6 +57,11 @@ from .service import DueTarget, SchedulerRepository, TenantGate
 
 # scheduler 가 생성/평가하는 CrawlJob type(정본 6종 중 2종). 활성 job/실패 집계 스코프.
 _CRAWL_JOB_TYPES = (JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG)
+# 특정 대상/계정에 사람 조치가 필요한 실패는 플랫폼 전체 장애율에서 제외한다.
+_PLATFORM_BREAKER_IGNORED_FAILURE_CODES = (
+    FailureCategory.AUTH_REQUIRED.value,
+    FailureCategory.TARGET_VALIDATION_FAILURE.value,
+)
 # 인증 시작 계열 job type — 같은 대상에 둘 중 하나라도 진행 중이면 새 자동 복구 auth job 을 막는다
 # (crawl-coupang-auth-separation Task 7: 중복 OTP 요청·동시 복구 방지).
 _AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
@@ -74,6 +80,20 @@ def _safe_uuid(value: object) -> uuid.UUID | None:
         return uuid.UUID(raw)
     except (ValueError, AttributeError, TypeError):
         return None
+
+
+def _is_platform_breaker_failure_code(error_code: str | None) -> bool:
+    """플랫폼 breaker 실패율에 넣을 error_code 인가."""
+
+    return error_code not in _PLATFORM_BREAKER_IGNORED_FAILURE_CODES
+
+
+def _platform_breaker_failure_filter():
+    """failed job 중 플랫폼 breaker 실패로 셀 행 조건."""
+
+    return (Job.error_code.is_(None)) | (
+        Job.error_code.not_in(_PLATFORM_BREAKER_IGNORED_FAILURE_CODES)
+    )
 
 
 async def _acquire_account_advisory_lock(
@@ -313,7 +333,11 @@ class PostgresSchedulerRepository(SchedulerRepository):
         fail_stmt = (
             select(func.count())
             .select_from(Job)
-            .where(window & (Job.status == JOB_STATUS_FAILED))
+            .where(
+                window
+                & (Job.status == JOB_STATUS_FAILED)
+                & _platform_breaker_failure_filter()
+            )
         )
         async with self._session_factory() as session:
             total = (await session.execute(total_stmt)).scalar_one()

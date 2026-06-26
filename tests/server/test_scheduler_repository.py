@@ -19,11 +19,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import asyncio
+import inspect
 from dataclasses import replace
 
 import pytest
 
-from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
+from rider_server.domain import CustomerLifecycleState, FailureCategory, SubscriptionStatus
 from rider_server.queue import InMemoryQueueBackend
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
@@ -36,7 +37,9 @@ from rider_server.scheduler import policy
 from rider_server.scheduler.postgres_repository import (
     _ACTIVE_JOB_STATUSES,
     _CRAWL_JOB_TYPES,
+    _PLATFORM_BREAKER_IGNORED_FAILURE_CODES,
     _capacity_from_agent_rows,
+    _is_platform_breaker_failure_code,
     _safe_uuid,
     PostgresSchedulerRepository,
     _to_lifecycle_status,
@@ -106,6 +109,30 @@ def test_repository_active_status_scope_is_pending_claimed_running() -> None:
         JOB_STATUS_CLAIMED,
         JOB_STATUS_RUNNING,
     }
+
+
+def test_platform_breaker_ignores_target_specific_human_action_failures() -> None:
+    """대상별 조치 실패는 쿠팡 전체 장애율을 열지 않는다."""
+
+    assert set(_PLATFORM_BREAKER_IGNORED_FAILURE_CODES) == {
+        FailureCategory.AUTH_REQUIRED.value,
+        FailureCategory.TARGET_VALIDATION_FAILURE.value,
+    }
+    assert _is_platform_breaker_failure_code(FailureCategory.CRAWL_FAILURE.value) is True
+    assert _is_platform_breaker_failure_code(FailureCategory.RENDER_FAILURE.value) is True
+    assert _is_platform_breaker_failure_code(None) is True
+    assert _is_platform_breaker_failure_code(FailureCategory.AUTH_REQUIRED.value) is False
+    assert (
+        _is_platform_breaker_failure_code(
+            FailureCategory.TARGET_VALIDATION_FAILURE.value
+        )
+        is False
+    )
+
+
+def test_platform_failure_window_applies_platform_breaker_failure_filter() -> None:
+    source = inspect.getsource(PostgresSchedulerRepository.platform_failure_window)
+    assert "_platform_breaker_failure_filter()" in source
 
 
 def test_postgres_repository_has_release_due_target_for_enqueue_failures() -> None:
