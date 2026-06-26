@@ -361,6 +361,23 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_title_center_with_shift
     assert snapshot.peak_dashboard.updated_at == "20:38"
 
 
+def test_coupang_crawl_performance_snapshot_accepts_peak_title_center_with_night_nonpeak_suffix(tmp_path):
+    peak_html = _PEAK_DASHBOARD_HTML.replace(
+        "<main>",
+        '<main>\n  <div class="align-center dashboard-page-title-content flex">'
+        "<span>제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중</span>"
+        "</div>",
+    )
+    config = _config(tmp_path, baemin_center_name="제이앤에이치플러스 의정부남부")
+
+    snapshot = crawl_performance_snapshot(
+        config,
+        fetch_peak_dashboard_html=lambda _config: peak_html,
+    )
+
+    assert snapshot.peak_dashboard.updated_at == "20:38"
+
+
 def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_shift_suffix(tmp_path):
     # 헤딩이 "센터명 시프트(시간)" 형태여도 앞쪽 센터명만 떼어 비교한다.
     peak_html = _PEAK_DASHBOARD_HTML.replace(
@@ -400,6 +417,7 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_spaced_shi
         ("제이앤에이치플러스 의정부남부 저녁피크(16:55~20:00)", "제이앤에이치플러스 의정부남부"),
         ("제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00)", "제이앤에이치플러스 의정부남부"),
         ("제이앤에이치플러스 의정부남부 저녁 피크(16:55~20:00) 할당량 소진 중", "제이앤에이치플러스 의정부남부"),
+        ("제이앤에이치플러스 의정부남부 밤논피크(20:00~06:00) 할당량 소진 중", "제이앤에이치플러스 의정부남부"),
         ("에이비씨로지스 강남센터 점심 논피크(12:00~14:00)", "에이비씨로지스 강남센터"),
         ("에이비씨로지스 강남센터 오전피크(09:00~12:30)", "에이비씨로지스 강남센터"),
     ],

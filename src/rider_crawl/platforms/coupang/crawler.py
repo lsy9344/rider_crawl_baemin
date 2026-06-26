@@ -225,7 +225,7 @@ def _coupang_peak_heading_center_raw(peak_html: str) -> set[str]:
 _COUPANG_SHIFT_PATTERN = (
     r"(?:아침|오전\s*피크|오후\s*피크"
     r"|점심\s*피크|점심\s*논피크|저녁\s*피크|저녁\s*논피크"
-    r"|오전\s*논피크|오후\s*논피크|심야\s*논피크|논피크|피크)"
+    r"|오전\s*논피크|오후\s*논피크|심야\s*논피크|밤\s*논피크|논피크|피크)"
 )
 
 _COUPANG_PEAK_SECTION_HEADINGS = {
