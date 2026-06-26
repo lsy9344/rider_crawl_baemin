@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import rider_agent.browser_profile as browser_profile
 from rider_agent.browser_profile import (
     DEFAULT_MAX_RESTART_ATTEMPTS,
     ERROR_TARGET_VALIDATION_FAILURE,
@@ -304,6 +305,64 @@ def test_same_target_relaunches_when_tracked_browser_process_exited(tmp_path):
             "state": STATE_READY,
         }
     ]
+
+
+def test_agent_restart_adopts_existing_profile_chrome_with_live_cdp(
+    tmp_path, monkeypatch
+):
+    prepare = CountingPrepare()
+    adopted_process = FakeProcess()
+
+    def fail_if_allocated():
+        raise AssertionError("existing Chrome CDP should be adopted before port allocation")
+
+    def find_existing(profile_dir, *, cdp_probe=None):
+        assert profile_dir == tmp_path / "profiles" / "t1" / "alpha"
+        if cdp_probe is not None:
+            cdp_probe("http://127.0.0.1:9555")
+        return type(
+            "Endpoint",
+            (),
+            {
+                "cdp_url": "http://127.0.0.1:9555",
+                "cdp_port": 9555,
+                "process": adopted_process,
+            },
+        )()
+
+    probe_calls = []
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        find_existing,
+        raising=False,
+    )
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        allocate_port=fail_if_allocated,
+        cdp_probe=lambda cdp_url: probe_calls.append(cdp_url),
+    )
+
+    assignment = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert assignment.cdp_url == "http://127.0.0.1:9555"
+    assert assignment.cdp_port == 9555
+    assert assignment.state == STATE_READY
+    assert prepare.calls == []
+    assert probe_calls == ["http://127.0.0.1:9555"]
+    assert manager.browser_profiles() == [
+        {
+            "id": "t1:alpha",
+            "target_id": "alpha",
+            "agent_id": "agent-fake-1",
+            "cdp_port": 9555,
+            "state": STATE_READY,
+        }
+    ]
+
+    manager.release("t1", "alpha")
+    assert adopted_process.terminated is True
 
 
 def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path):

@@ -29,8 +29,10 @@ from rider_crawl.platforms import coupang, crawl_snapshot
 from rider_crawl.browser_launcher import (
     BrowserActionRequiredError,
     BrowserLaunchError,
+    ChromeDebugEndpoint,
     CdpUnavailableError,
     ensure_local_cdp_address,
+    find_existing_chrome_debug_endpoint,
     prepare_chrome,
 )
 
@@ -64,6 +66,8 @@ __all__ = [
     # Chrome 실행 + CDP/프로필 격리 가드(4.5)
     "prepare_chrome",
     "ensure_local_cdp_address",
+    "find_existing_chrome_debug_endpoint",
+    "ChromeDebugEndpoint",
     "BrowserLaunchError",
     "CdpUnavailableError",
     "BrowserActionRequiredError",

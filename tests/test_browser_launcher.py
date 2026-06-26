@@ -129,6 +129,45 @@ def test_prepare_chrome_refuses_when_profile_already_running_without_cdp(tmp_pat
     assert calls == []
 
 
+def test_find_existing_chrome_debug_endpoint_for_profile_reuses_live_local_cdp(
+    tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "browser"
+    calls = []
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def cmdline(self):
+            return [
+                "chrome.exe",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=9555",
+                f"--user-data-dir={profile_dir}",
+            ]
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [FakeProcess()]
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    endpoint = browser_launcher.find_existing_chrome_debug_endpoint(
+        profile_dir, cdp_probe=lambda cdp_url: calls.append(cdp_url)
+    )
+
+    assert endpoint is not None
+    assert endpoint.cdp_url == "http://127.0.0.1:9555"
+    assert endpoint.cdp_port == 9555
+    assert endpoint.process is not None
+    assert calls == ["http://127.0.0.1:9555"]
+
+
 def test_prepare_chrome_launches_when_profile_not_already_running(tmp_path, monkeypatch):
     calls = []
     probes = []

@@ -48,6 +48,7 @@ from rider_agent.reuse import (
     CdpUnavailableError,
     coupang_center_name_risk,
     ensure_local_cdp_address,
+    find_existing_chrome_debug_endpoint,
     prepare_chrome,
 )
 
@@ -253,6 +254,7 @@ class BrowserProfileManager:
         last_used_at = self._now()
 
         while True:
+            adopted_endpoint = None
             process_to_close = None
             wait_for_reservation = None
             with self._lock:
@@ -273,7 +275,14 @@ class BrowserProfileManager:
                         processes_to_close = self._enforce_max_profiles_locked()
                         profile_dir = self._profile_dir_for(*key)
                         profile_key = _profile_key(profile_dir)
-                        port = int(self._allocate_port())
+                        adopted_endpoint = find_existing_chrome_debug_endpoint(
+                            profile_dir, cdp_probe=self._cdp_probe
+                        )
+                        port = (
+                            int(adopted_endpoint.cdp_port)
+                            if adopted_endpoint is not None
+                            else int(self._allocate_port())
+                        )
                         self._reserve_launch_locked(key, port, profile_key)
                         reservation = self._reservations[key]
                         break
@@ -287,7 +296,11 @@ class BrowserProfileManager:
         launched_processes: list[Any] = []
 
         try:
-            cdp_url = f"http://127.0.0.1:{port}"
+            cdp_url = (
+                str(adopted_endpoint.cdp_url)
+                if adopted_endpoint is not None
+                else f"http://127.0.0.1:{port}"
+            )
             config = build_config(
                 tenant_id=key[0],
                 target_id=key[1],
@@ -306,14 +319,16 @@ class BrowserProfileManager:
             # 원격 CDP 차단 + 격리 가드(CDP-unused·profile-free·CDP 대기)를 prepare_chrome 으로 재사용.
             ensure_local_cdp_address(getattr(config, "cdp_url", cdp_url))
 
-            def run_command(command: list[str], check: bool) -> Any:
-                runner = self._run_command or _default_run_command
-                result = runner(command, check)
-                if _is_process_handle(result):
-                    launched_processes.append(result)
-                return result
+            if adopted_endpoint is None:
 
-            self._prepare(config, run_command=run_command, cdp_probe=self._cdp_probe)
+                def run_command(command: list[str], check: bool) -> Any:
+                    runner = self._run_command or _default_run_command
+                    result = runner(command, check)
+                    if _is_process_handle(result):
+                        launched_processes.append(result)
+                    return result
+
+                self._prepare(config, run_command=run_command, cdp_probe=self._cdp_probe)
         except Exception:
             for process in launched_processes:
                 self._close_process(process)
@@ -338,7 +353,11 @@ class BrowserProfileManager:
             self._registry[key] = assignment
             self._ports[port] = key
             self._profile_keys[profile_key] = key
-            process = launched_processes[-1] if launched_processes else None
+            process = (
+                getattr(adopted_endpoint, "process", None)
+                if adopted_endpoint is not None
+                else (launched_processes[-1] if launched_processes else None)
+            )
             if process is not None:
                 self._processes[key] = process
             reservation.set()

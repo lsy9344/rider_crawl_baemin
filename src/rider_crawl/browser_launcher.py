@@ -5,8 +5,9 @@ import shutil
 import subprocess
 import time
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlsplit
 from urllib.request import urlopen as default_urlopen
 
@@ -37,6 +38,13 @@ class BrowserActionRequiredError(RuntimeError):
 
 CommandRunner = Callable[[list[str], bool], object]
 CdpProbe = Callable[[str], object]
+
+
+@dataclass(frozen=True)
+class ChromeDebugEndpoint:
+    cdp_url: str
+    cdp_port: int
+    process: Any | None = None
 
 
 def prepare_chrome(
@@ -235,6 +243,49 @@ def _chrome_running_for_profile(profile_dir: Path) -> bool:
     return False
 
 
+def find_existing_chrome_debug_endpoint(
+    profile_dir: Path, *, cdp_probe: CdpProbe | None = None
+) -> ChromeDebugEndpoint | None:
+    """Return a live local CDP endpoint for an already-running Chrome profile.
+
+    This is intentionally stricter than ``_chrome_running_for_profile``: a process is
+    reusable only when it uses the same profile, declares a local remote-debugging
+    port, and the CDP probe succeeds.
+    """
+
+    try:
+        import psutil
+    except Exception:
+        return None
+
+    target = _profile_dir_key(profile_dir)
+    probe = cdp_probe or _probe_cdp_endpoint
+    for process in psutil.process_iter(["name"]):
+        try:
+            name = (process.info.get("name") or "").casefold()
+            if name not in {"chrome.exe", "chrome"}:
+                continue
+            cmdline = process.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+        if not _cmdline_uses_profile(cmdline, target):
+            continue
+        cdp_url = _cmdline_cdp_url(cmdline)
+        if cdp_url is None:
+            continue
+        try:
+            ensure_local_cdp_address(cdp_url)
+            probe(cdp_url)
+            return ChromeDebugEndpoint(
+                cdp_url=cdp_url,
+                cdp_port=_cdp_port(cdp_url),
+                process=process,
+            )
+        except Exception:
+            continue
+    return None
+
+
 def _cmdline_uses_profile(cmdline: list[str], target_key: str) -> bool:
     for arg in cmdline:
         if not arg.startswith("--user-data-dir"):
@@ -251,6 +302,34 @@ def _cmdline_uses_profile(cmdline: list[str], target_key: str) -> bool:
             if candidate and _profile_dir_key(Path(candidate)) == target_key:
                 return True
     return False
+
+
+def _cmdline_cdp_url(cmdline: list[str]) -> str | None:
+    port = _cmdline_option_value(cmdline, "--remote-debugging-port")
+    if not port:
+        return None
+    try:
+        parsed_port = int(port)
+    except ValueError:
+        return None
+    if parsed_port <= 0 or parsed_port > 65535:
+        return None
+    address = _cmdline_option_value(cmdline, "--remote-debugging-address") or "127.0.0.1"
+    address = address.strip().strip('"')
+    return f"http://{address}:{parsed_port}"
+
+
+def _cmdline_option_value(cmdline: list[str], option: str) -> str | None:
+    for arg in cmdline:
+        if not arg.startswith(option):
+            continue
+        _, sep, value = arg.partition("=")
+        if sep:
+            return value.strip().strip('"')
+    for index, arg in enumerate(cmdline[:-1]):
+        if arg == option:
+            return cmdline[index + 1].strip().strip('"')
+    return None
 
 
 def _profile_dir_key(path: Path) -> str:
