@@ -1180,6 +1180,18 @@ def test_entity_admin_required_selects_and_inline_error_handler_contract() -> No
     assert "inline-action-status" in template
 
 
+def test_entity_admin_inline_error_handler_reads_error_envelope() -> None:
+    template = Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "friendlyErrorMessage" in template
+    assert "data.error" in template
+    assert "message_redacted" in template
+    assert "source not allowed" in template
+    assert "허용된 관리자 접속 위치가 아닙니다" in template
+
+
 def test_action_result_fragment_does_not_create_nested_live_region() -> None:
     template = Path("src/rider_server/admin/templates/_action_result.html").read_text(
         encoding="utf-8"

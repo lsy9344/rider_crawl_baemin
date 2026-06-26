@@ -386,9 +386,33 @@
     if (!xhr || !xhr.responseText) { return fallback; }
     try {
       var data = JSON.parse(xhr.responseText);
+      if (data && data.error) {
+        return friendlyErrorMessage(data.error.code, data.error.message_redacted);
+      }
       if (data && data.detail) { return data.detail; }
     } catch (e) {}
+    if (xhr.responseText.trim().charAt(0) === "{") { return fallback; }
     return xhr.responseText.length > 120 ? fallback : xhr.responseText;
+  }
+  function friendlyErrorMessage(code, message) {
+    var normalized = (message || "").toLowerCase();
+    if (normalized === "source not allowed") {
+      return "접근 차단 · 허용된 관리자 접속 위치가 아닙니다";
+    }
+    if (normalized === "admin origin not allowed") {
+      return "접근 차단 · 관리자 화면 출처가 허용되지 않았습니다";
+    }
+    if (normalized === "mfa verification required") {
+      return "접근 차단 · MFA 인증이 필요합니다";
+    }
+    if (normalized === "insufficient admin role") {
+      return "접근 차단 · 관리자 권한이 부족합니다";
+    }
+    if (normalized === "admin authentication required") {
+      return "관리자 로그인이 필요합니다";
+    }
+    if (message) { return message; }
+    return code ? "요청 실패 · " + code : "요청 실패 · 입력을 확인하세요";
   }
   function inlineStatusForEvent(event) {
     var detail = event.detail || {};
