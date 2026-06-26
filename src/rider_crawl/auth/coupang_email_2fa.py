@@ -48,6 +48,13 @@ _CODE_INPUT_SELECTORS = (
 _SUBMIT_TEXTS = ("인증 완료", "확인", "인증", "제출", "로그인", "submit", "verify")
 _CAPTCHA_SIGNALS = ("captcha", "보안문자", "자동입력 방지", "로봇이 아닙니다", "recaptcha")
 _PASSWORD_SIGNALS = ("비밀번호 입력",)
+_USERNAME_LOGIN_SIGNALS = (
+    "아이디",
+    "username",
+    "login",
+    "vendor portal",
+    "login-actions/authenticate",
+)
 _USERNAME_INPUT_SELECTORS = (
     "input[placeholder*='아이디']",
     "input[name='username']",
@@ -69,6 +76,7 @@ _PASSWORD_INPUT_SELECTORS = (
     "input[autocomplete='current-password']",
 )
 _LOGIN_BUTTON_TEXTS = ("로그인", "login")
+_USERNAME_STEP_BUTTON_TEXTS = ("다음", "계속", "로그인", "login", "next", "continue")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Za-z0-9._%*+\-]+@[A-Za-z0-9.*\-]+\.[A-Za-z]{2,})")
 _SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
 
@@ -86,14 +94,14 @@ def recover_coupang_session_with_email_2fa(
     if _contains_any(page_text, _CAPTCHA_SIGNALS):
         return False
 
-    if _is_password_login_screen(page_text, page):
+    if _is_primary_login_screen(page_text, page):
         if not _submit_primary_login(page, config):
             return False
         _wait_after_action(page, config)
 
     _click_first_by_text(page, _EMAIL_METHOD_TEXTS, config, roles=("tab", "button"))
     refreshed_text = _safe_page_text(page)
-    if _is_password_login_screen(refreshed_text, page):
+    if _is_primary_login_screen(refreshed_text, page):
         return False
 
     if not _account_matches_screen(page, config.verification_email_address):
@@ -229,6 +237,16 @@ def _is_password_login_screen(text: str, page: Any | None = None) -> bool:
     return _has_visible_input(page, _PASSWORD_INPUT_SELECTORS)
 
 
+def _is_primary_login_screen(text: str, page: Any | None = None) -> bool:
+    if _is_password_login_screen(text, page):
+        return True
+    if page is None:
+        return _contains_any(text, _USERNAME_LOGIN_SIGNALS)
+    return _has_visible_input(page, _USERNAME_INPUT_SELECTORS) and _contains_any(
+        text, _USERNAME_LOGIN_SIGNALS
+    )
+
+
 def _submit_primary_login(page: Any, config: AppConfig) -> bool:
     credentials = _load_coupang_credentials(config)
     if credentials is None:
@@ -238,7 +256,12 @@ def _submit_primary_login(page: Any, config: AppConfig) -> bool:
     if not _fill_first_input(page, _USERNAME_INPUT_SELECTORS, username, config):
         return False
     if not _fill_first_input(page, _PASSWORD_INPUT_SELECTORS, password, config):
-        return False
+        if not _click_first_by_text(page, _USERNAME_STEP_BUTTON_TEXTS, config, roles=("button",)):
+            _press_enter_first(page, _USERNAME_INPUT_SELECTORS, config)
+        if not _wait_for_visible_input(page, _PASSWORD_INPUT_SELECTORS, config):
+            return False
+        if not _fill_first_input(page, _PASSWORD_INPUT_SELECTORS, password, config):
+            return False
     _press_enter_first(page, _PASSWORD_INPUT_SELECTORS, config)
     _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
     return True
@@ -320,6 +343,19 @@ def _has_visible_input(page: Any, selectors: tuple[str, ...]) -> bool:
         except Exception:
             continue
     return False
+
+
+def _wait_for_visible_input(page: Any, selectors: tuple[str, ...], config: AppConfig) -> bool:
+    if _has_visible_input(page, selectors):
+        return True
+    try:
+        page.locator(", ".join(selectors)).first.wait_for(
+            state="visible",
+            timeout=min(config.page_timeout_seconds, _EMAIL_METHOD_READY_TIMEOUT_MS),
+        )
+    except Exception:
+        pass
+    return _has_visible_input(page, selectors)
 
 
 # 로그인 제출 → 2FA 화면 전환 대기 상한. networkidle 은 쿠팡 페이지에서 안 떠 항상

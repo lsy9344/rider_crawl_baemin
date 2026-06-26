@@ -290,6 +290,53 @@ def test_recover_logs_in_with_ui_credentials_before_email_2fa(tmp_path):
     ]
 
 
+def test_recover_handles_split_username_then_password_login(tmp_path):
+    config = replace(
+        _config(tmp_path),
+        coupang_login_id="worker-id",
+        coupang_login_password="worker-password",
+    )
+    page = _FakePage(
+        html="<html>Vendor Portal 아이디 입력 다음</html>",
+        role_clickable=(
+            ("button", "다음"),
+            ("button", "로그인"),
+            ("tab", "이메일로 인증"),
+            ("button", "인증코드 전송"),
+            ("button", "인증 완료"),
+        ),
+        role_click_updates={
+            ("button", "다음"): "<html>Vendor Portal 비밀번호 입력 로그인</html>",
+            ("button", "로그인"): (
+                "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+                " 인증코드를 rider@naver.com 으로 보냅니다"
+                "<input placeholder='인증코드'></html>"
+            ),
+        },
+        role_click_input_updates={
+            ("button", "다음"): ("input[placeholder*='비밀번호']",),
+            ("button", "로그인"): ("input[placeholder*='코드']",),
+        },
+        input_selectors=("input[placeholder*='아이디']",),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("112233"), now=_NOW
+    )
+
+    assert result is True
+    assert ("button", "다음") in page.clicked_roles
+    assert ("button", "로그인") in page.clicked_roles
+    assert ("tab", "이메일로 인증") in page.clicked_roles
+    assert ("button", "인증코드 전송") in page.clicked_roles
+    assert ("button", "인증 완료") in page.clicked_roles
+    assert page.filled == [
+        ("input[placeholder*='아이디']", "worker-id"),
+        ("input[placeholder*='비밀번호']", "worker-password"),
+        ("input[placeholder*='코드']", "112233"),
+    ]
+
+
 def test_recover_detects_primary_login_by_password_input_when_body_label_is_short(tmp_path):
     config = replace(
         _config(tmp_path),
