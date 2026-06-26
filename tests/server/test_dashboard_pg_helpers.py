@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from rider_server.admin import dashboard_repository_postgres as pg_repo
 from rider_server.admin.dashboard_repository_postgres import (
     _ACTIVE_JOB_STATUSES,
     _AUTH_SESSION_PENDING_STATES,
@@ -92,6 +93,15 @@ def test_auth_session_pending_states_cover_both_pending_vocab() -> None:
     assert _AUTH_SESSION_PENDING_STATES == (
         BaeminAuthState.AUTH_REQUIRED.value,
         BaeminAuthState.USER_ACTION_PENDING.value,
+    )
+
+
+def test_account_auth_required_states_cover_manual_action_vocab() -> None:
+    # 계정 자체가 사람 조치 상태면 auth_sessions row 없이도 인증 필요 목록에 떠야 한다.
+    assert getattr(pg_repo, "_ACCOUNT_AUTH_REQUIRED_STATES", ()) == (
+        BaeminAuthState.AUTH_REQUIRED.value,
+        BaeminAuthState.USER_ACTION_PENDING.value,
+        BaeminAuthState.BLOCKED_OR_CAPTCHA.value,
     )
 
 

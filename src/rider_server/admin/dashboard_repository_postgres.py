@@ -92,6 +92,13 @@ _AUTH_SESSION_PENDING_STATES = (
     BaeminAuthState.USER_ACTION_PENDING.value,
 )
 
+#: 계정 자체가 인증 조치 필요로 보는 상태. auth_session row 가 없어도 목록에 떠야 한다.
+_ACCOUNT_AUTH_REQUIRED_STATES = (
+    BaeminAuthState.AUTH_REQUIRED.value,
+    BaeminAuthState.USER_ACTION_PENDING.value,
+    BaeminAuthState.BLOCKED_OR_CAPTCHA.value,
+)
+
 #: critical 후보 정렬에서 "성공 수집 이력 없음"(NULL)을 가장 오래된 값으로 치환하는 하한.
 #: aware UTC — collected_at(timezone-aware) 와 비교 가능해야 하고, 어떤 실제 성공보다 과거다.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -539,7 +546,7 @@ class PostgresDashboardRepository(DashboardRepository):
             return []
         account_conditions = [
             MonitoringTarget.tenant_id == PlatformAccount.tenant_id,
-            PlatformAccount.auth_state == BaeminAuthState.AUTH_REQUIRED.value,
+            PlatformAccount.auth_state.in_(_ACCOUNT_AUTH_REQUIRED_STATES),
         ]
         session_conditions = [
             AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
@@ -549,7 +556,7 @@ class PostgresDashboardRepository(DashboardRepository):
         if tenant_id != ALL_TENANTS:
             account_conditions.append(PlatformAccount.tenant_id == tenant_id)
             session_conditions.append(PlatformAccount.tenant_id == tenant_id)
-        # 계정 인증 필요(AUTH_REQUIRED) 대상/프로필을 tenant scope 로 조인(AC4).
+        # 계정 인증 조치 필요 대상/프로필을 tenant scope 로 조인(AC4).
         account_stmt = (
             select(
                 MonitoringTarget.tenant_id,

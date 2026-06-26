@@ -93,6 +93,17 @@ def test_signals_auth_required_from_account_auth_state() -> None:
     assert s.any_signal is True
 
 
+@pytest.mark.parametrize("state", ["USER_ACTION_PENDING", "BLOCKED_OR_CAPTCHA"])
+def test_signals_auth_required_from_manual_action_auth_states(state: str) -> None:
+    s = failclosed_signals_from(
+        account_auth_state=state,
+        lifecycle_state="ACTIVE",
+        latest_failure_code=None,
+    )
+    assert s.auth_required is True
+    assert s.any_signal is True
+
+
 def test_signals_auth_required_from_lifecycle_and_failure_and_session() -> None:
     # lifecycle 의 AUTH_REQUIRED 는 계정 인증과 독립 → ACTIVE 계정이어도 인증필요.
     assert failclosed_signals_from(

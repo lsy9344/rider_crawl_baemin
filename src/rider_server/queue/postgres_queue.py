@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from rider_crawl.redaction import redact
 
-from ..db.models.account import PlatformAccount
+from ..db.models.account import AuthSession, PlatformAccount
 from ..db.models.agent import Job
 from ..db.models.audit import AuditLog
 from ..db.models.messaging import DeliveryLog
@@ -155,6 +155,17 @@ _COUPANG_RECOVERY_STATE_TO_GATE: dict[str, str] = {
     "EMAIL_AUTH_REQUIRED": BaeminAuthState.AUTH_REQUIRED.value,
     "RECOVERY_FAILED": BaeminAuthState.AUTH_REQUIRED.value,
 }
+_AUTH_SESSION_PENDING_STATES: tuple[str, ...] = (
+    BaeminAuthState.AUTH_REQUIRED.value,
+    BaeminAuthState.USER_ACTION_PENDING.value,
+)
+_AUTH_SESSION_RESOLVED_AUTH_STATES: frozenset[str] = frozenset(
+    {
+        BaeminAuthState.ACTIVE.value,
+        BaeminAuthState.AUTH_VERIFIED.value,
+        BaeminAuthState.CENTER_MISMATCH.value,
+    }
+)
 
 
 def _platform_account_auth_update(
@@ -194,6 +205,18 @@ def _platform_account_auth_update(
         return str(platform_account_id), BaeminAuthState.AUTH_REQUIRED.value
     if error_code == FailureCategory.TARGET_VALIDATION_FAILURE.value:
         return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
+    return None
+
+
+def _auth_session_resolution_update(job: Job, error_code: str | None) -> str | None:
+    """Return platform account id whose pending auth sessions should be resolved."""
+
+    update_values = _platform_account_auth_update(job, error_code)
+    if update_values is None:
+        return None
+    platform_account_id, auth_state = update_values
+    if auth_state in _AUTH_SESSION_RESOLVED_AUTH_STATES:
+        return platform_account_id
     return None
 
 
@@ -414,6 +437,7 @@ class PostgresQueueBackend(QueueBackend):
                 session,
                 job=job,
                 error_code=error_code,
+                now=now,
             )
             await self._persist_coupang_recovery_state(
                 session,
@@ -464,6 +488,7 @@ class PostgresQueueBackend(QueueBackend):
         *,
         job: Job,
         error_code: str | None,
+        now: datetime,
     ) -> None:
         update_values = _platform_account_auth_update(job, error_code)
         if update_values is None:
@@ -473,6 +498,17 @@ class PostgresQueueBackend(QueueBackend):
             update(PlatformAccount)
             .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
             .values(auth_state=auth_state)
+        )
+        if _auth_session_resolution_update(job, error_code) is None:
+            return
+        await session.execute(
+            update(AuthSession)
+            .where(
+                AuthSession.account_id == _as_uuid(str(platform_account_id)),
+                AuthSession.state.in_(_AUTH_SESSION_PENDING_STATES),
+                AuthSession.resolved_at.is_(None),
+            )
+            .values(resolved_at=now)
         )
 
     async def _persist_coupang_recovery_state(

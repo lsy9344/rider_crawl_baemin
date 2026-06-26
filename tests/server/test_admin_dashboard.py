@@ -1098,10 +1098,36 @@ def test_dashboard_counts_display_failclosed_states_as_action_required_work() ->
 
     body = _client(repo).get(f"/admin?tenant={_TENANT}").text
 
-    assert '<span class="n">1</span><span class="lbl">조치 필요</span>' in body
+    assert '<span class="n" id="target-count-action-required">1</span><span class="lbl">조치 필요</span>' in body
     assert '<span class="n">1</span><span class="lbl">중지</span>' not in body
     assert 'data-primary-action="auth-start"' in body
     assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
+
+
+def test_manual_action_auth_states_render_as_auth_required_work() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(
+        _target(
+            target_id="t-user-action",
+            last_success_at=_NOW - timedelta(minutes=1),
+            account_auth_state="USER_ACTION_PENDING",
+            lifecycle_state="ACTIVE",
+        )
+    )
+    repo.seed_target(
+        _target(
+            target_id="t-captcha",
+            last_success_at=_NOW - timedelta(minutes=1),
+            account_auth_state="BLOCKED_OR_CAPTCHA",
+            lifecycle_state="ACTIVE",
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert body.count('data-severity="AUTH_REQUIRED"') == 2
+    assert body.count('data-primary-action="auth-start"') == 2
+    assert '<span class="n" id="target-count-action-required">2</span><span class="lbl">조치 필요</span>' in body
 
 
 # ── 인증 완료 후 묵은 AUTH_REQUIRED 실패가 배지를 띄우지 않음(2026-06 회귀) ─────────
@@ -1602,6 +1628,50 @@ def test_full_page_invokes_only_read_methods() -> None:
         "channel_health",
         "auth_required",
     }
+
+
+def test_agent_summary_can_sync_after_agents_fragment_swap() -> None:
+    repo = InMemoryDashboardRepository()
+    real_now = datetime.now(timezone.utc)
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-online",
+            name="agent-online",
+            version="1.0.0",
+            last_heartbeat_at=real_now,
+            current_job_type=None,
+            capabilities=(),
+        )
+    )
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-offline",
+            name="agent-offline",
+            version="1.0.0",
+            last_heartbeat_at=real_now - timedelta(minutes=5),
+            current_job_type=None,
+            capabilities=(),
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'id="agent-summary-seg"' in body
+    assert 'id="agent-summary-tag"' in body
+    assert 'data-agent-total="2"' in body
+    assert 'data-agent-online="1"' in body
+    assert "function syncAgentSummaryFromFragment" in body
+    assert 'e.target && e.target.id === "agents"' in body
+
+
+def test_target_summary_can_sync_after_targets_fragment_swap() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'id="target-count-all"' in body
+    assert 'data-target-total="3"' in body
+    assert 'data-target-auth-required="1"' in body
+    assert "function syncTargetSummaryFromRows" in body
+    assert 'e.target && e.target.id === "targets"' in body
 
 
 def test_dashboard_repository_port_exposes_only_read_methods() -> None:

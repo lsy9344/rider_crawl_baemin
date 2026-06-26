@@ -1,5 +1,8 @@
 {# Agent fleet 부분 fragment(HTMX swap 대상). online/offline·버전·현재 job·capability. #}
-<div class="table-wrap">
+{% set agent_list = agents | list %}
+{% set agent_total = agent_list | length %}
+{% set agent_online = agent_list | selectattr('online') | list | length %}
+<div class="table-wrap" data-agent-total="{{ agent_total }}" data-agent-online="{{ agent_online }}">
 <table>
   <thead>
     <tr>
@@ -13,7 +16,7 @@
     </tr>
   </thead>
   <tbody>
-    {% for a in agents %}
+    {% for a in agent_list %}
     <tr>
       <td>{{ a.name }}</td>
       <td>{{ a.version }}</td>

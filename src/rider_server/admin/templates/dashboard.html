@@ -381,13 +381,13 @@
   {# ════════════ 모니터링 모드 (기본 · J1 트리아지) ════════════ #}
   <main class="container" id="view-monitor" role="tabpanel">
     <div class="summary">
-      <button class="kpichip k-all" aria-pressed="true" data-sevclass="all" onclick="setSevFilter(this)"><span class="n">{{ tg_total }}</span><span class="lbl">전체</span></button>
-      <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n">{{ tg_normal }}</span><span class="lbl">정상</span></button>
-      <button class="kpichip k-warn" aria-pressed="false" data-sevclass="sev-warning" onclick="setSevFilter(this)"><span class="n">{{ tg_warning }}</span><span class="lbl">주의</span></button>
-      <button class="kpichip k-crit" aria-pressed="false" data-sevclass="sev-critical" onclick="setSevFilter(this)"><span class="n">{{ tg_critical }}</span><span class="lbl">위험</span></button>
-      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n">{{ tg_stopped }}</span><span class="lbl">조치 필요</span></button>
+      <button class="kpichip k-all" aria-pressed="true" data-sevclass="all" onclick="setSevFilter(this)"><span class="n" id="target-count-all">{{ tg_total }}</span><span class="lbl">전체</span></button>
+      <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n" id="target-count-normal">{{ tg_normal }}</span><span class="lbl">정상</span></button>
+      <button class="kpichip k-warn" aria-pressed="false" data-sevclass="sev-warning" onclick="setSevFilter(this)"><span class="n" id="target-count-warning">{{ tg_warning }}</span><span class="lbl">주의</span></button>
+      <button class="kpichip k-crit" aria-pressed="false" data-sevclass="sev-critical" onclick="setSevFilter(this)"><span class="n" id="target-count-critical">{{ tg_critical }}</span><span class="lbl">위험</span></button>
+      <button class="kpichip k-stop" aria-pressed="false" data-sevclass="sev-stopped" onclick="setSevFilter(this)"><span class="n" id="target-count-action-required">{{ tg_stopped }}</span><span class="lbl">조치 필요</span></button>
       <div class="ministatus">
-        <span class="seg {{ 'bad' if ag_offline else '' }}"><b>Agent</b> {{ ag_online }}/{{ ag_total }} 온라인</span>
+        <span class="seg {{ 'bad' if ag_offline else '' }}" id="agent-summary-seg"><b>Agent</b> <span id="agent-summary-count">{{ ag_online }}/{{ ag_total }}</span> 온라인</span>
         <span class="seg {{ 'bad' if channels.kakao_queue_lag_seconds else '' }}"><b>Kakao</b> {{ channels.kakao_queue_lag_seconds }}초 지연</span>
         <span class="seg {{ 'bad' if channels.telegram_error_count else '' }}"><b>Telegram</b> {{ channels.telegram_error_count }}건 오류</span>
       </div>
@@ -412,7 +412,7 @@
     </section>
 
     <details class="aux">
-      <summary>Agent fleet <span class="tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>
+      <summary>Agent fleet <span class="tag" id="agent-summary-tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>
       <div class="aux-body">
         <div id="agents" hx-get="/admin/agents" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_agents.html" %}</div>
       </div>
@@ -513,9 +513,33 @@
       var d = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; };
       el.textContent = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
       var pill = document.getElementById("live-pill"); if (pill) { pill.classList.remove("pill-stale"); pill.firstChild && (pill.childNodes[1].nodeValue = " LIVE · 30s"); } }
+    function setText(id, value) { var el = document.getElementById(id); if (el) el.textContent = value; }
+    function readCount(source, name) { var value = parseInt(source.dataset[name] || "0", 10); return isNaN(value) ? 0 : value; }
+    function syncTargetSummaryFromRows() {
+      var source = document.querySelector("#targets #tlist");
+      if (!source) return;
+      var total = readCount(source, "targetTotal");
+      setText("target-count-all", total);
+      setText("target-count-normal", readCount(source, "targetNormal"));
+      setText("target-count-warning", readCount(source, "targetWarning"));
+      setText("target-count-critical", readCount(source, "targetCritical"));
+      setText("target-count-action-required", readCount(source, "targetActionRequired"));
+    }
+    function syncAgentSummaryFromFragment() {
+      var source = document.querySelector("#agents [data-agent-total][data-agent-online]");
+      if (!source) return;
+      var total = readCount(source, "agentTotal");
+      var online = readCount(source, "agentOnline");
+      var text = online + "/" + total;
+      setText("agent-summary-count", text);
+      setText("agent-summary-tag", text + " 온라인 · 30s");
+      var seg = document.getElementById("agent-summary-seg");
+      if (seg) seg.classList.toggle("bad", online < total);
+    }
     document.body.addEventListener("htmx:afterSwap", function (e) {
       stampUpdated();
-      if (e.target && e.target.id === "targets") { applyFilter(); syncOpenDrawerFromRows(); }
+      if (e.target && e.target.id === "targets") { syncTargetSummaryFromRows(); applyFilter(); syncOpenDrawerFromRows(); }
+      if (e.target && e.target.id === "agents") syncAgentSummaryFromFragment();
       if (isActionResultTarget(e.target)) triggerAdminRefreshBurst();
     });
     function triggerAdminRefreshBurst() {

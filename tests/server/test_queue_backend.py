@@ -40,6 +40,7 @@ from rider_server.queue.states import (
 )
 from rider_server.queue.postgres_queue import (
     COUPANG_AUTO_RECOVERY_COOLDOWN,
+    _auth_session_resolution_update,
     _platform_account_auth_update,
     coupang_recovery_state_values,
     kakao_delivery_log_values,
@@ -759,6 +760,37 @@ def test_postgres_account_auth_update_maps_auth_state_and_center_mismatch():
         "33333333-3333-3333-3333-333333333333",
         BaeminAuthState.AUTH_VERIFIED.value,
     )
+
+
+def test_postgres_account_auth_update_resolves_completed_auth_sessions():
+    account_id = "33333333-3333-3333-3333-333333333333"
+
+    active_job = SimpleNamespace(
+        payload_json={"platform_account_id": account_id},
+        result_json={"auth_state": BaeminAuthState.ACTIVE.value},
+    )
+    verified_job = SimpleNamespace(
+        payload_json={"platform_account_id": account_id},
+        result_json={"auth_state": BaeminAuthState.AUTH_VERIFIED.value},
+    )
+    center_mismatch_job = SimpleNamespace(
+        payload_json={"platform_account_id": account_id},
+        result_json={"mismatch": BaeminAuthState.CENTER_MISMATCH.value},
+    )
+    still_pending_job = SimpleNamespace(
+        payload_json={"platform_account_id": account_id},
+        result_json={"auth_state": BaeminAuthState.AUTH_REQUIRED.value},
+    )
+
+    assert _auth_session_resolution_update(active_job, None) == account_id
+    assert _auth_session_resolution_update(verified_job, None) == account_id
+    assert (
+        _auth_session_resolution_update(
+            center_mismatch_job, FailureCategory.TARGET_VALIDATION_FAILURE.value
+        )
+        == account_id
+    )
+    assert _auth_session_resolution_update(still_pending_job, None) is None
 
 
 # ── Task 4: Coupang 자동 복구 cooldown 영속(순수 함수, 항상 실행) ─────────────────

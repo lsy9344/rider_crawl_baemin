@@ -42,6 +42,16 @@ HEALTHY_AUTH_STATES: frozenset[str] = frozenset(
     {BaeminAuthState.ACTIVE.value, BaeminAuthState.AUTH_VERIFIED.value}
 )
 
+#: 사람 조치가 필요한 계정 인증 상태. 스케줄러가 crawl 을 막는 상태는 대시보드에서도
+#: 조치 필요로 올려야 운영자가 멈춘 이유를 볼 수 있다.
+ACTION_REQUIRED_AUTH_STATES: frozenset[str] = frozenset(
+    {
+        BaeminAuthState.AUTH_REQUIRED.value,
+        BaeminAuthState.USER_ACTION_PENDING.value,
+        BaeminAuthState.BLOCKED_OR_CAPTCHA.value,
+    }
+)
+
 #: 정본 심각도 4종(낮음→높음 순). tuple 로 두어 우발적 변이를 막는다.
 SEVERITIES: tuple[str, ...] = (
     SEVERITY_NORMAL,
@@ -136,7 +146,7 @@ def failclosed_signals_from(
     """정본 어휘(:class:`BaeminAuthState`/:class:`CustomerLifecycleState`/:class:`FailureCategory`)
     를 fail-closed 신호로 매핑한다(순수·결정적, AC3).
 
-    - **인증 필요**: ``platform_accounts.auth_state == AUTH_REQUIRED`` /
+    - **인증 필요**: ``platform_accounts.auth_state`` 가 사람 조치 상태 /
       ``tenant lifecycle == AUTH_REQUIRED`` / 최신 실패 ``error_code == AUTH_REQUIRED`` /
       ``auth_sessions`` 인증대기(``auth_session_pending``).
     - **기대 대상 검증 실패**: ``auth_state == CENTER_MISMATCH`` /
@@ -167,7 +177,7 @@ def failclosed_signals_from(
     # 코드)만 끈다. tenant lifecycle 의 AUTH_REQUIRED 와 진행 중 auth_session 은 계정 인증과
     # 독립한 신호라 그대로 둔다(거짓 음성 방지).
     account_auth_required = not auth_verified and (
-        account_auth_state == BaeminAuthState.AUTH_REQUIRED.value
+        account_auth_state in ACTION_REQUIRED_AUTH_STATES
         or failure_code_active == FailureCategory.AUTH_REQUIRED.value
     )
     auth_required = (

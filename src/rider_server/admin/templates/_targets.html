@@ -2,8 +2,21 @@
    행 = 심각도 바 + 이름/센터 + 플랫폼 배지 + 심각도 배지 + 사유/상대시간 + 상황맞춤 액션.
    심각도 class(severity_class) 는 행과 배지에 공유해 좌측 바·배지 색을 결정한다(고정폭 트랙으로 정렬 일치).
    data-* 속성은 클릭 시 업체 상세 드로어를 서버 왕복 없이 채우는 데 쓴다. autoescape 유지. #}
-<div class="tlist" id="tlist">
-  {% for t in targets %}
+{% set target_list = targets | list %}
+{% set target_total = target_list | length %}
+{% set target_normal = target_list | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
+{% set target_warning = target_list | selectattr('severity', 'equalto', 'WARNING') | list | length %}
+{% set target_critical = target_list | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
+{% set target_auth_required = target_list | selectattr('severity', 'equalto', 'AUTH_REQUIRED') | list | length %}
+{% set target_action_required = target_total - target_normal - target_warning - target_critical %}
+<div class="tlist" id="tlist"
+     data-target-total="{{ target_total }}"
+     data-target-normal="{{ target_normal }}"
+     data-target-warning="{{ target_warning }}"
+     data-target-critical="{{ target_critical }}"
+     data-target-auth-required="{{ target_auth_required }}"
+     data-target-action-required="{{ target_action_required }}">
+  {% for t in target_list %}
   {# 배지 구동은 severity 단일 소스로만 결정한다(순수 정책이 묵은 last_failure_code·AUTH_VERIFIED
      억제를 이미 인코딩 — 인증 후에도 인증필요 배지가 남던 회귀 차단, 2026-06). #}
   {% set is_auth_required = t.severity == 'AUTH_REQUIRED' %}
