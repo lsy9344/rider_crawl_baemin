@@ -643,7 +643,7 @@ async def auth_required_fragment(
         return _db_failure_fragment(request)
     return templates.TemplateResponse(
         request,
-        "_auth_required.html",
+        "_auth_required_section.html",
         {"auth_required": rows, "tenant_id": _tenant_id(request)},
     )
 

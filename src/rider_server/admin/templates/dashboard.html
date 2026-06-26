@@ -432,12 +432,7 @@
         <div id="registered-settings" hx-get="/admin/registered-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_registered_settings.html" %}</div>
       </div>
     </details>
-    <details class="aux" {% if auth_n %}open{% endif %}>
-      <summary>인증 필요 대상 <span class="tag">{{ auth_n }}건 · secret 비노출</span></summary>
-      <div class="aux-body">
-        <div id="auth-required" hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
-      </div>
-    </details>
+    {% include "_auth_required_section.html" %}
     {# 실시간 큐: active(대기/배정/실행/재시도) job 을 5초 주기로 갱신. 멈춘(stuck) job 이 있으면
        펼친 상태로 둬 "왜 진행 중이라고 뜨는지"를 운영자가 바로 본다. #}
     <details class="aux" {% if jobs_stuck %}open{% endif %}>

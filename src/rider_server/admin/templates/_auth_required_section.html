@@ -1,0 +1,12 @@
+{# 인증 필요 영역 전체를 갱신해 제목의 건수와 open 상태까지 최신화한다. #}
+{% set auth_n = auth_required | list | length %}
+<details id="auth-required-section" class="aux" {% if auth_n %}open{% endif %}>
+  <summary>인증 필요 대상 <span class="tag">{{ auth_n }}건 · secret 비노출</span></summary>
+  <div class="aux-body">
+    <div id="auth-required"
+         hx-get="/admin/auth-required?tenant={{ tenant_id | urlencode }}"
+         hx-trigger="admin-action-refresh from:body, every 30s"
+         hx-target="#auth-required-section"
+         hx-swap="outerHTML swap:0.15s">{% include "_auth_required.html" %}</div>
+  </div>
+</details>

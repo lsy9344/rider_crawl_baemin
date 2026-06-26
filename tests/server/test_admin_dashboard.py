@@ -713,6 +713,33 @@ def test_auth_required_fragment_lists_only_tenant_rows() -> None:
     assert "상세 열기" in body
 
 
+def test_auth_required_fragment_refreshes_section_summary_and_open_state() -> None:
+    repo = InMemoryDashboardRepository()
+    c = _client(repo)
+
+    body = c.get(f"/admin/auth-required?tenant={_TENANT}").text
+
+    assert 'id="auth-required-section"' in body
+    assert '인증 필요 대상 <span class="tag">0건 · secret 비노출</span>' in body
+    assert '<details id="auth-required-section" class="aux" open' not in body
+
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="target-needs-auth",
+            profile_id=None,
+            reason="ACCOUNT_AUTH_REQUIRED",
+            target_name="인증업체",
+        )
+    )
+
+    body = c.get(f"/admin/auth-required?tenant={_TENANT}").text
+
+    assert '<details id="auth-required-section" class="aux" open' in body
+    assert '인증 필요 대상 <span class="tag">1건 · secret 비노출</span>' in body
+    assert "인증업체" in body
+
+
 def test_auth_required_target_button_uses_data_attribute_not_inline_js_literal() -> None:
     # target_id 를 JS 문자열 안에 직접 끼우면 따옴표가 섞인 id 에서 깨질 수 있다.
     html = admin_routes.templates.env.get_template("_auth_required.html").render(
@@ -1174,7 +1201,10 @@ def test_dashboard_bursts_refresh_after_admin_action() -> None:
     assert 'admin-action-refresh from:body' in body
     assert 'triggerAdminRefreshBurst' in body
     assert "setTimeout(function () { htmx.trigger(document.body, \"admin-action-refresh\"); }, delay);" in body
-    assert 'id="auth-required" hx-get="/admin/auth-required?tenant=tn-1" hx-trigger="admin-action-refresh from:body, every 30s"' in body
+    assert 'id="auth-required"' in body
+    assert 'hx-get="/admin/auth-required?tenant=tn-1"' in body
+    assert 'hx-trigger="admin-action-refresh from:body, every 30s"' in body
+    assert 'hx-target="#auth-required-section"' in body
     assert 'id="agents" hx-get="/admin/agents" hx-trigger="admin-action-refresh from:body, every 30s"' in body
 
 
