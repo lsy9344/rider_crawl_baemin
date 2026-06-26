@@ -209,6 +209,10 @@
     details.aux[open] > summary::before { transform: rotate(90deg); }
     details.aux > summary .tag { margin-left: auto; font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
     .aux-body { padding: 0 1rem 1rem; }
+    /* 시인성 강화: 계정·채널·고객·구독 관리 카드는 브랜드 secondary(틸) 톤으로 구분 */
+    details.aux.aux-entity { background: color-mix(in srgb, var(--secondary) 16%, var(--card)); border-color: color-mix(in srgb, var(--secondary) 45%, var(--border)); box-shadow: var(--shadow-sm); }
+    details.aux.aux-entity > summary { color: var(--secondary); }
+    details.aux.aux-entity > summary::before { color: var(--secondary); }
 
     /* ── 채널 지표 타일(기존 _channels.html 호환) / 표(기존 _agents,_auth 호환) ── */
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
