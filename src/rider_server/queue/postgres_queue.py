@@ -313,6 +313,15 @@ class PostgresQueueBackend(QueueBackend):
             await session.commit()
         return str(job_id)
 
+    async def get_job_status(self, job_id: str) -> str | None:
+        """잡 단건 상태(UPPER_SNAKE) 조회 — 없으면 None(채널 전송 테스트 폴링용, 읽기 전용)."""
+        async with self._session_factory() as session:
+            return (
+                await session.execute(
+                    select(Job.status).where(Job.id == _as_uuid(job_id))
+                )
+            ).scalar_one_or_none()
+
     async def claim(
         self,
         *,

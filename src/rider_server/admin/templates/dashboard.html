@@ -256,6 +256,19 @@
     /* ── 관리 모드: 폼/폴드 ─────────────────────────────────────────────── */
     fieldset { border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 28%, var(--card)); padding: 1rem 1.1rem 0.6rem; margin: 0 0 1.1rem; }
     legend { font-weight: 600; font-size: 0.875rem; padding: 0.1rem 0.5rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    /* ── 전달(Delivery) 카드: ❶채널→❷전송 테스트→❸실제 메시지 보내기를 한 흐름으로 묶어 강조.
+       브랜드 secondary(틸) 톤 테두리로 일반 fieldset 무리와 시각 분리(aux-entity 선례 재사용). ── */
+    .delivery-card { margin: 0 0 1.3rem; padding: 0.9rem 1rem 0.4rem; background: color-mix(in srgb, var(--secondary) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--secondary) 40%, var(--border)); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
+    .delivery-head { margin: 0 0 0.9rem; padding: 0.2rem 0.3rem 0.7rem; border-bottom: 1px dashed color-mix(in srgb, var(--secondary) 35%, var(--border)); }
+    .delivery-head h3 { font-size: 1rem; font-weight: 600; color: var(--secondary); }
+    .delivery-head p { margin: 0.3rem 0 0; font-size: 0.875rem; }
+    .delivery-card fieldset { background: var(--card); }
+    /* 텔레그램 전용 인프라(봇 토큰·보안키) 접힘: 평소엔 요약만, 펼치면 입력칸 노출 */
+    .tg-credentials { margin: 0.4rem 0 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--muted) 22%, var(--card)); }
+    .tg-credentials > summary { cursor: pointer; font-weight: 600; font-size: 0.875rem; color: var(--muted-foreground); list-style: none; }
+    .tg-credentials > summary::-webkit-details-marker { display: none; }
+    .tg-credentials > summary::before { content: "▸ "; color: var(--muted-foreground); }
+    .tg-credentials[open] > summary::before { content: "▾ "; }
     #view-manage label { display: inline-flex; flex-direction: column; gap: 0.3rem; margin: 0 0.7rem 0.75rem 0; vertical-align: bottom; font-size: 0.875rem; font-weight: 500; color: var(--muted-foreground); }
     #view-manage input[type="text"], #view-manage input[type="number"], #view-manage input[type="password"], #view-manage select { font-family: var(--font-sans); font-size: 0.875rem; padding: 0.46rem 0.6rem; min-width: 11rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
     #view-manage .field-help { max-width: 13rem; font-size: 0.875rem; line-height: 1.35; color: var(--muted-foreground); }
@@ -417,6 +430,25 @@
       <div class="filter-empty" id="filter-empty">조건에 맞는 업체가 없습니다: 필터를 조정하세요. <button class="btn" onclick="resetFilters()">필터 초기화</button></div>
     </section>
 
+    {# 카드 순서(운영자 우선순위): 등록된 설정 → 실시간 큐 → 인증 필요 → Agent fleet → 채널 상태. #}
+    {# 등록된 설정: 현재 세팅된 모든 모니터링 대상을 한 표로(읽기 전용). 등록 config 변경(admin-entity-changed)
+       + 라이브 램프 신선도(30s)로 갱신. 관리 탭 쓰기 후 delay:2s 로 커밋 착지를 기다린다(targets 카드 선례). #}
+    {% set st_total = (settings_rows | default([])) | list | length %}
+    <details class="aux">
+      <summary>등록된 설정 <span class="tag">{{ st_total }}건 · 30s</span></summary>
+      <div class="aux-body">
+        <div id="registered-settings" hx-get="/admin/registered-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_registered_settings.html" %}</div>
+      </div>
+    </details>
+    {# 실시간 큐: active(대기/배정/실행/재시도) job 을 5초 주기로 갱신. 멈춘(stuck) job 이 있으면
+       펼친 상태로 둬 "왜 진행 중이라고 뜨는지"를 운영자가 바로 본다. #}
+    <details class="aux" {% if jobs_stuck %}open{% endif %}>
+      <summary>실시간 큐 <span class="tag" id="queue-summary-tag">{{ jobs_n }}건 처리 중{% if jobs_recent_failed %} · 최근 실패 {{ jobs_recent_failed }}건{% endif %}{% if jobs_stuck %} · ⚠ 멈춤 {{ jobs_stuck }}{% endif %} · 5s</span></summary>
+      <div class="aux-body">
+        <div id="jobs-queue" hx-get="/admin/jobs?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% with jobs = jobs | default([]) %}{% include "_jobs_queue.html" %}{% endwith %}</div>
+      </div>
+    </details>
+    {% include "_auth_required_section.html" %}
     <details class="aux">
       <summary>Agent fleet <span class="tag" id="agent-summary-tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>
       <div class="aux-body">
@@ -427,24 +459,6 @@
       <summary>채널 상태 <span class="tag">Kakao {{ channels.kakao_queue_lag_seconds }}s · Telegram {{ channels.telegram_error_count }}건</span></summary>
       <div class="aux-body">
         <div id="channels" hx-get="/admin/channels?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_channels.html" %}</div>
-      </div>
-    </details>
-    {# 등록된 설정: 현재 세팅된 모든 모니터링 대상을 한 표로(읽기 전용). 등록 config 변경(admin-entity-changed)
-       + 라이브 램프 신선도(30s)로 갱신. 관리 탭 쓰기 후 delay:2s 로 커밋 착지를 기다린다(targets 카드 선례). #}
-    {% set st_total = (settings_rows | default([])) | list | length %}
-    <details class="aux">
-      <summary>등록된 설정 <span class="tag">{{ st_total }}건 · 30s</span></summary>
-      <div class="aux-body">
-        <div id="registered-settings" hx-get="/admin/registered-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_registered_settings.html" %}</div>
-      </div>
-    </details>
-    {% include "_auth_required_section.html" %}
-    {# 실시간 큐: active(대기/배정/실행/재시도) job 을 5초 주기로 갱신. 멈춘(stuck) job 이 있으면
-       펼친 상태로 둬 "왜 진행 중이라고 뜨는지"를 운영자가 바로 본다. #}
-    <details class="aux" {% if jobs_stuck %}open{% endif %}>
-      <summary>실시간 큐 <span class="tag" id="queue-summary-tag">{{ jobs_n }}건 처리 중{% if jobs_recent_failed %} · 최근 실패 {{ jobs_recent_failed }}건{% endif %}{% if jobs_stuck %} · ⚠ 멈춤 {{ jobs_stuck }}{% endif %} · 5s</span></summary>
-      <div class="aux-body">
-        <div id="jobs-queue" hx-get="/admin/jobs?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% with jobs = jobs | default([]) %}{% include "_jobs_queue.html" %}{% endwith %}</div>
       </div>
     </details>
   </main>

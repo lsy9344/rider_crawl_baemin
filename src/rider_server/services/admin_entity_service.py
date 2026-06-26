@@ -85,7 +85,10 @@ from rider_server.services.admin_entities.common import (
     scoped_tenant,
 )
 from rider_server.services.admin_entities.target_service import TargetAdminEntityService
-from rider_server.services.admin_entities.tenant_service import TenantAdminEntityService
+from rider_server.services.admin_entities.tenant_service import (
+    _UNSET as _UNSET_SEND_TEST,
+    TenantAdminEntityService,
+)
 from rider_server.services.channel_registration import (
     assert_channel_transition,
     assert_unique_kakao_rooms,
@@ -133,6 +136,14 @@ class AdminEntityService:
 
     async def list_messenger_channels(self, tenant_id: str) -> list[MessengerChannel]:
         return await self._repo.list_messenger_channels(tenant_id)
+
+    async def get_messenger_channel(self, channel_id: str) -> MessengerChannel | None:
+        """채널 단건 조회(전송 테스트 seam 용 — scope 는 호출부가 강제)."""
+        return await self._repo.get_messenger_channel(channel_id)
+
+    async def get_tenant(self, tenant_id: str) -> Tenant | None:
+        """tenant 단건 조회(전송 테스트 게이트 상태 표시 seam 용)."""
+        return await self._repo.get_tenant(tenant_id)
 
     async def list_delivery_rules(
         self, target_id: str, *, tenant_id: str
@@ -237,6 +248,7 @@ class AdminEntityService:
         telegram_bot_token: str | None = None,
         telegram_webhook_secret: str | None = None,
         sending_enabled: bool | None = None,
+        send_test_passed_at: datetime | None = _UNSET_SEND_TEST,
         at: datetime,
         actor_id: str | None,
         source: str | None = None,
@@ -247,6 +259,7 @@ class AdminEntityService:
         텔레그램 봇 토큰/webhook secret 은 ``None`` 이면 기존 값을 유지하고(빈 문자열은 명시
         삭제로 취급), 평문 저장한다(0011 선례). audit diff 에는 secret 값을 절대 싣지 않고 변경
         여부(set/cleared/unchanged)만 기록한다. ``sending_enabled`` 는 ``None`` 이면 유지한다.
+        ``send_test_passed_at`` 은 sentinel 이면 유지(채널 전송 테스트 통과 시각, 게이트 해제 조건).
         """
 
         return await self._tenant_service.update_tenant(
@@ -256,6 +269,7 @@ class AdminEntityService:
             telegram_bot_token=telegram_bot_token,
             telegram_webhook_secret=telegram_webhook_secret,
             sending_enabled=sending_enabled,
+            send_test_passed_at=send_test_passed_at,
             at=at,
             actor_id=actor_id,
             source=source,

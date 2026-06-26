@@ -1430,6 +1430,47 @@ def test_update_tenant_allows_idempotent_sending_enabled_true_on_already_live() 
     assert _run(repo.get_tenant(_TENANT)).sending_enabled is True
 
 
+def test_update_tenant_allows_sending_on_after_send_test_passed() -> None:
+    # 0023: 전송 테스트 통과(send_test_passed_at 존재)면 OFF→ON 전이를 허용한다(게이트 해제 조건).
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    # 채널 전송 테스트 성공이 스탬프하는 것과 동일한 경로(send_test_passed_at 설정).
+    _run(
+        svc.update_tenant(
+            _TENANT, send_test_passed_at=_NOW, at=_NOW, actor_id=_ACTOR
+        )
+    )
+    updated = _run(
+        svc.update_tenant(_TENANT, sending_enabled=True, at=_NOW, actor_id=_ACTOR)
+    )
+
+    assert updated.sending_enabled is True
+    assert _run(repo.get_tenant(_TENANT)).send_test_passed_at == _NOW
+    diff = repo.audits[-1].diff_redacted
+    assert diff["from_sending_enabled"] is False and diff["to_sending_enabled"] is True
+
+
+def test_update_tenant_clearing_send_test_passed_reblocks_gate() -> None:
+    # send_test_passed_at 을 None 으로 지우면(미통과로 되돌림) 다시 OFF→ON 이 막힌다.
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+            send_test_passed_at=_NOW,
+        )
+    )
+    svc = _svc(repo)
+
+    _run(svc.update_tenant(_TENANT, send_test_passed_at=None, at=_NOW, actor_id=_ACTOR))
+    with pytest.raises(ValueError):
+        _run(svc.update_tenant(_TENANT, sending_enabled=True, at=_NOW, actor_id=_ACTOR))
+
+
 def test_delete_tenant_removes_empty_customer_and_audits() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())

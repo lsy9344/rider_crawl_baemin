@@ -580,12 +580,14 @@ def test_manage_tab_shows_customer_setup_flow_and_send_gate() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}&mode=manage").text
 
     assert "새 고객 세팅 시작" in body
-    for label in ("고객", "플랫폼", "계정", "업체/센터", "채널", "테스트", "실제 메시지 보내기"):
+    for label in ("고객", "플랫폼", "계정", "업체/센터", "채널", "전송 테스트", "실제 메시지 보내기"):
         assert label in body
-    assert "수집 테스트" in body
-    assert "전송 테스트" in body
+    # 0023: 게이트 기준이 전송 테스트로 좁혀졌다(수집 테스트 단계 제거). 채널별 전송 테스트 섹션 노출.
+    # 전달(Delivery) 카드 재구성: ❶채널 등록→❷전송 테스트→❸실제 메시지 보내기 흐름으로 묶음.
+    assert "❷ 전송 테스트 (채널 연결 검증)" in body
     assert "테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다." in body
     assert 'id="tg-edit-sending"' in body
+    assert 'id="entity-channel-test"' in body
     assert "sending_enabled" not in body
 
 
@@ -1716,12 +1718,16 @@ def _settings_app(
     sending_enabled: bool = True,
     seed_health: bool = True,
     seed_entities: bool = True,
+    seed_second_tenant: bool = False,
 ) -> TestClient:
     """"등록된 설정" 카드용 app — dashboard repo(라이브 램프) + 엔티티 repo(등록 config) 동시 seed.
 
     tenant ``tn-1`` 에 BAEMIN/COUPANG 계정, 대상 2건(tg-a ACTIVE·예약 09:00~22:00,
     tg-b PAUSED·예약 off), TELEGRAM/KAKAO 채널, 전송규칙(tg-a→두 채널 enabled · tg-b→tel disabled)을
     심는다. tg-a 는 최근 수집 성공 health 를 심어 램프가 NORMAL 로 떨어지게 한다.
+
+    ``seed_second_tenant`` 이면 두 번째 tenant ``tn-2``(고객B)에 대상 1건(tg-c·역삼점B)을 더 심어
+    ``전체 고객`` 집계가 tenant 경계를 넘어 합쳐지는지 검증할 수 있게 한다.
     """
 
     entity_repo = InMemoryAdminEntityRepository()
@@ -1735,6 +1741,33 @@ def _settings_app(
                 sending_enabled=sending_enabled,
             )
         )
+        if seed_second_tenant:
+            entity_repo.seed_tenant(
+                Tenant(
+                    id=_OTHER_TENANT,
+                    name="고객B",
+                    status=CustomerLifecycleState.ACTIVE,
+                    created_at=_NOW,
+                    sending_enabled=sending_enabled,
+                )
+            )
+            entity_repo.seed_platform_account(
+                PlatformAccount(
+                    id="acc-b2", tenant_id=_OTHER_TENANT, platform=Platform.BAEMIN, label="배민계정B"
+                )
+            )
+            entity_repo.seed_monitoring_target(
+                MonitoringTarget(
+                    id="tg-c",
+                    tenant_id=_OTHER_TENANT,
+                    platform_account_id="acc-b2",
+                    name="역삼점B",
+                    center_name="역삼센터B",
+                    interval_minutes=15,
+                    schedule_enabled=False,
+                    status=MonitoringTargetStatus.ACTIVE,
+                )
+            )
         entity_repo.seed_platform_account(
             PlatformAccount(id="acc-b", tenant_id=_TENANT, platform=Platform.BAEMIN, label="배민계정")
         )
@@ -1860,6 +1893,19 @@ def test_dashboard_full_page_includes_registered_settings_card() -> None:
     assert "admin-entity-changed from:body delay:2s" in body
     # 첫 페인트 사전 렌더(무-플래시): 카드 안에 행 데이터가 이미 들어 있다.
     assert "강남점" in body
+
+
+def test_registered_settings_all_tenants_aggregates_across_tenants() -> None:
+    # 전체 고객(tenant=all): 모든 tenant 의 등록 설정을 한 표로 합쳐 보여준다(단일 tenant 단축 아님).
+    body = _settings_app(seed_second_tenant=True).get(
+        "/admin/registered-settings?tenant=all"
+    ).text
+
+    # tn-1 대상(강남점/역삼점)과 tn-2 대상(역삼점B)이 모두 한 표에 존재.
+    assert "강남점" in body and "역삼점" in body and "역삼점B" in body
+    # 전체 고객 뷰는 행마다 소속 고객을 라벨로 단다(_registered_settings.html: tenant_id=='all').
+    assert "고객: 고객B" in body
+    assert "등록된 설정이 없습니다." not in body
 
 
 def test_registered_settings_messenger_label_filter() -> None:

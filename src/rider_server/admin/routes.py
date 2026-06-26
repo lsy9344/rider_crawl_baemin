@@ -397,22 +397,55 @@ async def _settings_rows_for_display(
 
     조립 위치를 ``routes.py`` 로 둔 건 등록 config 가 ``AdminEntityService`` 에서 오고 라이브
     램프가 ``DashboardRepository`` 에서 와 두 소스를 합쳐야 하기 때문이다(어느 한 service 도
-    상대에 의존하지 않는다). 엔티티 service 미주입이거나 tenant 미선택/전체 고객이면 빈 목록을
-    돌려 안전하게 무-카드로 렌더한다(``list_monitoring_targets`` 는 단일 tenant 전용).
+    상대에 의존하지 않는다). 엔티티 service 미주입/tenant 미선택이면 빈 목록을 돌려 안전하게
+    무-카드로 렌더한다. ``전체 고객``(ALL_TENANTS) 선택 시엔 모든 tenant 의 설정을 합쳐 보여준다
+    (``list_monitoring_targets`` 는 단일 tenant 전용이라 tenant 마다 조립 후 합친다).
     """
 
     service = getattr(request.app.state, "admin_entity_service", None)
-    if service is None or not tenant_id or tenant_id == ALL_TENANTS:
+    if service is None or not tenant_id:
         return []
 
+    if tenant_id == ALL_TENANTS:
+        rows: list[SettingsRow] = []
+        for tenant in await service.list_tenants():
+            rows.extend(
+                await _settings_rows_for_tenant(
+                    request, service, tenant=tenant, now=now
+                )
+            )
+    else:
+        tenant = next(
+            (t for t in await service.list_tenants() if t.id == tenant_id), None
+        )
+        if tenant is None:
+            return []
+        rows = await _settings_rows_for_tenant(
+            request, service, tenant=tenant, now=now
+        )
+
+    # 위험도 높은 순으로 정렬하되(targets 카드와 동일), 동순위는 이름 오름차순으로 안정화한다.
+    rows.sort(key=lambda r: r.name)
+    rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
+    return rows
+
+
+async def _settings_rows_for_tenant(
+    request: Request, service, *, tenant, now: datetime
+) -> list[SettingsRow]:
+    """단일 tenant 의 등록 설정 행을 조립한다(정렬 전). ``_settings_rows_for_display`` 의 단위.
+
+    tenant 객체를 받아 호출자가 ``list_tenants`` 를 1번만 돌게 한다(전체 고객 N tenant 루프에서
+    tenant 마다 전체 목록을 다시 긁지 않도록).
+    """
+
+    tenant_id = tenant.id
     targets = await service.list_monitoring_targets(tenant_id)
     channels = await service.list_messenger_channels(tenant_id)
     accounts = await service.list_platform_accounts(tenant_id)
 
-    # tenant 플래그는 public list 경로로 도출한다(service._repo 직접 접근 금지 — _dashboard_tenants 선례).
-    tenant = next((t for t in await service.list_tenants() if t.id == tenant_id), None)
     sending_enabled = bool(getattr(tenant, "sending_enabled", False))
-    customer_name = tenant.name if tenant is not None else ""
+    customer_name = tenant.name
 
     account_platform = {a.id: a.platform.value for a in accounts}
     channel_messenger = {c.id: c.messenger.value for c in channels}
@@ -461,9 +494,6 @@ async def _settings_rows_for_display(
                 status=t.status.value,
             )
         )
-    # 위험도 높은 순으로 정렬하되(targets 카드와 동일), 동순위는 이름 오름차순으로 안정화한다.
-    rows.sort(key=lambda r: r.name)
-    rows.sort(key=lambda r: severity_policy.severity_rank(r.severity), reverse=True)
     return rows
 
 

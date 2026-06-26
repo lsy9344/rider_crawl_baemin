@@ -1,9 +1,13 @@
 {# 고객별 텔레그램 설정 테이블 partial: 30초 polling. secret 은 설정 여부만 표시. autoescape 유지. #}
-<div class="table-wrap">
+{# 전송 테스트 게이트(0023): id→{passed, sending} 맵을 data 속성으로 실어 보내, _entity_admin.html #}
+{# 의 syncSendingGate() 가 선택 고객의 통과 여부에 따라 'ON' 옵션 disabled 를 푼다(JS 가 파싱). #}
+<div class="table-wrap"
+     id="tenant-telegram-state"
+     data-send-test-gate='[{% for row in rows %}{% if not loop.first %},{% endif %}{"id":{{ row.id | tojson }},"passed":{{ row.send_test_passed | tojson }},"sending":{{ row.sending_enabled | tojson }}}{% endfor %}]'>
 <table>
   <caption class="muted">고객별 텔레그램 설정 ({{ rows | length }}건)</caption>
   <thead>
-    <tr><th>고객명</th><th>봇 토큰</th><th>텔레그램 webhook 보안키</th><th>실제 메시지 보내기</th></tr>
+    <tr><th>고객명</th><th>봇 토큰</th><th>텔레그램 webhook 보안키</th><th>전송 테스트</th><th>실제 메시지 보내기</th></tr>
   </thead>
   <tbody>
     {% for row in rows %}
@@ -11,11 +15,16 @@
       <td>{{ row.name }}</td>
       <td>{{ row.bot_token_label }}</td>
       <td>{{ row.webhook_secret_label }}</td>
+      <td><span class="sev-badge {{ 'sev-normal' if row.send_test_passed else 'sev-stopped' }}">{{ '통과' if row.send_test_passed else '미통과' }}</span></td>
       <td><span class="sev-badge {{ 'sev-normal' if row.sending_enabled else 'sev-stopped' }}">{{ 'ON' if row.sending_enabled else 'OFF' }}</span></td>
     </tr>
     {% else %}
-    <tr><td colspan="4" class="muted">등록된 고객이 없습니다.</td></tr>
+    <tr><td colspan="5" class="muted">등록된 고객이 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>
 </div>
+<script>
+  // 테이블이 swap 될 때마다(30초 polling/액션 후) 게이트 동기화를 다시 돌린다.
+  if (window.syncSendingGate) { window.syncSendingGate(); }
+</script>

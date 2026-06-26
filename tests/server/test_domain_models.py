@@ -86,6 +86,7 @@ def test_all_eight_models_importable() -> None:
 
 def test_model_field_sets_match_contract() -> None:
     # 0012: tenant 별 텔레그램 설정(봇 토큰/webhook secret/실발송 게이트) 추가.
+    # 0023: send_test_passed_at(채널 전송 테스트 통과 시각 — 실발송 게이트 해제 조건) 추가.
     assert _fields(Tenant) == {
         "id",
         "name",
@@ -94,6 +95,7 @@ def test_model_field_sets_match_contract() -> None:
         "telegram_bot_token",
         "telegram_webhook_secret",
         "sending_enabled",
+        "send_test_passed_at",
     }
     assert _fields(Subscription) == {
         "id",

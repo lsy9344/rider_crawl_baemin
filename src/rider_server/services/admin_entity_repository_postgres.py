@@ -66,6 +66,7 @@ def _tenant_to_domain(row: TenantRow) -> Tenant:
         telegram_bot_token=row.telegram_bot_token,
         telegram_webhook_secret=row.telegram_webhook_secret,
         sending_enabled=row.sending_enabled,
+        send_test_passed_at=row.send_test_passed_at,
     )
 
 
@@ -238,6 +239,7 @@ class PostgresAdminEntityRepository:
             "telegram_bot_token": tenant.telegram_bot_token,
             "telegram_webhook_secret": tenant.telegram_webhook_secret,
             "sending_enabled": tenant.sending_enabled,
+            "send_test_passed_at": tenant.send_test_passed_at,
         }
         await self._insert_with_audit(TenantRow, values, audit)
 
@@ -347,6 +349,7 @@ class PostgresAdminEntityRepository:
                 "telegram_bot_token": tenant.telegram_bot_token,
                 "telegram_webhook_secret": tenant.telegram_webhook_secret,
                 "sending_enabled": tenant.sending_enabled,
+                "send_test_passed_at": tenant.send_test_passed_at,
             },
             audit,
         )

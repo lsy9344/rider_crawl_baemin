@@ -700,8 +700,12 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0022: Coupang auto recovery state on top of per-target send window policy.
-    assert heads[0] == "0022_coupang_auto_recovery_state"
+    # 0023: tenant 전송 테스트 게이트(send_test_passed_at) on top of Coupang auto recovery state.
+    assert heads[0] == "0023_tenant_send_test_gate"
+    assert (
+        script.get_revision("0023_tenant_send_test_gate").down_revision
+        == "0022_coupang_auto_recovery_state"
+    )
     assert (
         script.get_revision("0022_coupang_auto_recovery_state").down_revision
         == "0021_target_send_window"

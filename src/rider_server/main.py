@@ -42,7 +42,7 @@ from .api import (
     telegram_webhook_router,
 )
 from .db.base import create_engine, create_session_factory
-from .domain import MessengerChannel
+from .domain import Messenger, MessengerChannel
 from .metrics.policy import evaluate_alerts
 from .metrics.repository_postgres import PostgresMetricsRepository
 from .metrics.service import (
@@ -77,6 +77,7 @@ from .services.admin_entity_service import (
     InMemoryAdminEntityRepository,
 )
 from .services.channel_registration import ChannelRepository, InMemoryChannelRepository
+from .services.channel_test_service import ChannelTestService
 from .services.channel_repository_postgres import PostgresChannelRepository
 from .services.dispatch_fanout_service import DispatchJob
 from .services.dispatch_worker import TelegramDispatchWorker
@@ -399,6 +400,78 @@ def _default_telegram_sender(
     return send
 
 
+def _default_channel_test_service(
+    settings: Settings,
+    *,
+    admin_entity_service: AdminEntityService,
+    queue_backend: QueueBackend,
+    provider: TenantTelegramConfigProvider | None,
+) -> ChannelTestService:
+    """채널 전송 테스트 service 기본값 — 실 seam(텔레그램 직접 전송·KAKAO_SEND enqueue·잡 상태) 주입.
+
+    텔레그램은 :class:`CentralTelegramSender` 로 동기 직접 전송(tenant 게이트와 무관 — 테스트는
+    게이트를 켜기 위한 사전 검증이라 sending_enabled OFF 여도 전송해야 한다). 카카오는 큐에
+    ``KAKAO_SEND`` 잡을 넣고, 잡 터미널 상태를 폴링해 자동 판정한다(에이전트가 실제 전송 보고).
+    """
+
+    from .queue.states import JOB_TYPE_KAKAO_SEND
+
+    resolve_token = _default_resolve_telegram_token(settings, provider)
+
+    def telegram_test_send(channel: MessengerChannel, text: str) -> None:
+        # 테스트 전송은 tenant sending_enabled 게이트를 의도적으로 건너뛴다 — 게이트를 켜기 위한
+        # 사전 검증이기 때문(실 dispatch 의 _default_telegram_sender 와 달리 게이트 확인 없음).
+        # DispatchJob 은 channel_id 로 채널을 찾는 데만 쓰이므로 최소 carrier 로 구성한다.
+        job = DispatchJob(
+            id="channel-send-test",
+            target_id="channel-send-test",
+            channel_id=channel.id,
+            message_id="channel-send-test",
+            messenger=channel.messenger,
+            template_version="",
+            message_hash="",
+        )
+        CentralTelegramSender(
+            channels={channel.id: channel},
+            resolve_token=resolve_token,
+            urlopen=urlopen,
+        ).send(job, text)
+
+    async def kakao_enqueue(
+        *, kakao_room_name: str, message: str, tenant_id: str, channel_id: str
+    ) -> str:
+        return await queue_backend.enqueue(
+            job_type=JOB_TYPE_KAKAO_SEND,
+            payload_json={
+                "kakao_room_name": kakao_room_name,
+                "message": message,
+                "channel_send_test": True,  # 실 fan-out 잡과 구분하는 마커(에이전트는 무시)
+                "tenant_id": tenant_id,
+                "channel_id": channel_id,
+            },
+            now=datetime.now(timezone.utc),
+        )
+
+    async def job_status(job_id: str) -> str | None:
+        getter = getattr(queue_backend, "get_job_status", None)
+        if getter is None:
+            return None
+        try:
+            return await getter(job_id)
+        except (ValueError, LookupError):
+            # 잘못된 job_id(UUID 파싱 실패 등)는 '아직 결과 없음'으로 다룬다(fail-safe).
+            return None
+
+    return ChannelTestService(
+        get_channel=admin_entity_service.get_messenger_channel,
+        get_tenant=admin_entity_service.get_tenant,
+        mark_send_test_passed=admin_entity_service.update_tenant,
+        telegram_test_send=telegram_test_send,
+        kakao_enqueue=kakao_enqueue,
+        job_status=job_status,
+    )
+
+
 def _default_dispatch_worker_factory(
     settings: Settings,
     session_factory: Any | None = None,
@@ -560,6 +633,14 @@ def create_app(
     # Story 5.11: 엔티티 CRUD service(생성/편집/비활성화 write+audit 동일 트랜잭션) — 테스트 주입 가능.
     app.state.admin_entity_service = admin_entity_service or AdminEntityService(
         _default_admin_entity_repository(app.state.settings, db_session_factory)
+    )
+    # 채널 전송 테스트 service(0023): 실발송 게이트를 켜기 위한 채널별 전송 검증.
+    # 텔레그램=동기 직접 전송, 카카오=KAKAO_SEND enqueue 후 잡 결과 폴링 자동 판정.
+    app.state.channel_test_service = _default_channel_test_service(
+        app.state.settings,
+        admin_entity_service=app.state.admin_entity_service,
+        queue_backend=app.state.queue_backend,
+        provider=app.state.tenant_telegram_provider,
     )
     # Story 5.8: Admin 접근 보안 — principal 해석 seam(기본 fail-closed deny) + IP allowlist + MFA
     # 강제 토글. server-side token revoke/rotate service + 복구 non-sending 게이트 플래그.

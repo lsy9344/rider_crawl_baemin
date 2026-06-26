@@ -100,6 +100,12 @@ class InMemoryQueueBackend(QueueBackend):
             )
         return job_id
 
+    async def get_job_status(self, job_id: str) -> str | None:
+        """잡 단건 상태(UPPER_SNAKE) 조회 — 없으면 None(채널 전송 테스트 폴링용)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return job.status if job is not None else None
+
     async def claim(
         self,
         *,

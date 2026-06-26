@@ -69,6 +69,11 @@ def _service(request: Request):
     return request.app.state.admin_entity_service
 
 
+def _channel_test_service(request: Request):
+    """채널 전송 테스트 service(0023) — 미구성(무-DB dev 등)이면 None."""
+    return getattr(request.app.state, "channel_test_service", None)
+
+
 def _now() -> datetime:
     """현재 시각(UTC). 라우트는 주입 불가한 실 ``now()`` 를 쓴다(시각 단언은 service 레이어)."""
     return datetime.now(timezone.utc)
@@ -287,10 +292,13 @@ async def list_telegram_settings(
         {
             "rows": [
                 {
+                    "id": t.id,
                     "name": t.name,
                     "bot_token_label": "설정됨" if (t.telegram_bot_token or "").strip() else "미설정",
                     "webhook_secret_label": "설정됨" if (t.telegram_webhook_secret or "").strip() else "미설정",
                     "sending_enabled": t.sending_enabled,
+                    # 전송 테스트 게이트(0023): send_test_passed_at 이 있으면 통과 → ON 허용 가능.
+                    "send_test_passed": t.send_test_passed_at is not None,
                 }
                 for t in rows
             ],
@@ -994,3 +1002,78 @@ async def deactivate_delivery_rule(
         f"전송 규칙 비활성화됨 (enabled={rule.enabled})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
+
+
+# ── 채널 전송 테스트(0023) — 실발송 게이트를 켜기 위한 채널별 전송 검증 ──────────────────────
+# 텔레그램은 동기 직접 전송이라 즉시 PASSED/FAILED, 카카오는 KAKAO_SEND 잡 enqueue 후 PENDING →
+# 운영자 화면이 status 라우트로 폴링해 에이전트 결과(SUCCEEDED/FAILED)로 자동 판정한다. 테스트가
+# 통과하면 tenant.send_test_passed_at 이 스탬프돼 '실제 메시지 보내기' OFF→ON 이 허용된다.
+
+# 전송 테스트 결과 코드 → action-result CSS state class. PASSED=ok, PENDING=warn, FAILED=err.
+_TEST_STATE_CLASS = {"PASSED": "ok", "PENDING": "warn", "FAILED": "err"}
+
+
+def _channel_test_fragment(request: Request, outcome) -> HTMLResponse:
+    """전송 테스트 결과 fragment. PASSED 면 게이트 옵션 갱신 위해 entity-changed 를 발화한다."""
+    response = templates.TemplateResponse(
+        request,
+        "_channel_test_result.html",
+        {
+            "message": outcome.message,
+            "state_class": _TEST_STATE_CLASS.get(outcome.result, "warn"),
+            "job_id": outcome.job_id or "",
+        },
+    )
+    if outcome.result == "PASSED":
+        response.headers["HX-Trigger"] = ENTITY_OPTIONS_CHANGED
+    return response
+
+
+@router.post("/channel-test", response_class=HTMLResponse)
+async def run_channel_test(
+    request: Request, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    """선택 채널로 전송 테스트를 실행한다(텔레그램=동기, 카카오=잡 enqueue)."""
+    svc = _channel_test_service(request)
+    if svc is None:
+        return _fragment(request, "전송 테스트가 구성되지 않았습니다", ok=False)
+    form = await _form(request)
+    channel_id = form.get("channel_id", "").strip()
+    if not channel_id:
+        return _fragment(request, "테스트할 채널을 선택하세요", ok=False)
+    try:
+        outcome = await svc.run_test(
+            channel_id,
+            tenant_id=_tenant_id(request),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _channel_test_fragment(request, outcome)
+
+
+@router.post("/channel-test/status", response_class=HTMLResponse)
+async def check_channel_test(
+    request: Request, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    """enqueue 된 카카오 테스트 잡의 상태를 폴링해 결과를 판정한다(SUCCEEDED 면 PASSED 스탬프)."""
+    svc = _channel_test_service(request)
+    if svc is None:
+        return _fragment(request, "전송 테스트가 구성되지 않았습니다", ok=False)
+    form = await _form(request)
+    job_id = form.get("job_id", "").strip()
+    if not job_id:
+        return _fragment(request, "확인할 테스트 작업이 없습니다", ok=False)
+    try:
+        outcome = await svc.check_kakao_test(
+            job_id,
+            tenant_id=_tenant_id(request),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _channel_test_fragment(request, outcome)

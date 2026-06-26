@@ -19,3 +19,7 @@ class Tenant:
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     sending_enabled: bool = False
+    # 전송 테스트 게이트(0023): 채널 전송 테스트가 마지막으로 성공한 시각. None 이면 미통과 →
+    # sending_enabled OFF→ON 전이를 막는다(fail-closed). 한 번이라도 채널 테스트가 성공하면
+    # 스탬프되고, 그 뒤 운영자가 실발송을 켤 수 있다. 호출부가 시각을 주입한다(순수·결정적).
+    send_test_passed_at: datetime | None = None

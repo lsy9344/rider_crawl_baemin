@@ -28,6 +28,8 @@ class Tenant(Base):
     telegram_bot_token: Mapped[str] = mapped_column(String, nullable=False, default="")
     telegram_webhook_secret: Mapped[str] = mapped_column(String, nullable=False, default="")
     sending_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 전송 테스트 게이트(0023) — 채널 전송 테스트 마지막 성공 시각. NULL 이면 미통과(fail-closed).
+    send_test_passed_at: Mapped[datetime | None] = ts(nullable=True)
 
 
 class Subscription(Base):
