@@ -899,6 +899,11 @@ def _open_kakao_chat_window_from_main(chat_name: str) -> None:
     pyperclip.copy(chat_name)
     pyautogui.hotkey("ctrl", "f")
     time.sleep(0.2)
+    # 검색창에 이전 실행의 키워드가 남아 있으면 paste 가 그 뒤에 덧붙어 잘못된
+    # 채팅방을 찾는다(예: "이수열" 뒤에 신규 키워드). paste 전에 기존 텍스트를
+    # 선택해 덮어쓰게 한다. 카카오톡 검색창에서는 ctrl+a 가 '친구추가'로 가로채이므로
+    # 전체 선택 단축키는 ctrl+shift+a 를 쓴다.
+    pyautogui.hotkey("ctrl", "shift", "a")
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.5)
     pyautogui.press("enter")

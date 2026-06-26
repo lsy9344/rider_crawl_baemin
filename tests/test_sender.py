@@ -347,7 +347,10 @@ def test_open_from_main_focuses_main_window_not_arbitrary_kakao(monkeypatch):
     assert focused == [main_window]
 
 
-def test_open_from_main_searches_with_ctrl_f_without_ctrl_a(monkeypatch):
+def test_open_from_main_selects_existing_search_text_before_pasting(monkeypatch):
+    # 검색창에 이전 실행 키워드가 남아 있으면 paste 가 덧붙어 잘못된 채팅방을 찾는다.
+    # ctrl+f 직후 기존 텍스트를 선택해 paste 가 덮어쓰게 한다. 카카오톡 검색창에서는
+    # ctrl+a 가 '친구추가'로 가로채이므로 전체 선택은 ctrl+shift+a 를 쓴다.
     main_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
     _patch_desktop(monkeypatch, lambda backend: [main_window])
 
@@ -361,6 +364,7 @@ def test_open_from_main_searches_with_ctrl_f_without_ctrl_a(monkeypatch):
 
     assert pyautogui.actions == [
         ("hotkey", ("ctrl", "f")),
+        ("hotkey", ("ctrl", "shift", "a")),
         ("hotkey", ("ctrl", "v")),
         ("press", ("enter",)),
     ]
