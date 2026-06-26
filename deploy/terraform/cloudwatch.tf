@@ -233,7 +233,7 @@ resource "aws_cloudwatch_metric_alarm" "auth_required" {
   # CloudWatch 상태 확인용으로만 유지하고 이메일/SNS 알림은 보내지 않는다.
   alarm_actions = []
   ok_actions    = []
-  tags                = { Name = "${var.project}-auth-required" }
+  tags          = { Name = "${var.project}-auth-required" }
 }
 
 # (g) gmail_reauth_required_count >= 1 — 쿠팡 인증 이메일 재확인 근사. WARNING.
