@@ -29,9 +29,9 @@ variable "server_ecr_repository_name" {
 }
 
 variable "instance_type" {
-  description = "EC2 인스턴스 타입. 기본은 비용 최소 예시(t4g.micro), 운영 memory hardening은 tfvars에서 t4g.small로 고정."
+  description = "EC2 인스턴스 타입. 운영 memory hardening 기준은 t4g.small 이다."
   type        = string
-  default     = "t4g.micro"
+  default     = "t4g.small"
 }
 
 variable "root_volume_gb" {

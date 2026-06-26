@@ -98,10 +98,11 @@ $env:RIDER_POSTGRES_PASSWORD="운영에서-관리하는-비밀번호"
 $env:RIDER_DB_MIGRATION_BACKUP_CONFIRMED="1"
 # 선택: 기존 8000번 포트와 충돌하면 호스트 포트만 변경
 # $env:RIDER_BACKEND_PORT="8001"
-docker compose -f deploy/docker-compose.yml up --build -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 compose는 `db` healthcheck 후 `migrate` one-shot으로 Alembic migration을 적용하고, 성공 뒤 `backend-api`, `scheduler`, `queue-recovery`, `telegram-dispatch`를 시작합니다. `backend-api`는 FastAPI HTTP/API와 Telegram webhook을 받습니다. `scheduler`는 due monitoring target을 crawl job으로 넣습니다. `queue-recovery`는 lease 만료와 stuck queue를 recovery합니다. `telegram-dispatch`는 dispatch queue의 Telegram send job을 처리합니다. `RIDER_DB_MIGRATION_BACKUP_CONFIRMED=1`이 없으면 migration은 시작하지 않습니다. 외부 DB를 쓰는 배포에서는 compose의 `DATABASE_URL` environment를 운영 secret 주입 값으로 override하세요.
+운영 EC2 배포는 GitHub Actions가 ECR image를 빌드한 뒤 EC2에서 pull + `--no-build` 재시작만 수행하는 경로를 사용합니다. 작은 EC2에서 직접 Docker build를 실행하지 마세요.
 
 기본 운영 경로는 중앙 서버(`backend-api` + `scheduler` + `queue-recovery` + `telegram-dispatch`)와 Windows Local Agent 조합입니다. Agent는 고객 PC/운영 PC에서 Chrome 화면 읽기와 카카오톡 UI 자동화를 담당하고, 로컬 UI는 소규모 수동 운영과 개발 확인용 경로입니다.
 

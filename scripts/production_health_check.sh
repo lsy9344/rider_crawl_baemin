@@ -12,6 +12,13 @@ fail() {
   exit 1
 }
 
+runner_matches="$(mktemp /tmp/rider-runner-processes.XXXXXX)"
+
+cleanup() {
+  rm -f "$runner_matches"
+}
+trap cleanup EXIT
+
 cd "$REPO_DIR"
 
 curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"' || fail "backend /health is not ok"
@@ -43,8 +50,8 @@ if [ -z "$root_free_kib" ] || [ "$root_free_kib" -lt "$MIN_ROOT_FREE_KIB" ]; the
   fail "low root disk space: free=${root_free_kib:-unknown}KiB, required=${MIN_ROOT_FREE_KIB}KiB"
 fi
 
-if pgrep -af "$RUNNER_PATTERN" >/tmp/rider-runner-processes.txt; then
-  cat /tmp/rider-runner-processes.txt >&2
+if pgrep -af "$RUNNER_PATTERN" >"$runner_matches"; then
+  cat "$runner_matches" >&2
   fail "GitHub self-hosted runner process is running on production EC2"
 fi
 

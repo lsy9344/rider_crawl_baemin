@@ -231,6 +231,33 @@ def test_ci_validates_terraform_without_touching_live_aws_state() -> None:
     assert "terraform apply" not in workflow
 
 
+def test_terraform_default_instance_type_matches_memory_hardened_production() -> None:
+    variables = Path("deploy/terraform/variables.tf").read_text(encoding="utf-8")
+    readme = Path("deploy/terraform/README.md").read_text(encoding="utf-8")
+
+    block = variables[variables.index('variable "instance_type"') :]
+    block = block[: block.index('variable "root_volume_gb"')]
+
+    assert 'default     = "t4g.small"' in block
+    assert "EC2 t4g.micro (ARM) 기본값" not in readme
+    assert "운영 기본값은 t4g.small" in readme
+
+
+def test_manual_deploy_docs_do_not_reintroduce_ec2_docker_builds() -> None:
+    active_docs = {
+        "README.md": Path("README.md").read_text(encoding="utf-8"),
+        "deploy/terraform/README.md": Path("deploy/terraform/README.md").read_text(
+            encoding="utf-8"
+        ),
+    }
+
+    for path, text in active_docs.items():
+        assert "up --build" not in text, path
+        assert "docker compose up --build" not in text, path
+
+    assert "--no-build" in active_docs["deploy/terraform/README.md"]
+
+
 def test_ci_deploy_runs_host_preflight_before_remote_compose() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
@@ -273,6 +300,18 @@ def test_production_operation_scripts_guard_memory_runner_disk_and_oom() -> None
     assert "journalctl -k --since" in health
     assert "out of memory|oom|killed process" in health
     assert "MemAvailable" in health
+
+
+def test_production_operation_scripts_use_unique_runner_tempfiles() -> None:
+    for script_path in (
+        "scripts/production_deploy_preflight.sh",
+        "scripts/production_health_check.sh",
+    ):
+        script = Path(script_path).read_text(encoding="utf-8")
+
+        assert "mktemp /tmp/rider-runner-processes.XXXXXX" in script
+        assert "trap cleanup EXIT" in script
+        assert ">/tmp/rider-runner-processes.txt" not in script
 
 
 def test_git_attributes_keep_linux_runner_files_lf_normalized() -> None:
