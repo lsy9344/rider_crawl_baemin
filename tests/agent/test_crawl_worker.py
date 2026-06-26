@@ -23,7 +23,7 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
 )
-from rider_agent.reuse import BrowserActionRequiredError
+from rider_agent.reuse import BrowserActionRequiredError, BrowserLaunchError
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
 from rider_agent.workers.crawl_worker import (
     AUTH_STATE_ACTIVE,
@@ -631,6 +631,36 @@ def test_profile_failure_is_fail_closed_before_crawl() -> None:
     assert result.error_code == ERROR_PROFILE_UNAVAILABLE
     assert calls == []
     assert "C:/secret/raw" not in (result.error_message_redacted or "")
+    diagnostics = result.result_json["diagnostics"]["agent_error"]
+    assert diagnostics["type"] == "RuntimeError"
+    assert diagnostics["reason"] == "profile_prepare_exception"
+    assert "message_redacted" not in diagnostics
+    assert "C:/secret/raw" not in json.dumps(result.result_json, ensure_ascii=False)
+
+
+def test_profile_launch_error_reports_safe_reason_without_raw_path() -> None:
+    class BrokenProfiles:
+        def ensure_profile(self, *args, **kwargs):
+            raise BrowserLaunchError(
+                "이 브라우저 프로필을 쓰는 Chrome이 이미 실행 중인데 CDP 디버깅 포트는 열려 "
+                "있지 않습니다. 먼저 닫으세요: C:/secret/raw"
+            )
+
+    worker = CrawlWorker(
+        profile_manager=BrokenProfiles(),
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot(),
+    )
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_PROFILE_UNAVAILABLE
+    diagnostics = result.result_json["diagnostics"]["agent_error"]
+    assert diagnostics["type"] == "BrowserLaunchError"
+    assert diagnostics["reason"] == "chrome_profile_in_use_without_cdp"
+    assert "message_redacted" not in diagnostics
+    blob = json.dumps(result.result_json, ensure_ascii=False)
+    assert "C:/secret/raw" not in blob
 
 
 def test_unclassified_crawl_failure_persists_redacted_cause() -> None:

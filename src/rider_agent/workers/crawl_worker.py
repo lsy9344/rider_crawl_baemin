@@ -151,12 +151,8 @@ class CrawlWorker:
                         "CDP endpoint unavailable",
                         result_json={"target_id": payload.target_id, "platform": payload.platform},
                     )
-                except BrowserLaunchError:
-                    return make_failure_result(
-                        ERROR_PROFILE_UNAVAILABLE,
-                        "browser profile unavailable",
-                        result_json={"target_id": payload.target_id, "platform": payload.platform},
-                    )
+                except BrowserLaunchError as exc:
+                    return _profile_unavailable_failure(payload, exc)
                 except SecretRefUnresolved:
                     return make_failure_result(
                         ERROR_SECRET_REF_UNRESOLVED,
@@ -260,12 +256,8 @@ class CrawlWorker:
                 "CDP endpoint unavailable",
                 result_json={"target_id": payload.target_id, "platform": payload.platform},
             )
-        except BrowserLaunchError:
-            return make_failure_result(
-                ERROR_PROFILE_UNAVAILABLE,
-                "browser profile unavailable",
-                result_json={"target_id": payload.target_id, "platform": payload.platform},
-            )
+        except BrowserLaunchError as exc:
+            return _profile_unavailable_failure(payload, exc)
         except SecretRefUnresolved:
             return make_failure_result(
                 ERROR_SECRET_REF_UNRESOLVED,
@@ -667,6 +659,63 @@ def _target_validation_failure(payload: CrawlJobPayload, exc: BaseException) -> 
             "diagnostics": {"agent_error": _exception_diagnostics(exc)},
         },
     )
+
+
+def _profile_unavailable_failure(payload: CrawlJobPayload, exc: BaseException) -> JobResult:
+    return make_failure_result(
+        ERROR_PROFILE_UNAVAILABLE,
+        "browser profile unavailable",
+        result_json={
+            "target_id": payload.target_id,
+            "platform": payload.platform,
+            "diagnostics": {
+                "agent_error": _profile_unavailable_diagnostics(exc),
+            },
+        },
+    )
+
+
+def _profile_unavailable_diagnostics(exc: BaseException) -> dict[str, str]:
+    root = _root_cause(exc)
+    return {
+        "type": root.__class__.__name__,
+        "reason": _profile_unavailable_reason(exc, root),
+    }
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    current = exc
+    seen: set[int] = set()
+    while current.__cause__ is not None and id(current.__cause__) not in seen:
+        seen.add(id(current))
+        current = current.__cause__
+    return current
+
+
+def _profile_unavailable_reason(exc: BaseException, root: BaseException) -> str:
+    text_parts = [str(exc), str(root)]
+    seen: set[int] = set()
+    current = exc.__cause__
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text_parts.append(str(current))
+        current = current.__cause__
+    text = "\n".join(text_parts).casefold()
+    if "cdp 디버깅 포트는 열려 있지" in text and "이미 실행 중" in text:
+        return "chrome_profile_in_use_without_cdp"
+    if "cdp 주소가 이미 사용 중" in text:
+        return "cdp_endpoint_in_use"
+    if "chrome cdp 포트가 준비되지" in text:
+        return "chrome_cdp_not_ready"
+    if "chrome 실행 실패" in text:
+        return "chrome_launch_failed"
+    if "cdp 주소에는 포트" in text:
+        return "cdp_url_missing_port"
+    if "cdp 주소는 ipv4 로컬 주소" in text:
+        return "remote_cdp_rejected"
+    if root is not exc:
+        return "profile_prepare_exception"
+    return "browser_launch_error"
 
 
 def _crawl_failure(payload: CrawlJobPayload, exc: BaseException) -> JobResult:

@@ -168,6 +168,91 @@ def test_find_existing_chrome_debug_endpoint_for_profile_reuses_live_local_cdp(
     assert calls == ["http://127.0.0.1:9555"]
 
 
+def test_close_stale_chrome_processes_for_profile_terminates_profile_without_live_cdp(
+    tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "browser"
+    calls = []
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def cmdline(self):
+            return [
+                "chrome.exe",
+                "--remote-debugging-port=9555",
+                f"--user-data-dir={profile_dir}",
+            ]
+
+        def terminate(self):
+            calls.append("terminate")
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+        TimeoutExpired = TimeoutError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [FakeProcess()]
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    closed = browser_launcher.close_stale_chrome_processes_for_profile(
+        profile_dir,
+        cdp_probe=lambda _cdp_url: (_ for _ in ()).throw(OSError("refused")),
+        wait_timeout_seconds=0.25,
+    )
+
+    assert closed == 1
+    assert calls == ["terminate", ("wait", 0.25)]
+
+
+def test_close_stale_chrome_processes_for_profile_keeps_live_cdp(
+    tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "browser"
+    calls = []
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def cmdline(self):
+            return [
+                "chrome.exe",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=9555",
+                f"--user-data-dir={profile_dir}",
+            ]
+
+        def terminate(self):
+            calls.append("terminate")
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+        TimeoutExpired = TimeoutError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [FakeProcess()]
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    closed = browser_launcher.close_stale_chrome_processes_for_profile(
+        profile_dir,
+        cdp_probe=lambda cdp_url: calls.append(cdp_url),
+    )
+
+    assert closed == 0
+    assert calls == ["http://127.0.0.1:9555"]
+
+
 def test_prepare_chrome_launches_when_profile_not_already_running(tmp_path, monkeypatch):
     calls = []
     probes = []

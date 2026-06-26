@@ -365,6 +365,52 @@ def test_agent_restart_adopts_existing_profile_chrome_with_live_cdp(
     assert adopted_process.terminated is True
 
 
+def test_agent_restart_closes_stale_profile_chrome_without_live_cdp_before_launch(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        lambda _profile_dir, *, cdp_probe=None: None,
+        raising=False,
+    )
+
+    def close_stale(profile_dir, *, cdp_probe=None):
+        calls.append(("close_stale", profile_dir))
+        return 1
+
+    monkeypatch.setattr(
+        browser_profile,
+        "close_stale_chrome_processes_for_profile",
+        close_stale,
+        raising=False,
+    )
+
+    def allocate_port():
+        calls.append(("allocate_port", None))
+        return 9301
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        calls.append(("prepare", config.cdp_url))
+
+    manager = _manager(
+        tmp_path,
+        allocate_port=allocate_port,
+        prepare=prepare,
+    )
+
+    assignment = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert assignment.cdp_url == "http://127.0.0.1:9301"
+    assert calls == [
+        ("close_stale", tmp_path / "profiles" / "t1" / "alpha"),
+        ("allocate_port", None),
+        ("prepare", "http://127.0.0.1:9301"),
+    ]
+
+
 def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path):
     times = iter([100.0, 200.0, 500.0, 501.0])
     manager = _manager(

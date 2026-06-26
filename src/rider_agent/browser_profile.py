@@ -46,6 +46,7 @@ from rider_agent.reuse import (
     BrowserActionRequiredError,
     BrowserLaunchError,
     CdpUnavailableError,
+    close_stale_chrome_processes_for_profile,
     coupang_center_name_risk,
     ensure_local_cdp_address,
     find_existing_chrome_debug_endpoint,
@@ -278,6 +279,12 @@ class BrowserProfileManager:
                         adopted_endpoint = find_existing_chrome_debug_endpoint(
                             profile_dir, cdp_probe=self._cdp_probe
                         )
+                        if adopted_endpoint is None:
+                            closed = close_stale_chrome_processes_for_profile(
+                                profile_dir, cdp_probe=self._cdp_probe
+                            )
+                            if closed and self._log is not None:
+                                self._log(redact("closed stale browser profile process"))
                         port = (
                             int(adopted_endpoint.cdp_port)
                             if adopted_endpoint is not None

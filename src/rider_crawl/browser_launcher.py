@@ -286,6 +286,86 @@ def find_existing_chrome_debug_endpoint(
     return None
 
 
+def close_stale_chrome_processes_for_profile(
+    profile_dir: Path,
+    *,
+    cdp_probe: CdpProbe | None = None,
+    wait_timeout_seconds: float = 5.0,
+) -> int:
+    """Close Chrome processes for ``profile_dir`` when they do not expose live CDP.
+
+    A process is left alone when it uses the same profile and has a live local CDP
+    endpoint, because ``find_existing_chrome_debug_endpoint`` can reuse it. Every
+    other matching process is stale for automation: it holds the user-data-dir but
+    cannot be controlled by the Agent.
+    """
+
+    try:
+        import psutil
+    except Exception:
+        return 0
+
+    target = _profile_dir_key(profile_dir)
+    probe = cdp_probe or _probe_cdp_endpoint
+    closed = 0
+    for process in psutil.process_iter(["name"]):
+        try:
+            name = (process.info.get("name") or "").casefold()
+            if name not in {"chrome.exe", "chrome"}:
+                continue
+            cmdline = process.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+        if not _cmdline_uses_profile(cmdline, target):
+            continue
+        if _process_has_live_local_cdp(cmdline, probe=probe):
+            continue
+        if _terminate_process(process, wait_timeout_seconds=wait_timeout_seconds):
+            closed += 1
+    return closed
+
+
+def _process_has_live_local_cdp(cmdline: list[str], *, probe: CdpProbe) -> bool:
+    cdp_url = _cmdline_cdp_url(cmdline)
+    if cdp_url is None:
+        return False
+    try:
+        ensure_local_cdp_address(cdp_url)
+        probe(cdp_url)
+    except Exception:
+        return False
+    return True
+
+
+def _terminate_process(process: Any, *, wait_timeout_seconds: float) -> bool:
+    terminate = getattr(process, "terminate", None)
+    if not callable(terminate):
+        return False
+    try:
+        terminate()
+    except Exception:
+        return False
+    wait = getattr(process, "wait", None)
+    if callable(wait):
+        try:
+            wait(timeout=max(0.0, float(wait_timeout_seconds)))
+            return True
+        except Exception:
+            pass
+    kill = getattr(process, "kill", None)
+    if callable(kill):
+        try:
+            kill()
+        except Exception:
+            pass
+    if callable(wait):
+        try:
+            wait(timeout=max(0.0, float(wait_timeout_seconds)))
+        except Exception:
+            pass
+    return True
+
+
 def _cmdline_uses_profile(cmdline: list[str], target_key: str) -> bool:
     for arg in cmdline:
         if not arg.startswith("--user-data-dir"):
