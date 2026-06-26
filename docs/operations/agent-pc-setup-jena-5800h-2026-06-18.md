@@ -34,16 +34,16 @@ Agent는 서버로 outbound HTTP 요청을 보냅니다. Agent PC에 inbound por
 cd "$env:USERPROFILE\Desktop"
 git clone https://github.com/lsy9344/rider_crawl_baemin.git rider_result_mornitoring
 cd rider_result_mornitoring
-git checkout design_develop
-git pull origin design_develop
+git checkout main
+git pull origin main
 ```
 
 이미 저장소가 있다면 아래처럼 최신화합니다.
 
 ```powershell
 cd C:\path\to\rider_result_mornitoring
-git checkout design_develop
-git pull origin design_develop
+git checkout main
+git pull origin main
 ```
 
 ## 2. Python 가상환경 만들기
