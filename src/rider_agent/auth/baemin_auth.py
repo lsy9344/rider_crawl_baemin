@@ -83,6 +83,7 @@ ERROR_AUTH_REQUIRED = "AUTH_REQUIRED"
 
 # 재인증 미완료 사유(평문 상수) — timeout 결과 metrics/result_json 에 실어 운영에 남긴다.
 REASON_AUTH_TIMEOUT = "auth_timeout"
+REASON_BROWSER_UNAVAILABLE = "browser_unavailable"
 
 # payload TTL 이 지난 stale OPEN_AUTH_BROWSER job 을 브라우저 열기 전에 거르는 defensive 가드
 # (server preflight 가 우회돼도 오래된 인증 브라우저를 열지 않게 — Task 5 defense-in-depth).
@@ -284,17 +285,11 @@ def default_open_auth_browser(
 
     config = _config_from_auth_job(job, secret_resolver=secret_resolver)
     platform = str(getattr(config, "platform_name", "") or "").strip().casefold()
-    try:
-        reuse.prepare_chrome(config, platform_name="Windows")
-    except Exception:
-        return
+    reuse.prepare_chrome(config, platform_name="Windows")
     if platform == "coupang":
         # Coupang 은 브라우저만 연다(자동 OTP 0). 로그인 화면이 보이도록 대상 URL 로만 안내하고,
         # IMAP/OTP/2FA 제출은 하지 않는다. 사람이 직접 조치하면 detect_completion 이 감지한다.
-        try:
-            _open_coupang_auth_browser_only(config)
-        except Exception:
-            return
+        _open_coupang_auth_browser_only(config)
         return None
     if platform != "baemin":
         return None
@@ -710,7 +705,24 @@ def execute_open_auth_browser_job(
         )
 
     # (a) 프로필 브라우저를 인증 전용으로 연다. 정확히 1회.
-    opened = open_auth_browser(job)
+    try:
+        opened = open_auth_browser(job)
+    except Exception:
+        if log is not None:
+            log(redact(f"auth browser unavailable (target {target_id})"))
+        return make_failure_result(
+            ERROR_AUTH_REQUIRED,
+            "auth browser could not be opened",
+            result_json={
+                "target_id": target_id,
+                "auth_state": AUTH_STATE_AUTH_REQUIRED,
+                "reason": REASON_BROWSER_UNAVAILABLE,
+                "first_incomplete_stage": "open_auth_browser",
+                "last_detect_state": REASON_BROWSER_UNAVAILABLE,
+                "detect_attempts": 0,
+            },
+            metrics={"auth_reason": REASON_BROWSER_UNAVAILABLE},
+        )
     if opened is True:
         if log is not None:
             log(redact(f"auth opened and verified (target {target_id})"))

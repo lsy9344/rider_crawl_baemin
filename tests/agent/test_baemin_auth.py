@@ -34,6 +34,7 @@ from rider_agent.auth.baemin_auth import (
     ERROR_AUTH_REQUIRED,
     ERROR_PAYLOAD_EXPIRED,
     REASON_AUTH_TIMEOUT,
+    REASON_BROWSER_UNAVAILABLE,
     REASON_PAYLOAD_EXPIRED,
     build_auth_execute_job,
     classify_baemin_auth_state,
@@ -57,7 +58,7 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
 )
-from rider_agent.reuse import BrowserActionRequiredError, CdpUnavailableError
+from rider_agent.reuse import BrowserActionRequiredError, BrowserLaunchError, CdpUnavailableError
 from rider_agent.secure_store import AgentIdentity, save_agent_identity
 
 # 가짜 식별자만(누출 가드 — 실 토큰/OTP/휴대폰/이메일 금지).
@@ -879,6 +880,29 @@ def test_open_auth_browser_for_coupang_does_not_run_email_2fa(monkeypatch):
     assert result is None
 
 
+def test_default_open_auth_browser_propagates_prepare_failure(monkeypatch):
+    monkeypatch.setattr(
+        "rider_agent.reuse.prepare_chrome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            BrowserLaunchError("chrome launch failed")
+        ),
+    )
+
+    with pytest.raises(BrowserLaunchError):
+        default_open_auth_browser(
+            _auth_job(
+                type=CAPABILITY_OPEN_AUTH_BROWSER,
+                payload={
+                    "tenant_id": "tenant-fake-1",
+                    "target_id": FAKE_TARGET,
+                    "platform": "coupang",
+                    "primary_url": "https://partner.coupangeats.com/page/rider-performance",
+                    "expected_display_name": "쿠팡상점A",
+                },
+            )
+        )
+
+
 def test_open_auth_browser_for_coupang_navigates_to_target_when_not_login_screen(monkeypatch):
     """Non-login-screen Coupang open navigates to the target URL once, without driving 2FA."""
     from types import SimpleNamespace
@@ -1158,6 +1182,31 @@ def test_open_auth_browser_timeout_result_includes_safe_detection_diagnostics():
     assert result.result_json["first_incomplete_stage"] == "open_auth_browser"
     assert result.result_json["last_detect_state"] == "not_completed"
     assert result.result_json["detect_attempts"] == 2
+
+
+def test_open_auth_browser_reports_browser_unavailable_without_waiting():
+    detect_calls = []
+
+    result = execute_open_auth_browser_job(
+        _auth_job(type=CAPABILITY_OPEN_AUTH_BROWSER),
+        open_auth_browser=lambda j: (_ for _ in ()).throw(
+            BrowserLaunchError("chrome unavailable")
+        ),
+        detect_completion=lambda j: detect_calls.append(j) or False,
+        now=lambda: 0.0,
+        sleep=lambda s: None,
+        max_attempts=100,
+        max_wait_seconds=1e9,
+        poll_interval_seconds=5.0,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["reason"] == REASON_BROWSER_UNAVAILABLE
+    assert result.result_json["last_detect_state"] == REASON_BROWSER_UNAVAILABLE
+    assert result.result_json["detect_attempts"] == 0
+    assert result.metrics["auth_reason"] == REASON_BROWSER_UNAVAILABLE
+    assert detect_calls == []
 
 
 # ══════════════════════════════════════════════════════════════════════════
