@@ -946,12 +946,16 @@ def test_open_auth_browser_for_coupang_navigates_to_target_when_not_login_screen
     from types import SimpleNamespace
 
     gotos = []
+    front_calls = []
 
     class FakePage:
         url = "https://partner.coupangeats.com/page/rider-performance"
 
         def content(self):
             return "<html>partner page</html>"
+
+        def bring_to_front(self):
+            front_calls.append(self.url)
 
         def goto(self, url, wait_until=None, timeout=None):
             gotos.append((url, wait_until, timeout))
@@ -1004,6 +1008,7 @@ def test_open_auth_browser_for_coupang_navigates_to_target_when_not_login_screen
 
     assert result is None
     assert recover_calls == []  # 자동 2FA 복구 0
+    assert front_calls == ["https://partner.coupangeats.com/page/rider-performance"]
     assert [g[0] for g in gotos] == ["https://partner.coupangeats.com/page/rider-performance"]
 
 

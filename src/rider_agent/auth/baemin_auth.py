@@ -326,6 +326,7 @@ def _open_coupang_auth_browser_only(config: Any) -> None:
             page = _first_browser_page(browser)
         if page is None:
             return
+        _bring_page_to_front(page)
         is_login_screen = coupang_crawler._page_looks_like_coupang_login_required(page)
         if target_url and not is_login_screen:
             try:
@@ -341,6 +342,16 @@ def _open_coupang_auth_browser_only(config: Any) -> None:
             # networkidle 대신 입력칸 등장까지만 대기 — 쿠팡 페이지는 idle 이 안 떠
             # timeout 까지 헛대기했다(라이브 측정). 입력칸이 보이면 즉시 진행한다.
             _wait_for_auth_screen_ready(page, _AUTH_NETWORKIDLE_TIMEOUT_MS)
+
+
+def _bring_page_to_front(page: Any) -> None:
+    bring_to_front = getattr(page, "bring_to_front", None)
+    if not callable(bring_to_front):
+        return
+    try:
+        bring_to_front()
+    except Exception:
+        return
 
 
 def default_detect_completion(
