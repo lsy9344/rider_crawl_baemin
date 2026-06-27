@@ -25,7 +25,11 @@ from rider_agent.job_loop import (
     make_failure_result,
     make_success_result,
 )
-from rider_agent.reuse import recover_coupang_session_with_email_2fa
+from rider_agent.reuse import (
+    BrowserLaunchError,
+    CdpUnavailableError,
+    recover_coupang_session_with_email_2fa,
+)
 from rider_agent.secure_store import DpapiSecretStore, default_secret_store_path
 
 # ── Coupang 2FA 세부 복구 상태(auth job ``result_json.auth_recovery_state``) ─────────
@@ -42,6 +46,7 @@ REASON_CAPTCHA_OR_ABNORMAL = "captcha_or_abnormal_login"
 REASON_EMAIL_AUTH = "email_auth_required"
 REASON_MAIL_DELAY = "verification_mail_delayed"
 REASON_REPEATED_FAILURE = "repeated_recovery_failure"
+REASON_BROWSER_UNAVAILABLE = "browser_unavailable"
 
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
 DEFAULT_RECOVERY_BACKOFF_SECONDS = 1.0
@@ -188,6 +193,29 @@ def default_is_email_auth_required(exc: BaseException) -> bool:
     return False
 
 
+def default_is_browser_unavailable(exc: BaseException) -> bool:
+    """Chrome/CDP 준비·연결 실패를 메일 지연과 분리한다."""
+
+    markers = (
+        "connect_over_cdp",
+        "chrome cdp",
+        "cdp endpoint",
+        "econnrefused",
+        "err_connection_refused",
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (BrowserLaunchError, CdpUnavailableError)):
+            return True
+        text = f"{type(current).__name__}: {current}".casefold()
+        if any(marker in text for marker in markers):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _success_result(mailbox_ref: str, attempts: int, log: Callable[[str], None] | None) -> JobResult:
     if log is not None:
         log(redact(f"coupang email 2fa recovered (mailbox {mailbox_ref})"))
@@ -226,6 +254,7 @@ def recover_coupang_mailbox(
     max_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS,
     backoff_seconds: float = DEFAULT_RECOVERY_BACKOFF_SECONDS,
     is_email_auth_required: Callable[[BaseException], bool] | None = None,
+    is_browser_unavailable: Callable[[BaseException], bool] | None = default_is_browser_unavailable,
     log: Callable[[str], None] | None = None,
 ) -> JobResult:
     del store, now
@@ -244,6 +273,14 @@ def recover_coupang_mailbox(
                 )
                 if state == STATE_EMAIL_AUTH_REQUIRED:
                     return _failure_result(state, mailbox_ref, REASON_EMAIL_AUTH, attempts, log)
+                if _email_auth_flag(is_browser_unavailable, exc) is True:
+                    return _failure_result(
+                        STATE_RECOVERY_FAILED,
+                        mailbox_ref,
+                        REASON_BROWSER_UNAVAILABLE,
+                        attempts,
+                        log,
+                    )
                 if attempts >= max_attempts:
                     reason = REASON_REPEATED_FAILURE if attempts > 1 else REASON_MAIL_DELAY
                     return _failure_result(STATE_RECOVERY_FAILED, mailbox_ref, reason, attempts, log)

@@ -1069,6 +1069,22 @@ def test_coupang_recovery_detail_explains_auth_required_target() -> None:
     assert row.auth_recovery_detail == "인증 메일 지연"
 
 
+def test_coupang_recovery_detail_explains_browser_unavailable() -> None:
+    facts = _target(
+        target_id="t-auth",
+        last_success_at=_NOW - timedelta(hours=1),
+        last_failure_code="AUTH_REQUIRED",
+        last_failure_at=_NOW,
+        account_auth_state="AUTH_REQUIRED",
+        auth_recovery_state="RECOVERY_FAILED",
+        auth_recovery_reason="browser_unavailable",
+    )
+
+    row = DashboardService.target_row(facts, _NOW)
+
+    assert row.auth_recovery_detail == "브라우저 연결 실패"
+
+
 def test_targets_fragment_prefers_coupang_recovery_detail_for_auth_required() -> None:
     row = TargetRow(
         target_id="t-auth",

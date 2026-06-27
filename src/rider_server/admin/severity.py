@@ -255,6 +255,7 @@ COUPANG_RECOVERY_DETAIL_BY_REASON: dict[str, str] = {
     "captcha_or_abnormal_login": "캡차/이상 로그인",
     "verification_mail_delayed": "인증 메일 지연",
     "repeated_recovery_failure": "자동 인증 실패",
+    "browser_unavailable": "브라우저 연결 실패",
 }
 
 

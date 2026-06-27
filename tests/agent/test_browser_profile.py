@@ -270,6 +270,49 @@ def test_same_target_reuses_assignment_without_reallocation(tmp_path):
     assert len(prepare.calls) == 1  # 두번째 호출은 prepare 재실행 안 함
 
 
+def test_same_target_relaunches_when_registered_cdp_is_not_live(tmp_path, monkeypatch):
+    """READY registry alone is not enough; stale CDP must be relaunched before auth/crawl."""
+
+    prepare_calls: list[str] = []
+    first_process = FakeProcess()
+    second_process = FakeProcess()
+    processes = [first_process, second_process]
+    lookup_calls: list[Path] = []
+
+    def no_live_endpoint(profile_dir, *, cdp_probe=None):
+        del cdp_probe
+        lookup_calls.append(profile_dir)
+        return None
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        del cdp_probe
+        prepare_calls.append(str(config.cdp_url))
+        assert run_command is not None
+        run_command(["chrome-fake"], False)
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        no_live_endpoint,
+    )
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        run_command=lambda command, check: processes.pop(0),
+        allocate_port=_fixed_ports([9301, 9302]),
+    )
+
+    first = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    second = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert first is not second
+    assert first.cdp_port == 9301
+    assert second.cdp_port == 9302
+    assert prepare_calls == ["http://127.0.0.1:9301", "http://127.0.0.1:9302"]
+    assert first_process.terminated is True
+    assert lookup_calls == [tmp_path / "profiles" / "t1" / "alpha"] * 3
+
+
 def test_same_target_relaunches_when_tracked_browser_process_exited(tmp_path):
     prepare_calls: list[str] = []
     first = FakeProcess()

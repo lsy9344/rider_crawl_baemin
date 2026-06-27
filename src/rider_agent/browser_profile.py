@@ -264,6 +264,13 @@ class BrowserProfileManager:
                     process = self._processes.get(key)
                     if _process_has_exited(process):
                         _assignment, process_to_close = self._release_key_locked(key)
+                    elif (
+                        (process is not None or self._cdp_probe is not None)
+                        and not self._assignment_has_live_cdp(existing)
+                    ):
+                        # 등록부 READY 만 믿고 재사용하면 죽은 CDP 포트에 붙다가 auth/crawl 이
+                        # 즉시 실패한다. 재사용 직전에 실제 endpoint 를 확인하고, 없으면 새로 연다.
+                        _assignment, process_to_close = self._release_key_locked(key)
                     else:
                         # 이미 할당된 대상은 그 할당을 재사용한다 — 다른 대상에 재배정하지 않는다(AC1.2).
                         object.__setattr__(existing, "last_used_at", last_used_at)
@@ -369,6 +376,15 @@ class BrowserProfileManager:
                 self._processes[key] = process
             reservation.set()
         return assignment
+
+    def _assignment_has_live_cdp(self, assignment: ProfileAssignment) -> bool:
+        endpoint = find_existing_chrome_debug_endpoint(
+            assignment.profile_dir,
+            cdp_probe=self._cdp_probe,
+        )
+        if endpoint is None:
+            return False
+        return str(endpoint.cdp_url).rstrip("/") == str(assignment.cdp_url).rstrip("/")
 
     def release(self, tenant_id: str, target_id: str) -> None:
         """등록부에서 대상을 제거하고 포트/프로필 키를 회수한다(누수 없이 재할당 가능)."""

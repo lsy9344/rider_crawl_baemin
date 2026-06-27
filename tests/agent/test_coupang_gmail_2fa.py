@@ -39,6 +39,7 @@ REASON_CAPTCHA_OR_ABNORMAL = agent_email_2fa.REASON_CAPTCHA_OR_ABNORMAL
 REASON_EMAIL_AUTH = agent_email_2fa.REASON_EMAIL_AUTH
 REASON_MAIL_DELAY = agent_email_2fa.REASON_MAIL_DELAY
 REASON_REPEATED_FAILURE = agent_email_2fa.REASON_REPEATED_FAILURE
+REASON_BROWSER_UNAVAILABLE = agent_email_2fa.REASON_BROWSER_UNAVAILABLE
 STATE_EMAIL_AUTH_REQUIRED = agent_email_2fa.STATE_EMAIL_AUTH_REQUIRED
 STATE_RECOVERED = agent_email_2fa.STATE_RECOVERED
 STATE_RECOVERY_FAILED = agent_email_2fa.STATE_RECOVERY_FAILED
@@ -605,6 +606,24 @@ def test_execute_auth_coupang_2fa_job_mail_delay_is_recovery_failed():
     assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
     assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
     assert result.result_json["reason"] == REASON_MAIL_DELAY
+
+
+def test_execute_auth_coupang_2fa_job_browser_failure_is_not_mail_delay():
+    """Chrome/CDP failure is surfaced separately from delayed verification mail."""
+    from rider_agent.reuse import CdpUnavailableError
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=lambda: (_ for _ in ()).throw(CdpUnavailableError("CDP endpoint unavailable")),
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=1,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] == REASON_BROWSER_UNAVAILABLE
 
 
 def test_execute_auth_coupang_2fa_job_fails_closed_when_secret_ref_unresolved():
