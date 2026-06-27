@@ -903,6 +903,44 @@ def test_default_open_auth_browser_propagates_prepare_failure(monkeypatch):
         )
 
 
+def test_default_open_auth_browser_reuses_managed_profile_without_repreparing(
+    monkeypatch, tmp_path
+):
+    opened = []
+
+    monkeypatch.setattr(
+        "rider_agent.reuse.prepare_chrome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            BrowserLaunchError("cdp already prepared")
+        ),
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._open_coupang_auth_browser_only",
+        lambda config: opened.append(
+            (str(config.cdp_url), str(config.browser_user_data_dir))
+        ),
+    )
+
+    profile_dir = tmp_path / "managed-profile"
+    result = default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "coupang",
+                "primary_url": "https://partner.coupangeats.com/page/rider-performance",
+                "expected_display_name": "쿠팡상점A",
+                "cdp_url": "http://127.0.0.1:9450",
+                "browser_user_data_dir": str(profile_dir),
+            },
+        )
+    )
+
+    assert result is None
+    assert opened == [("http://127.0.0.1:9450", str(profile_dir))]
+
+
 def test_open_auth_browser_for_coupang_navigates_to_target_when_not_login_screen(monkeypatch):
     """Non-login-screen Coupang open navigates to the target URL once, without driving 2FA."""
     from types import SimpleNamespace

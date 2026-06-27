@@ -285,7 +285,12 @@ def default_open_auth_browser(
 
     config = _config_from_auth_job(job, secret_resolver=secret_resolver)
     platform = str(getattr(config, "platform_name", "") or "").strip().casefold()
-    reuse.prepare_chrome(config, platform_name="Windows")
+    raw_payload = job.payload or {}
+    managed_profile_ready = bool(
+        raw_payload.get("cdp_url") and raw_payload.get("browser_user_data_dir")
+    )
+    if not managed_profile_ready:
+        reuse.prepare_chrome(config, platform_name="Windows")
     if platform == "coupang":
         # Coupang 은 브라우저만 연다(자동 OTP 0). 로그인 화면이 보이도록 대상 URL 로만 안내하고,
         # IMAP/OTP/2FA 제출은 하지 않는다. 사람이 직접 조치하면 detect_completion 이 감지한다.
