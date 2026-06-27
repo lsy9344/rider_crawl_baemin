@@ -150,6 +150,18 @@ class FakeProcess:
         return 0
 
 
+def _debug_endpoint(cdp_url: str, cdp_port: int, process=None):
+    return type(
+        "Endpoint",
+        (),
+        {
+            "cdp_url": cdp_url,
+            "cdp_port": cdp_port,
+            "process": process,
+        },
+    )()
+
+
 def _windows_prepare(config, *, run_command=None, cdp_probe=None):
     """실 ``prepare_chrome`` 를 Windows 경로로 강제 호출(테스트 OS 무관, 실 Chrome 0)."""
 
@@ -257,10 +269,17 @@ def test_distinct_targets_get_distinct_profiles_and_ports(tmp_path):
     assert {p["cdp_port"] for p in manager.browser_profiles()} == {9301, 9302}
 
 
-def test_same_target_reuses_assignment_without_reallocation(tmp_path):
+def test_same_target_reuses_assignment_without_reallocation(tmp_path, monkeypatch):
     prepare = CountingPrepare()
     # 둘째 포트(9999)는 재할당이 일어나면 쓰일 값 — 재사용이면 절대 쓰이지 않는다.
     manager = _manager(tmp_path, prepare=prepare, allocate_port=_fixed_ports([9301, 9999]))
+    endpoints = iter([None, _debug_endpoint("http://127.0.0.1:9301", 9301)])
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        lambda _profile_dir, *, cdp_probe=None: next(endpoints),
+    )
 
     a = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
     a2 = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
@@ -310,6 +329,44 @@ def test_same_target_relaunches_when_registered_cdp_is_not_live(tmp_path, monkey
     assert second.cdp_port == 9302
     assert prepare_calls == ["http://127.0.0.1:9301", "http://127.0.0.1:9302"]
     assert first_process.terminated is True
+    assert lookup_calls == [tmp_path / "profiles" / "t1" / "alpha"] * 3
+
+
+def test_same_target_relaunches_stale_cdp_without_tracked_process(
+    tmp_path, monkeypatch
+):
+    """A READY registry entry without a process handle still must prove live CDP."""
+
+    prepare_calls: list[str] = []
+    lookup_calls: list[Path] = []
+
+    def no_live_endpoint(profile_dir, *, cdp_probe=None):
+        del cdp_probe
+        lookup_calls.append(profile_dir)
+        return None
+
+    def prepare(config, *, run_command=None, cdp_probe=None):
+        del run_command, cdp_probe
+        prepare_calls.append(str(config.cdp_url))
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        no_live_endpoint,
+    )
+    manager = _manager(
+        tmp_path,
+        prepare=prepare,
+        allocate_port=_fixed_ports([9301, 9302]),
+    )
+
+    first = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    second = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    assert first is not second
+    assert first.cdp_port == 9301
+    assert second.cdp_port == 9302
+    assert prepare_calls == ["http://127.0.0.1:9301", "http://127.0.0.1:9302"]
     assert lookup_calls == [tmp_path / "profiles" / "t1" / "alpha"] * 3
 
 
@@ -454,12 +511,19 @@ def test_agent_restart_closes_stale_profile_chrome_without_live_cdp_before_launc
     ]
 
 
-def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path):
+def test_reuse_updates_last_used_and_idle_cleanup_releases_indexes(tmp_path, monkeypatch):
     times = iter([100.0, 200.0, 500.0, 501.0])
     manager = _manager(
         tmp_path,
         allocate_port=_fixed_ports([9301, 9301]),
         now=lambda: next(times),
+    )
+    endpoints = iter([None, _debug_endpoint("http://127.0.0.1:9301", 9301), None])
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        lambda _profile_dir, *, cdp_probe=None: next(endpoints),
     )
 
     a = manager.ensure_profile("t1", "alpha", build_config=make_build_config())
@@ -493,7 +557,7 @@ def test_max_profiles_releases_least_recent_assignment(tmp_path):
     assert {p["id"] for p in manager.browser_profiles()} == {"t1:beta"}
 
 
-def test_concurrent_same_target_launch_uses_single_reservation(tmp_path):
+def test_concurrent_same_target_launch_uses_single_reservation(tmp_path, monkeypatch):
     entered_prepare = threading.Event()
     allow_prepare = threading.Event()
     second_prepare_started = threading.Event()
@@ -515,6 +579,13 @@ def test_concurrent_same_target_launch_uses_single_reservation(tmp_path):
         tmp_path,
         prepare=prepare,
         allocate_port=_fixed_ports([9301, 9302]),
+    )
+    endpoints = iter([None, _debug_endpoint("http://127.0.0.1:9301", 9301)])
+
+    monkeypatch.setattr(
+        browser_profile,
+        "find_existing_chrome_debug_endpoint",
+        lambda _profile_dir, *, cdp_probe=None: next(endpoints),
     )
 
     def ensure():

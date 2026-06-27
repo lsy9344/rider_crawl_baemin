@@ -264,10 +264,7 @@ class BrowserProfileManager:
                     process = self._processes.get(key)
                     if _process_has_exited(process):
                         _assignment, process_to_close = self._release_key_locked(key)
-                    elif (
-                        (process is not None or self._cdp_probe is not None)
-                        and not self._assignment_has_live_cdp(existing)
-                    ):
+                    elif not self._assignment_has_live_cdp(existing):
                         # 등록부 READY 만 믿고 재사용하면 죽은 CDP 포트에 붙다가 auth/crawl 이
                         # 즉시 실패한다. 재사용 직전에 실제 endpoint 를 확인하고, 없으면 새로 연다.
                         _assignment, process_to_close = self._release_key_locked(key)
