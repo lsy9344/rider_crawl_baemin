@@ -342,6 +342,7 @@ def _auth_start_payload(
     account: PlatformAccount,
     *,
     at: datetime,
+    force_manual_browser: bool = False,
 ) -> tuple[str, dict[str, object]]:
     platform = _platform_registry_key(account.platform.value)
     ttl_fields = _open_auth_browser_ttl_fields(at)
@@ -388,7 +389,7 @@ def _auth_start_payload(
     auto_2fa_complete = bool(
         verification_email_address_ref and verification_email_app_password_ref
     )
-    if not auto_2fa_complete:
+    if force_manual_browser or not auto_2fa_complete:
         # 수동 폴백: 브라우저만 열고 사람이 조치(자동 OTP 0). 자동 2FA 플래그/recovery_mode 미포함.
         return (
             JOB_TYPE_OPEN_AUTH_BROWSER,
@@ -824,6 +825,7 @@ class AdminActionService:
         actor_id: str | None,
         at: datetime,
         source: str | None = None,
+        force_manual_browser: bool = False,
     ) -> str:
         """대상 인증을 시작한다.
 
@@ -834,7 +836,12 @@ class AdminActionService:
 
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         account = await self._scoped_platform_account(target.platform_account_id, tenant_id=tenant_id)
-        job_type, payload = _auth_start_payload(target, account, at=at)
+        job_type, payload = _auth_start_payload(
+            target,
+            account,
+            at=at,
+            force_manual_browser=force_manual_browser,
+        )
         enqueue_manual_job = getattr(self._repo, "enqueue_manual_job", None)
         if callable(enqueue_manual_job):
             job_id = str(uuid.uuid4())

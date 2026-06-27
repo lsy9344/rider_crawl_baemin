@@ -837,6 +837,42 @@ def test_start_auth_for_coupang_enqueues_auth_coupang_2fa_when_auto_info_complet
     assert repo.audits[-1].diff_redacted["job_type"] == "AUTH_COUPANG_2FA"
 
 
+def test_start_auth_for_coupang_can_force_manual_browser_when_auto_info_complete() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-login-id-ref",
+            password="coupang-login-password-ref",
+            verification_email_address="mailbox-ref",
+            verification_email_app_password="mail-app-password-ref",
+        )
+    )
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(
+        svc.start_auth(
+            target_id="mt-1",
+            tenant_id=_TENANT,
+            actor_id=_ACTOR,
+            at=_NOW,
+            force_manual_browser=True,
+        )
+    )
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.type == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert job.payload_json["job_type"] == "OPEN_AUTH_BROWSER"
+    assert job.payload_json["platform"] == "coupang"
+    assert job.payload_json["coupang_login_id_ref"] == "coupang-login-id-ref"
+    assert job.payload_json["coupang_login_password_ref"] == "coupang-login-password-ref"
+    assert "recovery_mode" not in job.payload_json
+    assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
+
+
 def test_start_auth_for_coupang_manual_fallback_uses_open_auth_browser() -> None:
     """Manual browser auth remains available when auto 2FA cannot run.
 
@@ -1056,6 +1092,43 @@ def test_route_auth_start_triggers_coupang_auth_coupang_2fa() -> None:
     assert claimed[0].payload_json["recovery_mode"] == "coupang_auto_email_2fa"
     assert claimed[0].payload_json["verification_email_address_ref"] == "mailbox-ref"
     assert "coupang_auto_email_2fa_enabled" not in claimed[0].payload_json
+
+
+def test_route_auth_start_browser_mode_forces_coupang_open_auth_browser() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    repo.seed_platform_account(
+        _platform_account(
+            platform=Platform.COUPANG,
+            username="coupang-login-id-ref",
+            password="coupang-login-password-ref",
+            verification_email_address="mailbox-ref",
+            verification_email_app_password="mail-app-password-ref",
+        )
+    )
+    queue = InMemoryQueueBackend()
+    client = TestClient(_app_with(repo, queue))
+
+    resp = client.post(
+        "/admin/targets/mt-1/auth-start?tenant=tn-1",
+        data=_confirmed({"mode": "browser"}),
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    claimed = _run(
+        queue.claim(
+            agent_id="agent-auth",
+            capabilities=[JOB_TYPE_OPEN_AUTH_BROWSER],
+            max_jobs=1,
+            lease_seconds=60,
+            now=_NOW,
+        )
+    )
+    assert len(claimed) == 1
+    assert claimed[0].type == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert claimed[0].payload_json["job_type"] == JOB_TYPE_OPEN_AUTH_BROWSER
+    assert claimed[0].payload_json["platform"] == "coupang"
+    assert "recovery_mode" not in claimed[0].payload_json
 
 
 def test_route_auth_start_missing_credentials_is_400() -> None:

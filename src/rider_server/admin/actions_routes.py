@@ -270,7 +270,10 @@ async def auth_check(
 async def auth_start(
     request: Request, target_id: str, _principal=Depends(require_operator)
 ) -> HTMLResponse:
-    _require_confirmation(await _form(request))
+    form = await _form(request)
+    _require_confirmation(form)
+    mode = str(form.get("mode", "") or "").strip().casefold()
+    force_manual_browser = mode in {"browser", "manual", "open_auth_browser"}
     try:
         job_id = await _service(request).start_auth(
             target_id=target_id,
@@ -278,6 +281,7 @@ async def auth_start(
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),
             at=_now(),
+            force_manual_browser=force_manual_browser,
         )
     except AdminActionNotFound as exc:
         _raise_for(exc)

@@ -24,6 +24,12 @@
                 hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-start?tenant={{ action_tenant | urlencode }}"
                 hx-vals='{"confirm_action": "confirmed"}'
                 hx-target="#auth-required-result-{{ r.target_id }}">인증 시작</button>
+        <button type="button"
+                class="btn ghost"
+                data-target="{{ r.target_id }}"
+                hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-start?tenant={{ action_tenant | urlencode }}"
+                hx-vals='{"confirm_action": "confirmed", "mode": "browser"}'
+                hx-target="#auth-required-result-{{ r.target_id }}">브라우저 열기</button>
         {% endif %}
         <button type="button"
                 class="btn {% if is_auth_pending %}primary{% else %}ghost{% endif %}"
