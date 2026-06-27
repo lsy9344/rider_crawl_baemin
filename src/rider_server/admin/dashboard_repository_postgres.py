@@ -170,8 +170,13 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             for row in rows:
                 target_id = str(row.id)
-                failure_code, failed_at = latest_failure_by_target.get(
-                    target_id, (None, None)
+                (
+                    failure_code,
+                    failed_at,
+                    auth_recovery_state,
+                    auth_recovery_reason,
+                ) = latest_failure_by_target.get(
+                    target_id, (None, None, None, None)
                 )
                 facts.append(
                     TargetHealthFacts(
@@ -189,6 +194,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         account_auth_state=row.auth_state,
                         lifecycle_state=row.lifecycle_state,
                         auth_session_pending=str(row.account_id) in pending_account_ids,
+                        auth_recovery_state=auth_recovery_state,
+                        auth_recovery_reason=auth_recovery_reason,
                     )
                 )
         return facts
@@ -270,8 +277,13 @@ class PostgresDashboardRepository(DashboardRepository):
             )
             for row in rows:
                 target_id = str(row.id)
-                failure_code, failed_at = latest_failure_by_target.get(
-                    target_id, (None, None)
+                (
+                    failure_code,
+                    failed_at,
+                    auth_recovery_state,
+                    auth_recovery_reason,
+                ) = latest_failure_by_target.get(
+                    target_id, (None, None, None, None)
                 )
                 facts.append(
                     TargetHealthFacts(
@@ -289,6 +301,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         account_auth_state=row.auth_state,
                         lifecycle_state=row.lifecycle_state,
                         auth_session_pending=str(row.account_id) in pending_account_ids,
+                        auth_recovery_state=auth_recovery_state,
+                        auth_recovery_reason=auth_recovery_reason,
                     )
                 )
         return facts
@@ -333,7 +347,7 @@ class PostgresDashboardRepository(DashboardRepository):
 
     async def _latest_failure_codes(
         self, session: AsyncSession, target_ids: list[str]
-    ) -> dict[str, tuple[str, datetime | None]]:
+    ) -> dict[str, tuple[str, datetime | None, str | None, str | None]]:
         if not target_ids:
             return {}
         job_stmt = (
@@ -341,6 +355,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 Job.target_id,
                 Job.error_code,
                 func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
+                Job.result_json,
             )
             .where(Job.target_id.in_(target_ids), Job.error_code.is_not(None))
         )
@@ -359,9 +374,19 @@ class PostgresDashboardRepository(DashboardRepository):
                 DeliveryLog.error_code.is_not(None),
             )
         )
-        latest: dict[str, tuple[str, datetime | None]] = {}
-        for target_id, error_code, ts in (await session.execute(job_stmt)).all():
-            _set_latest(latest, str(target_id), error_code, ts)
+        latest: dict[str, tuple[str, datetime | None, str | None, str | None]] = {}
+        for target_id, error_code, ts, result_json in (await session.execute(job_stmt)).all():
+            recovery_state, recovery_reason = _coupang_recovery_detail_from_result_json(
+                result_json
+            )
+            _set_latest(
+                latest,
+                str(target_id),
+                error_code,
+                ts,
+                auth_recovery_state=recovery_state,
+                auth_recovery_reason=recovery_reason,
+            )
         for target_id, error_code, ts in (await session.execute(delivery_stmt)).all():
             _set_latest(latest, str(target_id), error_code, ts)
         return dict(latest)
@@ -733,15 +758,44 @@ def _pick_latest_code(job_row, delivery_row) -> str | None:
 
 
 def _set_latest(
-    latest: dict[str, tuple[str, datetime | None]],
+    latest: dict[str, tuple[str, datetime | None, str | None, str | None]],
     target_id: str,
     error_code: str,
     ts: datetime | None,
+    *,
+    auth_recovery_state: str | None = None,
+    auth_recovery_reason: str | None = None,
 ) -> None:
     current = latest.get(target_id)
     if current is None:
-        latest[target_id] = (error_code, ts)
+        latest[target_id] = (
+            error_code,
+            ts,
+            auth_recovery_state,
+            auth_recovery_reason,
+        )
         return
-    _code, current_ts = current
+    _code, current_ts, _state, _reason = current
     if ts is not None and (current_ts is None or ts > current_ts):
-        latest[target_id] = (error_code, ts)
+        latest[target_id] = (
+            error_code,
+            ts,
+            auth_recovery_state,
+            auth_recovery_reason,
+        )
+
+
+def _coupang_recovery_detail_from_result_json(
+    result_json: object,
+) -> tuple[str | None, str | None]:
+    if not isinstance(result_json, dict):
+        return (None, None)
+    return (
+        _clean_optional_text(result_json.get("auth_recovery_state")),
+        _clean_optional_text(result_json.get("reason")),
+    )
+
+
+def _clean_optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None

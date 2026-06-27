@@ -26,6 +26,7 @@ from rider_server.admin.dashboard_repository_postgres import (
     _AUTH_SESSION_PENDING_STATES,
     _TELEGRAM_ERROR_WINDOW,
     _pick_latest_code,
+    _set_latest,
 )
 from rider_server.domain import BaeminAuthState
 from rider_server.queue.states import (
@@ -84,6 +85,54 @@ def test_pick_latest_code_both_ts_none_prefers_job() -> None:
     job = _row("CRAWL_FAILURE", None)
     delivery = _row("TELEGRAM_FAILURE", None)
     assert _pick_latest_code(job, delivery) == "CRAWL_FAILURE"
+
+
+def test_set_latest_preserves_coupang_recovery_detail_from_latest_job() -> None:
+    latest: dict[str, tuple[str, datetime | None, str | None, str | None]] = {}
+
+    _set_latest(
+        latest,
+        "target-1",
+        "AUTH_REQUIRED",
+        _NOW,
+        auth_recovery_state="RECOVERY_FAILED",
+        auth_recovery_reason="verification_mail_delayed",
+    )
+
+    assert latest["target-1"] == (
+        "AUTH_REQUIRED",
+        _NOW,
+        "RECOVERY_FAILED",
+        "verification_mail_delayed",
+    )
+
+
+def test_set_latest_keeps_detail_from_more_recent_failure() -> None:
+    latest: dict[str, tuple[str, datetime | None, str | None, str | None]] = {}
+
+    _set_latest(
+        latest,
+        "target-1",
+        "AUTH_REQUIRED",
+        _NOW - timedelta(minutes=10),
+        auth_recovery_state="RECOVERY_FAILED",
+        auth_recovery_reason="verification_mail_delayed",
+    )
+    _set_latest(
+        latest,
+        "target-1",
+        "AUTH_REQUIRED",
+        _NOW,
+        auth_recovery_state="USER_ACTION_REQUIRED",
+        auth_recovery_reason="captcha_or_abnormal_login",
+    )
+
+    assert latest["target-1"] == (
+        "AUTH_REQUIRED",
+        _NOW,
+        "USER_ACTION_REQUIRED",
+        "captcha_or_abnormal_login",
+    )
 
 
 # ── 정책 상수: 정본 어휘 드리프트 차단 ────────────────────────────────────────

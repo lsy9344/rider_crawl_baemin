@@ -95,6 +95,8 @@ def _target(
     account_auth_state: str | None = "ACTIVE",
     lifecycle_state: str | None = "ACTIVE",
     auth_session_pending: bool = False,
+    auth_recovery_state: str | None = None,
+    auth_recovery_reason: str | None = None,
 ) -> TargetHealthFacts:
     return TargetHealthFacts(
         target_id=target_id,
@@ -110,6 +112,8 @@ def _target(
         account_auth_state=account_auth_state,
         lifecycle_state=lifecycle_state,
         auth_session_pending=auth_session_pending,
+        auth_recovery_state=auth_recovery_state,
+        auth_recovery_reason=auth_recovery_reason,
     )
 
 
@@ -1046,6 +1050,45 @@ def test_auth_required_reason_takes_precedence_over_latest_profile_failure() -> 
 
     assert 'data-reason="로그인 만료 · 인증 확인 필요"' in html
     assert "브라우저 프로필 준비 실패" not in html
+
+
+def test_coupang_recovery_detail_explains_auth_required_target() -> None:
+    facts = _target(
+        target_id="t-auth",
+        last_success_at=_NOW - timedelta(hours=1),
+        last_failure_code="AUTH_REQUIRED",
+        last_failure_at=_NOW,
+        account_auth_state="AUTH_REQUIRED",
+        auth_recovery_state="RECOVERY_FAILED",
+        auth_recovery_reason="verification_mail_delayed",
+    )
+
+    row = DashboardService.target_row(facts, _NOW)
+
+    assert row.severity == SEVERITY_STOPPED
+    assert row.auth_recovery_detail == "인증 메일 지연"
+
+
+def test_targets_fragment_prefers_coupang_recovery_detail_for_auth_required() -> None:
+    row = TargetRow(
+        target_id="t-auth",
+        tenant_id=_TENANT,
+        name="인증가게",
+        center_name="센터",
+        platform="COUPANG",
+        interval_minutes=10,
+        last_success_at=None,
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        severity=SEVERITY_AUTH_REQUIRED,
+        auth_recovery_detail="캡차/이상 로그인",
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert 'data-reason="캡차/이상 로그인"' in html
+    assert "캡차/이상 로그인" in html
+    assert "로그인 만료 · 인증 확인 필요" not in html
 
 
 def test_auth_session_pending_target_prompts_user_to_enter_code_and_recheck() -> None:

@@ -52,6 +52,8 @@ class TargetHealthFacts:
     customer_name: str = ""
     auth_session_pending: bool = False  # auth_sessions 인증대기 행 존재
     last_failure_at: datetime | None = None  # 위 last_failure_code 의 발생 시각(stale 판정용)
+    auth_recovery_state: str | None = None  # 쿠팡 자동 인증 복구 세부 상태(AUTH_COUPANG_2FA)
+    auth_recovery_reason: str | None = None  # 쿠팡 자동 인증 복구 세부 사유(result_json.reason)
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,7 @@ class TargetRow:
     severity: str
     customer_name: str = ""
     auth_session_pending: bool = False
+    auth_recovery_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +307,10 @@ class DashboardService:
             severity=overall,
             customer_name=facts.customer_name,
             auth_session_pending=facts.auth_session_pending,
+            auth_recovery_detail=severity.coupang_recovery_detail_label(
+                auth_recovery_state=facts.auth_recovery_state,
+                reason=facts.auth_recovery_reason,
+            ),
         )
 
     @staticmethod
