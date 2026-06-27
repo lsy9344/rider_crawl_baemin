@@ -26,6 +26,8 @@ _SEND_CODE_TEXTS = (
     "인증코드 전송",
     "인증번호 발송",
     "인증번호 받기",
+    "인증코드 받기",
+    "인증 코드 받기",
     "인증번호 전송",
     "인증코드 발송",
     "코드 받기",
@@ -104,11 +106,11 @@ def recover_coupang_session_with_email_2fa(
     if _is_primary_login_screen(refreshed_text, page):
         return False
 
-    if not _account_matches_screen(page, config.verification_email_address):
-        return False
-
     requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
     if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
+        return False
+
+    if not _account_matches_screen(page, config.verification_email_address):
         return False
 
     code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
@@ -179,7 +181,7 @@ def _account_matches_screen(page: Any, account_address: str) -> bool:
         return False
     recipients = _onscreen_recipients(page)
     if not recipients:
-        return False
+        return True
     return any(_recipient_matches_account(recipient, account) for recipient in recipients)
 
 
