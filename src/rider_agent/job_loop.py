@@ -110,6 +110,9 @@ ERROR_JOB_CLAIM = "AGENT_JOB_CLAIM_ERROR"
 ERROR_JOB_EXECUTION = "AGENT_JOB_EXECUTION_ERROR"
 ERROR_JOB_COMPLETE = "AGENT_JOB_COMPLETE_ERROR"
 ERROR_JOB_REVOKED = "AGENT_JOB_REVOKED"
+# 403 = token 은 유효하나 다른 agent identity 로 해석됨(mismatch). revoked 와 같은 재등록 필요
+# 상태로 처리하되 운영자가 구분할 수 있게 코드를 분리한다(transient backoff 로 묻지 않는다).
+ERROR_JOB_IDENTITY_REJECTED = "AGENT_JOB_IDENTITY_REJECTED"
 ERROR_JOB_LEASE_LOST = "AGENT_JOB_LEASE_LOST"
 ERROR_JOB_EVENT = "AGENT_JOB_EVENT_ERROR"
 # preflight denied / 호출 불가 시 기록하는 에러 코드(UPPER_SNAKE, secret 아님).
@@ -678,9 +681,10 @@ class JobRunner:
             )
         except TransportError as exc:
             self._handle_transport_error(ERROR_JOB_CLAIM, "job claim failed", exc)
-            # 401/revoke 는 backoff 대상이 아니다(재등록 필요 — 폴링 backoff 로 숨기지 않는다).
-            # network/5xx 등 일시 실패만 연속 카운터를 올려 다음 대기에 지수 backoff 를 적용한다.
-            if exc.status_code == 401:
+            # 401/403(revoke·identity mismatch)은 backoff 대상이 아니다(재등록 필요 — 폴링
+            # backoff 로 숨기지 않는다). network/5xx 등 일시 실패만 연속 카운터를 올려 다음
+            # 대기에 지수 backoff 를 적용한다.
+            if exc.status_code in (401, 403):
                 self._consecutive_claim_failures = 0
             else:
                 self._consecutive_claim_failures += 1
@@ -872,9 +876,12 @@ class JobRunner:
                         exc,
                     )
                     return COMPLETE_REPORT_LEASE_LOST
-                if exc.status_code == 401:
+                if exc.status_code in (401, 403):
+                    # 401=revoked, 403=identity mismatch. 둘 다 재등록 필요 계열이라 같은
+                    # COMPLETE_REPORT_REVOKED 로 닫는다(outbox record 를 sent/discarded 로
+                    # 표시하지 않음). 이벤트 코드만 _handle_transport_error 가 분기한다.
                     self._handle_transport_error(
-                        ERROR_JOB_REVOKED, "job complete rejected: token revoked", exc
+                        ERROR_JOB_REVOKED, "job complete rejected", exc
                     )
                     return COMPLETE_REPORT_REVOKED
                 if should_retry and self._sleep_before_complete_retry():
@@ -1008,6 +1015,15 @@ class JobRunner:
             self._record_error(
                 ERROR_JOB_REVOKED,
                 "rejected: token revoked — re-registration required",
+                exc,
+            )
+        elif exc.status_code == 403:
+            # 403 = token 은 유효하나 다른 agent identity 로 해석됨. revoked 와 같은 재등록 필요
+            # 상태로 전환하되, identity mismatch 전용 코드로 남겨 운영자가 구분하게 한다.
+            self._set_status(TOKEN_STATUS_REVOKED)
+            self._record_error(
+                ERROR_JOB_IDENTITY_REJECTED,
+                "rejected: agent identity mismatch — re-registration required",
                 exc,
             )
         else:

@@ -395,6 +395,39 @@ def test_reporter_surfaces_revoked_on_401_without_crash_or_spin():
     assert FAKE_TOKEN not in " ".join(logs)
 
 
+def test_reporter_surfaces_identity_mismatch_on_403_without_crash_or_spin():
+    # 403 = token 자체는 유효하나 다른 agent identity 로 해석됨. 401(revoked) 와 같은 재등록
+    # 필요 상태로 surfacing 하되, 운영자가 구분할 수 있도록 전용 이벤트 코드를 남긴다.
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    statuses: list[str] = []
+    logs: list[str] = []
+    transport = FakeTransport(
+        error=TransportError("agent heartbeat HTTP error", status_code=403)
+    )
+    reporter = HeartbeatReporter(
+        _IDENTITY,
+        transport=transport,
+        sleep=sleep,
+        stop_event=stop,
+        on_status=statuses.append,
+        log=logs.append,
+    )
+
+    reporter.run()
+
+    # 매 주기 403 이어도 crash 없이 루프 진행 → 주입 sleep 으로만 정지(무한 즉시 스핀 없음).
+    assert len(transport.calls) == 2
+    assert sleep.intervals
+    # revoked 와 동일하게 재등록 필요로 두되 이벤트 코드는 identity mismatch 전용.
+    assert reporter.needs_registration is True
+    assert reporter.token_status == TOKEN_STATUS_REVOKED
+    assert statuses == [TOKEN_STATUS_REVOKED]
+    assert reporter.last_error_event is not None
+    assert reporter.last_error_event["code"] == "AGENT_HEARTBEAT_IDENTITY_REJECTED"
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
 def test_reporter_stop_breaks_loop():
     stop = threading.Event()
     stop.set()  # 시작 전 정지 요청 → 한 번도 보고하지 않는다.

@@ -676,6 +676,87 @@ def test_heartbeat_strips_sensitive_payload_fields_before_storage() -> None:
     assert "profile-password-raw" not in saved_text
 
 
+def test_heartbeat_stores_diagnostic_fields_and_rejects_unsafe_browser_profile_values() -> None:
+    # Task 3A: auth_state/last_error_code/last_probe_at 는 저장되고, page_kind/current_url/html
+    # 등 금지 필드와 잘못된 cdp_port(0/음수/범위밖/bool/float/str)는 저장되지 않는다.
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {"cpu_percent": 1.0},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_profiles": [
+                {
+                    "id": "profile-1",
+                    "target_id": "target-1",
+                    "state": "AUTH_REQUIRED",
+                    "cdp_port": 9223,
+                    "auth_state": "AUTH_REQUIRED",
+                    "last_error_code": "CDP_UNREACHABLE",
+                    "last_probe_at": "2026-06-28T10:20:30Z",
+                    # 금지 필드(3A 에서 저장하지 않는다).
+                    "page_kind": "LOGIN",
+                    "current_url": "https://store.example.com/login?token=raw",
+                    "current_url_redacted": "https://store.example.com/login",
+                    "html": "<html>raw</html>",
+                    "screenshot": "base64-bytes-raw",
+                },
+                {  # cdp_port 가 범위 밖 → cdp_port 만 버리고 나머지는 저장.
+                    "id": "profile-2",
+                    "state": "READY",
+                    "cdp_port": 999999,
+                },
+                {  # cdp_port 가 0 → 버린다.
+                    "id": "profile-3",
+                    "cdp_port": 0,
+                },
+                {  # cdp_port 가 bool/float → 버린다.
+                    "id": "profile-4",
+                    "cdp_port": True,
+                },
+                {  # auth_state 가 문자열 아님 → 버린다.
+                    "id": "profile-5",
+                    "auth_state": 123,
+                },
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    capacity = registry.agent(_AGENT_ID).capacity_json
+    profiles = {p["id"]: p for p in capacity["browser_profiles"]}
+
+    # profile-1: 안전 진단 필드 저장, 금지 필드 전부 제거.
+    p1 = profiles["profile-1"]
+    assert p1["auth_state"] == "AUTH_REQUIRED"
+    assert p1["last_error_code"] == "CDP_UNREACHABLE"
+    assert p1["last_probe_at"] == "2026-06-28T10:20:30Z"
+    assert p1["cdp_port"] == 9223
+    for forbidden in ("page_kind", "current_url", "current_url_redacted", "html", "screenshot"):
+        assert forbidden not in p1
+
+    # 잘못된 cdp_port 는 저장되지 않는다(필드 자체가 없다).
+    assert "cdp_port" not in profiles["profile-2"]
+    assert profiles["profile-2"]["state"] == "READY"
+    assert "cdp_port" not in profiles["profile-3"]
+    assert "cdp_port" not in profiles["profile-4"]
+    # 잘못된 타입 auth_state 는 저장되지 않는다.
+    assert "auth_state" not in profiles["profile-5"]
+
+    # raw URL/HTML/screenshot/token 평문이 저장 어디에도 없다.
+    saved_text = str(capacity)
+    assert "store.example.com" not in saved_text
+    assert "raw</html>" not in saved_text
+    assert "base64-bytes-raw" not in saved_text
+    assert "LOGIN" not in saved_text
+
+
 def test_server_accepts_default_agent_heartbeat_payload_shape() -> None:
     registry = InMemoryAgentRegistry()
     registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)

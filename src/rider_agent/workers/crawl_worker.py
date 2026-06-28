@@ -23,6 +23,7 @@ from rider_crawl.redaction import redact
 
 from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN, CAPABILITY_CRAWL_COUPANG
 from rider_agent.job_loop import (
+    JOB_STATUS_SUCCESS,
     ClaimedJob,
     JobResult,
     default_execute_job,
@@ -40,6 +41,8 @@ AUTH_STATE_ACTIVE = "ACTIVE"
 AUTH_STATE_AUTH_REQUIRED = "AUTH_REQUIRED"
 AUTH_STATE_USER_ACTION_PENDING = "USER_ACTION_PENDING"
 AUTH_STATE_CENTER_MISMATCH = "CENTER_MISMATCH"
+# heartbeat 진단 투영에서 인증 상태를 단정할 수 없을 때의 fail-safe 요약(parser/CDP/timeout 등).
+AUTH_STATE_UNKNOWN = "UNKNOWN"
 
 ERROR_AUTH_REQUIRED = "AUTH_REQUIRED"
 ERROR_USER_ACTION_PENDING = "USER_ACTION_PENDING"
@@ -120,8 +123,17 @@ class CrawlWorker:
         if job.type not in {CAPABILITY_CRAWL_BAEMIN, CAPABILITY_CRAWL_COUPANG}:
             return self.make_unsupported(job)
 
-        raw_payload = _raw_payload(job)
         payload = payload_from_job(job)
+        # 지원 crawl job 의 최종 JobResult 를 한 곳에서 받아 profile 진단을 기록한다(process
+        # boundary 결과·_execute_payload 결과 모두 이 경로를 통과). timeout 은 release 순서가
+        # 중요해 _cleanup_after_timeout 안에서 release 전에 따로 기록하므로, 여기서의 재기록은
+        # assignment 가 이미 사라진 no-op 이다(중복 기록이 결과를 바꾸지 않는다).
+        result = self._execute_supported(job, payload)
+        self._record_crawl_diagnostic_from_result(payload, result)
+        return result
+
+    def _execute_supported(self, job: ClaimedJob, payload: CrawlJobPayload) -> JobResult:
+        raw_payload = _raw_payload(job)
         # payload TTL 이 지났으면 profile/browser 를 준비하기 전에 fail-fast(server preflight 가
         # 우회돼도 stale job 이 브라우저를 열지 않게 — Task 5 defense-in-depth).
         if _payload_expired(payload.expires_at, now=self._now()):
@@ -194,6 +206,45 @@ class CrawlWorker:
                 cleanup=lambda: self._cleanup_after_timeout(payload),
             )
         return self._execute_payload(job, raw_payload, payload)
+
+    def _record_crawl_diagnostic_from_result(
+        self, payload: CrawlJobPayload, result: JobResult
+    ) -> None:
+        """최종 JobResult 를 기준으로 기존 profile assignment 에 진단값을 기록한다.
+
+        auth_state 는 result_json 이 명시한 값(성공/인증필요/center mismatch)을 그대로 쓰고,
+        없으면 ``UNKNOWN`` 으로 둔다(parser/CDP/timeout 등을 인증 문제로 단정하지 않는다).
+        last_error_code 는 실패 시 result.error_code(진단 힌트)다. 진단 기록 실패는 흡수하며
+        job 결과를 바꾸지 않는다.
+        """
+
+        if self._profile_manager is None:
+            return
+        record = getattr(self._profile_manager, "record_profile_diagnostic", None)
+        if not callable(record):
+            return
+        result_json = result.result_json if isinstance(result.result_json, dict) else {}
+        auth_state = result_json.get("auth_state")
+        if not isinstance(auth_state, str) or not auth_state:
+            auth_state = (
+                AUTH_STATE_ACTIVE
+                if result.status == JOB_STATUS_SUCCESS
+                else AUTH_STATE_UNKNOWN
+            )
+        last_error_code = (
+            None if result.status == JOB_STATUS_SUCCESS else result.error_code
+        )
+        try:
+            record(
+                payload.tenant_id,
+                payload.target_id,
+                auth_state=auth_state,
+                last_error_code=last_error_code,
+                last_probe_at=_iso_utc(self._now()),
+            )
+        except Exception:  # noqa: BLE001 - diagnostic recording must not change job result.
+            if self._log is not None:
+                self._log(redact("profile diagnostic record failed"))
 
     def _should_use_process_boundary(self) -> bool:
         return (
@@ -297,6 +348,21 @@ class CrawlWorker:
 
     def _cleanup_after_timeout(self, payload: CrawlJobPayload) -> None:
         if self._profile_manager is not None:
+            # release 가 assignment 를 없애므로 timeout 진단은 release 전에 기록한다(이후
+            # 일반 result 기반 기록은 assignment 가 사라져 no-op 이 된다).
+            record = getattr(self._profile_manager, "record_profile_diagnostic", None)
+            if callable(record):
+                try:
+                    record(
+                        payload.tenant_id,
+                        payload.target_id,
+                        auth_state=AUTH_STATE_UNKNOWN,
+                        last_error_code=ERROR_CRAWL_TIMEOUT,
+                        last_probe_at=_iso_utc(self._now()),
+                    )
+                except Exception:  # noqa: BLE001 - diagnostic must not change timeout result.
+                    if self._log is not None:
+                        self._log(redact("profile timeout diagnostic record failed"))
             release = getattr(self._profile_manager, "release", None)
             if callable(release):
                 try:

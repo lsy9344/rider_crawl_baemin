@@ -411,6 +411,16 @@ class HeartbeatReporter:
                 "heartbeat rejected: token revoked — re-registration required",
                 exc,
             )
+        elif exc.status_code == 403:
+            # 403 = token 자체는 유효하나 다른 agent identity 로 해석됨(mismatch). 401 과 같은
+            # 재등록 필요 상태로 두되, 운영자가 "revoked" 와 "identity mismatch" 를 구분하도록
+            # 이벤트 코드를 분리한다(generic error/backoff 로 묻지 않는다).
+            self._set_status(TOKEN_STATUS_REVOKED)
+            self._record_error(
+                "AGENT_HEARTBEAT_IDENTITY_REJECTED",
+                "heartbeat rejected: agent identity mismatch — re-registration required",
+                exc,
+            )
         else:
             # 네트워크/5xx 등 일시 실패 — 상태는 그대로 두고 다음 주기에 재시도.
             self._record_error("AGENT_HEARTBEAT_ERROR", "heartbeat send failed", exc)

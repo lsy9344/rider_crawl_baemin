@@ -76,6 +76,15 @@ DEFAULT_MAX_RESTART_ATTEMPTS = 3
 DEFAULT_RESTART_BACKOFF_SECONDS = 1.0
 DEFAULT_BROWSER_PROCESS_CLOSE_TIMEOUT_SECONDS = 5.0
 
+# heartbeat 진단 문자열 상한(서버 sanitizer 도 자르지만 agent 쪽에서도 방어).
+_DIAGNOSTIC_MAX_LENGTH = 120
+
+
+def _clip_diagnostic(value: str) -> str:
+    """진단 문자열을 상한 길이로 자른다(투영 표면이 비대해지지 않게)."""
+
+    return value[:_DIAGNOSTIC_MAX_LENGTH]
+
 
 @dataclass(frozen=True)
 class ProfileAssignment:
@@ -94,6 +103,11 @@ class ProfileAssignment:
     cdp_url: str
     state: str = STATE_UNKNOWN
     last_used_at: float = 0.0
+    # ── optional 진단(heartbeat 투영용) — 운영자가 UNKNOWN/인증필요/parser/CDP 원인을 최소
+    # 텍스트로 구분하게 한다. secret/URL/HTML/screenshot 은 절대 담지 않는다.
+    auth_state: str | None = None  # 마지막 관측 인증 상태 요약(ACTIVE/AUTH_REQUIRED/UNKNOWN…)
+    last_error_code: str | None = None  # 실패/UNKNOWN 원인 힌트(CDP_UNREACHABLE 등)
+    last_probe_at: str | None = None  # 확인 시각(ISO-8601 UTC, "...Z")
 
 
 class TargetValidationError(RuntimeError):
@@ -543,16 +557,68 @@ class BrowserProfileManager:
         """
 
         with self._lock:
-            return [
-                {
+            profiles: list[dict[str, Any]] = []
+            for assignment in self._registry.values():
+                profile: dict[str, Any] = {
                     "id": assignment.id,
                     "target_id": assignment.target_id,
                     "agent_id": assignment.agent_id,
                     "cdp_port": assignment.cdp_port,
                     "state": assignment.state,
                 }
-                for assignment in self._registry.values()
-            ]
+                # optional 진단 필드는 값이 있을 때만 투영한다(None 은 생략).
+                if assignment.auth_state is not None:
+                    profile["auth_state"] = assignment.auth_state
+                if assignment.last_error_code is not None:
+                    profile["last_error_code"] = assignment.last_error_code
+                if assignment.last_probe_at is not None:
+                    profile["last_probe_at"] = assignment.last_probe_at
+                profiles.append(profile)
+            return profiles
+
+    def record_profile_diagnostic(
+        self,
+        tenant_id: str,
+        target_id: str,
+        *,
+        auth_state: str | None = None,
+        last_error_code: str | None = None,
+        last_probe_at: str | None = None,
+    ) -> None:
+        """기존 profile assignment 에 optional 진단값을 기록한다(heartbeat 투영용).
+
+        - registry 에 없는 profile 은 **새로 만들지 않고 조용히 반환**한다(placeholder 금지).
+          그래서 profile 생성 전 실패는 heartbeat row 로 새로 보이지 않는다(job result 로만 확인).
+        - ``ProfileAssignment`` 가 frozen 이라 직접 대입하지 않고 ``replace`` 로 갱신한다.
+        - ``None`` 인자는 기존 값을 덮어쓰지 않는다(부분 갱신 허용).
+        - 문자열은 과도하게 길지 않게 상한을 둔다(서버 sanitizer 도 자르지만 여기서도 방어).
+        - secret/URL/HTML/screenshot/clipboard 는 진단값에 넣지 않는다(호출자 책임이지만
+          이 메서드는 위 3개 필드 외에는 받지 않는다).
+        """
+
+        key = (str(tenant_id), str(target_id))
+        with self._lock:
+            assignment = self._registry.get(key)
+            if assignment is None:
+                return
+            self._registry[key] = replace(
+                assignment,
+                auth_state=(
+                    _clip_diagnostic(auth_state)
+                    if auth_state is not None
+                    else assignment.auth_state
+                ),
+                last_error_code=(
+                    _clip_diagnostic(last_error_code)
+                    if last_error_code is not None
+                    else assignment.last_error_code
+                ),
+                last_probe_at=(
+                    _clip_diagnostic(last_probe_at)
+                    if last_probe_at is not None
+                    else assignment.last_probe_at
+                ),
+            )
 
     # ── 내부 상태 전이(thread-safe) ───────────────────────────────────────────
 

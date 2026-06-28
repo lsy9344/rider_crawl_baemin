@@ -5,6 +5,8 @@
     <tr>
       <th>대상</th>
       <th>사유</th>
+      {# DB BrowserProfile 기반 배정 정보(heartbeat 런타임 상태와 다른 의미 — 강제 동기화 안 함). #}
+      <th>DB 배정 정보</th>
       <th>조치</th>
     </tr>
   </thead>
@@ -14,6 +16,7 @@
     <tr>
       <td>{{ r.target_name or "대상명 없음" }}</td>
       <td>{{ r.reason | reason_text }}</td>
+      <td>{% if r.profile_id %}{{ r.profile_id }}{% else %}<span class="muted">-</span>{% endif %}</td>
       <td>
         {% if r.target_id %}
         {% set action_tenant = r.tenant_id or tenant_id %}
@@ -45,7 +48,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="3" class="muted">인증 필요 대상이 없습니다.</td></tr>
+    <tr><td colspan="4" class="muted">인증 필요 대상이 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>

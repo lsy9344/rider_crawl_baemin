@@ -55,12 +55,14 @@ from rider_server.queue.states import (
 
 from .dashboard_service import (
     ALL_TENANTS,
+    AgentBrowserProfileRow,
     AgentHealthFacts,
     AuthRequiredRow,
     ChannelHealthRow,
     DashboardRepository,
     JobQueueRow,
     TargetHealthFacts,
+    _optional_str,
 )
 from .severity import is_agent_online
 
@@ -102,6 +104,57 @@ _ACCOUNT_AUTH_REQUIRED_STATES = (
 #: critical 후보 정렬에서 "성공 수집 이력 없음"(NULL)을 가장 오래된 값으로 치환하는 하한.
 #: aware UTC — collected_at(timezone-aware) 와 비교 가능해야 하고, 어떤 실제 성공보다 과거다.
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+#: 유효한 CDP 디버깅 포트 범위(0/음수/65535 초과/non-int 는 화면용 row 에서 버린다).
+_CDP_PORT_MIN = 1
+_CDP_PORT_MAX = 65535
+
+
+def _optional_cdp_port(value: object) -> int | None:
+    """heartbeat ``cdp_port`` 를 화면용으로 정제한다 — ``1..65535`` 정수만 통과.
+
+    ``bool`` 은 ``int`` 서브타입이라 먼저 걸러낸다. float/문자열/범위 밖 정수는 버린다.
+    (서버 저장 sanitizer 의 범위 검증은 Task 3A 에서 별도 추가한다 — 이건 화면용 방어선.)
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and _CDP_PORT_MIN <= value <= _CDP_PORT_MAX:
+        return value
+    return None
+
+
+def _browser_profile_rows(value: object) -> tuple[AgentBrowserProfileRow, ...]:
+    """raw ``capacity_json["browser_profiles"]`` 를 안전한 화면용 row 로 정제한다.
+
+    - list 가 아니면 빈 tuple.
+    - item 이 dict 가 아니면 건너뛴다.
+    - ``profile_id`` 는 ``id`` 가 안전한 문자열일 때만 만든다. 없으면 그 row 는 버린다.
+    - ``profile_path``/``profile_path_ref``/secret/token/URL 류는 읽지도 넘기지도 않는다.
+    - ORM row 나 raw dict 를 template 까지 흘리지 않는다(정제된 dataclass 만 반환).
+    """
+
+    if not isinstance(value, list):
+        return ()
+    rows: list[AgentBrowserProfileRow] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _optional_str(item.get("id"))
+        if profile_id is None:
+            continue
+        rows.append(
+            AgentBrowserProfileRow(
+                profile_id=profile_id,
+                target_id=_optional_str(item.get("target_id")),
+                state=_optional_str(item.get("state")),
+                cdp_port=_optional_cdp_port(item.get("cdp_port")),
+                auth_state=_optional_str(item.get("auth_state")),
+                last_error_code=_optional_str(item.get("last_error_code")),
+                last_probe_at=_optional_str(item.get("last_probe_at")),
+            )
+        )
+    return tuple(rows)
 
 
 class PostgresDashboardRepository(DashboardRepository):
@@ -524,6 +577,11 @@ class PostgresDashboardRepository(DashboardRepository):
                         current_job_type=current_job_by_agent.get(str(row.id)),
                         capabilities=capabilities,
                         kakao_status=kakao_status,
+                        # heartbeat 런타임 상태(배정 정보 아님). raw capacity 는 여기서 정제해
+                        # template 까지 안전한 값만 넘긴다(secret/path/URL 제외).
+                        browser_profiles=_browser_profile_rows(
+                            data.get("browser_profiles")
+                        ),
                     )
                 )
         return facts

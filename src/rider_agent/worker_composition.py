@@ -8,11 +8,18 @@ shutdown order; this module owns only worker chaining.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from rider_crawl.config import app_state_root
 from rider_crawl.redaction import redact
+
+# auth wrapper 가 heartbeat profile 진단을 기록하는 job type(profile assignment 가 있는 경우만).
+_AUTH_DIAGNOSTIC_JOB_TYPES = frozenset(
+    {"AUTH_CHECK", "OPEN_AUTH_BROWSER", "AUTH_COUPANG_2FA"}
+)
+_AUTH_STATE_UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,70 @@ def _with_profile_assignment(
         )
     )
     return replace(job, payload=raw_payload)
+
+
+def _diagnostic_iso(now: Callable[[], Any]) -> str:
+    """주입 ``now`` (epoch float 또는 datetime)를 ISO-8601 UTC(``...Z``) 문자열로 만든다."""
+
+    value = now()
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        moment = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    return (
+        moment.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _record_auth_diagnostic_from_result(
+    manager: Any,
+    job: Any,
+    result: Any,
+    *,
+    now: Callable[[], Any],
+) -> None:
+    """auth job 의 최종 ``JobResult`` 를 기존 profile assignment 에 진단으로 기록한다.
+
+    - ``crawl_profile_manager`` 가 있을 때만 호출된다(auth-only 조합은 profile row 없음).
+    - ``result_json.auth_state`` 가 있으면 그대로, 없으면 ``UNKNOWN`` 으로 둔다.
+    - ``error_code`` 는 실패 시 원인 힌트로 기록한다.
+    - secret/OTP/이메일/URL/HTML 은 담지 않는다(auth_state/error_code 텍스트만).
+    - 진단 기록 실패는 흡수하며 job 결과를 바꾸지 않는다.
+    - ``BrowserProfileManager`` 를 import 하지 않고 duck-typing 으로 호출한다(역방향 import 0).
+    """
+
+    record = getattr(manager, "record_profile_diagnostic", None)
+    if not callable(record):
+        return
+    job_type = getattr(job, "type", None)
+    if job_type not in _AUTH_DIAGNOSTIC_JOB_TYPES:
+        return
+    from rider_agent.workers.crawl_worker import payload_from_job
+
+    try:
+        payload = payload_from_job(job)
+    except Exception:  # noqa: BLE001 - payload 파싱 실패는 진단을 건너뛰되 결과를 바꾸지 않는다.
+        return
+    result_json = getattr(result, "result_json", None)
+    result_json = result_json if isinstance(result_json, dict) else {}
+    auth_state = result_json.get("auth_state")
+    if not isinstance(auth_state, str) or not auth_state:
+        auth_state = _AUTH_STATE_UNKNOWN
+    error_code = getattr(result, "error_code", None)
+    try:
+        record(
+            payload.tenant_id,
+            payload.target_id,
+            auth_state=auth_state,
+            last_error_code=error_code if isinstance(error_code, str) else None,
+            last_probe_at=_diagnostic_iso(now),
+        )
+    except Exception:  # noqa: BLE001 - diagnostic recording must not change job result.
+        # best-effort: 진단 기록 실패는 흡수한다(job 결과/실행에 영향 없음).
+        pass
 
 
 def compose_execute_job(
@@ -215,6 +286,20 @@ def compose_execute_job(
                     sleep=sleep,
                     log=log,
                 )
+
+        # auth 결과를 heartbeat profile 진단으로 기록한다(profile assignment 가 있을 때만).
+        # router 가 만든 최종 JobResult 를 검사만 하고 원본을 그대로 반환한다(결과 불변).
+        if crawl_profile_manager is not None:
+            _auth_inner = effective_execute_job
+
+            def _auth_with_diagnostic(job: Any, _inner=_auth_inner) -> Any:
+                result = _inner(job)
+                _record_auth_diagnostic_from_result(
+                    crawl_profile_manager, job, result, now=now
+                )
+                return result
+
+            effective_execute_job = _auth_with_diagnostic
 
     crawl_worker = None
     if should_start_crawl_worker:

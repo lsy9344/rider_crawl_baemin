@@ -12,6 +12,7 @@
       <th>마지막 heartbeat</th>
       <th>현재 job</th>
       <th>처리 가능 job type</th>
+      <th>Chrome 현재 상태<br><span class="muted">heartbeat runtime</span></th>
       <th>Kakao 상태</th>
     </tr>
   </thead>
@@ -24,6 +25,22 @@
       <td>{% if a.last_heartbeat_at %}{{ a.last_heartbeat_at }}{% else %}<span class="muted">없음</span>{% endif %}</td>
       <td>{% if a.current_job_type %}{{ a.current_job_type }}{% else %}<span class="muted">유휴</span>{% endif %}</td>
       <td>{{ a.capabilities | join(", ") }}</td>
+      <td>
+        {% if a.browser_profiles %}
+          {% for p in a.browser_profiles %}
+          <div class="browser-profile-row">
+            {% if p.state %}<span class="muted">{{ p.state }}</span>{% else %}<span class="muted">-</span>{% endif %}
+            {% if p.target_id %}<span class="muted">target {{ p.target_id }}</span>{% endif %}
+            {% if p.cdp_port is not none %}<span class="muted">CDP {{ p.cdp_port }}</span>{% endif %}
+            {% if p.auth_state %}<span class="muted">{{ p.auth_state }}</span>{% endif %}
+            {% if p.last_error_code %}<span class="sev-warning">{{ p.last_error_code }}</span>{% endif %}
+            {% if p.last_probe_at %}<span class="muted">checked {{ p.last_probe_at }}</span>{% endif %}
+          </div>
+          {% endfor %}
+        {% else %}
+          <span class="muted">-</span>
+        {% endif %}
+      </td>
       <td>
         {% if a.kakao_enabled is not none or a.kakao_state or a.kakao_queue_depth is not none or a.kakao_queue_lag_seconds is not none or a.kakao_sent is not none or a.kakao_failed is not none or a.kakao_last_success_at or a.kakao_last_error_code or a.kakao_interactive_session_available is not none %}
           {% if a.kakao_enabled is not none %}{% if a.kakao_enabled %}<span class="sev-normal">enabled</span>{% else %}<span class="sev-stopped">disabled</span>{% endif %}{% endif %}
@@ -41,7 +58,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="muted">등록된 Agent 가 없습니다.</td></tr>
+    <tr><td colspan="8" class="muted">등록된 Agent 가 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>
