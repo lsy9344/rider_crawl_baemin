@@ -534,6 +534,33 @@ def test_execute_auth_coupang_2fa_job_returns_active_on_recovered():
     }
 
 
+def test_execute_auth_coupang_2fa_job_keeps_account_id_from_nested_claim_payload():
+    """Server claim responses may keep the original job payload under payload."""
+    nested_payload = dict(_auth_2fa_job(account_id="account-nested").payload)
+    job = ClaimedJob(
+        job_id="job-auth-2fa-nested",
+        type=CAPABILITY_AUTH_COUPANG_2FA,
+        target_id="target-1",
+        lease_expires_at=5_000_000_000.0,
+        payload={
+            "job_id": "job-auth-2fa-nested",
+            "type": CAPABILITY_AUTH_COUPANG_2FA,
+            "target_id": "target-1",
+            "payload": nested_payload,
+        },
+    )
+
+    result = execute_auth_coupang_2fa_job(
+        job,
+        recover=lambda: True,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["platform_account_id"] == "account-nested"
+
+
 def test_execute_auth_coupang_2fa_job_maps_false_to_user_action_pending():
     """CAPTCHA/abnormal/manual screens stop without retry."""
     calls = []

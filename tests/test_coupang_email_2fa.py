@@ -46,6 +46,7 @@ class _FakePage:
         role_clickable: tuple[tuple[str, str], ...] = (),
         role_click_updates: dict[tuple[str, str], str] | None = None,
         role_click_input_updates: dict[tuple[str, str], tuple[str, ...]] | None = None,
+        role_min_timeout: dict[tuple[str, str], int] | None = None,
         input_selectors: tuple[str, ...] = (),
     ):
         self.html = html
@@ -53,6 +54,7 @@ class _FakePage:
         self._role_clickable = role_clickable
         self._role_click_updates = role_click_updates or {}
         self._role_click_input_updates = role_click_input_updates or {}
+        self._role_min_timeout = role_min_timeout or {}
         self._input_selectors = input_selectors
         self.clicked_texts: list[str] = []
         self.clicked_roles: list[tuple[str, str]] = []
@@ -99,6 +101,9 @@ class _FakeRoleLocator:
 
     def click(self, **_kwargs):
         if (self._role, self._name) in self._page._role_clickable:
+            min_timeout = self._page._role_min_timeout.get((self._role, self._name), 0)
+            if int(_kwargs.get("timeout") or 0) < min_timeout:
+                raise RuntimeError(f"not actionable yet: {self._role} {self._name}")
             self._page.clicked_roles.append((self._role, self._name))
             updated_html = self._page._role_click_updates.get((self._role, self._name))
             if updated_html is not None:
@@ -240,6 +245,31 @@ def test_recover_prefers_tab_and_button_roles_over_broad_text_matches(tmp_path):
     assert ("button", "인증코드 전송") in page.clicked_roles
     assert ("button", "인증 완료") in page.clicked_roles
     assert page.clicked_texts == []
+    assert page.filled == [("input[placeholder*='코드']", "135790")]
+
+
+def test_recover_waits_long_enough_for_send_code_button_to_become_actionable(tmp_path):
+    page = _FakePage(
+        html=(
+            "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다<input placeholder='인증코드'></html>"
+        ),
+        role_clickable=(
+            ("tab", "이메일로 인증"),
+            ("button", "인증코드 전송"),
+            ("button", "인증 완료"),
+        ),
+        role_min_timeout={("button", "인증코드 전송"): 1500},
+        input_selectors=("input[placeholder*='코드']",),
+    )
+    config = replace(_config(tmp_path), page_timeout_seconds=5000)
+
+    result = recover_coupang_session_with_email_2fa(
+        page, config, fetch_code=_ok_fetch("135790"), now=_NOW
+    )
+
+    assert result is True
+    assert ("button", "인증코드 전송") in page.clicked_roles
     assert page.filled == [("input[placeholder*='코드']", "135790")]
 
 

@@ -426,13 +426,23 @@ def _default_coupang_recover(
 def _coupang_auth_account_fields(job: ClaimedJob) -> dict[str, Any]:
     """result_json 공통 식별 필드(secret 0 — target/platform/account id + recovery mode)."""
 
-    payload = job.payload or {}
+    payload = _raw_job_payload(job)
     return {
-        "target_id": job.target_id,
+        "target_id": str(payload.get("target_id") or job.target_id or "") or None,
         "platform": "coupang",
         "platform_account_id": str(payload.get("platform_account_id") or "") or None,
         "recovery_mode": RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA,
     }
+
+
+def _raw_job_payload(job: ClaimedJob) -> dict[str, Any]:
+    raw = dict(job.payload or {})
+    nested = raw.get("payload")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        merged.update(raw)
+        raw = merged
+    return raw
 
 
 # 기본(브라우저/IMAP) 복구 경로가 실제로 쓰는 필수 secret 들 — 하나라도 비면 fail-closed.

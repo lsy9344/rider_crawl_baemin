@@ -16,10 +16,9 @@ from rider_crawl.config import AppConfig
 
 _REQUESTED_AFTER_SAFETY_SECONDS = 30
 # 화면 조작(버튼 클릭/입력칸 탐색) 시도당 대기 상한. selector 후보를 순차로
-# 시도하므로 존재하지 않는 후보마다 이 시간만큼 헛대기한다. 실제로 존재하는
-# 버튼은 거의 즉시 actionable 이라 2초는 과다였다 — 700ms 로 줄여 매 실행마다
-# 쌓이던 헛대기를 ~65% 줄인다(요소 등장 대기 상한일 뿐, 입력 속도와는 무관).
-_INTERACTION_TIMEOUT_MS = 700
+# 시도하므로 너무 길게 잡지는 않되, 쿠팡 antd 화면에서 이메일 방식 선택 직후
+# "인증코드 전송" 버튼이 늦게 actionable 되는 경우가 있어 2초까지 기다린다.
+_INTERACTION_TIMEOUT_MS = 2_000
 
 _EMAIL_METHOD_TEXTS = ("이메일로 인증", "이메일 인증", "이메일", "email")
 _SEND_CODE_TEXTS = (
