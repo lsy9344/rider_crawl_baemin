@@ -326,7 +326,13 @@ def test_different_mailbox_recoveries_run_in_parallel():
 
 def test_classify_states():
     assert classify_coupang_2fa_outcome(recovered=True) == STATE_RECOVERED
-    assert classify_coupang_2fa_outcome(recovered=False) == STATE_USER_ACTION_REQUIRED
+    # recover==False(2FA 플로우 미완)는 캡차로 단정하지 않고 재시도 가능한 RECOVERY_FAILED 다.
+    assert classify_coupang_2fa_outcome(recovered=False) == STATE_RECOVERY_FAILED
+    # 실제 캡차/이상 로그인 신호가 있을 때만 USER_ACTION_REQUIRED.
+    assert (
+        classify_coupang_2fa_outcome(is_user_action_required=True)
+        == STATE_USER_ACTION_REQUIRED
+    )
     assert classify_coupang_2fa_outcome(is_email_auth_required=True) == STATE_EMAIL_AUTH_REQUIRED
     assert classify_coupang_2fa_outcome(error=RuntimeError("mail delayed")) == STATE_RECOVERY_FAILED
     assert classify_coupang_2fa_outcome() == STATE_RECOVERY_FAILED
@@ -348,11 +354,33 @@ def test_recover_success_surfaces_active_result_json():
     assert calls == [1]
 
 
-def test_recover_false_stops_user_action_required_no_retry():
+def test_recover_false_is_retryable_recovery_failed_not_dead_user_action():
+    # recover==False(2FA 플로우 미완, 캡차 아님)는 캡차/데드 상태로 단정하지 않는다. 재시도 후
+    # RECOVERY_FAILED 로 닫혀 AUTH_REQUIRED 로 매핑되고 cooldown 뒤 다시 자동 복구 대상이 된다.
     calls = []
     result = recover_coupang_mailbox(
         mailbox_id=FAKE_MBX_1,
         recover=_recover(False, calls=calls),
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_RECOVERY_FAILED
+    assert result.result_json["state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] != REASON_CAPTCHA_OR_ABNORMAL
+    assert calls == [1, 1, 1]
+
+
+def test_recover_captcha_signal_stops_user_action_required_no_retry():
+    # 실제 캡차 화면(CoupangCaptchaError)은 사람 조치 필요 — USER_ACTION_REQUIRED 로 한 번에 닫고
+    # 재시도하지 않는다.
+    from rider_crawl.auth.coupang_email_2fa import CoupangCaptchaError
+
+    calls = []
+    result = recover_coupang_mailbox(
+        mailbox_id=FAKE_MBX_1,
+        recover=_recover(raises=CoupangCaptchaError("captcha"), calls=calls),
         max_attempts=3,
         sleep=lambda _s: None,
     )
@@ -457,7 +485,8 @@ def test_log_capture_has_state_but_no_plaintext_mailbox():
     )
     joined = "\n".join(logs)
     assert FAKE_EMAIL not in joined
-    assert STATE_USER_ACTION_REQUIRED in joined
+    # recover==False 는 이제 RECOVERY_FAILED 로 닫힌다(캡차/데드 USER_ACTION 아님).
+    assert STATE_RECOVERY_FAILED in joined
 
 
 def test_secret_storage_policy_email_app_password_agent_local_otp_not_stored():
@@ -561,8 +590,12 @@ def test_execute_auth_coupang_2fa_job_keeps_account_id_from_nested_claim_payload
     assert result.result_json["platform_account_id"] == "account-nested"
 
 
-def test_execute_auth_coupang_2fa_job_maps_false_to_user_action_pending():
-    """CAPTCHA/abnormal/manual screens stop without retry."""
+def test_execute_auth_coupang_2fa_job_maps_false_to_retryable_auth_required():
+    """recover==False(2FA 미완, 캡차 아님)는 재시도 가능한 AUTH_REQUIRED 로 닫는다.
+
+    데드 상태(USER_ACTION_PENDING)로 고착시키지 않는다 — 정상 세션인데 2FA 플로우 요소를 못
+    찾은 경우가 영구 차단되던 회귀를 막는다.
+    """
     calls = []
     result = execute_auth_coupang_2fa_job(
         _auth_2fa_job(),
@@ -573,13 +606,39 @@ def test_execute_auth_coupang_2fa_job_maps_false_to_user_action_pending():
     )
 
     assert result.status == JOB_STATUS_FAILED
-    # queue retry category 는 AUTH_REQUIRED, account coarse gate 는 USER_ACTION_PENDING.
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    # account coarse gate 는 AUTH_REQUIRED(USER_ACTION_PENDING 데드 상태 아님).
+    assert result.result_json["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_RECOVERY_FAILED
+    assert result.result_json["reason"] != REASON_CAPTCHA_OR_ABNORMAL
+    assert result.result_json["recovery_mode"] == RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
+    assert calls == [1, 1, 1]  # 재시도 후 종료
+
+
+def test_execute_auth_coupang_2fa_job_maps_captcha_to_user_action_pending():
+    """실제 캡차(CoupangCaptchaError)만 USER_ACTION_PENDING(사람 조치)로 닫는다."""
+    from rider_crawl.auth.coupang_email_2fa import CoupangCaptchaError
+
+    calls = []
+
+    def recover():
+        calls.append(1)
+        raise CoupangCaptchaError("captcha")
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=recover,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
     assert result.error_code == ERROR_AUTH_REQUIRED
     assert result.result_json["auth_state"] == AUTH_STATE_USER_ACTION_PENDING
     assert result.result_json["auth_recovery_state"] == STATE_USER_ACTION_REQUIRED
     assert result.result_json["reason"] == REASON_CAPTCHA_OR_ABNORMAL
-    assert result.result_json["recovery_mode"] == RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA
-    assert calls == [1]  # false → 즉시 멈춤(재시도 0)
+    assert calls == [1]  # 캡차 → 즉시 멈춤(재시도 0)
 
 
 def test_execute_auth_coupang_2fa_job_maps_mail_auth_to_auth_required_detail():

@@ -141,10 +141,10 @@ def _messenger_label(code: str | None) -> str:
 # ── 실시간 큐 뷰 표시 라벨(job type/status → 한글) ──────────────────────────────────
 _JOB_TYPE_LABELS: dict[str, str] = {
     "CRAWL_BAEMIN": "배민 수집",
-    "CRAWL_COUPANG": "쿠팡 수집",
-    "AUTH_CHECK": "인증 확인",
-    "OPEN_AUTH_BROWSER": "인증 브라우저 열기",
-    "AUTH_COUPANG_2FA": "쿠팡 2차인증",
+    "CRAWL_COUPANG": "쿠팡 수집/상태 재확인",
+    "AUTH_CHECK": "배민 인증 확인",
+    "OPEN_AUTH_BROWSER": "수동 인증 브라우저",
+    "AUTH_COUPANG_2FA": "쿠팡 자동 2차인증",
     "KAKAO_SEND": "카카오 전송",
     "CAPTURE_DIAGNOSTIC": "진단 캡처",
 }

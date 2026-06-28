@@ -932,12 +932,12 @@ def test_auth_required_fragment_renders_db_assigned_profile_column() -> None:
     assert "상태 재확인" in html
 
 
-def test_auth_required_fragment_empty_list_uses_four_column_span() -> None:
+def test_auth_required_fragment_empty_list_uses_five_column_span() -> None:
     html = admin_routes.templates.env.get_template("_auth_required.html").render(
         auth_required=[]
     )
 
-    assert 'colspan="4"' in html
+    assert 'colspan="5"' in html
     assert "인증 필요 대상이 없습니다." in html
 
 
@@ -1185,7 +1185,7 @@ def test_failclosed_display_severity_drives_primary_actions_without_failure_code
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
 
-    assert 'data-primary-action="auth-start"' in html
+    assert 'data-primary-action="auth-check"' in html
     assert "/admin/targets/t-auth/auth-start" in html
     assert 'data-primary-action="center-name"' in html
     assert "로그인 만료 · 인증 확인 필요" in html
@@ -1324,10 +1324,52 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
     assert 'role="button"' not in html
-    assert 'data-primary-action="auth-start"' in html
+    assert 'data-primary-action="auth-check"' in html
     assert 'aria-label="가게 상세 열기"' in html
     assert 'id="target-result-t-auth"' in html
     assert 'hx-target="#target-result-t-auth"' in html
+
+
+def test_coupang_auth_required_recheck_uses_coupang_test_crawl_not_auth_check() -> None:
+    row = TargetRow(
+        target_id="t-coupang-auth",
+        tenant_id=_TENANT,
+        name="쿠팡가게",
+        center_name="쿠팡센터",
+        platform="COUPANG",
+        interval_minutes=10,
+        last_success_at=None,
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        severity=SEVERITY_AUTH_REQUIRED,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert "/admin/targets/t-coupang-auth/test-crawl" in html
+    assert "/admin/targets/t-coupang-auth/auth-check" not in html
+    assert '"platform": "COUPANG"' in html
+
+
+def test_auth_required_fragment_coupang_recheck_uses_coupang_test_crawl() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-coupang-auth",
+                profile_id="p1",
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="쿠팡가게",
+                platform="COUPANG",
+            )
+        ],
+        tenant_id=_TENANT,
+    )
+
+    assert "쿠팡" in html
+    assert "/admin/targets/t-coupang-auth/test-crawl" in html
+    assert "/admin/targets/t-coupang-auth/auth-check" not in html
+    assert '"platform": "COUPANG"' in html
 
 
 def test_dashboard_counts_display_failclosed_states_as_action_required_work() -> None:
@@ -1345,7 +1387,7 @@ def test_dashboard_counts_display_failclosed_states_as_action_required_work() ->
 
     assert '<span class="n" id="target-count-action-required">1</span><span class="lbl">조치 필요</span>' in body
     assert '<span class="n">1</span><span class="lbl">중지</span>' not in body
-    assert 'data-primary-action="auth-start"' in body
+    assert 'data-primary-action="auth-check"' in body
     assert "r.dataset.severity === \"AUTH_REQUIRED\"" in body
 
 
@@ -1371,7 +1413,7 @@ def test_manual_action_auth_states_render_as_auth_required_work() -> None:
     body = _client(repo).get(f"/admin?tenant={_TENANT}").text
 
     assert body.count('data-severity="AUTH_REQUIRED"') == 2
-    assert body.count('data-primary-action="auth-start"') == 2
+    assert body.count('data-primary-action="auth-check"') == 2
     assert '<span class="n" id="target-count-action-required">2</span><span class="lbl">조치 필요</span>' in body
 
 

@@ -4,6 +4,7 @@
   <thead>
     <tr>
       <th>대상</th>
+      <th>플랫폼</th>
       <th>사유</th>
       {# DB BrowserProfile 기반 배정 정보(heartbeat 런타임 상태와 다른 의미 — 강제 동기화 안 함). #}
       <th>DB 배정 정보</th>
@@ -13,16 +14,24 @@
   <tbody>
     {% for r in auth_required %}
     {% set is_auth_pending = r.reason == "AUTH_SESSION_PENDING" %}
+    {% set is_coupang = (r.platform | lower) == 'coupang' %}
     <tr>
       <td>{{ r.target_name or "대상명 없음" }}</td>
+      <td>{% if r.platform %}<span class="plat {{ r.platform | platform_class }}">{{ r.platform | platform_label }}</span>{% else %}<span class="muted">-</span>{% endif %}</td>
       <td>{{ r.reason | reason_text }}</td>
       <td>{% if r.profile_id %}{{ r.profile_id }}{% else %}<span class="muted">-</span>{% endif %}</td>
       <td>
         {% if r.target_id %}
         {% set action_tenant = r.tenant_id or tenant_id %}
-        {% if not is_auth_pending %}
         <button type="button"
                 class="btn primary"
+                data-target="{{ r.target_id }}"
+                hx-post="{% if is_coupang %}/admin/targets/{{ r.target_id | urlencode }}/test-crawl?tenant={{ action_tenant | urlencode }}{% else %}/admin/targets/{{ r.target_id | urlencode }}/auth-check?tenant={{ action_tenant | urlencode }}{% endif %}"
+                hx-vals='{% if is_coupang %}{"platform": "{{ r.platform }}", "confirm_action": "confirmed"}{% else %}{"confirm_action": "confirmed"}{% endif %}'
+                hx-target="#auth-required-result-{{ r.target_id }}">상태 재확인</button>
+        {% if not is_auth_pending %}
+        <button type="button"
+                class="btn ghost"
                 data-target="{{ r.target_id }}"
                 hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-start?tenant={{ action_tenant | urlencode }}"
                 hx-vals='{"confirm_action": "confirmed"}'
@@ -34,12 +43,6 @@
                 hx-vals='{"confirm_action": "confirmed", "mode": "browser"}'
                 hx-target="#auth-required-result-{{ r.target_id }}">브라우저 열기</button>
         {% endif %}
-        <button type="button"
-                class="btn {% if is_auth_pending %}primary{% else %}ghost{% endif %}"
-                data-target="{{ r.target_id }}"
-                hx-post="/admin/targets/{{ r.target_id | urlencode }}/auth-check?tenant={{ action_tenant | urlencode }}"
-                hx-vals='{"confirm_action": "confirmed"}'
-                hx-target="#auth-required-result-{{ r.target_id }}">상태 재확인</button>
         <button type="button" class="btn ghost" data-target="{{ r.target_id }}" onclick="openAuthRequiredTarget(this.dataset.target)">상세 열기</button>
         <div class="muted" id="auth-required-result-{{ r.target_id }}" aria-live="polite"></div>
         {% else %}
@@ -48,7 +51,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="4" class="muted">인증 필요 대상이 없습니다.</td></tr>
+    <tr><td colspan="5" class="muted">인증 필요 대상이 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>

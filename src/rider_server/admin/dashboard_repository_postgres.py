@@ -645,6 +645,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 MonitoringTarget.tenant_id,
                 MonitoringTarget.id.label("target_id"),
                 MonitoringTarget.name.label("target_name"),
+                PlatformAccount.platform.label("platform"),
                 BrowserProfile.id.label("profile_id"),
             )
             .select_from(PlatformAccount)
@@ -671,6 +672,7 @@ class PostgresDashboardRepository(DashboardRepository):
                         profile_id=str(row.profile_id) if row.profile_id else None,
                         reason="ACCOUNT_AUTH_REQUIRED",
                         target_name=str(row.target_name) if row.target_name else None,
+                        platform=str(row.platform) if row.platform else None,
                     )
                 )
             # auth_sessions 인증대기(미해소) — 계정을 tenant scope 로 묶어 도출.
@@ -680,6 +682,7 @@ class PostgresDashboardRepository(DashboardRepository):
                     AuthSession.account_id,
                     MonitoringTarget.id.label("target_id"),
                     MonitoringTarget.name.label("target_name"),
+                    PlatformAccount.platform.label("platform"),
                     BrowserProfile.id.label("profile_id"),
                 )
                 .select_from(AuthSession)
@@ -703,6 +706,7 @@ class PostgresDashboardRepository(DashboardRepository):
                         profile_id=str(row.profile_id) if row.profile_id else None,
                         reason="AUTH_SESSION_PENDING",
                         target_name=str(row.target_name) if row.target_name else None,
+                        platform=str(row.platform) if row.platform else None,
                     )
                 )
         return rows

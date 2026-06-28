@@ -145,13 +145,17 @@ def classify_coupang_2fa_outcome(
     recovered: bool | None = None,
     error: BaseException | None = None,
     is_email_auth_required: bool | None = None,
+    is_user_action_required: bool | None = None,
 ) -> str:
     if recovered is True:
         return STATE_RECOVERED
-    if recovered is False:
+    # 실제 캡차/이상 로그인 신호가 있을 때만 USER_ACTION_REQUIRED(사람 조치, 자동 재시도 0).
+    if is_user_action_required is True:
         return STATE_USER_ACTION_REQUIRED
     if is_email_auth_required is True:
         return STATE_EMAIL_AUTH_REQUIRED
+    # recover 가 False(2FA 플로우 미완)거나 그 외 실패는 재시도 가능한 RECOVERY_FAILED 로 둔다.
+    # False 를 무조건 캡차로 보지 않는다 — 정상 세션을 데드 상태로 잘못 고착시키지 않기 위함.
     return STATE_RECOVERY_FAILED
 
 
@@ -188,6 +192,30 @@ def default_is_email_auth_required(exc: BaseException) -> bool:
         if isinstance(current, ImapAuthError):
             return True
         if isinstance(current, Coupang2faError) and getattr(current, "email_auth_required", False):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def default_is_user_action_required(exc: BaseException) -> bool:
+    """캡차/이상 로그인(사람 조치 필요)인지 — 실제 캡차 신호일 때만 True.
+
+    ``recover_coupang_session_with_email_2fa`` 가 캡차 화면을 감지하면
+    ``CoupangCaptchaError`` 로 올린다. 예외 체인(``__cause__``/``__context__``)을 따라가 그
+    신호만 잡는다. 단순 복구 미완(``recover`` 가 ``False``)은 여기서 True 가 아니다 — 정상 세션을
+    데드 상태(``USER_ACTION_PENDING``)로 잘못 고착시키지 않기 위함. import-safe(lazy import).
+    """
+
+    try:
+        from rider_crawl.auth.coupang_email_2fa import CoupangCaptchaError
+    except Exception:  # pragma: no cover - 의존성 부재 환경에선 보수적으로 미지정.
+        return False
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, CoupangCaptchaError):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -254,6 +282,7 @@ def recover_coupang_mailbox(
     max_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS,
     backoff_seconds: float = DEFAULT_RECOVERY_BACKOFF_SECONDS,
     is_email_auth_required: Callable[[BaseException], bool] | None = None,
+    is_user_action_required: Callable[[BaseException], bool] | None = default_is_user_action_required,
     is_browser_unavailable: Callable[[BaseException], bool] | None = default_is_browser_unavailable,
     log: Callable[[str], None] | None = None,
 ) -> JobResult:
@@ -270,7 +299,13 @@ def recover_coupang_mailbox(
                 state = classify_coupang_2fa_outcome(
                     error=exc,
                     is_email_auth_required=_email_auth_flag(is_email_auth_required, exc),
+                    is_user_action_required=_email_auth_flag(is_user_action_required, exc),
                 )
+                if state == STATE_USER_ACTION_REQUIRED:
+                    # 실제 캡차/이상 로그인 — 사람 조치 필요, 재시도하지 않는다.
+                    return _failure_result(
+                        state, mailbox_ref, REASON_CAPTCHA_OR_ABNORMAL, attempts, log
+                    )
                 if state == STATE_EMAIL_AUTH_REQUIRED:
                     return _failure_result(state, mailbox_ref, REASON_EMAIL_AUTH, attempts, log)
                 if _email_auth_flag(is_browser_unavailable, exc) is True:
@@ -290,7 +325,14 @@ def recover_coupang_mailbox(
             state = classify_coupang_2fa_outcome(recovered=recovered)
             if state == STATE_RECOVERED:
                 return _success_result(mailbox_ref, attempts, log)
-            return _failure_result(state, mailbox_ref, REASON_CAPTCHA_OR_ABNORMAL, attempts, log)
+            # recover 가 False(2FA 플로우 미완 — 캡차는 위 예외 경로에서 처리)면 재시도 가능한
+            # 실패로 다룬다. 캡차로 단정하지 않으므로 RECOVERY_FAILED 로 닫혀 AUTH_REQUIRED 로
+            # 매핑되고(데드 USER_ACTION_PENDING 아님) cooldown 뒤 다시 자동 복구 대상이 된다.
+            if attempts >= max_attempts:
+                reason = REASON_REPEATED_FAILURE if attempts > 1 else REASON_MAIL_DELAY
+                return _failure_result(STATE_RECOVERY_FAILED, mailbox_ref, reason, attempts, log)
+            sleep(backoff_seconds)
+            continue
 
 
 def build_coupang_recover(

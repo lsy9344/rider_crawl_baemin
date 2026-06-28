@@ -47,7 +47,15 @@ _CODE_INPUT_SELECTORS = (
     "input[type='number']",
 )
 _SUBMIT_TEXTS = ("인증 완료", "확인", "인증", "제출", "로그인", "submit", "verify")
-_CAPTCHA_SIGNALS = ("captcha", "보안문자", "자동입력 방지", "로봇이 아닙니다", "recaptcha")
+# 캡차/이상 로그인 화면의 가시 신호. 주의: bare "captcha"/"recaptcha" 는 정상 페이지에도 흔히
+# 임베드되는 reCAPTCHA 스크립트 태그(page.content() 전체 HTML)에 들어 있어 오탐을 일으킨다.
+# 그래서 사람이 보는 한글 안내 문구로만 좁힌다(보안문자(CAPTCHA) 같은 실제 캡차 화면은
+# "보안문자" 로 여전히 잡힌다).
+_CAPTCHA_SIGNALS = ("보안문자", "자동입력 방지", "로봇이 아닙니다")
+# 이미 인증된 대시보드(peak-dashboard)임을 나타내는 권위 신호 — parser 가 실적을 읽는 앵커와
+# 동일 어휘다. 로그인/2FA/캡차 화면에는 나타나지 않으므로, 이 신호가 보이고 로그인/2FA 화면이
+# 아니면 "복구할 게 없는 정상 세션" 으로 본다(불필요한 USER_ACTION 오분류 방지).
+_AUTHENTICATED_DASHBOARD_SIGNALS = ("배정 물량", "처리 물량", "라이더 현황")
 _PASSWORD_SIGNALS = ("비밀번호 입력",)
 _EMAIL_2FA_SCREEN_SIGNALS = (
     "2단계 인증",
@@ -100,7 +108,16 @@ def recover_coupang_session_with_email_2fa(
 
     page_text = _safe_page_text(page)
     if _contains_any(page_text, _CAPTCHA_SIGNALS):
-        return False
+        # 실제 캡차/이상 로그인 화면 — 사람 조치 필요. 단순 복구 미완(False)과 구분하기 위해
+        # 전용 예외로 올린다(상위 분류기가 USER_ACTION_REQUIRED 로만 표면화).
+        raise CoupangCaptchaError("captcha or abnormal login screen detected")
+
+    # 세션이 이미 정상이라 복구할 게 없는 경우(에이전트가 이미 로그인/2FA 를 끝내고 대시보드에
+    # 들어와 있는 상태)를 성공으로 본다. 2FA 플로우 요소(송신 버튼 등)를 못 찾아 False 를 돌리고
+    # 상위에서 "캡차/이상 로그인" 으로 오분류되던 데드 상태를 막는다. 단, 로그인/2FA 화면이면
+    # 정상적으로 복구를 진행한다(아래로 흐른다).
+    if _is_already_authenticated(page_text, page):
+        return True
 
     if _is_primary_login_screen(page_text, page):
         if not _submit_primary_login(page, config):
@@ -136,6 +153,15 @@ class Coupang2faError(RuntimeError):
     def __init__(self, *args: object, email_auth_required: bool = False) -> None:
         super().__init__(*args)
         self.email_auth_required = email_auth_required
+
+
+class CoupangCaptchaError(Coupang2faError):
+    """캡차/이상 로그인 화면이 실제로 감지됨 — 사람 조치가 필요한 상태.
+
+    상위 분류기가 이 예외를 보고만 ``USER_ACTION_REQUIRED`` 로 표면화한다. 단순히 2FA 플로우를
+    못 몬 경우(``recover`` 가 ``False`` 반환)는 캡차가 아니라 재시도 가능한 실패로 다룬다 —
+    그래야 정상 세션이 데드 상태(``USER_ACTION_PENDING``)로 잘못 고착되지 않는다.
+    """
 
 
 def _fetch_code(
@@ -243,6 +269,22 @@ def _is_password_login_screen(text: str, page: Any | None = None) -> bool:
     if page is None:
         return _contains_any(text, _PASSWORD_SIGNALS)
     return _has_visible_input(page, _PASSWORD_INPUT_SELECTORS)
+
+
+def _is_already_authenticated(text: str, page: Any | None = None) -> bool:
+    """페이지가 이미 인증된 대시보드인가(복구 불필요).
+
+    권위 대시보드 신호(배정/처리 물량·라이더 현황)가 보이고, 2FA 화면도 로그인 화면도 아니어야
+    한다 — 2FA/로그인 화면이면 복구를 진행해야 하므로 여기서 성공으로 단정하지 않는다.
+    """
+
+    if not _contains_any(text, _AUTHENTICATED_DASHBOARD_SIGNALS):
+        return False
+    if _contains_any(text, _EMAIL_2FA_SCREEN_SIGNALS):
+        return False
+    if _is_primary_login_screen(text, page):
+        return False
+    return True
 
 
 def _is_primary_login_screen(text: str, page: Any | None = None) -> bool:

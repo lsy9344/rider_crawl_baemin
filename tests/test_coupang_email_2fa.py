@@ -6,6 +6,7 @@ import pytest
 from rider_crawl.auth import coupang_email_2fa
 from rider_crawl.auth.coupang_email_2fa import (
     Coupang2faError,
+    CoupangCaptchaError,
     recover_coupang_session_with_email_2fa,
 )
 from rider_crawl.auth.imap_2fa import Imap2faError
@@ -178,15 +179,76 @@ def test_recover_clicks_email_method_send_and_fills_code(tmp_path):
     assert captured["code_digits"] == 6
 
 
-def test_recover_returns_false_on_captcha(tmp_path):
+def test_recover_raises_captcha_error_on_captcha_screen(tmp_path):
+    # 실제 캡차 화면은 단순 False(복구 미완)와 구분해 전용 예외로 올린다 — 상위 분류기가
+    # 이걸 보고만 USER_ACTION_REQUIRED(사람 조치)로 표면화한다.
     page = _FakePage(html="<html>보안문자(CAPTCHA)를 입력하세요</html>")
+
+    with pytest.raises(CoupangCaptchaError):
+        recover_coupang_session_with_email_2fa(
+            page, _config(tmp_path), fetch_code=_ok_fetch(), now=_NOW
+        )
+
+    assert page.clicked_texts == []
+
+
+def test_recover_returns_true_when_already_on_dashboard(tmp_path):
+    # 에이전트가 이미 로그인/2FA 를 끝내고 대시보드에 있으면 복구할 게 없다 → 성공으로 본다
+    # (2FA 요소를 못 찾아 False→"캡차/이상 로그인" 으로 오분류되던 데드 상태 방지).
+    page = _FakePage(
+        html=(
+            "<html>제이앤에이치플러스 의정부남부 라이더 현황 14:02 업데이트"
+            " 배정 물량 12 처리 물량 9</html>"
+        ),
+    )
+    called = {"hit": False}
+
+    def _fetch(**_kwargs):
+        called["hit"] = True
+        return "246802"
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_fetch, now=_NOW
+    )
+
+    assert result is True
+    # 대시보드면 2FA 플로우를 건드리지 않는다(클릭/입력/메일조회 0).
+    assert called["hit"] is False
+    assert page.clicked_texts == []
+    assert page.clicked_roles == []
+    assert page.filled == []
+
+
+def test_recover_does_not_false_positive_dashboard_on_login_screen(tmp_path):
+    # 대시보드 신호가 일부 섞여도 로그인 화면이면 복구를 진행해야 한다(성급한 성공 금지).
+    page = _FakePage(
+        html="<html><input placeholder='아이디 입력'><input placeholder='비밀번호 입력'> 처리 물량</html>",
+        input_selectors=("input[placeholder*='비밀번호']",),
+    )
 
     result = recover_coupang_session_with_email_2fa(
         page, _config(tmp_path), fetch_code=_ok_fetch(), now=_NOW
     )
 
+    # 로그인 화면 + 자격증명 없음 → 기존대로 False(대시보드로 오인하지 않음).
     assert result is False
-    assert page.clicked_texts == []
+
+
+def test_recover_ignores_embedded_recaptcha_script_on_dashboard(tmp_path):
+    # 정상 대시보드에 reCAPTCHA 스크립트가 임베드돼 있어도 캡차 화면으로 오탐하지 않는다
+    # (page.content() 전체 HTML 에 'recaptcha' 가 있어도 사람이 보는 캡차 안내가 아님).
+    page = _FakePage(
+        html=(
+            "<html><script src='https://www.google.com/recaptcha/api.js'></script>"
+            " 라이더 현황 14:02 업데이트 배정 물량 3 처리 물량 1</html>"
+        ),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch(), now=_NOW
+    )
+
+    assert result is True
 
 
 def test_recover_returns_false_on_password_login_screen(tmp_path):

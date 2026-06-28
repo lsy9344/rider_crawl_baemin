@@ -711,11 +711,17 @@
     function renderDrawerActions(d) {
       var box = document.getElementById("drawer-actions"); box.textContent = "";
       var action = d.primaryAction || "details";
+      var isCoupang = String(ADM.platform || "").toLowerCase() === "coupang";
+      function recheckAuth() {
+        if (isCoupang) drawerPost("/test-crawl", {platform: ADM.platform});
+        else drawerPost("/auth-check");
+      }
       if (action === "auth-start") {
         box.appendChild(makeDrawerButton(d.primaryLabel || "인증 시작", "primary", function () { drawerPost("/auth-start"); }));
-        box.appendChild(makeDrawerButton("상태 재확인", "", function () { drawerPost("/auth-check"); }));
+        box.appendChild(makeDrawerButton("상태 재확인", "", recheckAuth));
       } else if (action === "auth-check") {
-        box.appendChild(makeDrawerButton(d.primaryLabel || "상태 재확인", "primary", function () { drawerPost("/auth-check"); }));
+        box.appendChild(makeDrawerButton(d.primaryLabel || "상태 재확인", "primary", recheckAuth));
+        box.appendChild(makeDrawerButton("인증 시작", "", function () { drawerPost("/auth-start"); }));
       }
       else if (action === "center-name") {
         box.appendChild(makeDrawerButton(d.primaryLabel || "센터명 설정", "primary", focusCenterNameEdit));

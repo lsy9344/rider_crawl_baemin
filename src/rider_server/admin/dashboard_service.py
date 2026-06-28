@@ -155,6 +155,7 @@ class AuthRequiredRow:
     profile_id: str | None
     reason: str
     target_name: str | None = None
+    platform: str | None = None
 
 
 @dataclass(frozen=True)
@@ -431,6 +432,7 @@ class DashboardService:
                 profile_id=winner.profile_id or fallback.profile_id,
                 reason=winner.reason,
                 target_name=winner.target_name or fallback.target_name,
+                platform=winner.platform or fallback.platform,
             )
 
         collapsed: dict[tuple[str, str], AuthRequiredRow] = {}
