@@ -197,6 +197,56 @@ def test_same_completion_id_replays_as_accepted_without_duplicate_inserts(pg_rep
 
 
 @_pg_gate
+def test_successful_snapshot_crawl_restores_account_auth_state_active(pg_repo) -> None:
+    """성공 crawl(snapshot) atomic 완료가 ``platform_accounts.auth_state`` 를 ACTIVE 로 되돌린다.
+
+    회귀(2026-06-29): atomic 경로(``complete_snapshot_job``)가 auth_state 를 갱신하지 않아,
+    AUTH_CHECK 등이 계정을 UNKNOWN 으로 만든 뒤에는 crawl 이 아무리 성공해도 계정이 UNKNOWN 에
+    굳어 scheduler 가 ``AUTH_STATE_UNKNOWN`` 으로 영구 차단(수집 정지)했다. 성공 crawl 은 인증
+    정상의 강한 신호이므로 ACTIVE 로 복귀해야 한다(``PostgresQueueBackend.complete`` 와 동치).
+    """
+    from sqlalchemy import select
+
+    from rider_server.db.models.account import PlatformAccount
+    from rider_server.domain import BaeminAuthState
+    from rider_server.queue import COMPLETE_ACCEPTED
+    from rider_server.queue.states import JOB_STATUS_SUCCEEDED
+
+    repo, factory = pg_repo
+
+    async def _run():
+        # 사전조건: 계정을 UNKNOWN 으로 만들어 데드락 상태를 재현한다.
+        async with factory() as session:
+            await session.execute(
+                PlatformAccount.__table__.update()
+                .where(PlatformAccount.id == uuid.UUID(_ACCOUNT))
+                .values(auth_state=BaeminAuthState.UNKNOWN.value)
+            )
+            await session.commit()
+
+        outcome = await repo.complete_snapshot_job(
+            _record(), agent_id=_AGENT, status=JOB_STATUS_SUCCEEDED,
+            result_json={"result_type": "snapshot"}, error_code=None, duration_ms=10,
+            result_schema_version="1", completion_id="auth1", completion_payload_hash="h1",
+            now=_T0,
+        )
+        assert outcome.result == COMPLETE_ACCEPTED
+        assert outcome.final_status == JOB_STATUS_SUCCEEDED
+
+        async with factory() as session:
+            auth_state = (
+                await session.execute(
+                    select(PlatformAccount.auth_state).where(
+                        PlatformAccount.id == uuid.UUID(_ACCOUNT)
+                    )
+                )
+            ).scalar_one()
+        assert auth_state == BaeminAuthState.ACTIVE.value
+
+    asyncio.run(_run())
+
+
+@_pg_gate
 def test_different_completion_id_after_terminal_is_lease_lost(pg_repo) -> None:
     from rider_server.queue import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
     from rider_server.queue.states import JOB_STATUS_SUCCEEDED
