@@ -247,6 +247,78 @@ def test_successful_snapshot_crawl_restores_account_auth_state_active(pg_repo) -
 
 
 @_pg_gate
+def test_unknown_auth_state_result_does_not_clobber_healthy_account(pg_repo) -> None:
+    """``UNKNOWN``("판정 불가") 결과는 정상(ACTIVE/AUTH_VERIFIED) 계정을 덮어쓰지 않는다.
+
+    회귀(2026-06-29 2차): AUTH_CHECK 가 쿠팡 계정을 Baemin probe 로 점검하다 분류 실패→
+    ``auth_state=UNKNOWN`` 을 보고했고, 서버가 그걸 그대로 써 **정상 계정을 UNKNOWN 으로 떨궈**
+    scheduler 가 ``AUTH_STATE_UNKNOWN`` 으로 영구 차단했다. UNKNOWN 은 정보가 없다는 뜻이라
+    정상 신호를 파괴해선 안 된다. 단, 비정상(AUTH_REQUIRED 등) 상태는 UNKNOWN 으로 낮출 수
+    있어야 한다(stale 해소 — 기존 의도 보존).
+    """
+    from sqlalchemy import select
+
+    from rider_server.db.models.account import PlatformAccount
+    from rider_server.domain import BaeminAuthState
+    from rider_server.queue import COMPLETE_ACCEPTED
+    from rider_server.queue.states import JOB_STATUS_SUCCEEDED
+
+    repo, factory = pg_repo
+
+    async def _set_state(value: str) -> None:
+        async with factory() as session:
+            await session.execute(
+                PlatformAccount.__table__.update()
+                .where(PlatformAccount.id == uuid.UUID(_ACCOUNT))
+                .values(auth_state=value)
+            )
+            await session.commit()
+
+    async def _read_state() -> str:
+        async with factory() as session:
+            return (
+                await session.execute(
+                    select(PlatformAccount.auth_state).where(
+                        PlatformAccount.id == uuid.UUID(_ACCOUNT)
+                    )
+                )
+            ).scalar_one()
+
+    async def _complete_unknown(completion_id: str, hash_: str, *, at) -> None:
+        outcome = await repo.complete_snapshot_job(
+            _record(), agent_id=_AGENT, status=JOB_STATUS_SUCCEEDED,
+            # 성공 crawl 이지만 결과가 명시적으로 UNKNOWN 을 싣는 경우(분류 불가 표면화).
+            result_json={
+                "result_type": "snapshot",
+                "auth_state": BaeminAuthState.UNKNOWN.value,
+            },
+            error_code=None, duration_ms=10, result_schema_version="1",
+            completion_id=completion_id, completion_payload_hash=hash_, now=at,
+        )
+        assert outcome.result == COMPLETE_ACCEPTED
+
+    async def _run():
+        # (1) 정상(ACTIVE) 계정 + UNKNOWN 결과 → ACTIVE 유지(덮어쓰기 금지).
+        await _set_state(BaeminAuthState.ACTIVE.value)
+        await _complete_unknown("u-active", "h1", at=_T0)
+        assert await _read_state() == BaeminAuthState.ACTIVE.value
+
+        # (2) 비정상(AUTH_REQUIRED) 계정 + UNKNOWN 결과 → UNKNOWN 으로 낮춤(stale 해소 보존).
+        #     같은 job 을 재완료할 수 없으므로(터미널) 상태만 바꿔 statement 의미를 직접 검증한다.
+        from rider_server.queue.postgres_queue import _account_auth_state_update
+
+        await _set_state(BaeminAuthState.AUTH_REQUIRED.value)
+        async with factory() as session:
+            await session.execute(
+                _account_auth_state_update(_ACCOUNT, BaeminAuthState.UNKNOWN.value)
+            )
+            await session.commit()
+        assert await _read_state() == BaeminAuthState.UNKNOWN.value
+
+    asyncio.run(_run())
+
+
+@_pg_gate
 def test_different_completion_id_after_terminal_is_lease_lost(pg_repo) -> None:
     from rider_server.queue import COMPLETE_ACCEPTED, COMPLETE_LEASE_LOST
     from rider_server.queue.states import JOB_STATUS_SUCCEEDED

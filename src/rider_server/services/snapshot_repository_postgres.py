@@ -50,6 +50,7 @@ from rider_server.queue import (
     CompleteOutcome,
 )
 from rider_server.queue.postgres_queue import (
+    _account_auth_state_update,
     _AUTH_SESSION_PENDING_STATES,
     _auth_session_resolution_update,
     _platform_account_auth_update,
@@ -311,9 +312,7 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
         if update_values is not None:
             platform_account_id, auth_state = update_values
             await session.execute(
-                update(PlatformAccountRow)
-                .where(PlatformAccountRow.id == _uuid(str(platform_account_id)))
-                .values(auth_state=auth_state)
+                _account_auth_state_update(platform_account_id, auth_state)
             )
             if _auth_session_resolution_update(job, error_code) is not None:
                 await session.execute(

@@ -169,6 +169,32 @@ _AUTH_SESSION_RESOLVED_AUTH_STATES: frozenset[str] = frozenset(
         BaeminAuthState.CENTER_MISMATCH.value,
     }
 )
+#: ``UNKNOWN``("판정 불가") 결과가 **덮어쓰면 안 되는** 인증 정상 상태(severity.HEALTHY_AUTH_STATES
+#: 와 같은 정의 — 단방향 가드상 admin 을 import 하지 않고 값만 미러). AUTH_CHECK 가 쿠팡 계정을
+#: Baemin probe 로 점검하다 분류 실패(UNKNOWN)를 보고하면, 정상(ACTIVE/AUTH_VERIFIED) 계정을
+#: UNKNOWN 으로 떨궈 scheduler 가 ``AUTH_STATE_UNKNOWN`` 으로 영구 차단되는 데드락이 생겼다
+#: (2026-06-29). UNKNOWN 은 정보가 없다는 뜻이라 정상 신호를 파괴해선 안 된다 — stale
+#: AUTH_REQUIRED 등 비정상 상태만 낮춘다.
+_AUTH_STATE_HEALTHY: frozenset[str] = frozenset(
+    {BaeminAuthState.ACTIVE.value, BaeminAuthState.AUTH_VERIFIED.value}
+)
+
+
+def _account_auth_state_update(account_id: str, auth_state: str):
+    """``platform_accounts.auth_state`` 갱신 statement(``UNKNOWN`` 가드 포함).
+
+    ``auth_state == UNKNOWN`` 이면 현재 값이 :data:`_AUTH_STATE_HEALTHY` 가 **아닐 때만** 쓴다
+    (정상 신호를 판정 불가로 파괴 금지). 그 외 상태는 무조건 쓴다(권위 있는 전이). 두 writer
+    (``PostgresQueueBackend._mark_auth_required_account`` / 원자 snapshot 완료 경로)가 같은
+    정책을 쓰도록 단일 정본으로 둔다.
+    """
+
+    stmt = update(PlatformAccount).where(
+        PlatformAccount.id == _as_uuid(str(account_id))
+    )
+    if auth_state == BaeminAuthState.UNKNOWN.value:
+        stmt = stmt.where(PlatformAccount.auth_state.notin_(_AUTH_STATE_HEALTHY))
+    return stmt.values(auth_state=auth_state)
 
 
 def _platform_account_auth_update(
@@ -513,9 +539,7 @@ class PostgresQueueBackend(QueueBackend):
             return
         platform_account_id, auth_state = update_values
         await session.execute(
-            update(PlatformAccount)
-            .where(PlatformAccount.id == _as_uuid(str(platform_account_id)))
-            .values(auth_state=auth_state)
+            _account_auth_state_update(platform_account_id, auth_state)
         )
         if _auth_session_resolution_update(job, error_code) is None:
             return
