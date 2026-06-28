@@ -919,9 +919,9 @@ def kakao_login_available(
 
     반환:
     * ``True``  — 로그인됨(메인 연락처 창이 보인다).
-    * ``False`` — KakaoTalk 창은 있으나 메인 연락처 창이 없다(로그인 창만 = 미로그인).
-    * ``None``  — 미상(pywinauto 미설치/조회 실패/KakaoTalk 미실행). 로그인 여부를 단정하지
-      않는다 — 호출자는 이 신호를 생략한다(거짓 경보 금지).
+    * ``False`` — KakaoTalk 창이 없거나, 로그인 창만 보여 전송 준비가 안 됨.
+    * ``None``  — 미상(pywinauto 미설치/조회 실패). 로그인 여부를 단정하지 않는다 —
+      호출자는 이 신호를 생략한다(거짓 경보 금지).
 
     OS/창 식별자 raw 값은 반환하지 않는다(분류 결과 bool 만). 비-Windows 에서는 ``None``.
     """
@@ -934,8 +934,8 @@ def kakao_login_available(
     if windows is None:
         return None
     if not windows:
-        # KakaoTalk 창이 하나도 안 보임 = 앱 미실행 등 — 미상으로 둔다(False 단정 금지).
-        return None
+        # KakaoTalk 창이 하나도 안 보이면 앱 미실행/전송 불가 상태다.
+        return False
     if any(_is_kakao_main_contact_window(window) for window in windows):
         return True
     if any(_window_title(window) in _KAKAO_MAIN_WINDOW_TITLES for window in windows):

@@ -1014,9 +1014,9 @@ def test_kakao_login_available_false_when_main_window_hidden():
     assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
 
 
-def test_kakao_login_available_none_when_no_kakao_windows():
-    # KakaoTalk 창이 하나도 없으면(앱 미실행 등) 미상(None) — False 로 단정하지 않는다.
-    assert sender_module.kakao_login_available(list_windows=lambda: []) is None
+def test_kakao_login_available_false_when_no_kakao_windows():
+    # KakaoTalk 창이 하나도 없으면 앱 미실행/전송 불가 상태다.
+    assert sender_module.kakao_login_available(list_windows=lambda: []) is False
 
 
 def test_kakao_login_available_none_when_enumeration_fails():

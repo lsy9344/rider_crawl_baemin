@@ -1525,6 +1525,26 @@ def test_template_normal_severity_with_stale_failure_code_shows_no_auth_badge() 
     assert 'data-primary-action="auth-start"' not in html
 
 
+def test_template_critical_without_failure_code_does_not_render_none_failcode() -> None:
+    row = TargetRow(
+        target_id="t-critical",
+        tenant_id=_TENANT,
+        name="가게",
+        center_name="센터",
+        platform="COUPANG",
+        interval_minutes=2,
+        last_success_at=_NOW - timedelta(minutes=17),
+        last_delivery_at=None,
+        last_failure_code=None,
+        severity=SEVERITY_CRITICAL,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert 'data-failcode="None"' not in html
+    assert 'data-failcode=""' in html
+
+
 def test_kakao_session_unavailable_target_overrides_stale_auth_failure() -> None:
     # 운영 재현: 쿠팡 수집은 최근 성공했고 예전 AUTH_REQUIRED failure_code 만 남았지만,
     # 실제 장애는 카카오톡 미로그인이다. 대상 표시는 로그인 만료가 아니라 Kakao 오류여야 한다.
