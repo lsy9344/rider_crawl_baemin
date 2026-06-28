@@ -2082,6 +2082,7 @@ def test_dashboard_repository_port_exposes_only_read_methods() -> None:
 def _settings_app(
     *,
     sending_enabled: bool = True,
+    global_sending_enabled: bool = True,
     seed_health: bool = True,
     seed_entities: bool = True,
     seed_second_tenant: bool = False,
@@ -2197,7 +2198,13 @@ def _settings_app(
         repo.seed_target(_target(target_id="tg-a", name="강남점", last_success_at=recent))
     app = _allow_viewer(
         create_app(
-            _FAKE_SETTINGS,
+            Settings(
+                app_env="test",
+                app_version="9.9.9",
+                build_sha=None,
+                build_time=None,
+                sending_enabled=global_sending_enabled,
+            ),
             dashboard_repository=repo,
             admin_entity_service=AdminEntityService(entity_repo),
         )
@@ -2227,8 +2234,13 @@ def test_registered_settings_fragment_renders_assembled_rows() -> None:
     assert "sev-normal" in body
 
 
-def test_registered_settings_send_gate_respects_tenant_sending_enabled() -> None:
+def test_registered_settings_send_gate_respects_tenant_sending_enabled(monkeypatch) -> None:
     # sending_enabled=False 면 enabled 규칙·ACTIVE 채널이 있어도 전송은 OFF 여야 한다.
+    monkeypatch.setattr(
+        admin_routes,
+        "_now",
+        lambda: datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc),  # 10:00 KST
+    )
     body_on = _settings_app(sending_enabled=True).get(
         f"/admin/registered-settings?tenant={_TENANT}"
     ).text
@@ -2239,6 +2251,38 @@ def test_registered_settings_send_gate_respects_tenant_sending_enabled() -> None
     # 켜짐: 전송 ON pill 이 최소 1개(tg-a). 꺼짐: 전송 ON 은 사라지고 크롤링 ON(tg-a)만 남는다.
     assert body_on.count("toggle-pill on") > body_off.count("toggle-pill on")
     # 게이트 OFF 라도 크롤링(수집) ON 은 유지(tg-a ACTIVE) → ON pill 이 정확히 1개.
+    assert body_off.count("toggle-pill on") == 1
+
+
+def test_registered_settings_send_gate_respects_global_sending_enabled(monkeypatch) -> None:
+    # 전역 발송 게이트가 OFF면 고객/규칙/채널이 모두 켜져 있어도 실제 fan-out은 안 만들어진다.
+    # 등록 설정 카드도 같은 의미를 보여야 운영자가 "전송 ON인데 미실행"으로 오해하지 않는다.
+    monkeypatch.setattr(
+        admin_routes,
+        "_now",
+        lambda: datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc),  # 10:00 KST
+    )
+    body_off = _settings_app(global_sending_enabled=False).get(
+        f"/admin/registered-settings?tenant={_TENANT}"
+    ).text
+
+    assert "강남점" in body_off
+    # 수집 ON 하나만 남고, 전송 ON pill 은 없어야 한다.
+    assert body_off.count("toggle-pill on") == 1
+
+
+def test_registered_settings_send_gate_respects_current_send_window(monkeypatch) -> None:
+    # tg-a 의 전송 허용 시간은 09:00~22:00 KST. 창 밖이면 실제 fan-out 이 생성되지 않는다.
+    monkeypatch.setattr(
+        admin_routes,
+        "_now",
+        lambda: datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc),  # 22:30 KST
+    )
+
+    body_off = _settings_app().get(f"/admin/registered-settings?tenant={_TENANT}").text
+
+    assert "강남점" in body_off
+    # 수집 ON 하나만 남고, 전송 ON pill 은 없어야 한다.
     assert body_off.count("toggle-pill on") == 1
 
 

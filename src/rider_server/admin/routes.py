@@ -29,6 +29,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..domain import MessengerChannelState, MonitoringTargetStatus
 from ..security.access import enforce_session
+from ..services.recovery import effective_send_enabled, send_window_allows_dispatch
 from .dashboard_service import ALL_TENANTS, DashboardRepository, DashboardService
 from . import severity as severity_policy
 from .severity import (
@@ -384,7 +385,7 @@ class SettingsRow:
     center_name: str
     severity: str  # 라이브 severity(램프) — target_health join, 없으면 STOPPED(회색)
     crawl_enabled: bool  # MonitoringTarget.status == ACTIVE
-    send_enabled: bool  # tenant.sending_enabled AND ≥1 enabled rule → ACTIVE channel
+    send_enabled: bool  # 지금 dispatch fan-out 가능한 상태(전역/고객/규칙/채널/시간창 모두 통과)
     schedule_enabled: bool
     start_time: str
     stop_time: str
@@ -449,7 +450,8 @@ async def _settings_rows_for_tenant(
     channels = await service.list_messenger_channels(tenant_id)
     accounts = await service.list_platform_accounts(tenant_id)
 
-    sending_enabled = bool(getattr(tenant, "sending_enabled", False))
+    tenant_sending_enabled = bool(getattr(tenant, "sending_enabled", False))
+    global_sending_enabled = bool(getattr(request.app.state, "sending_enabled", False))
     customer_name = tenant.name
 
     account_platform = {a.id: a.platform.value for a in accounts}
@@ -478,8 +480,18 @@ async def _settings_rows_for_tenant(
                 }
             )
         )
-        send_enabled = sending_enabled and any(
+        route_enabled = any(
             r.enabled and r.channel_id in active_channel_ids for r in rules
+        )
+        window_enabled = send_window_allows_dispatch(
+            now,
+            schedule_enabled=t.schedule_enabled,
+            start_time=t.start_time,
+            stop_time=t.stop_time,
+        )
+        send_enabled = effective_send_enabled(
+            send_enabled=tenant_sending_enabled and route_enabled and window_enabled,
+            sending_enabled=global_sending_enabled,
         )
         rows.append(
             SettingsRow(
