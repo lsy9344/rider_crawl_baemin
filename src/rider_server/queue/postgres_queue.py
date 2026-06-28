@@ -48,6 +48,8 @@ from .states import (
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_KAKAO_SEND,
     assert_transition,
     stale_recovery_reason,
@@ -56,6 +58,7 @@ from .states import (
 _MAX_EVENT_TEXT_LENGTH = 200
 _MAX_EVENT_MESSAGE_LENGTH = 500
 _MAX_EVENT_ARTIFACTS = 5
+_AUTH_HEALTHY_CRAWL_JOB_TYPES = {JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG}
 
 
 def _iso_utc_z(dt: datetime) -> str:
@@ -201,6 +204,12 @@ def _platform_account_auth_update(
 
     if result_json.get("mismatch") == BaeminAuthState.CENTER_MISMATCH.value:
         return str(platform_account_id), BaeminAuthState.CENTER_MISMATCH.value
+    if (
+        error_code is None
+        and getattr(job, "status", None) == JOB_STATUS_SUCCEEDED
+        and getattr(job, "type", None) in _AUTH_HEALTHY_CRAWL_JOB_TYPES
+    ):
+        return str(platform_account_id), BaeminAuthState.ACTIVE.value
     if error_code == FailureCategory.AUTH_REQUIRED.value:
         return str(platform_account_id), BaeminAuthState.AUTH_REQUIRED.value
     if error_code == FailureCategory.TARGET_VALIDATION_FAILURE.value:

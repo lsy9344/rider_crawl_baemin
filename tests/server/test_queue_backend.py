@@ -793,6 +793,22 @@ def test_postgres_account_auth_update_resolves_completed_auth_sessions():
     assert _auth_session_resolution_update(still_pending_job, None) is None
 
 
+def test_postgres_account_auth_update_marks_successful_coupang_crawl_active():
+    account_id = "33333333-3333-3333-3333-333333333333"
+    job = SimpleNamespace(
+        type=JOB_TYPE_CRAWL_COUPANG,
+        status=JOB_STATUS_SUCCEEDED,
+        payload_json={"platform_account_id": account_id},
+        result_json={"target_id": "mt-1", "platform": "coupang"},
+    )
+
+    assert _platform_account_auth_update(job, None) == (
+        account_id,
+        BaeminAuthState.ACTIVE.value,
+    )
+    assert _auth_session_resolution_update(job, None) == account_id
+
+
 # ── Task 4: Coupang 자동 복구 cooldown 영속(순수 함수, 항상 실행) ─────────────────
 
 
