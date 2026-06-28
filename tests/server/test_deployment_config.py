@@ -499,6 +499,16 @@ def test_compose_passes_telegram_env_ref_values_to_backend() -> None:
     )
 
 
+def test_compose_passes_global_sending_gate_from_root_env_to_send_processes() -> None:
+    compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+    backend = compose[compose.index("\n  backend-api:\n") : compose.index("\n  scheduler:\n")]
+    dispatch = compose[compose.index("\n  telegram-dispatch:\n") :]
+
+    expected = "RIDER_SENDING_ENABLED: ${RIDER_SENDING_ENABLED:-false}"
+    assert expected in backend
+    assert expected in dispatch
+
+
 def test_telegram_env_documents_default_supported_env_secret_refs() -> None:
     env = Path("deploy/env/telegram-webhook.env").read_text(encoding="utf-8")
 
