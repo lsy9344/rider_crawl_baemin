@@ -21,7 +21,11 @@ from rider_crawl.models import (
     PerformanceSnapshot,
 )
 from rider_crawl.redaction import redact
-from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
+from rider_server.db.models.account import (
+    AuthSession as AuthSessionRow,
+    MonitoringTarget as MonitoringTargetRow,
+    PlatformAccount as PlatformAccountRow,
+)
 from rider_server.db.models.agent import Job as JobRow
 from rider_server.db.models.messaging import (
     DeliveryLog as DeliveryLogRow,
@@ -44,6 +48,12 @@ from rider_server.queue import (
     COMPLETE_LEASE_LOST,
     COMPLETE_NOT_FOUND,
     CompleteOutcome,
+)
+from rider_server.queue.postgres_queue import (
+    _AUTH_SESSION_PENDING_STATES,
+    _auth_session_resolution_update,
+    _platform_account_auth_update,
+    coupang_recovery_state_values,
 )
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
@@ -238,6 +248,17 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 job.completion_id = completion_id
                 job.completion_payload_hash = completion_payload_hash
 
+                # 성공한 crawl(snapshot) 은 인증 정상의 가장 강한 신호다. 이 atomic 경로는
+                # ``PostgresQueueBackend.complete`` 와 달리 ``platform_accounts.auth_state`` 를
+                # 갱신하지 않아, AUTH_CHECK 등이 계정을 ``UNKNOWN`` 으로 만든 뒤에는 crawl 이
+                # 아무리 성공해도 scheduler 가 ``AUTH_STATE_UNKNOWN`` 으로 영구 차단되는
+                # 데드락이 발생했다(2026-06-29). 같은 순수 정책(``_platform_account_auth_update``)
+                # 으로 ACTIVE 복귀·auth session 해소·자동복구 cooldown 클리어를 같은 트랜잭션에
+                # 실어 그 회귀를 막는다. 정책 지식은 ``postgres_queue`` 단일 정본을 재사용한다.
+                await self._persist_account_auth_state(
+                    session, job=job, error_code=error_code, status=status, now=now
+                )
+
                 await session.execute(
                     insert(SnapshotRow).values(
                         id=snapshot_id,
@@ -267,6 +288,52 @@ class PostgresSnapshotIngestRepository(JobResultIngestService):
                 )
 
         return CompleteOutcome(COMPLETE_ACCEPTED, record.job_id, final_status=status)
+
+    async def _persist_account_auth_state(
+        self,
+        session: AsyncSession,
+        *,
+        job: JobRow,
+        error_code: str | None,
+        status: str,
+        now: datetime,
+    ) -> None:
+        """완료된 crawl 의 인증 신호를 ``platform_accounts`` 에 반영한다(atomic 경로).
+
+        ``PostgresQueueBackend._mark_auth_required_account`` /
+        ``_persist_coupang_recovery_state`` 와 **동일한 순수 정책**(``postgres_queue`` 정본)을
+        재사용한다 — 결정 로직은 한곳에만 두고 여기선 UPDATE 실행만 미러한다. 성공 crawl →
+        ``auth_state=ACTIVE`` + 대기 auth session 해소 + Coupang 자동복구 cooldown 클리어.
+        매핑이 없으면 no-op(예: snapshot 에 platform_account_id 미존재).
+        """
+
+        update_values = _platform_account_auth_update(job, error_code)
+        if update_values is not None:
+            platform_account_id, auth_state = update_values
+            await session.execute(
+                update(PlatformAccountRow)
+                .where(PlatformAccountRow.id == _uuid(str(platform_account_id)))
+                .values(auth_state=auth_state)
+            )
+            if _auth_session_resolution_update(job, error_code) is not None:
+                await session.execute(
+                    update(AuthSessionRow)
+                    .where(
+                        AuthSessionRow.account_id == _uuid(str(platform_account_id)),
+                        AuthSessionRow.state.in_(_AUTH_SESSION_PENDING_STATES),
+                        AuthSessionRow.resolved_at.is_(None),
+                    )
+                    .values(resolved_at=now)
+                )
+
+        recovery_update = coupang_recovery_state_values(job=job, status=status, now=now)
+        if recovery_update is not None:
+            recovery_account_id, recovery_values = recovery_update
+            await session.execute(
+                update(PlatformAccountRow)
+                .where(PlatformAccountRow.id == _uuid(str(recovery_account_id)))
+                .values(**recovery_values)
+            )
 
     async def _enqueue_dispatch_records(
         self,
