@@ -213,6 +213,8 @@ def test_heartbeat_preserves_kakao_worker_operational_status() -> None:
         "sent": 7,
         "failed": 1,
         "last_error_code": "KAKAO_FAILURE",
+        # KakaoTalk 로그인/세션 신호 — 서버 저장 allowlist 통과(미로그인 감지 근거).
+        "interactive_session_available": False,
     }
 
     response = client.post(
@@ -230,6 +232,8 @@ def test_heartbeat_preserves_kakao_worker_operational_status() -> None:
     saved = registry.agent(_AGENT_ID)
     assert saved is not None
     assert saved.capacity_json["kakao_status"] == kakao_status
+    # 로그인/세션 신호가 bool 그대로 보존된다(redact/형변환 없음).
+    assert saved.capacity_json["kakao_status"]["interactive_session_available"] is False
 
 
 def test_heartbeat_updates_agent_version() -> None:

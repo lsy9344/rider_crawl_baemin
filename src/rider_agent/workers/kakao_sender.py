@@ -60,6 +60,7 @@ from rider_agent.job_loop import (
 from rider_agent.reuse import (
     KakaoSendError,
     KakaoUnsafeSelectionError,
+    kakao_login_available,
     send_kakao_text,
 )
 
@@ -82,6 +83,10 @@ _MESSAGE_KEYS = ("message", "text")
 
 # 기본 진단 로그 경로(send_kakao_text 가 config.log_dir 에 kakao_diagnostics.log 를 남긴다).
 DEFAULT_KAKAO_LOG_DIR = Path("logs")
+
+# KakaoTalk 로그인/세션 probe 캐시 TTL(초). heartbeat 마다 창을 스캔하면 비용·포커스 경합이
+# 있으므로 결과를 잠시 캐시한다(매 heartbeat 가 아니라 이 간격으로만 실제 probe).
+DEFAULT_SESSION_PROBE_TTL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -206,12 +211,20 @@ class KakaoSenderWorker:
         log: Callable[[str], None] | None = None,
         capabilities: Sequence[str] = DEFAULT_CAPABILITIES,
         submit_timeout: float | None = None,
+        session_probe: Callable[[], bool | None] | None = None,
+        session_probe_ttl_seconds: float = DEFAULT_SESSION_PROBE_TTL_SECONDS,
     ) -> None:
         self._send = send
         self._build_config = build_config
         self._sleep = sleep
         self._now = now
         self._stop_event = stop_event if stop_event is not None else threading.Event()
+        #: KakaoTalk 로그인/세션 probe(주입 가능, best-effort). None 이면 신호 미수집.
+        self._session_probe = session_probe
+        self._session_probe_ttl = session_probe_ttl_seconds
+        #: probe 결과 캐시(값, 측정 시각) — heartbeat 마다 스캔하지 않게 TTL 캐시.
+        self._session_cache: bool | None = None
+        self._session_cache_at: float | None = None
         self._log = log
         self._capabilities = tuple(capabilities)
         self._submit_timeout = submit_timeout
@@ -244,13 +257,18 @@ class KakaoSenderWorker:
 
         ``queue_lag_seconds`` 는 주입 ``now`` − 가장 오래된 **대기** 항목 enqueue 시각이며 빈
         큐면 0 이다(처리 중 항목은 대기에서 빠진다). thread-safe 스냅샷을 돌려준다.
+        ``interactive_session_available`` 는 KakaoTalk 로그인/세션 probe 결과로, 명확히
+        판정될 때만 포함한다(미상이면 생략 — 거짓 신호 금지). 활성(``KAKAO_SEND``) 워커에서만
+        probe 한다.
         [Source: operations-security-test-contract.md(28·16), architecture.md(215)]
         """
 
+        # probe 는 창 스캔이라 느릴 수 있어 lock 밖에서(캐시 경유) 먼저 구한다.
+        session_available = self._session_available_cached()
         with self._lock:
             depth = len(self._pending_ts)
             lag = max(0.0, self._now() - self._pending_ts[0]) if self._pending_ts else 0.0
-            return {
+            status: dict[str, Any] = {
                 "enabled": self._enabled,
                 "queue_depth": depth,
                 "queue_lag_seconds": lag,
@@ -258,6 +276,33 @@ class KakaoSenderWorker:
                 "failed": self._failed,
                 "last_error_code": self._last_error_code,
             }
+        if session_available is not None:
+            status["interactive_session_available"] = session_available
+        return status
+
+    def _session_available_cached(self) -> bool | None:
+        """KakaoTalk 로그인/세션 probe 결과(TTL 캐시·best-effort). 미상이면 ``None``.
+
+        - 비활성(``KAKAO_SEND`` 없음) 워커거나 probe 미주입이면 ``None``(신호 미수집).
+        - probe 가 예외를 던지면 흡수하고 ``None``(heartbeat 를 절대 막지 않는다).
+        - 같은 결과를 TTL 동안 캐시해 heartbeat 마다 창 스캔하지 않는다.
+        """
+
+        if not self._enabled or self._session_probe is None:
+            return None
+        now = self._now()
+        cached_at = self._session_cache_at
+        if cached_at is not None and (now - cached_at) < self._session_probe_ttl:
+            return self._session_cache
+        try:
+            value = self._session_probe()
+        except Exception:  # noqa: BLE001 - probe 실패가 heartbeat/전송을 막으면 안 된다.
+            value = None
+        if not isinstance(value, bool):
+            value = None
+        self._session_cache = value
+        self._session_cache_at = now
+        return value
 
     # ── enqueue / 소비자 루프 ─────────────────────────────────────────────────
 
@@ -432,6 +477,7 @@ def start_kakao_sender_worker_if_enabled(
     stop_event: threading.Event | None = None,
     log: Callable[[str], None] | None = None,
     submit_timeout: float | None = None,
+    session_probe: Callable[[], bool | None] | None = kakao_login_available,
 ) -> KakaoSenderWorker | None:
     """활성 조건일 때만 :class:`KakaoSenderWorker` 를 만들어 소비자 thread 를 띄운다(startup 진입).
 
@@ -460,6 +506,7 @@ def start_kakao_sender_worker_if_enabled(
         log=log,
         capabilities=capabilities,
         submit_timeout=submit_timeout,
+        session_probe=session_probe,
     )
     worker.start()
     return worker

@@ -231,6 +231,41 @@ def test_agents_fragment_renders_kakao_worker_status() -> None:
     assert "KAKAO_FAILURE" in html
 
 
+def _kakao_agent_row(*, session_available) -> AgentRow:
+    return AgentRow(
+        agent_id="a-kakao",
+        name="agent-kakao",
+        version="1.0.0",
+        last_heartbeat_at=_NOW,
+        online=True,
+        current_job_type=None,
+        capabilities=("KAKAO_SEND",),
+        kakao_enabled=True,
+        kakao_interactive_session_available=session_available,
+    )
+
+
+def test_agents_fragment_flags_kakao_enabled_but_not_logged_in() -> None:
+    # 카톡 전송 켜짐 + 세션 없음(미로그인) → '정상'처럼 보이지 않고 critical 경고로 표시한다.
+    html = admin_routes.templates.env.get_template("_agents.html").render(
+        agents=[_kakao_agent_row(session_available=False)]
+    )
+
+    assert "로그인 필요" in html
+    assert "세션 없음" in html
+    # enabled 배지가 단독 초록(sev-normal)으로 정상처럼 보이지 않는다.
+    assert '<span class="sev-normal">enabled</span>' not in html
+
+
+def test_agents_fragment_keeps_enabled_green_when_session_ok_or_unknown() -> None:
+    for session in (True, None):
+        html = admin_routes.templates.env.get_template("_agents.html").render(
+            agents=[_kakao_agent_row(session_available=session)]
+        )
+        assert "로그인 필요" not in html
+        assert '<span class="sev-normal">enabled</span>' in html
+
+
 def test_agent_row_drops_unsafe_kakao_status_values() -> None:
     row = DashboardService.agent_row(
         AgentHealthFacts(

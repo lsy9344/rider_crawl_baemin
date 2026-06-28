@@ -362,6 +362,87 @@ def test_status_aggregates_sent_failed_and_last_error_code():
     assert status["enabled"] is True
 
 
+def test_status_includes_interactive_session_available_when_probe_true():
+    worker = _worker(session_probe=lambda: True)
+    assert worker.kakao_status()["interactive_session_available"] is True
+
+
+def test_status_includes_interactive_session_available_when_probe_false():
+    # 카톡 미로그인(probe False) → 신호가 명시적으로 False 로 노출된다(대시보드 경고 근거).
+    worker = _worker(session_probe=lambda: False)
+    assert worker.kakao_status()["interactive_session_available"] is False
+
+
+def test_status_omits_session_signal_when_probe_unknown():
+    # probe 가 None(미상: pywinauto 미설치/앱 미실행 등)이면 키를 넣지 않는다(거짓 신호 금지).
+    worker = _worker(session_probe=lambda: None)
+    assert "interactive_session_available" not in worker.kakao_status()
+
+
+def test_status_omits_session_signal_when_no_probe():
+    worker = _worker(session_probe=None)
+    assert "interactive_session_available" not in worker.kakao_status()
+
+
+def test_status_omits_session_signal_when_kakao_disabled():
+    # 비활성(KAKAO_SEND 없음) 워커는 probe 하지 않는다 — 신호 미수집.
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return True
+
+    worker = _worker(capabilities=("CRAWL_BAEMIN",), session_probe=probe)
+    status = worker.kakao_status()
+    assert "interactive_session_available" not in status
+    assert calls == []  # probe 호출 자체가 없다
+
+
+def test_status_session_probe_is_cached_within_ttl():
+    # heartbeat 마다 창을 스캔하지 않게 TTL 동안 결과를 캐시한다.
+    calls = []
+    clock = {"t": 1000.0}
+
+    def probe():
+        calls.append(1)
+        return True
+
+    worker = _worker(session_probe=probe, session_probe_ttl_seconds=30.0, now=lambda: clock["t"])
+    worker.kakao_status()
+    worker.kakao_status()
+    assert calls == [1]  # TTL 안에서는 1회만 실제 probe
+
+    clock["t"] = 1031.0  # TTL 경과
+    worker.kakao_status()
+    assert calls == [1, 1]  # 다시 1회 probe
+
+
+def test_status_session_probe_failure_is_swallowed():
+    # probe 가 예외를 던져도 heartbeat 가 죽지 않고 신호만 생략된다.
+    def boom():
+        raise RuntimeError("probe blew up")
+
+    worker = _worker(session_probe=boom)
+    status = worker.kakao_status()  # 예외 없이 반환
+    assert "interactive_session_available" not in status
+
+
+def test_start_kakao_sender_worker_wires_real_login_probe():
+    # 프로덕션 startup 은 실제 로그인 probe 를 배선한다(테스트 기본은 None 이라 무회귀).
+    from rider_agent.reuse import kakao_login_available
+
+    worker = start_kakao_sender_worker_if_enabled(
+        capabilities=(CAPABILITY_KAKAO_SEND,),
+        build_config=_fake_build_config,
+    )
+    try:
+        assert worker is not None
+        assert worker._session_probe is kakao_login_available
+    finally:
+        if worker is not None:
+            worker.stop()
+
+
 def test_default_send_path_is_send_kakao_text_not_messenger_routing():
     # 기본 전송 경로는 Kakao 직접 전송(send_kakao_text) — messenger 라우팅(dispatch_text_message,
     # Telegram 가능)을 쓰지 않는다(AC3.2 자동 다른-채널 복구 금지).

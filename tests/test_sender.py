@@ -958,3 +958,64 @@ class _UnknownFocusMessageInput:
 class _FakePyperclip:
     def copy(self, _value) -> None:
         pass
+
+
+# ── KakaoTalk 로그인/세션 probe ────────────────────────────────────────────────
+
+
+class _ProbeWindow:
+    """probe 용 fake 창 — title/class/visible 만 노출(라이브 관측 형태 모사)."""
+
+    def __init__(self, title: str, *, class_name: str = "EVA_Window_Dblclk", visible: bool = True) -> None:
+        self.title = title
+        self.element_info = _FakeElementInfo(class_name=class_name)
+        self._visible = visible
+        self.handle = abs(hash((title, class_name))) % 100000
+
+    def window_text(self) -> str:
+        return self.title
+
+    def is_visible(self) -> bool:
+        return self._visible
+
+
+def test_kakao_login_available_true_when_main_contact_window_visible():
+    # 로그인 상태: 메인 연락처 창(title 카카오톡 + EVA_Window* + visible)이 있으면 True.
+    windows = [
+        _ProbeWindow("카카오톡"),
+        _ProbeWindow("실적봇_의정부남부"),  # 열린 채팅방
+    ]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is True
+
+
+def test_kakao_login_available_true_for_english_main_title():
+    windows = [_ProbeWindow("KakaoTalk")]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is True
+
+
+def test_kakao_login_available_false_when_only_login_or_chat_windows():
+    # 미로그인: KakaoTalk 창은 있으나 메인 연락처 창이 없다(로그인 창/채팅방만) → False.
+    windows = [
+        _ProbeWindow("로그인", class_name="EVA_Window"),  # 로그인 창(메인 제목 아님)
+        _ProbeWindow("실적봇_의정부남부"),  # 채팅방
+    ]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
+
+
+def test_kakao_login_available_false_when_main_window_hidden():
+    # 메인 창 제목이지만 visible 하지 않으면 로그인으로 보지 않는다.
+    windows = [_ProbeWindow("카카오톡", visible=False)]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
+
+
+def test_kakao_login_available_none_when_no_kakao_windows():
+    # KakaoTalk 창이 하나도 없으면(앱 미실행 등) 미상(None) — False 로 단정하지 않는다.
+    assert sender_module.kakao_login_available(list_windows=lambda: []) is None
+
+
+def test_kakao_login_available_none_when_enumeration_fails():
+    # 조회 자체가 실패하면(pywinauto 미설치 등) 미상(None) — 거짓 경보 금지.
+    def _boom():
+        raise sender_module.KakaoUnsafeSelectionError("no backend")
+
+    assert sender_module.kakao_login_available(list_windows=_boom) is None

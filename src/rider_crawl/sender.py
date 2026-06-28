@@ -858,6 +858,84 @@ def _has_kakao_class(window: object) -> bool:
     return _window_class_name(window).startswith("EVA_Window")
 
 
+# ── KakaoTalk 로그인/세션 probe (heartbeat interactive_session_available 소스) ─────────
+# 로그인되면 메인 연락처 창(title 정확히 ``카카오톡``/``KakaoTalk`` + class ``EVA_Window*``)이
+# 보인다. 로그아웃이면 로그인 창만 떠 메인 연락처 창이 없다. 라이브 검증(pywinauto uia/win32)
+# 결과 메인 창은 ``EVA_Window_Dblclk`` title ``카카오톡`` 로 관측됨.
+#: 메인 연락처 창의 정확한 제목 — 채팅방/로그인 창과 구분하는 anchor.
+_KAKAO_MAIN_WINDOW_TITLES = ("카카오톡", "KakaoTalk")
+
+
+def _is_kakao_main_contact_window(window: object) -> bool:
+    """로그인 시에만 존재하는 메인 연락처 창인가(가시 + EVA_Window* + 정확한 메인 제목)."""
+
+    if not _is_visible(window):
+        return False
+    if not _window_class_name(window).startswith("EVA_Window"):
+        return False
+    return _window_title(window) in _KAKAO_MAIN_WINDOW_TITLES
+
+
+def _all_kakao_windows() -> list[object]:
+    """양 backend(uia/win32)에서 KakaoTalk 로 보이는 모든 top-level 창(진단/probe 용).
+
+    pywinauto 미설치나 양 backend 모두 조회 실패면 ``None`` 을 돌려준다 — 호출자가 "미상"
+    으로 처리해 로그인 여부를 거짓으로 단정하지 않게 한다(false alarm 방지).
+    """
+
+    windows: list[object] = []
+    scanned_any = False
+    seen: set[int] = set()
+    for backend in ("uia", "win32"):
+        try:
+            backend_windows = _desktop_windows(backend)
+        except Exception:
+            continue
+        scanned_any = True
+        for window in backend_windows:
+            if not _is_kakao_window(window):
+                continue
+            handle = _window_handle(window)
+            if isinstance(handle, int):
+                if handle in seen:
+                    continue
+                seen.add(handle)
+            windows.append(window)
+    if not scanned_any:
+        raise KakaoUnsafeSelectionError("카카오톡 창 목록을 조회하지 못했습니다.")
+    return windows
+
+
+def kakao_login_available(
+    *, list_windows: Callable[[], list[object]] | None = None
+) -> bool | None:
+    """KakaoTalk PC 앱이 로그인되어 전송 가능한 상태인지 best-effort 로 판정한다.
+
+    반환:
+    * ``True``  — 로그인됨(메인 연락처 창이 보인다).
+    * ``False`` — KakaoTalk 창은 있으나 메인 연락처 창이 없다(로그인 창만 = 미로그인).
+    * ``None``  — 미상(pywinauto 미설치/조회 실패/KakaoTalk 미실행). 로그인 여부를 단정하지
+      않는다 — 호출자는 이 신호를 생략한다(거짓 경보 금지).
+
+    OS/창 식별자 raw 값은 반환하지 않는다(분류 결과 bool 만). 비-Windows 에서는 ``None``.
+    """
+
+    lister = list_windows if list_windows is not None else _all_kakao_windows
+    try:
+        windows = lister()
+    except Exception:
+        return None
+    if windows is None:
+        return None
+    if not windows:
+        # KakaoTalk 창이 하나도 안 보임 = 앱 미실행 등 — 미상으로 둔다(False 단정 금지).
+        return None
+    if any(_is_kakao_main_contact_window(window) for window in windows):
+        return True
+    # KakaoTalk 창은 있는데 메인 연락처 창이 없다 = 로그인 창만 떠 있는 미로그인 상태.
+    return False
+
+
 def _is_visible(window: object) -> bool:
     try:
         is_visible = getattr(window, "is_visible", None)

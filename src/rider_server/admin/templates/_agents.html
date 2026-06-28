@@ -43,7 +43,7 @@
       </td>
       <td>
         {% if a.kakao_enabled is not none or a.kakao_state or a.kakao_queue_depth is not none or a.kakao_queue_lag_seconds is not none or a.kakao_sent is not none or a.kakao_failed is not none or a.kakao_last_success_at or a.kakao_last_error_code or a.kakao_interactive_session_available is not none %}
-          {% if a.kakao_enabled is not none %}{% if a.kakao_enabled %}<span class="sev-normal">enabled</span>{% else %}<span class="sev-stopped">disabled</span>{% endif %}{% endif %}
+          {% if a.kakao_enabled is not none %}{% if a.kakao_enabled %}{% if a.kakao_interactive_session_available is false %}<span class="sev-critical">enabled · 로그인 필요</span>{% else %}<span class="sev-normal">enabled</span>{% endif %}{% else %}<span class="sev-stopped">disabled</span>{% endif %}{% endif %}
           {% if a.kakao_state %}<span class="muted">{{ a.kakao_state }}</span>{% endif %}
           {% if a.kakao_queue_depth is not none %}<span class="muted">대기 {{ a.kakao_queue_depth }}건</span>{% endif %}
           {% if a.kakao_queue_lag_seconds is not none %}<span class="muted">지연 {{ a.kakao_queue_lag_seconds }}초</span>{% endif %}

@@ -55,6 +55,7 @@ from rider_crawl.messengers import KakaoMessenger, dispatch_text_message
 from rider_crawl.sender import (
     KakaoSendError,
     KakaoUnsafeSelectionError,
+    kakao_login_available,
     send_kakao_text,
 )
 
@@ -84,6 +85,7 @@ __all__ = [
     "recover_coupang_session_with_email_2fa",
     # Kakao sender
     "send_kakao_text",
+    "kakao_login_available",
     "KakaoSendError",
     "KakaoUnsafeSelectionError",
     "KakaoMessenger",
