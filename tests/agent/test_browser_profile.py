@@ -959,6 +959,58 @@ def test_browser_profiles_projection_excludes_raw_path(tmp_path):
     assert str(assignment.profile_dir) not in blob
 
 
+def test_record_profile_diagnostic_noop_when_profile_absent(tmp_path):
+    # registry 에 row 가 없으면 placeholder 를 만들지 않고 조용히 반환한다.
+    manager = _manager(tmp_path)
+
+    manager.record_profile_diagnostic(
+        "t1", "missing", auth_state="UNKNOWN", last_error_code="CDP_UNREACHABLE"
+    )
+
+    assert manager.browser_profiles() == []
+
+
+def test_record_profile_diagnostic_updates_projection(tmp_path):
+    # frozen dataclass 라 replace 로 새 assignment 를 저장하고, projection 에 진단 필드가 뜬다.
+    manager = _manager(tmp_path)
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+
+    manager.record_profile_diagnostic(
+        "t1",
+        "alpha",
+        auth_state="AUTH_REQUIRED",
+        last_error_code="AUTH_REQUIRED",
+        last_probe_at="2026-06-28T10:20:30Z",
+    )
+
+    profiles = manager.browser_profiles()
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile["auth_state"] == "AUTH_REQUIRED"
+    assert profile["last_error_code"] == "AUTH_REQUIRED"
+    assert profile["last_probe_at"] == "2026-06-28T10:20:30Z"
+    # 기존 필드는 유지된다.
+    assert profile["id"] == "t1:alpha"
+    assert profile["cdp_port"] == 9301
+    # raw profile_dir/secret/URL/HTML/screenshot/clipboard 는 projection 에 없다.
+    blob = json.dumps(profiles, ensure_ascii=False)
+    for forbidden in ("profile_dir", "current_url", "html", "screenshot", "clipboard"):
+        assert forbidden not in blob
+
+
+def test_record_profile_diagnostic_partial_update_preserves_existing(tmp_path):
+    # None 인자는 기존 값을 덮어쓰지 않는다(부분 갱신).
+    manager = _manager(tmp_path)
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    manager.record_profile_diagnostic("t1", "alpha", auth_state="ACTIVE")
+
+    manager.record_profile_diagnostic("t1", "alpha", last_error_code="CRAWL_TIMEOUT")
+
+    profile = manager.browser_profiles()[0]
+    assert profile["auth_state"] == "ACTIVE"  # 유지
+    assert profile["last_error_code"] == "CRAWL_TIMEOUT"  # 추가
+
+
 class _FakeTransport:
     """최소 fake transport — post_json 은 빈 응답(실 네트워크 0)."""
 

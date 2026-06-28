@@ -349,3 +349,10 @@ Permanent fix:
 - Add queue recovery expiry for interactive jobs.
 - Add stale scheduled crawl coalescing.
 - Add Agent-side fail-fast checks before opening a browser.
+
+## Browser profile observability (배정 정보 vs 런타임 상태)
+
+DB `BrowserProfile`(배정 정보)과 heartbeat `capacity_json.browser_profiles`(런타임 상태)는
+의미와 수명이 다르다. **두 값을 자동으로 강제 동기화하지 않는다** — 인증 필요 화면의
+`DB 배정 정보` 와 Agents 화면의 `heartbeat runtime` 이 달라 보이는 것은 정상일 수 있다.
+자세한 역할 구분과 진단 필드 판독은 `agent-browser-profile-observability.md` 를 본다.

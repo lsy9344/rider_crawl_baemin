@@ -131,7 +131,28 @@ def generate_agent_token() -> str:
 
 
 _ACTIVE_JOB_KEYS = frozenset({"job_id", "lease_expires_at"})
-_BROWSER_PROFILE_KEYS = frozenset({"id", "target_id", "state", "cdp_port", "profile_path_ref"})
+_BROWSER_PROFILE_KEYS = frozenset(
+    {
+        "id",
+        "target_id",
+        "state",
+        "cdp_port",
+        "profile_path_ref",
+        # Task 3A 최소 진단 필드(optional). secret/URL/HTML/page_kind 는 허용하지 않는다.
+        "auth_state",
+        "last_probe_at",
+        "last_error_code",
+    }
+)
+#: browser_profiles[] 의 문자열 진단 필드(타입/길이/control char 검증 대상).
+_BROWSER_PROFILE_STRING_KEYS = frozenset(
+    {"id", "target_id", "state", "profile_path_ref", "auth_state", "last_probe_at", "last_error_code"}
+)
+#: heartbeat 진단 문자열 최대 길이(과도하게 긴 값은 저장하지 않는다).
+_BROWSER_PROFILE_STRING_MAX_LENGTH = 120
+#: 유효한 CDP 디버깅 포트 범위(0/음수/65535 초과/non-int 는 저장하지 않는다).
+_CDP_PORT_MIN = 1
+_CDP_PORT_MAX = 65535
 _KAKAO_STATUS_KEYS = frozenset(
     {
         "queue_depth",
@@ -161,10 +182,9 @@ def heartbeat_capacity(request: HeartbeatInput) -> dict[str, Any]:
         "max_in_flight": _max_in_flight(metrics, capabilities),
         "active_jobs": _sanitize_list(request.active_jobs, allowed_keys=_ACTIVE_JOB_KEYS),
         "kakao_status": _sanitize_mapping(request.kakao_status, allowed_keys=_KAKAO_STATUS_KEYS),
-        "browser_profiles": _sanitize_list(
-            request.browser_profiles,
-            allowed_keys=_BROWSER_PROFILE_KEYS,
-        ),
+        # browser_profiles 는 item 단위로 타입/길이/cdp_port 범위까지 검증한다(generic
+        # _sanitize_list 가 아니라 전용 sanitizer — agent_registry 가 저장 경계의 정본).
+        "browser_profiles": _sanitize_browser_profiles(request.browser_profiles),
     }
 
 
@@ -224,6 +244,71 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, str):
         return redact(value)
     return value
+
+
+def _has_control_char(text: str) -> bool:
+    return any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text)
+
+
+def _sanitize_browser_profile_string(value: Any) -> str | None:
+    """browser_profiles[] 문자열 필드를 정제한다 — redact 후 빈/control/과길이는 버린다."""
+
+    if not isinstance(value, str):
+        return None
+    text = redact(value).strip()
+    if not text or len(text) > _BROWSER_PROFILE_STRING_MAX_LENGTH:
+        return None
+    if _has_control_char(text):
+        return None
+    return text
+
+
+def _sanitize_cdp_port(value: Any) -> int | None:
+    """cdp_port 를 정제한다 — 1..65535 정수만 저장(bool/float/문자열/범위 밖은 버린다).
+
+    bool 은 int 서브타입이라 먼저 걸러낸다. 이 검증은 browser_profiles[] item 경로에만
+    적용하고 전역 _sanitize_value 의 다른 int 는 건드리지 않는다.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and _CDP_PORT_MIN <= value <= _CDP_PORT_MAX:
+        return value
+    return None
+
+
+def _sanitize_browser_profiles(values: list[Any]) -> list[dict[str, Any]]:
+    """heartbeat browser_profiles 를 item 단위로 정제한다(allowlist + 타입/길이/범위).
+
+    - dict 아닌 item 은 건너뛴다.
+    - allowlist 밖 키(``profile_path``/``current_url``/``page_kind``/secret 류)는 버린다.
+    - 문자열 진단 필드는 redact + 빈/control/과길이 검증.
+    - ``cdp_port`` 는 1..65535 정수만 저장(bool/float/문자열/범위 밖은 버린다).
+    """
+
+    cleaned: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        item: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            if key not in _BROWSER_PROFILE_KEYS:
+                continue
+            if _is_sensitive_key(key):
+                continue
+            if key == "cdp_port":
+                port = _sanitize_cdp_port(raw_value)
+                if port is not None:
+                    item[key] = port
+            elif key in _BROWSER_PROFILE_STRING_KEYS:
+                text = _sanitize_browser_profile_string(raw_value)
+                if text is not None:
+                    item[key] = text
+            else:
+                item[key] = _sanitize_value(raw_value)
+        cleaned.append(item)
+    return cleaned
 
 
 class InMemoryAgentRegistry:

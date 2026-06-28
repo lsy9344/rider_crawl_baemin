@@ -792,6 +792,162 @@ def test_crawl_timeout_releases_target_profile() -> None:
         release.set()
 
 
+class _RecordingProfiles:
+    """profile manager fake — diagnostic 기록을 캡처하고 release/cleanup 순서를 관찰한다."""
+
+    def __init__(self) -> None:
+        self.diagnostics: list[dict] = []
+        self.released: list[tuple[str, str]] = []
+        self.cleaned: list[float] = []
+        self.events: list[str] = []  # record/release 순서 관찰용
+
+    def ensure_profile(self, tenant_id, target_id, *, build_config):
+        return SimpleNamespace(
+            cdp_url="http://127.0.0.1:9222",
+            profile_dir=Path("runtime") / "profiles" / str(target_id),
+        )
+
+    def record_profile_diagnostic(
+        self, tenant_id, target_id, *, auth_state=None, last_error_code=None, last_probe_at=None
+    ):
+        self.events.append("record")
+        self.diagnostics.append(
+            {
+                "tenant_id": tenant_id,
+                "target_id": target_id,
+                "auth_state": auth_state,
+                "last_error_code": last_error_code,
+                "last_probe_at": last_probe_at,
+            }
+        )
+
+    def release(self, tenant_id, target_id):
+        self.events.append("release")
+        self.released.append((tenant_id, target_id))
+
+    def cleanup_idle_profiles(self, *, max_idle_seconds):
+        self.cleaned.append(max_idle_seconds)
+
+
+_FIXED_NOW = datetime(2026, 6, 28, 10, 20, 30, tzinfo=timezone.utc)
+
+
+def test_crawl_success_records_active_diagnostic() -> None:
+    profiles = _RecordingProfiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot(),
+        now=lambda: _FIXED_NOW,
+    )
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert profiles.diagnostics[-1] == {
+        "tenant_id": "tenant-1",
+        "target_id": "target-1",
+        "auth_state": AUTH_STATE_ACTIVE,
+        "last_error_code": None,
+        "last_probe_at": "2026-06-28T10:20:30Z",
+    }
+
+
+def test_crawl_auth_required_records_auth_required_diagnostic() -> None:
+    def auth_required_crawl(config, *, platform_name=None):
+        raise BrowserActionRequiredError("login required")
+
+    profiles = _RecordingProfiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=auth_required_crawl,
+        now=lambda: _FIXED_NOW,
+    )
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    last = profiles.diagnostics[-1]
+    assert last["auth_state"] == AUTH_STATE_AUTH_REQUIRED
+    assert last["last_error_code"] == ERROR_AUTH_REQUIRED
+
+
+def test_crawl_center_mismatch_records_center_mismatch_diagnostic() -> None:
+    # 표시명 불일치 → CENTER_MISMATCH / TARGET_VALIDATION_FAILURE 로 기록(인증 문제 아님).
+    profiles = _RecordingProfiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot("다른센터"),
+        now=lambda: _FIXED_NOW,
+    )
+
+    result = worker.execute(_crawl_job(expected="배민센터A"))
+
+    assert result.error_code == ERROR_TARGET_VALIDATION_FAILURE
+    last = profiles.diagnostics[-1]
+    assert last["auth_state"] == AUTH_STATE_CENTER_MISMATCH
+    assert last["last_error_code"] == ERROR_TARGET_VALIDATION_FAILURE
+
+
+def test_crawl_timeout_records_diagnostic_before_release() -> None:
+    # timeout 진단은 release 가 assignment 를 없애기 전에 기록되어야 한다(release 전 record).
+    started = threading.Event()
+    release = threading.Event()
+
+    def stuck_crawl(config, *, platform_name=None):
+        started.set()
+        release.wait()
+        return _baemin_snapshot()
+
+    job = _crawl_job()
+    job = ClaimedJob(
+        job_id=job.job_id,
+        type=job.type,
+        target_id=job.target_id,
+        lease_expires_at=job.lease_expires_at,
+        payload={**job.payload, "timeout_seconds": 0.01},
+    )
+    profiles = _RecordingProfiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=stuck_crawl,
+        profile_idle_ttl_seconds=30,
+        now=lambda: _FIXED_NOW,
+    )
+
+    try:
+        result = worker.execute(job)
+
+        assert result.error_code == ERROR_CRAWL_TIMEOUT
+        # record 가 release 보다 먼저 일어났다.
+        assert "record" in profiles.events
+        assert "release" in profiles.events
+        assert profiles.events.index("record") < profiles.events.index("release")
+        timeout_record = profiles.diagnostics[0]
+        assert timeout_record["last_error_code"] == ERROR_CRAWL_TIMEOUT
+        assert timeout_record["auth_state"] == "UNKNOWN"
+    finally:
+        release.set()
+
+
+def test_crawl_diagnostic_recording_failure_does_not_change_result() -> None:
+    # record_profile_diagnostic 가 던져도 job 결과는 그대로다(진단은 best-effort).
+    class _ExplodingProfiles(_RecordingProfiles):
+        def record_profile_diagnostic(self, *args, **kwargs):
+            raise RuntimeError("diagnostic backend down")
+
+    profiles = _ExplodingProfiles()
+    worker = CrawlWorker(
+        profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: _baemin_snapshot(),
+        now=lambda: _FIXED_NOW,
+    )
+
+    result = worker.execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+
+
 def test_default_crawl_timeout_uses_process_boundary(monkeypatch) -> None:
     calls: list[tuple[str, float, str, str]] = []
 

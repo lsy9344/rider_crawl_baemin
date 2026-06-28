@@ -24,8 +24,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from rider_server.admin import routes as admin_routes
-from rider_server.admin.dashboard_repository_postgres import PostgresDashboardRepository
+from rider_server.admin.dashboard_repository_postgres import (
+    PostgresDashboardRepository,
+    _browser_profile_rows,
+)
 from rider_server.admin.dashboard_service import (
+    AgentBrowserProfileRow,
     AgentHealthFacts,
     AgentRow,
     AuthRequiredRow,
@@ -256,6 +260,118 @@ def test_agent_row_drops_unsafe_kakao_status_values() -> None:
     assert row.kakao_failed is None
     assert row.kakao_last_success_at is None
     assert row.kakao_last_error_code is None
+
+
+def test_agent_row_maps_heartbeat_browser_profiles() -> None:
+    # service 는 repository 가 이미 정제한 AgentBrowserProfileRow 를 그대로 통과시킨다.
+    facts = AgentHealthFacts(
+        agent_id="a-prof",
+        name="agent-prof",
+        version="1.0.0",
+        last_heartbeat_at=_NOW,
+        current_job_type=None,
+        capabilities=("CRAWL_BAEMIN",),
+        browser_profiles=(
+            AgentBrowserProfileRow(
+                profile_id="profile-1",
+                target_id="target-1",
+                state="READY",
+                cdp_port=9222,
+            ),
+        ),
+    )
+
+    row = DashboardService.agent_row(facts, _NOW)
+
+    assert row.browser_profiles[0].state == "READY"
+    assert row.browser_profiles[0].cdp_port == 9222
+    assert row.browser_profiles[0].target_id == "target-1"
+    assert row.browser_profiles[0].source == "heartbeat"
+
+
+def test_browser_profile_rows_drops_unsafe_capacity_values() -> None:
+    # raw capacity 의 profile_path/profile_path_ref/password/token/current_url 과 잘못된 cdp_port
+    # 는 화면용 row 의 어느 필드에도 들어가면 안 된다(secret/path/URL 누출 차단).
+    rows = _browser_profile_rows(
+        [
+            {
+                "id": "profile-1",
+                "target_id": "target-1",
+                "state": "READY",
+                "cdp_port": 9222,
+                "auth_state": "ACTIVE",
+                "profile_path": "C:\\Users\\KimYS\\ChromeProfile",
+                "profile_path_ref": "opaque-profile-ref",
+                "password": "profile-password-raw",
+                "token": "agent-token-raw",
+                "current_url": "https://store.example.com/secret?token=abc",
+            },
+            {  # cdp_port 가 범위 밖 → cdp_port 만 버리고 row 자체는 유지(id 가 안전).
+                "id": "profile-2",
+                "target_id": "target-2",
+                "state": "AUTH_REQUIRED",
+                "cdp_port": 999999,
+            },
+            {  # cdp_port 가 bool → 버린다(bool 은 int 서브타입).
+                "id": "profile-3",
+                "cdp_port": True,
+            },
+            {  # id 가 없으면 row 자체를 버린다.
+                "target_id": "no-id",
+                "state": "READY",
+            },
+            "not-a-dict",
+        ]
+    )
+
+    assert [r.profile_id for r in rows] == ["profile-1", "profile-2", "profile-3"]
+    first = rows[0]
+    assert first.state == "READY"
+    assert first.cdp_port == 9222
+    assert first.auth_state == "ACTIVE"
+    # 정제 결과 어디에도 unsafe 값이 없다.
+    joined = " ".join(
+        str(v)
+        for r in rows
+        for v in (r.profile_id, r.target_id, r.state, r.cdp_port, r.auth_state,
+                  r.last_error_code, r.last_probe_at)
+    )
+    assert "ChromeProfile" not in joined
+    assert "opaque-profile-ref" not in joined
+    assert "profile-password-raw" not in joined
+    assert "agent-token-raw" not in joined
+    assert "store.example.com" not in joined
+    # 범위 밖/bool cdp_port 는 버려졌다.
+    assert rows[1].cdp_port is None
+    assert rows[2].cdp_port is None
+
+
+def test_agents_fragment_renders_browser_profile_state() -> None:
+    html = admin_routes.templates.env.get_template("_agents.html").render(
+        agents=[
+            AgentRow(
+                agent_id="a-prof",
+                name="agent-prof",
+                version="1.0.0",
+                last_heartbeat_at=_NOW,
+                online=True,
+                current_job_type=None,
+                capabilities=("CRAWL_BAEMIN",),
+                browser_profiles=(
+                    AgentBrowserProfileRow(
+                        profile_id="profile-1",
+                        target_id="target-1",
+                        state="AUTH_REQUIRED",
+                        cdp_port=9222,
+                    ),
+                ),
+            )
+        ]
+    )
+
+    assert "AUTH_REQUIRED" in html
+    assert "9222" in html
+    assert "heartbeat runtime" in html
 
 
 def test_channel_health_separates_kakao_lag_and_telegram_error() -> None:
@@ -734,8 +850,10 @@ def test_auth_required_fragment_lists_only_tenant_rows() -> None:
     body = c.get(f"/admin/auth-required?tenant={_TENANT}").text
     assert "t-stopped" in body
     assert "t-other" not in body  # cross-tenant 누출 0
-    assert ">t-stopped<" not in body
-    assert ">p1<" not in body
+    assert ">t-stopped<" not in body  # target_id 는 bare 텍스트로 노출하지 않는다(target_name 만)
+    # profile_id 는 새 정책상 "DB 배정 정보" 열에 의도적으로 노출한다(배정 정보 ≠ 런타임 상태).
+    assert "DB 배정 정보" in body
+    assert ">p1<" in body
     assert "상세 열기" in body
 
 
@@ -782,6 +900,45 @@ def test_auth_required_target_button_uses_data_attribute_not_inline_js_literal()
     assert "openAuthRequiredTarget(this.dataset.target)" in html
     assert 'data-target="bad&#39;id"' in html
     assert "openAuthRequiredTarget('" not in html
+
+
+def test_auth_required_fragment_renders_db_assigned_profile_column() -> None:
+    # DB BrowserProfile 기반 배정 정보를 "DB 배정 정보" 라벨로 노출한다(heartbeat 런타임과 구분).
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-stopped",
+                profile_id="p1",
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="가게A",
+            ),
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-noprofile",
+                profile_id=None,
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="가게B",
+            ),
+        ]
+    )
+
+    assert "DB 배정 정보" in html
+    assert ">p1<" in html  # 배정 profile 노출
+    assert ">-<" in html  # profile 없으면 muted "-"
+    # 기존 인증 시작/브라우저 열기/상태 재확인 버튼 동작 유지.
+    assert "인증 시작" in html
+    assert "브라우저 열기" in html
+    assert "상태 재확인" in html
+
+
+def test_auth_required_fragment_empty_list_uses_four_column_span() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[]
+    )
+
+    assert 'colspan="4"' in html
+    assert "인증 필요 대상이 없습니다." in html
 
 
 def test_require_admin_session_seam_can_deny() -> None:
@@ -840,7 +997,14 @@ def test_main_dependencies_still_exactly_seven() -> None:
 
 def test_readmodel_dtos_have_no_secret_shaped_fields() -> None:
     forbidden = ("token", "secret", "password", "otp", "passwd", "_ref")
-    for dto in (TargetRow, AgentRow, ChannelHealthRow, AuthRequiredRow, admin_routes.SettingsRow):
+    for dto in (
+        TargetRow,
+        AgentRow,
+        AgentBrowserProfileRow,
+        ChannelHealthRow,
+        AuthRequiredRow,
+        admin_routes.SettingsRow,
+    ):
         for field in fields(dto):
             lowered = field.name.lower()
             assert not any(bad in lowered for bad in forbidden), f"{dto.__name__}.{field.name}"

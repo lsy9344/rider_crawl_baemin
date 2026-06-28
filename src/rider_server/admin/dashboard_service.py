@@ -57,6 +57,24 @@ class TargetHealthFacts:
 
 
 @dataclass(frozen=True)
+class AgentBrowserProfileRow:
+    """heartbeat ``capacity_json.browser_profiles`` 1건의 런타임 상태(배정 정보 아님).
+
+    secret 0: profile path/secret/URL 은 담지 않는다(필드명에 token/secret/_ref 금지).
+    진단 필드(auth_state/last_error_code/last_probe_at)는 optional 이며 값이 없으면 ``None``.
+    """
+
+    profile_id: str
+    target_id: str | None
+    state: str | None
+    cdp_port: int | None
+    source: str = "heartbeat"
+    auth_state: str | None = None
+    last_error_code: str | None = None
+    last_probe_at: str | None = None
+
+
+@dataclass(frozen=True)
 class AgentHealthFacts:
     """Agent 한 건의 facts(online 미판정 — 순수 정책이 판정). agents 는 tenant 소유 아님(fleet)."""
 
@@ -67,6 +85,7 @@ class AgentHealthFacts:
     current_job_type: str | None  # 활성(CLAIMED/RUNNING) job 의 type
     capabilities: tuple[str, ...]  # capacity_json 의 capability 목록
     kakao_status: dict[str, Any] | None = None
+    browser_profiles: tuple[AgentBrowserProfileRow, ...] = ()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -112,6 +131,7 @@ class AgentRow:
     kakao_last_success_at: str | None = None
     kakao_last_error_code: str | None = None
     kakao_interactive_session_available: bool | None = None
+    browser_profiles: tuple[AgentBrowserProfileRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -339,6 +359,9 @@ class DashboardService:
             kakao_interactive_session_available=_optional_bool(
                 kakao.get("interactive_session_available")
             ),
+            # browser_profiles 는 repository 에서 이미 정제된 AgentBrowserProfileRow 다.
+            # service 는 정책 합성만 하고 런타임 상태는 그대로 통과시킨다(raw capacity 미접근).
+            browser_profiles=facts.browser_profiles,
         )
 
     async def target_rows(

@@ -126,6 +126,12 @@ TARGET_TYPE_AGENT = "agent"
 TARGET_TYPE_CHANNEL = "messenger_channel"
 TARGET_TYPE_ACCESS = "admin_access"
 
+# 수동 crawl 액션(test_crawl)이 enqueue 할 수 있는 job type — CRAWL 만 명시 허용(fail-closed).
+# CAPTURE_DIAGNOSTIC 같은 미구현 artifact job 이 service 경계에서 생성되지 않게 한다. 이 가드는
+# payload 생성 단계의 암묵적 _platform_for_crawl_job 실패에 기대지 않고 정책을 명시한다.
+# (CAPTURE_DIAGNOSTIC 은 JOB_TYPES/DEFAULT_CAPABILITIES 에는 그대로 남는다 — vocabulary 불변.)
+_MANUAL_CRAWL_JOB_TYPES = frozenset({JOB_TYPE_CRAWL_BAEMIN, JOB_TYPE_CRAWL_COUPANG})
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 중립 값 객체(repository 입출력 — ORM Row/SQL 누출 금지)
@@ -712,6 +718,11 @@ class AdminActionService:
         target = await self._scoped_target(target_id, tenant_id=tenant_id)
         if job_type not in JOB_TYPES:
             raise ValueError(f"unknown job type: {job_type}")
+        # 수동 crawl 액션은 CRAWL_BAEMIN/CRAWL_COUPANG 만 허용한다(명시 fail-closed). 알려진
+        # job type 이라도 CRAWL 이 아니면(예: 미구현 CAPTURE_DIAGNOSTIC) payload 생성 전에
+        # 거부해 큐에 애매한 UNSUPPORTED_JOB_TYPE 으로 남지 않게 한다.
+        if job_type not in _MANUAL_CRAWL_JOB_TYPES:
+            raise ValueError(f"unsupported manual crawl job type: {job_type}")
         # 쿠팡 crawl 은 계정의 로그인/2FA ref 가 payload 에 있어야 세션 만료 시 자동복구가 된다
         # (scheduled crawl 과 동일). 계정을 tenant scope 로 불러와 enrich 한다. 미연결/조회 실패
         # 시엔 account 없이 진행(배민이거나 ref 없는 계정은 기존 동작 유지).

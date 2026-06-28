@@ -426,6 +426,30 @@ def test_test_crawl_unknown_job_type_rejected() -> None:
         )
 
 
+def test_test_crawl_capture_diagnostic_rejected_by_explicit_guard() -> None:
+    # CAPTURE_DIAGNOSTIC 은 JOB_TYPES 에는 있지만(알려진 type) 미구현 artifact job 이므로 수동
+    # crawl 액션이 만들지 못한다. service 경계의 명시 allowlist 가드로 거부되고 큐에 job 을
+    # 만들지 않는다. 암묵적 _platform_for_crawl_job 실패가 아니라 명시 가드임을 메시지로 고정한다.
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target())
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    with pytest.raises(ValueError, match="unsupported manual crawl job type"):
+        _run(
+            svc.test_crawl(
+                target_id="mt-1",
+                job_type="CAPTURE_DIAGNOSTIC",
+                tenant_id=_TENANT,
+                actor_id=_ACTOR,
+                at=_NOW,
+            )
+        )
+
+    # 큐에 어떤 job 도 enqueue 되지 않았다(payload 생성/enqueue 전에 거부).
+    assert queue._jobs == {}
+
+
 def test_dry_run_render_returns_text_without_send() -> None:
     repo = InMemoryAdminActionRepository()
     repo.seed_target(_target())

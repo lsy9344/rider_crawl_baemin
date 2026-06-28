@@ -370,6 +370,162 @@ def test_compose_routes_auth_coupang_2fa_to_dedicated_worker(tmp_path):
     assert result.result_json["auth_state"] == "ACTIVE"
 
 
+class _DiagnosticProfiles:
+    """compose-level fake — auth wrapper 가 record_profile_diagnostic 을 호출하는지 캡처."""
+
+    def __init__(self, tmp_path) -> None:
+        self._tmp_path = tmp_path
+        self.diagnostics: list[dict] = []
+
+    def ensure_profile(self, tenant_id, target_id, *, build_config):
+        from types import SimpleNamespace
+
+        profile_dir = self._tmp_path / "profiles" / tenant_id / target_id
+        config = build_config(
+            tenant_id=tenant_id,
+            target_id=target_id,
+            cdp_url="http://127.0.0.1:9450",
+            user_data_dir=profile_dir,
+        )
+        return SimpleNamespace(cdp_url=config.cdp_url, profile_dir=config.browser_user_data_dir)
+
+    def record_profile_diagnostic(
+        self, tenant_id, target_id, *, auth_state=None, last_error_code=None, last_probe_at=None
+    ):
+        self.diagnostics.append(
+            {
+                "tenant_id": tenant_id,
+                "target_id": target_id,
+                "auth_state": auth_state,
+                "last_error_code": last_error_code,
+                "last_probe_at": last_probe_at,
+            }
+        )
+
+    def browser_profiles(self):
+        return []
+
+
+def _coupang_auth_payload() -> dict:
+    return {
+        "target_id": "target-1",
+        "tenant_id": "tenant-1",
+        "platform": "coupang",
+        "platform_account_id": "account-1",
+        "primary_url": "https://partner.coupangeats.com/page/peak-dashboard",
+        "expected_display_name": "쿠팡상점A",
+        "browser_profile_ref": "profile:target-1",
+    }
+
+
+def test_compose_auth_open_browser_records_profile_diagnostic(tmp_path):
+    # compose 레벨에서 OPEN_AUTH_BROWSER 성공 결과가 profile 진단으로 기록되는지 확인한다
+    # (개별 auth 함수 단위 테스트만으로는 wrapper 배선 누락을 못 잡는다).
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_COUPANG, CAPABILITY_OPEN_AUTH_BROWSER
+    from rider_agent.worker_composition import compose_execute_job
+
+    profiles = _DiagnosticProfiles(tmp_path)
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[CAPABILITY_OPEN_AUTH_BROWSER, CAPABILITY_CRAWL_COUPANG],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_auth_worker=True,
+        auth_open_auth_browser=lambda job: True,
+        auth_detect_completion=lambda job: True,
+        start_crawl_worker=True,
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+    )
+
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="job-auth-open-1",
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            target_id="target-1",
+            lease_expires_at=FUTURE_LEASE,
+            payload=_coupang_auth_payload(),
+        )
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert len(profiles.diagnostics) == 1
+    record = profiles.diagnostics[0]
+    assert record["tenant_id"] == "tenant-1"
+    assert record["target_id"] == "target-1"
+    # OPEN_AUTH_BROWSER 성공은 result_json.auth_state 를 남긴다(인증 검증됨).
+    assert record["auth_state"] == result.result_json["auth_state"]
+    # epoch 0.0 → ISO-8601 UTC 문자열로 기록.
+    assert record["last_probe_at"] == "1970-01-01T00:00:00Z"
+
+
+def test_compose_auth_coupang_2fa_records_profile_diagnostic(tmp_path):
+    # AUTH_COUPANG_2FA 도 compose 레벨에서 result_json.auth_state 정규화 뒤 기록되는지 확인한다.
+    from rider_agent.heartbeat import (
+        CAPABILITY_AUTH_COUPANG_2FA,
+        CAPABILITY_CRAWL_COUPANG,
+        CAPABILITY_OPEN_AUTH_BROWSER,
+    )
+    from rider_agent.worker_composition import compose_execute_job
+
+    profiles = _DiagnosticProfiles(tmp_path)
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[
+            CAPABILITY_OPEN_AUTH_BROWSER,
+            CAPABILITY_AUTH_COUPANG_2FA,
+            CAPABILITY_CRAWL_COUPANG,
+        ],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_auth_worker=True,
+        start_crawl_worker=True,
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+        secret_resolver={
+            "mailbox-ref": "operator@example.com",
+            "mail-app-password-ref": "fake app password",
+        }.get,
+    )
+
+    import rider_agent.auth.coupang_gmail_2fa as cg2fa
+
+    original = cg2fa.execute_auth_coupang_2fa_job
+
+    def spy(job, **kwargs):
+        kwargs["recover"] = lambda: True
+        return original(job, **kwargs)
+
+    cg2fa.execute_auth_coupang_2fa_job = spy
+    try:
+        result = composition.execute_job(
+            ClaimedJob(
+                job_id="job-auth-2fa-diag-1",
+                type=CAPABILITY_AUTH_COUPANG_2FA,
+                target_id="target-1",
+                lease_expires_at=FUTURE_LEASE,
+                payload={
+                    **_coupang_auth_payload(),
+                    "verification_email_address_ref": "mailbox-ref",
+                    "verification_email_app_password_ref": "mail-app-password-ref",
+                },
+            )
+        )
+    finally:
+        cg2fa.execute_auth_coupang_2fa_job = original
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["auth_state"] == "ACTIVE"
+    assert len(profiles.diagnostics) == 1
+    record = profiles.diagnostics[0]
+    assert record["target_id"] == "target-1"
+    assert record["auth_state"] == "ACTIVE"
+
+
 def _runner(transport, **kwargs):
     """JobRunner 생성 헬퍼 — stop/sleep 기본 배선 + 주입 override."""
 
@@ -738,6 +894,34 @@ def test_claim_401_is_not_backed_off():
     short = DEFAULT_SHORT_POLL_INTERVAL_SECONDS
     expected = short + short * DEFAULT_POLL_JITTER_RATIO * seed_ratio
     # 401 은 backoff 카운터를 올리지 않으므로 매 대기가 short_poll(+jitter) 그대로다.
+    assert all(w == pytest.approx(expected) for w in sleep.intervals)
+
+
+def test_runner_surfaces_identity_mismatch_on_403_claim_without_backoff_spin():
+    # 403 = token 은 유효하나 다른 agent identity 로 해석됨. transient backoff 에 묻지 않고
+    # 재등록 필요 상태로 surfacing 하며, 전용 이벤트 코드를 남긴다.
+    from rider_agent.job_loop import (
+        DEFAULT_POLL_JITTER_RATIO,
+        DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
+    )
+    from rider_agent.heartbeat import stable_jitter_ratio
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport(
+        claim_error=TransportError("agent jobs HTTP error", status_code=403)
+    )
+    runner = _runner(transport, stop_event=stop, sleep=sleep)
+    runner.run()
+
+    assert runner.needs_registration is True
+    assert runner.token_status == TOKEN_STATUS_REVOKED
+    assert runner.last_error_event is not None
+    assert runner.last_error_event["code"] == "AGENT_JOB_IDENTITY_REJECTED"
+    # 403 도 401 처럼 backoff 카운터를 올리지 않으므로 매 대기가 short_poll(+jitter) 그대로다.
+    seed_ratio = stable_jitter_ratio(_IDENTITY.agent_id)
+    short = DEFAULT_SHORT_POLL_INTERVAL_SECONDS
+    expected = short + short * DEFAULT_POLL_JITTER_RATIO * seed_ratio
     assert all(w == pytest.approx(expected) for w in sleep.intervals)
 
 
@@ -1455,6 +1639,38 @@ def test_runner_surfaces_revoked_on_complete_401():
     assert runner.needs_registration is True
     assert runner.token_status == TOKEN_STATUS_REVOKED
     assert statuses == [TOKEN_STATUS_REVOKED]
+    assert runner.active_jobs() == []  # in-flight 정리.
+    assert FAKE_TOKEN not in " ".join(logs)
+
+
+def test_runner_surfaces_identity_mismatch_on_complete_403():
+    # complete 가 403 이면 401(revoked) 와 같은 재등록 필요 계열로 닫되, identity mismatch
+    # 전용 이벤트 코드를 남긴다. lease-lost(409/410) 와 다르다.
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=1)  # 1주기만 — 다음 claim 성공이 상태를 되돌리지 않게.
+    statuses: list[str] = []
+    logs: list[str] = []
+    transport = FakeTransport(
+        claim_script=[{"jobs": [dict(_JOB_DICT)]}],
+        complete_error=TransportError("agent jobs HTTP error", status_code=403),
+    )
+
+    runner = _runner(
+        transport,
+        stop_event=stop,
+        sleep=sleep,
+        execute_job=lambda j: make_success_result(),
+        on_status=statuses.append,
+        log=logs.append,
+    )
+    runner.run()
+
+    assert len(transport.calls_for("/complete")) == 1
+    assert runner.needs_registration is True
+    assert runner.token_status == TOKEN_STATUS_REVOKED
+    assert statuses == [TOKEN_STATUS_REVOKED]
+    assert runner.last_error_event is not None
+    assert runner.last_error_event["code"] == "AGENT_JOB_IDENTITY_REJECTED"
     assert runner.active_jobs() == []  # in-flight 정리.
     assert FAKE_TOKEN not in " ".join(logs)
 
