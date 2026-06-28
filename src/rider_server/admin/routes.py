@@ -27,9 +27,8 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from ..domain import MessengerChannelState, MonitoringTargetStatus
+from ..domain import MonitoringTargetStatus
 from ..security.access import enforce_session
-from ..services.recovery import effective_send_enabled, send_window_allows_dispatch
 from .dashboard_service import ALL_TENANTS, DashboardRepository, DashboardService
 from . import severity as severity_policy
 from .severity import (
@@ -385,7 +384,7 @@ class SettingsRow:
     center_name: str
     severity: str  # 라이브 severity(램프) — target_health join, 없으면 STOPPED(회색)
     crawl_enabled: bool  # MonitoringTarget.status == ACTIVE
-    send_enabled: bool  # 지금 dispatch fan-out 가능한 상태(전역/고객/규칙/채널/시간창 모두 통과)
+    send_enabled: bool  # tenant 발송 활성화 상태(= '관리' ❸ 실제 메시지 보내기 토글)
     schedule_enabled: bool
     start_time: str
     stop_time: str
@@ -451,14 +450,10 @@ async def _settings_rows_for_tenant(
     accounts = await service.list_platform_accounts(tenant_id)
 
     tenant_sending_enabled = bool(getattr(tenant, "sending_enabled", False))
-    global_sending_enabled = bool(getattr(request.app.state, "sending_enabled", False))
     customer_name = tenant.name
 
     account_platform = {a.id: a.platform.value for a in accounts}
     channel_messenger = {c.id: c.messenger.value for c in channels}
-    active_channel_ids = {
-        c.id for c in channels if c.state == MessengerChannelState.ACTIVE
-    }
 
     # 라이브 severity(램프)는 targets 카드와 동일 정제(_target_row_for_display)로 맞춘다 — STOPPED 가
     # AUTH_REQUIRED/검증실패 등으로 분기해 두 카드의 램프 색이 어긋나지 않게 한다.
@@ -480,19 +475,11 @@ async def _settings_rows_for_tenant(
                 }
             )
         )
-        route_enabled = any(
-            r.enabled and r.channel_id in active_channel_ids for r in rules
-        )
-        window_enabled = send_window_allows_dispatch(
-            now,
-            schedule_enabled=t.schedule_enabled,
-            start_time=t.start_time,
-            stop_time=t.stop_time,
-        )
-        send_enabled = effective_send_enabled(
-            send_enabled=tenant_sending_enabled and route_enabled and window_enabled,
-            sending_enabled=global_sending_enabled,
-        )
+        # 전송 ON/OFF 는 '관리' 화면의 ❸ 실제 메시지 보내기 토글과 같은 의미 — tenant 발송 활성화
+        # 상태(tenant.sending_enabled)만 반영한다. 전역 게이트/전송 시간창/채널 ACTIVE 같은 실 dispatch
+        # 게이트는 _enqueue_dispatch_records 가 실행 시점에 따로 본다(여긴 '등록 상태' 표시이지 실행
+        # 게이트가 아니다 — 두 화면이 같은 활성화 상태를 보여 운영자가 헷갈리지 않게 한다).
+        send_enabled = tenant_sending_enabled
         rows.append(
             SettingsRow(
                 target_id=t.id,

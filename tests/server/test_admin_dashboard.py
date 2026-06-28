@@ -1594,6 +1594,42 @@ def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -
     assert 'trapDrawerFocus' in body
 
 
+def test_dashboard_drawer_surfaces_flow_history_and_recommendations() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    assert "현재 상태 흐름" in body
+    assert "최근 이력" in body
+    assert "추천 조치" in body
+    assert 'id="d-flow"' in body
+    assert 'id="d-history"' in body
+    assert 'id="d-recommendations"' in body
+    assert "renderDrawerFlow" in body
+    assert "renderDrawerHistory" in body
+    assert "renderDrawerRecommendations" in body
+
+
+def test_target_rows_expose_failure_label_for_drawer_history() -> None:
+    row = TargetRow(
+        target_id="t-kakao-fail",
+        tenant_id=_TENANT,
+        name="가게",
+        center_name="센터",
+        platform="BAEMIN",
+        interval_minutes=10,
+        last_success_at=_NOW - timedelta(minutes=3),
+        last_delivery_at=None,
+        last_failure_code="KAKAO_FAILURE",
+        severity=SEVERITY_CRITICAL,
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(
+        targets=[row], tenant_id=_TENANT
+    )
+
+    assert 'data-failcode="KAKAO_FAILURE"' in html
+    assert 'data-failure-label="카카오톡 전송 오류"' in html
+
+
 def test_drawer_does_not_offer_pause_for_failclosed_display_states() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
 
@@ -2234,13 +2270,11 @@ def test_registered_settings_fragment_renders_assembled_rows() -> None:
     assert "sev-normal" in body
 
 
-def test_registered_settings_send_gate_respects_tenant_sending_enabled(monkeypatch) -> None:
-    # sending_enabled=False 면 enabled 규칙·ACTIVE 채널이 있어도 전송은 OFF 여야 한다.
-    monkeypatch.setattr(
-        admin_routes,
-        "_now",
-        lambda: datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc),  # 10:00 KST
-    )
+def test_registered_settings_send_gate_respects_tenant_sending_enabled() -> None:
+    # 전송 ON/OFF 는 '관리' 화면의 ❸ 실제 메시지 보내기 토글과 같은 의미 — tenant.sending_enabled
+    # 만 반영한다. 전역 게이트/전송 시간창/채널 ACTIVE 같은 실 dispatch 게이트는 여기서 보지 않는다
+    # (그것들은 _enqueue_dispatch_records 가 실행 시점에 따로 본다). 두 화면이 같은 활성화 상태를
+    # 보여 "관리=ON 인데 모니터링=OFF" 오해가 없게 한다.
     body_on = _settings_app(sending_enabled=True).get(
         f"/admin/registered-settings?tenant={_TENANT}"
     ).text
@@ -2254,36 +2288,24 @@ def test_registered_settings_send_gate_respects_tenant_sending_enabled(monkeypat
     assert body_off.count("toggle-pill on") == 1
 
 
-def test_registered_settings_send_gate_respects_global_sending_enabled(monkeypatch) -> None:
-    # 전역 발송 게이트가 OFF면 고객/규칙/채널이 모두 켜져 있어도 실제 fan-out은 안 만들어진다.
-    # 등록 설정 카드도 같은 의미를 보여야 운영자가 "전송 ON인데 미실행"으로 오해하지 않는다.
+def test_registered_settings_send_gate_ignores_global_and_window(monkeypatch) -> None:
+    # '등록된 설정' 전송 열은 '관리' 토글과 같은 활성화 상태 표시이지 실 dispatch 게이트가 아니다.
+    # tenant.sending_enabled 가 ON 이면, 전역 발송 게이트(global_sending_enabled)가 OFF 든 현재
+    # 시각이 tg-a 전송 시간창(09:00~22:00 KST) 밖이든 상관없이 전송 ON pill 이 그대로 보여야 한다.
     monkeypatch.setattr(
         admin_routes,
         "_now",
-        lambda: datetime(2026, 6, 16, 1, 0, tzinfo=timezone.utc),  # 10:00 KST
+        lambda: datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc),  # 22:30 KST(창 밖)
     )
-    body_off = _settings_app(global_sending_enabled=False).get(
+
+    body = _settings_app(sending_enabled=True, global_sending_enabled=False).get(
         f"/admin/registered-settings?tenant={_TENANT}"
     ).text
 
-    assert "강남점" in body_off
-    # 수집 ON 하나만 남고, 전송 ON pill 은 없어야 한다.
-    assert body_off.count("toggle-pill on") == 1
-
-
-def test_registered_settings_send_gate_respects_current_send_window(monkeypatch) -> None:
-    # tg-a 의 전송 허용 시간은 09:00~22:00 KST. 창 밖이면 실제 fan-out 이 생성되지 않는다.
-    monkeypatch.setattr(
-        admin_routes,
-        "_now",
-        lambda: datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc),  # 22:30 KST
-    )
-
-    body_off = _settings_app().get(f"/admin/registered-settings?tenant={_TENANT}").text
-
-    assert "강남점" in body_off
-    # 수집 ON 하나만 남고, 전송 ON pill 은 없어야 한다.
-    assert body_off.count("toggle-pill on") == 1
+    assert "강남점" in body
+    # tenant 발송 ON 이므로 두 대상 모두 전송 ON(활성화 상태만 본다 — tg-b 의 disabled 규칙·창 밖
+    # 여부는 무관). 전송 ON 2개(tg-a·tg-b) + 수집 ON 1개(tg-a ACTIVE, tg-b 는 PAUSED) = ON pill 3개.
+    assert body.count("toggle-pill on") == 3
 
 
 def test_registered_settings_empty_state() -> None:

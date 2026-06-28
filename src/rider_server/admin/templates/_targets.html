@@ -51,6 +51,7 @@
     {% set primary_style = 'ghost' %}
   {% endif %}
   {% set display_failure_code = t.last_failure_code if t.severity != 'NORMAL' and t.last_failure_code else '' %}
+  {% set display_failure_label = display_failure_code | reason_text if display_failure_code and not is_auth_required and not is_target_validation and not is_operator_stopped else '' %}
   <div class="trow trow--{{ t.severity | lower }}"
        onclick="if(!event.target.closest('button'))openTargetDrawer(this, this)"
        data-name="{{ t.name }}"
@@ -62,6 +63,7 @@
        data-severity-class="{{ t.severity | severity_class }}"
        data-interval="{{ t.interval_minutes }}"
        data-failcode="{{ display_failure_code }}"
+       data-failure-label="{{ display_failure_label }}"
        data-reason="{% if is_auth_pending %}인증번호 입력 필요 · Chrome에서 인증번호 입력 후 상태를 재확인하세요{% elif is_auth_required %}{{ auth_reason }}{% elif is_target_validation %}센터/상점명 불일치: 오발송 위험{% elif is_operator_stopped %}운영자가 비활성한 대상입니다: 필요 시 활성화하세요.{% elif t.last_failure_code and t.severity != 'NORMAL' %}{{ t.last_failure_code | reason_text }}{% endif %}"
        data-success="{{ t.last_success_at | relative_time }}"
        data-delivery="{{ t.last_delivery_at | relative_time }}"
