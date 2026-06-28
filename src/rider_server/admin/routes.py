@@ -349,6 +349,11 @@ def _target_row_for_display(facts, now: datetime):
 def _display_severity(code: str, facts) -> str:
     if code != SEVERITY_STOPPED:
         return code
+    if (
+        getattr(facts, "kakao_delivery_enabled", False)
+        and getattr(facts, "kakao_runtime_unavailable", False)
+    ):
+        return SEVERITY_KAKAO_MISDELIVERY_RISK
     signals = severity_policy.failclosed_signals_from(
         account_auth_state=facts.account_auth_state,
         lifecycle_state=facts.lifecycle_state,

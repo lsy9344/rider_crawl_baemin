@@ -25,6 +25,7 @@ from rider_server.admin.dashboard_repository_postgres import (
     _ACTIVE_JOB_STATUSES,
     _AUTH_SESSION_PENDING_STATES,
     _TELEGRAM_ERROR_WINDOW,
+    _agent_reports_kakao_runtime_unavailable,
     _pick_latest_code,
     _set_latest,
 )
@@ -32,6 +33,7 @@ from rider_server.domain import BaeminAuthState
 from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_RUNNING,
+    JOB_TYPE_KAKAO_SEND,
 )
 
 _NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
@@ -162,3 +164,39 @@ def test_active_job_statuses_are_claimed_and_running() -> None:
 def test_telegram_error_window_is_ten_minutes() -> None:
     # ops-contract 정합(최근 10분 윈도; 정밀화는 5.9).
     assert _TELEGRAM_ERROR_WINDOW == timedelta(minutes=10)
+
+
+def test_agent_reports_kakao_runtime_unavailable_for_sessionless_worker() -> None:
+    assert _agent_reports_kakao_runtime_unavailable(
+        capacity_json={
+            "capabilities": [JOB_TYPE_KAKAO_SEND],
+            "kakao_status": {"enabled": True, "interactive_session_available": False},
+        },
+        last_heartbeat_at=_NOW,
+        now=_NOW,
+    )
+
+    assert not _agent_reports_kakao_runtime_unavailable(
+        capacity_json={
+            "capabilities": [JOB_TYPE_KAKAO_SEND],
+            "kakao_status": {"enabled": True, "interactive_session_available": False},
+        },
+        last_heartbeat_at=_NOW - timedelta(minutes=5),
+        now=_NOW,
+    )
+    assert not _agent_reports_kakao_runtime_unavailable(
+        capacity_json={
+            "capabilities": [JOB_TYPE_KAKAO_SEND],
+            "kakao_status": {"enabled": True, "interactive_session_available": True},
+        },
+        last_heartbeat_at=_NOW,
+        now=_NOW,
+    )
+    assert not _agent_reports_kakao_runtime_unavailable(
+        capacity_json={
+            "capabilities": ["CRAWL_COUPANG"],
+            "kakao_status": {"enabled": True, "interactive_session_available": False},
+        },
+        last_heartbeat_at=_NOW,
+        now=_NOW,
+    )

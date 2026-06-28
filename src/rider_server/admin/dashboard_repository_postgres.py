@@ -32,6 +32,7 @@ from rider_server.db.models.account import (
 from rider_server.db.models.agent import Agent, BrowserProfile, Job
 from rider_server.db.models.messaging import (
     DeliveryLog,
+    DeliveryRule,
     Message,
     MessengerChannel,
     Snapshot,
@@ -41,6 +42,8 @@ from rider_server.domain import (
     BaeminAuthState,
     DeliveryStatus,
     FailureCategory,
+    Messenger,
+    MessengerChannelState,
     MonitoringTargetStatus,
     SnapshotQualityState,
 )
@@ -62,6 +65,7 @@ from .dashboard_service import (
     DashboardRepository,
     JobQueueRow,
     TargetHealthFacts,
+    _optional_bool,
     _optional_str,
 )
 from .severity import is_agent_online
@@ -157,6 +161,36 @@ def _browser_profile_rows(value: object) -> tuple[AgentBrowserProfileRow, ...]:
     return tuple(rows)
 
 
+def _agent_reports_kakao_runtime_unavailable(
+    *,
+    capacity_json: object,
+    last_heartbeat_at: datetime | None,
+    now: datetime,
+) -> bool:
+    """True when an online Kakao-capable agent explicitly reports no Kakao session."""
+
+    if not is_agent_online(last_heartbeat_at, now):
+        return False
+    if not isinstance(capacity_json, dict):
+        return False
+    capabilities = capacity_json.get("capabilities")
+    if (
+        not isinstance(capabilities, (list, tuple))
+        or JOB_TYPE_KAKAO_SEND not in capabilities
+    ):
+        return False
+    kakao_status = capacity_json.get("kakao_status")
+    if not isinstance(kakao_status, dict):
+        return False
+    enabled = _optional_bool(
+        kakao_status.get("enabled")
+        if "enabled" in kakao_status
+        else kakao_status.get("worker_enabled")
+    )
+    session_available = _optional_bool(kakao_status.get("interactive_session_available"))
+    return enabled is True and session_available is False
+
+
 class PostgresDashboardRepository(DashboardRepository):
     """async SQLAlchemy 기반 읽기 전용 ``DashboardRepository``."""
 
@@ -221,6 +255,12 @@ class PostgresDashboardRepository(DashboardRepository):
             pending_account_ids = await self._auth_session_pending_account_ids(
                 session, account_ids
             )
+            kakao_delivery_target_ids = await self._kakao_delivery_enabled_target_ids(
+                session, target_ids
+            )
+            kakao_runtime_unavailable = await self._fleet_kakao_runtime_unavailable(
+                session, now
+            )
             for row in rows:
                 target_id = str(row.id)
                 (
@@ -249,6 +289,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         auth_session_pending=str(row.account_id) in pending_account_ids,
                         auth_recovery_state=auth_recovery_state,
                         auth_recovery_reason=auth_recovery_reason,
+                        kakao_delivery_enabled=target_id in kakao_delivery_target_ids,
+                        kakao_runtime_unavailable=kakao_runtime_unavailable,
                     )
                 )
         return facts
@@ -328,6 +370,12 @@ class PostgresDashboardRepository(DashboardRepository):
             pending_account_ids = await self._auth_session_pending_account_ids(
                 session, account_ids
             )
+            kakao_delivery_target_ids = await self._kakao_delivery_enabled_target_ids(
+                session, target_ids
+            )
+            kakao_runtime_unavailable = await self._fleet_kakao_runtime_unavailable(
+                session, now
+            )
             for row in rows:
                 target_id = str(row.id)
                 (
@@ -356,6 +404,8 @@ class PostgresDashboardRepository(DashboardRepository):
                         auth_session_pending=str(row.account_id) in pending_account_ids,
                         auth_recovery_state=auth_recovery_state,
                         auth_recovery_reason=auth_recovery_reason,
+                        kakao_delivery_enabled=target_id in kakao_delivery_target_ids,
+                        kakao_runtime_unavailable=kakao_runtime_unavailable,
                     )
                 )
         return facts
@@ -459,6 +509,43 @@ class PostgresDashboardRepository(DashboardRepository):
             .distinct()
         )
         return {str(account_id) for account_id in (await session.execute(stmt)).scalars()}
+
+    async def _kakao_delivery_enabled_target_ids(
+        self, session: AsyncSession, target_ids: list[str]
+    ) -> set[str]:
+        if not target_ids:
+            return set()
+        stmt = (
+            select(DeliveryRule.target_id)
+            .join(
+                MessengerChannel,
+                and_(
+                    DeliveryRule.tenant_id == MessengerChannel.tenant_id,
+                    DeliveryRule.channel_id == MessengerChannel.id,
+                ),
+            )
+            .where(
+                DeliveryRule.target_id.in_(target_ids),
+                DeliveryRule.enabled.is_(True),
+                MessengerChannel.messenger == Messenger.KAKAO.value,
+                MessengerChannel.state == MessengerChannelState.ACTIVE.value,
+            )
+            .distinct()
+        )
+        return {str(target_id) for target_id in (await session.execute(stmt)).scalars()}
+
+    async def _fleet_kakao_runtime_unavailable(
+        self, session: AsyncSession, now: datetime
+    ) -> bool:
+        stmt = select(Agent.last_heartbeat_at, Agent.capacity_json)
+        for last_heartbeat_at, capacity_json in (await session.execute(stmt)).all():
+            if _agent_reports_kakao_runtime_unavailable(
+                capacity_json=capacity_json,
+                last_heartbeat_at=last_heartbeat_at,
+                now=now,
+            ):
+                return True
+        return False
 
     async def _last_collect_success(
         self, session: AsyncSession, target_id: str

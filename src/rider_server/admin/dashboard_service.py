@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from rider_server.domain import FailureCategory
+
 from . import severity
 
 ALL_TENANTS = "all"
@@ -54,6 +56,8 @@ class TargetHealthFacts:
     last_failure_at: datetime | None = None  # 위 last_failure_code 의 발생 시각(stale 판정용)
     auth_recovery_state: str | None = None  # 쿠팡 자동 인증 복구 세부 상태(AUTH_COUPANG_2FA)
     auth_recovery_reason: str | None = None  # 쿠팡 자동 인증 복구 세부 사유(result_json.reason)
+    kakao_delivery_enabled: bool = False  # 이 대상에 ACTIVE Kakao delivery rule 이 연결됨
+    kakao_runtime_unavailable: bool = False  # 온라인 Kakao agent 가 세션 없음으로 보고함
 
 
 @dataclass(frozen=True)
@@ -301,16 +305,30 @@ class DashboardService:
 
     @staticmethod
     def target_row(facts: TargetHealthFacts, now: datetime) -> TargetRow:
+        failure_code = facts.last_failure_code
+        failure_at = facts.last_failure_at
+        failure_is_stale = (
+            facts.last_success_at is not None
+            and failure_at is not None
+            and failure_at <= facts.last_success_at
+        )
+        if facts.kakao_delivery_enabled and facts.kakao_runtime_unavailable:
+            failure_code = FailureCategory.KAKAO_FAILURE.value
+            failure_at = now
+        elif failure_is_stale:
+            failure_code = None
+            failure_at = None
+
         freshness = severity.classify_freshness(
             facts.last_success_at, facts.interval_minutes, now
         )
         signals = severity.failclosed_signals_from(
             account_auth_state=facts.account_auth_state,
             lifecycle_state=facts.lifecycle_state,
-            latest_failure_code=facts.last_failure_code,
+            latest_failure_code=failure_code,
             auth_session_pending=facts.auth_session_pending,
             last_success_at=facts.last_success_at,
-            latest_failure_at=facts.last_failure_at,
+            latest_failure_at=failure_at,
         )
         overall = severity.overall_severity(
             freshness, severity.classify_failclosed(signals)
@@ -324,7 +342,7 @@ class DashboardService:
             interval_minutes=facts.interval_minutes,
             last_success_at=facts.last_success_at,
             last_delivery_at=facts.last_delivery_at,
-            last_failure_code=facts.last_failure_code,
+            last_failure_code=failure_code,
             severity=overall,
             customer_name=facts.customer_name,
             auth_session_pending=facts.auth_session_pending,

@@ -44,6 +44,7 @@ from rider_server.admin.dashboard_service import (
 from rider_server.admin.severity import (
     SEVERITY_AUTH_REQUIRED,
     SEVERITY_CRITICAL,
+    SEVERITY_KAKAO_MISDELIVERY_RISK,
     SEVERITY_NORMAL,
     SEVERITY_OPERATOR_STOPPED,
     SEVERITY_STOPPED,
@@ -1520,7 +1521,40 @@ def test_template_normal_severity_with_stale_failure_code_shows_no_auth_badge() 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
     assert "로그인 만료 · 인증 확인 필요" not in html
+    assert 'data-failcode="AUTH_REQUIRED"' not in html
     assert 'data-primary-action="auth-start"' not in html
+
+
+def test_kakao_session_unavailable_target_overrides_stale_auth_failure() -> None:
+    # 운영 재현: 쿠팡 수집은 최근 성공했고 예전 AUTH_REQUIRED failure_code 만 남았지만,
+    # 실제 장애는 카카오톡 미로그인이다. 대상 표시는 로그인 만료가 아니라 Kakao 오류여야 한다.
+    facts = TargetHealthFacts(
+        target_id="t-kakao",
+        tenant_id=_TENANT,
+        name="H&J",
+        center_name="제이앤에이치플러스 의정부남부",
+        platform="COUPANG",
+        interval_minutes=2,
+        last_success_at=_NOW - timedelta(minutes=2),
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        last_failure_at=_NOW - timedelta(minutes=30),
+        account_auth_state="ACTIVE",
+        lifecycle_state="ACTIVE",
+        kakao_delivery_enabled=True,
+        kakao_runtime_unavailable=True,
+    )
+
+    row = admin_routes._target_row_for_display(facts, _NOW)
+    html = admin_routes.templates.env.get_template("_targets.html").render(
+        targets=[row], tenant_id=_TENANT
+    )
+
+    assert row.severity == SEVERITY_KAKAO_MISDELIVERY_RISK
+    assert row.last_failure_code == "KAKAO_FAILURE"
+    assert 'data-failcode="KAKAO_FAILURE"' in html
+    assert 'data-reason="카카오톡 전송 오류"' in html
+    assert "로그인 만료 · 인증 확인 필요" not in html
 
 
 def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -> None:
