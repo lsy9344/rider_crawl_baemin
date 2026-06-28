@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,15 @@ def _worker(send=None, **kwargs):
     kwargs.setdefault("build_config", _fake_build_config)
     kwargs.setdefault("submit_timeout", 2.0)
     return KakaoSenderWorker(send=send if send is not None else RecordingSend(), **kwargs)
+
+
+def _wait_until(predicate, *, timeout=1.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def test_request_from_server_claim_payload_shape() -> None:
@@ -364,12 +374,20 @@ def test_status_aggregates_sent_failed_and_last_error_code():
 
 def test_status_includes_interactive_session_available_when_probe_true():
     worker = _worker(session_probe=lambda: True)
+    worker.kakao_status()
+    assert _wait_until(
+        lambda: worker.kakao_status().get("interactive_session_available") is True
+    )
     assert worker.kakao_status()["interactive_session_available"] is True
 
 
 def test_status_includes_interactive_session_available_when_probe_false():
     # 카톡 미로그인(probe False) → 신호가 명시적으로 False 로 노출된다(대시보드 경고 근거).
     worker = _worker(session_probe=lambda: False)
+    worker.kakao_status()
+    assert _wait_until(
+        lambda: worker.kakao_status().get("interactive_session_available") is False
+    )
     assert worker.kakao_status()["interactive_session_available"] is False
 
 
@@ -409,12 +427,82 @@ def test_status_session_probe_is_cached_within_ttl():
 
     worker = _worker(session_probe=probe, session_probe_ttl_seconds=30.0, now=lambda: clock["t"])
     worker.kakao_status()
+    assert _wait_until(lambda: calls == [1])
     worker.kakao_status()
     assert calls == [1]  # TTL 안에서는 1회만 실제 probe
 
     clock["t"] = 1031.0  # TTL 경과
     worker.kakao_status()
+    assert _wait_until(lambda: calls == [1, 1])
     assert calls == [1, 1]  # 다시 1회 probe
+
+
+def test_status_session_probe_unknown_result_is_not_cached():
+    values = [None, False]
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return values.pop(0)
+
+    worker = _worker(session_probe=probe)
+    worker.kakao_status()
+    assert _wait_until(lambda: calls == [1])
+    assert "interactive_session_available" not in worker.kakao_status()
+    assert _wait_until(lambda: calls == [1, 1])
+    assert _wait_until(
+        lambda: worker.kakao_status().get("interactive_session_available") is False
+    )
+
+
+def test_status_session_probe_cache_expires_when_clock_moves_backward():
+    values = [True, False]
+    clock = {"t": 1000.0}
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return values.pop(0)
+
+    worker = _worker(session_probe=probe, now=lambda: clock["t"])
+    worker.kakao_status()
+    assert _wait_until(
+        lambda: worker.kakao_status().get("interactive_session_available") is True
+    )
+
+    clock["t"] = 990.0
+    assert "interactive_session_available" not in worker.kakao_status()
+    assert _wait_until(lambda: calls == [1, 1])
+    assert _wait_until(
+        lambda: worker.kakao_status().get("interactive_session_available") is False
+    )
+
+
+def test_status_does_not_block_on_slow_session_probe():
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    result: dict[str, object] = {}
+
+    def slow_probe():
+        started.set()
+        release.wait(1.0)
+        return True
+
+    worker = _worker(session_probe=slow_probe)
+
+    def collect_status() -> None:
+        result["status"] = worker.kakao_status()
+        done.set()
+
+    thread = threading.Thread(target=collect_status)
+    thread.start()
+    assert started.wait(0.5)
+    assert done.wait(0.1)
+    release.set()
+    thread.join(1.0)
+
+    assert "interactive_session_available" not in result["status"]
 
 
 def test_status_session_probe_failure_is_swallowed():

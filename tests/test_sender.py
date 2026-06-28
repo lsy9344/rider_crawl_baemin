@@ -1002,6 +1002,12 @@ def test_kakao_login_available_false_when_only_login_or_chat_windows():
     assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
 
 
+def test_kakao_login_available_none_when_only_chat_windows_visible():
+    # 열린 채팅방만 보이면 로그인 여부를 단정하지 않는다. 이미 열린 방 전송은 가능할 수 있다.
+    windows = [_ProbeWindow("실적봇_의정부남부")]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is None
+
+
 def test_kakao_login_available_false_when_main_window_hidden():
     # 메인 창 제목이지만 visible 하지 않으면 로그인으로 보지 않는다.
     windows = [_ProbeWindow("카카오톡", visible=False)]

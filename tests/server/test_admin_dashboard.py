@@ -231,13 +231,13 @@ def test_agents_fragment_renders_kakao_worker_status() -> None:
     assert "KAKAO_FAILURE" in html
 
 
-def _kakao_agent_row(*, session_available) -> AgentRow:
+def _kakao_agent_row(*, session_available, online=True) -> AgentRow:
     return AgentRow(
         agent_id="a-kakao",
         name="agent-kakao",
         version="1.0.0",
         last_heartbeat_at=_NOW,
-        online=True,
+        online=online,
         current_job_type=None,
         capabilities=("KAKAO_SEND",),
         kakao_enabled=True,
@@ -264,6 +264,15 @@ def test_agents_fragment_keeps_enabled_green_when_session_ok_or_unknown() -> Non
         )
         assert "로그인 필요" not in html
         assert '<span class="sev-normal">enabled</span>' in html
+
+
+def test_agents_fragment_does_not_blame_kakao_login_when_agent_offline() -> None:
+    html = admin_routes.templates.env.get_template("_agents.html").render(
+        agents=[_kakao_agent_row(session_available=False, online=False)]
+    )
+
+    assert "offline" in html
+    assert "로그인 필요" not in html
 
 
 def test_agent_row_drops_unsafe_kakao_status_values() -> None:

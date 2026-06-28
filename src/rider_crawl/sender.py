@@ -864,6 +864,7 @@ def _has_kakao_class(window: object) -> bool:
 # 결과 메인 창은 ``EVA_Window_Dblclk`` title ``카카오톡`` 로 관측됨.
 #: 메인 연락처 창의 정확한 제목 — 채팅방/로그인 창과 구분하는 anchor.
 _KAKAO_MAIN_WINDOW_TITLES = ("카카오톡", "KakaoTalk")
+_KAKAO_LOGIN_WINDOW_TITLE_PARTS = ("로그인", "Login")
 
 
 def _is_kakao_main_contact_window(window: object) -> bool:
@@ -874,6 +875,11 @@ def _is_kakao_main_contact_window(window: object) -> bool:
     if not _window_class_name(window).startswith("EVA_Window"):
         return False
     return _window_title(window) in _KAKAO_MAIN_WINDOW_TITLES
+
+
+def _is_kakao_login_window(window: object) -> bool:
+    title = _window_title(window)
+    return bool(title) and any(part in title for part in _KAKAO_LOGIN_WINDOW_TITLE_PARTS)
 
 
 def _all_kakao_windows() -> list[object]:
@@ -932,8 +938,13 @@ def kakao_login_available(
         return None
     if any(_is_kakao_main_contact_window(window) for window in windows):
         return True
-    # KakaoTalk 창은 있는데 메인 연락처 창이 없다 = 로그인 창만 떠 있는 미로그인 상태.
-    return False
+    if any(_window_title(window) in _KAKAO_MAIN_WINDOW_TITLES for window in windows):
+        return False
+    if any(_is_kakao_login_window(window) for window in windows):
+        # KakaoTalk 로그인 창이 보이면 메인 연락처 창을 통한 전송 준비가 안 된 상태다.
+        return False
+    # 열린 채팅방만 보이는 경우는 로그인/전송 가능 여부를 단정하지 않는다.
+    return None
 
 
 def _is_visible(window: object) -> bool:

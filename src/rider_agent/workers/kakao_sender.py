@@ -225,6 +225,7 @@ class KakaoSenderWorker:
         #: probe 결과 캐시(값, 측정 시각) — heartbeat 마다 스캔하지 않게 TTL 캐시.
         self._session_cache: bool | None = None
         self._session_cache_at: float | None = None
+        self._session_probe_in_flight = False
         self._log = log
         self._capabilities = tuple(capabilities)
         self._submit_timeout = submit_timeout
@@ -285,24 +286,51 @@ class KakaoSenderWorker:
 
         - 비활성(``KAKAO_SEND`` 없음) 워커거나 probe 미주입이면 ``None``(신호 미수집).
         - probe 가 예외를 던지면 흡수하고 ``None``(heartbeat 를 절대 막지 않는다).
-        - 같은 결과를 TTL 동안 캐시해 heartbeat 마다 창 스캔하지 않는다.
+        - TTL 이 지났으면 백그라운드 probe 를 시작하고 현재 호출은 즉시 캐시만 반환한다.
         """
 
         if not self._enabled or self._session_probe is None:
             return None
         now = self._now()
+        with self._lock:
+            cached_value = self._valid_session_cache(now)
+            if cached_value is not None:
+                return cached_value
+            if self._session_probe_in_flight:
+                return None
+            self._session_probe_in_flight = True
+        thread = threading.Thread(
+            target=self._refresh_session_cache,
+            name="rider-agent-kakao-session-probe",
+            daemon=True,
+        )
+        thread.start()
+        return None
+
+    def _valid_session_cache(self, now: float) -> bool | None:
         cached_at = self._session_cache_at
-        if cached_at is not None and (now - cached_at) < self._session_probe_ttl:
+        if cached_at is None:
+            return None
+        age = now - cached_at
+        if 0 <= age < self._session_probe_ttl:
             return self._session_cache
+        return None
+
+    def _refresh_session_cache(self) -> None:
         try:
             value = self._session_probe()
         except Exception:  # noqa: BLE001 - probe 실패가 heartbeat/전송을 막으면 안 된다.
             value = None
         if not isinstance(value, bool):
             value = None
-        self._session_cache = value
-        self._session_cache_at = now
-        return value
+        with self._lock:
+            if value is None:
+                self._session_cache = None
+                self._session_cache_at = None
+            else:
+                self._session_cache = value
+                self._session_cache_at = self._now()
+            self._session_probe_in_flight = False
 
     # ── enqueue / 소비자 루프 ─────────────────────────────────────────────────
 
