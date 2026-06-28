@@ -2308,6 +2308,26 @@ def test_registered_settings_send_gate_ignores_global_and_window(monkeypatch) ->
     assert body.count("toggle-pill on") == 3
 
 
+def test_registered_settings_send_pill_agrees_with_manage_table() -> None:
+    # 회귀 가드: '관리' 화면 표(/admin/telegram-settings)의 '실제 메시지 보내기' 배지와
+    # '모니터링' 카드(/admin/registered-settings)의 전송 pill 은 같은 tenant.sending_enabled 을
+    # 본다 — 한 app/서비스에서 렌더해 두 표면이 어긋나지 않음을 못박는다. (어긋나면 보통 stale
+    # 배포: 한쪽만 옛 게이트 로직.) tenant ON 이면 두 표면 모두 ON, OFF 면 둘 다 전송 OFF.
+    client_on = _settings_app(sending_enabled=True)
+    table_on = client_on.get(f"/admin/telegram-settings?tenant={_TENANT}").text
+    card_on = client_on.get(f"/admin/registered-settings?tenant={_TENANT}").text
+    # 표: ON 배지. 카드: tg-a·tg-b 전송 ON(활성화 상태만 본다).
+    assert "ON" in table_on and "sev-normal" in table_on
+    assert card_on.count("toggle-pill on") == 3
+
+    client_off = _settings_app(sending_enabled=False)
+    table_off = client_off.get(f"/admin/telegram-settings?tenant={_TENANT}").text
+    card_off = client_off.get(f"/admin/registered-settings?tenant={_TENANT}").text
+    # 표: OFF 배지. 카드: 전송 ON 은 사라지고 수집 ON(tg-a)만 남는다.
+    assert "OFF" in table_off
+    assert card_off.count("toggle-pill on") == 1
+
+
 def test_registered_settings_empty_state() -> None:
     body = _settings_app(seed_entities=False, seed_health=False).get(
         f"/admin/registered-settings?tenant={_TENANT}"
