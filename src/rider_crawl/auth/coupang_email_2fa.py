@@ -49,6 +49,13 @@ _CODE_INPUT_SELECTORS = (
 _SUBMIT_TEXTS = ("인증 완료", "확인", "인증", "제출", "로그인", "submit", "verify")
 _CAPTCHA_SIGNALS = ("captcha", "보안문자", "자동입력 방지", "로봇이 아닙니다", "recaptcha")
 _PASSWORD_SIGNALS = ("비밀번호 입력",)
+_EMAIL_2FA_SCREEN_SIGNALS = (
+    "2단계 인증",
+    "이메일로 인증",
+    "휴대전화로 인증",
+    "인증코드 전송",
+    "인증번호 발송",
+)
 _USERNAME_LOGIN_SIGNALS = (
     "아이디",
     "username",
@@ -239,6 +246,8 @@ def _is_password_login_screen(text: str, page: Any | None = None) -> bool:
 
 
 def _is_primary_login_screen(text: str, page: Any | None = None) -> bool:
+    if _contains_any(text, _EMAIL_2FA_SCREEN_SIGNALS):
+        return False
     if _is_password_login_screen(text, page):
         return True
     if page is None:

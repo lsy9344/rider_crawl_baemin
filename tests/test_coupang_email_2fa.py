@@ -273,6 +273,25 @@ def test_recover_waits_long_enough_for_send_code_button_to_become_actionable(tmp
     assert page.filled == [("input[placeholder*='코드']", "135790")]
 
 
+def test_recover_does_not_treat_2fa_screen_with_visible_username_as_primary_login(tmp_path):
+    page = _FakePage(
+        html=(
+            "<html>2단계 인증 로그인 아이디 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다<input placeholder='인증코드'></html>"
+        ),
+        clickable=("이메일로 인증", "인증코드 전송", "인증 완료"),
+        input_selectors=("input[placeholder*='아이디']", "input[placeholder*='코드']"),
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch("135790"), now=_NOW
+    )
+
+    assert result is True
+    assert "인증코드 전송" in page.clicked_texts
+    assert page.filled == [("input[placeholder*='코드']", "135790")]
+
+
 def test_recover_logs_in_with_ui_credentials_before_email_2fa(tmp_path):
     config = replace(
         _config(tmp_path),
