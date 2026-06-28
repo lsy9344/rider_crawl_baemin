@@ -333,6 +333,8 @@ class DashboardService:
         overall = severity.overall_severity(
             freshness, severity.classify_failclosed(signals)
         )
+        if signals.kakao_misdelivery_risk and overall != severity.SEVERITY_STOPPED:
+            overall = severity.SEVERITY_CRITICAL
         return TargetRow(
             target_id=facts.target_id,
             tenant_id=facts.tenant_id,

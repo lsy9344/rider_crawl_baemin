@@ -11,7 +11,7 @@
   (1) **시간 경과**(:func:`classify_freshness`): 마지막 수집 성공 시각이 ``interval×2`` 초과면
       주의, ``interval×4`` 초과면 위험(ops-contract:26 "Over interval x 2 / over interval x 4").
   (2) **fail-closed 우선 신호**(:func:`classify_failclosed`): 인증 필요·기대 대상 검증 실패·
-      Kakao 오발송 위험은 자동 전송보다 **중지(STOPPED)** 를 우선한다.
+      자동 전송보다 **중지(STOPPED)** 를 우선한다.
 :func:`overall_severity` 가 둘을 병합하되 **fail-closed 가 시간 경과보다 우선**한다(AC3).
 """
 
@@ -69,7 +69,7 @@ _SEVERITY_RANK: dict[str, int] = {
     SEVERITY_STOPPED: _STOPPED_RANK,
     SEVERITY_AUTH_REQUIRED: _STOPPED_RANK,
     SEVERITY_TARGET_VALIDATION_FAILURE: _STOPPED_RANK,
-    SEVERITY_KAKAO_MISDELIVERY_RISK: _STOPPED_RANK,
+    SEVERITY_KAKAO_MISDELIVERY_RISK: SEVERITIES.index(SEVERITY_CRITICAL),
     SEVERITY_OPERATOR_STOPPED: _STOPPED_RANK,
 }
 
@@ -119,7 +119,10 @@ def classify_freshness(
 
 @dataclass(frozen=True)
 class FailClosedSignals:
-    """fail-closed 우선 신호 묶음(불변). 하나라도 True 면 자동 전송보다 중지를 우선한다(AC3)."""
+    """fail-closed 우선 신호 묶음(불변).
+
+    Kakao 실패는 전송 실패 위험으로 표시하지만, 인증/대상 검증처럼 운영 중지로 올리지는 않는다.
+    """
 
     auth_required: bool = False
     target_validation_failed: bool = False
@@ -130,7 +133,6 @@ class FailClosedSignals:
         return (
             self.auth_required
             or self.target_validation_failed
-            or self.kakao_misdelivery_risk
         )
 
 
@@ -151,7 +153,7 @@ def failclosed_signals_from(
       ``auth_sessions`` 인증대기(``auth_session_pending``).
     - **기대 대상 검증 실패**: ``auth_state == CENTER_MISMATCH`` /
       최신 ``error_code == TARGET_VALIDATION_FAILURE``.
-    - **Kakao 오발송 위험**: 최신 ``error_code == KAKAO_FAILURE``.
+    - **Kakao 전송 실패 위험**: 최신 ``error_code == KAKAO_FAILURE``.
 
     "어떤 enum 값이 중지를 뜻하는가"라는 정책 지식을 순수 함수 한곳에 모아 always-run 으로
     잠근다(타입별 동명 멤버 ``AUTH_REQUIRED`` 혼동 방지 — 여기선 **문자열 값**으로만 비교).
@@ -202,7 +204,8 @@ def failclosed_signals_from(
 def classify_failclosed(signals: FailClosedSignals) -> str | None:
     """fail-closed 신호가 하나라도 있으면 :data:`SEVERITY_STOPPED`(중지 우선), 없으면 ``None``.
 
-    AC3 권장 결정: 자동 전송보다 **중지를 우선**하므로 최고 등급 ``STOPPED`` 를 반환한다.
+    AC3 권장 결정: 인증/대상 검증은 자동 전송보다 **중지를 우선**하므로 최고 등급
+    ``STOPPED`` 를 반환한다. Kakao 실패는 전송 실패 위험이라 여기서는 중지로 분류하지 않는다.
     ``None`` 은 "fail-closed 신호 없음 → 시간 경과 심각도를 그대로 쓰라"는 뜻이다.
     """
 

@@ -59,7 +59,7 @@ _SEVERITY_LABELS: dict[str, str] = {
     SEVERITY_STOPPED: "중지",
     SEVERITY_AUTH_REQUIRED: "인증 필요",
     SEVERITY_TARGET_VALIDATION_FAILURE: "대상 검증 실패",
-    SEVERITY_KAKAO_MISDELIVERY_RISK: "카카오 오발송 위험",
+    SEVERITY_KAKAO_MISDELIVERY_RISK: "위험",
     SEVERITY_OPERATOR_STOPPED: "운영자 중지",
 }
 _SEVERITY_CLASSES: dict[str, str] = {
@@ -69,7 +69,7 @@ _SEVERITY_CLASSES: dict[str, str] = {
     SEVERITY_STOPPED: "sev-stopped",
     SEVERITY_AUTH_REQUIRED: "sev-stopped",
     SEVERITY_TARGET_VALIDATION_FAILURE: "sev-stopped",
-    SEVERITY_KAKAO_MISDELIVERY_RISK: "sev-stopped",
+    SEVERITY_KAKAO_MISDELIVERY_RISK: "sev-critical",
     SEVERITY_OPERATOR_STOPPED: "sev-stopped",
 }
 
@@ -353,7 +353,7 @@ def _display_severity(code: str, facts) -> str:
         getattr(facts, "kakao_delivery_enabled", False)
         and getattr(facts, "kakao_runtime_unavailable", False)
     ):
-        return SEVERITY_KAKAO_MISDELIVERY_RISK
+        return SEVERITY_CRITICAL
     signals = severity_policy.failclosed_signals_from(
         account_auth_state=facts.account_auth_state,
         lifecycle_state=facts.lifecycle_state,
@@ -367,7 +367,7 @@ def _display_severity(code: str, facts) -> str:
     if signals.target_validation_failed:
         return SEVERITY_TARGET_VALIDATION_FAILURE
     if signals.kakao_misdelivery_risk:
-        return SEVERITY_KAKAO_MISDELIVERY_RISK
+        return SEVERITY_CRITICAL
     return SEVERITY_OPERATOR_STOPPED
 
 

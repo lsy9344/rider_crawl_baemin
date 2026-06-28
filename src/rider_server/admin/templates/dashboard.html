@@ -147,7 +147,7 @@
     /* ── 대상 행(리스트): 데스크톱: 고정폭 트랙으로 행 간 정렬 일치 ──────── */
     .tlist { display: flex; flex-direction: column; }
     .trow { display: grid; align-items: center; column-gap: 1.15rem;
-      /* 심각도 배지 칸(4번째)은 nowrap 라벨 중 가장 긴 "카카오 오발송 위험"(9자)·"대상 검증 실패"
+      /* 심각도 배지 칸(4번째)은 nowrap 라벨 중 긴 "대상 검증 실패"
          까지 담아야 한다. 고정 5rem 이면 4자 넘는 라벨이 칸을 넘쳐 옆 사유 칸과 겹친다.
          상한(11rem)을 둬 짧은 라벨만 있을 때 칸이 과하게 넓어지거나 행이 가로로 넘치지 않게 한다. */
       grid-template-columns: 0.3rem minmax(12rem, 1.5fr) 5rem minmax(8.5rem, 11rem) minmax(11rem, 2fr) 11rem;
@@ -341,15 +341,17 @@
   {% set tg_total = targets | list | length %}
   {% set tg_normal = targets | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
   {% set tg_warning = targets | selectattr('severity', 'equalto', 'WARNING') | list | length %}
-  {% set tg_critical = targets | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
+  {% set tg_critical = (
+    targets | selectattr('severity', 'equalto', 'CRITICAL') | list | length
+  ) + (
+    targets | selectattr('severity', 'equalto', 'KAKAO_MISDELIVERY_RISK') | list | length
+  ) %}
   {% set tg_stopped = (
     targets | selectattr('severity', 'equalto', 'STOPPED') | list | length
   ) + (
     targets | selectattr('severity', 'equalto', 'AUTH_REQUIRED') | list | length
   ) + (
     targets | selectattr('severity', 'equalto', 'TARGET_VALIDATION_FAILURE') | list | length
-  ) + (
-    targets | selectattr('severity', 'equalto', 'KAKAO_MISDELIVERY_RISK') | list | length
   ) + (
     targets | selectattr('severity', 'equalto', 'OPERATOR_STOPPED') | list | length
   ) %}

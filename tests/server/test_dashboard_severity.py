@@ -17,6 +17,7 @@ import pytest
 from rider_server.admin import severity
 from rider_server.admin.severity import (
     SEVERITY_CRITICAL,
+    SEVERITY_KAKAO_MISDELIVERY_RISK,
     SEVERITY_NORMAL,
     SEVERITY_STOPPED,
     SEVERITY_WARNING,
@@ -143,11 +144,10 @@ def test_signals_kakao_misdelivery_risk_from_kakao_failure() -> None:
 
 def test_resolved_kakao_failure_after_center_fixed_labels_kakao_not_validation() -> None:
     # 회귀: 센터 검증을 통과(계정 auth_state ACTIVE)시킨 뒤 카카오 전송이 실패하면, 카드는
-    # 더 오래된 '대상 검증 실패'가 아니라 현재 실패인 '카카오 오발송 위험'으로 라벨링돼야 한다.
+    # 더 오래된 '대상 검증 실패'가 아니라 현재 실패인 일반 '위험'으로 라벨링돼야 한다.
     # latest_failure_code 가 KAKAO_FAILURE 로 올바르게 뽑히면(쿼리 fix) target_validation 은
-    # 꺼지고 kakao 만 켜진다 → _display_severity 가 kakao 라벨을 돌려준다.
+    # 꺼지고 kakao 만 켜진다 → _display_severity 가 위험 라벨을 돌려준다.
     from rider_server.admin.routes import _display_severity
-    from rider_server.admin.severity import SEVERITY_KAKAO_MISDELIVERY_RISK
     from rider_server.admin.dashboard_service import TargetHealthFacts
 
     s = failclosed_signals_from(
@@ -173,7 +173,7 @@ def test_resolved_kakao_failure_after_center_fixed_labels_kakao_not_validation()
         lifecycle_state="ACTIVE",
         last_failure_at=_NOW,
     )
-    assert _display_severity(SEVERITY_STOPPED, facts) == SEVERITY_KAKAO_MISDELIVERY_RISK
+    assert _display_severity(SEVERITY_STOPPED, facts) == SEVERITY_CRITICAL
 
 
 def test_signals_clean_has_no_signal() -> None:
@@ -263,7 +263,7 @@ def test_healthy_auth_states_set_is_locked() -> None:
 
 def test_classify_failclosed_returns_stopped_or_none() -> None:
     assert classify_failclosed(FailClosedSignals(auth_required=True)) == SEVERITY_STOPPED
-    assert classify_failclosed(FailClosedSignals(kakao_misdelivery_risk=True)) == SEVERITY_STOPPED
+    assert classify_failclosed(FailClosedSignals(kakao_misdelivery_risk=True)) is None
     assert classify_failclosed(FailClosedSignals()) is None
 
 
@@ -289,6 +289,10 @@ def test_stopped_outranks_critical() -> None:
     assert severity_rank(SEVERITY_STOPPED) > severity_rank(SEVERITY_CRITICAL)
     assert severity_rank(SEVERITY_CRITICAL) > severity_rank(SEVERITY_WARNING)
     assert severity_rank(SEVERITY_WARNING) > severity_rank(SEVERITY_NORMAL)
+
+
+def test_legacy_kakao_failure_code_ranks_as_critical() -> None:
+    assert severity_rank(SEVERITY_KAKAO_MISDELIVERY_RISK) == severity_rank(SEVERITY_CRITICAL)
 
 
 # ── AC1: agent online/offline 2분 경계 ────────────────────────────────────────
@@ -324,7 +328,7 @@ def test_severity_constants_are_plain_strings_not_enum() -> None:
     )
 
 
-# ── QA 보강: fail-closed 신호 3종 모두 STOPPED, 병합 passthrough/override 전수 ──────
+# ── QA 보강: fail-closed 중지 신호와 병합 passthrough/override 전수 ───────────────
 
 def test_classify_failclosed_stopped_for_target_validation_signal() -> None:
     # target_validation_failed 단독도 중지(STOPPED) — any_signal 경로(기존 테스트 누락분).

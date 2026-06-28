@@ -44,7 +44,6 @@ from rider_server.admin.dashboard_service import (
 from rider_server.admin.severity import (
     SEVERITY_AUTH_REQUIRED,
     SEVERITY_CRITICAL,
-    SEVERITY_KAKAO_MISDELIVERY_RISK,
     SEVERITY_NORMAL,
     SEVERITY_OPERATOR_STOPPED,
     SEVERITY_STOPPED,
@@ -1547,7 +1546,8 @@ def test_template_critical_without_failure_code_does_not_render_none_failcode() 
 
 def test_kakao_session_unavailable_target_overrides_stale_auth_failure() -> None:
     # 운영 재현: 쿠팡 수집은 최근 성공했고 예전 AUTH_REQUIRED failure_code 만 남았지만,
-    # 실제 장애는 카카오톡 미로그인이다. 대상 표시는 로그인 만료가 아니라 Kakao 오류여야 한다.
+    # 실제 장애는 카카오톡 미로그인이다. 대상 표시는 로그인 만료/오발송 위험이 아니라
+    # 전송 실패 위험이어야 한다.
     facts = TargetHealthFacts(
         target_id="t-kakao",
         tenant_id=_TENANT,
@@ -1570,11 +1570,14 @@ def test_kakao_session_unavailable_target_overrides_stale_auth_failure() -> None
         targets=[row], tenant_id=_TENANT
     )
 
-    assert row.severity == SEVERITY_KAKAO_MISDELIVERY_RISK
+    assert row.severity == SEVERITY_CRITICAL
     assert row.last_failure_code == "KAKAO_FAILURE"
+    assert 'data-severity="CRITICAL"' in html
+    assert 'data-severity-label="위험"' in html
     assert 'data-failcode="KAKAO_FAILURE"' in html
     assert 'data-reason="카카오톡 전송 오류"' in html
     assert "로그인 만료 · 인증 확인 필요" not in html
+    assert "카카오 오발송 위험" not in html
 
 
 def test_dashboard_drawer_is_hidden_until_open_and_has_context_result_region() -> None:

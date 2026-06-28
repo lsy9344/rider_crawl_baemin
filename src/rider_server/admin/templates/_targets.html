@@ -6,7 +6,11 @@
 {% set target_total = target_list | length %}
 {% set target_normal = target_list | selectattr('severity', 'equalto', 'NORMAL') | list | length %}
 {% set target_warning = target_list | selectattr('severity', 'equalto', 'WARNING') | list | length %}
-{% set target_critical = target_list | selectattr('severity', 'equalto', 'CRITICAL') | list | length %}
+{% set target_critical = (
+  target_list | selectattr('severity', 'equalto', 'CRITICAL') | list | length
+) + (
+  target_list | selectattr('severity', 'equalto', 'KAKAO_MISDELIVERY_RISK') | list | length
+) %}
 {% set target_auth_required = target_list | selectattr('severity', 'equalto', 'AUTH_REQUIRED') | list | length %}
 {% set target_action_required = target_total - target_normal - target_warning - target_critical %}
 <div class="tlist" id="tlist"
@@ -37,7 +41,7 @@
     {% set primary_action = 'activate' %}
     {% set primary_label = '활성화' %}
     {% set primary_style = '' %}
-  {% elif t.severity in ('WARNING', 'CRITICAL') %}
+  {% elif t.severity in ('WARNING', 'CRITICAL', 'KAKAO_MISDELIVERY_RISK') %}
     {% set primary_action = 'test-crawl' %}
     {% set primary_label = '지금 수집' %}
     {% set primary_style = 'primary' if t.severity == 'CRITICAL' else '' %}
@@ -138,8 +142,8 @@
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/activate?tenant={{ t.tenant_id | urlencode }}"
               hx-vals='{"confirm_action": "confirmed"}'
               hx-target="#target-result-{{ t.target_id }}" hx-confirm="대상 '{{ t.name }}'을(를) 활성화할까요?">활성화</button>
-      {%- elif t.severity in ('WARNING', 'CRITICAL') %}
-      <button type="button" class="btn{% if t.severity == 'CRITICAL' %} primary{% endif %}" onclick="event.stopPropagation()"
+  {%- elif t.severity in ('WARNING', 'CRITICAL', 'KAKAO_MISDELIVERY_RISK') %}
+      <button type="button" class="btn{% if t.severity in ('CRITICAL', 'KAKAO_MISDELIVERY_RISK') %} primary{% endif %}" onclick="event.stopPropagation()"
               hx-post="/admin/targets/{{ t.target_id | urlencode }}/test-crawl?tenant={{ t.tenant_id | urlencode }}"
               hx-vals='{"platform": "{{ t.platform }}", "confirm_action": "confirmed"}' hx-target="#target-result-{{ t.target_id }}">지금 수집</button>
       {%- endif %}
