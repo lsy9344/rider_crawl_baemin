@@ -157,6 +157,7 @@ def build_windows_chrome_command(config: AppConfig, *, chrome_path: str | Path |
         str(chrome_path or _find_windows_chrome_executable()),
         "--remote-debugging-address=127.0.0.1",
         f"--remote-debugging-port={port}",
+        "--start-minimized",
         f"--user-data-dir={_chrome_profile_dir(config)}",
         config.coupang_eats_url,
     ]

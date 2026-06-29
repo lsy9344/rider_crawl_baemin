@@ -23,6 +23,7 @@ def test_build_mac_chrome_command_uses_cdp_port_and_dedicated_profile(tmp_path):
     assert command[:4] == ["open", "-na", "Google Chrome", "--args"]
     assert "--remote-debugging-address=127.0.0.1" in command
     assert "--remote-debugging-port=9222" in command
+    assert "--start-minimized" not in command
     assert user_data_arg == f"--user-data-dir={(tmp_path / 'browser').resolve()}"
     assert Path(user_data_arg.removeprefix("--user-data-dir=")).is_absolute()
     assert command[-1] == DEFAULT_BAEMIN_ACHIEVEMENT_REPORT_URL
@@ -46,6 +47,7 @@ def test_build_windows_chrome_command_uses_cdp_port_profile_and_baemin_url(tmp_p
     assert command[0] == "chrome.exe"
     assert "--remote-debugging-address=127.0.0.1" in command
     assert "--remote-debugging-port=9222" in command
+    assert "--start-minimized" in command
     assert user_data_arg == f"--user-data-dir={(tmp_path / 'browser').resolve()}"
     assert command[-1] == config.coupang_eats_url
 
