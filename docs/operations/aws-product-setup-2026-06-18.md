@@ -88,7 +88,8 @@ Local source-of-truth note:
 - Before the next EC2 redeploy, create a clean commit/tag from the local workspace and deploy that artifact. Do not treat the remote dirty working tree as the canonical release source.
 - 2026-06-19 follow-up local change: Telegram delivery now needs the separate `telegram-dispatch` compose service (`python -m rider_server.dispatch`) in addition to `backend-api`, `scheduler`, and `queue-recovery`.
 - 2026-06-19 follow-up local change: legacy migration maps supported credential fields to SecretRef 핸들 only. Do not rely on legacy plaintext values being copied into new `PlatformAccount` mappings.
-- 2026-06-20 follow-up local change: platform account fields store SecretRef handle strings in PostgreSQL. Plaintext values must live in the configured secret store or agent-local resolver, not in `platform_accounts`.
+- 2026-06-20 follow-up local change: platform account fields accept either direct values or secret handle strings in PostgreSQL `platform_accounts` (option B). The agent resolves handle-prefixed values from the local store and uses direct values as-is. Treat the DB and backups as sensitive, and never re-display raw secrets in the Admin UI.
+- 2026-06-29 correction: earlier "SecretRef handle only" wording above does not match the current code. The Admin web app may store direct plaintext values; the UI shows credential fields as 설정됨/미설정 status only and never returns raw secrets.
 
 ## Product Code Changes Deployed
 
@@ -103,9 +104,9 @@ Deployed on 2026-06-18:
 
 These changes are present in the local workspace and must be included in the next clean commit/tag before redeploy:
 
-- Admin platform account form expects Coupang login ID, login password, verification email address, and email app password as SecretRef handle inputs.
-- Backend stores platform account `username`, `password`, `verification_email_address`, and `verification_email_app_password` as handle strings in PostgreSQL.
-- Admin HTML contains SecretRef guidance for platform account fields.
+- Admin platform account form accepts Coupang login ID, login password, verification email address, and email app password as direct values or secret handle strings (option B).
+- Backend stores platform account `username`, `password`, `verification_email_address`, and `verification_email_app_password` as the entered value (direct or handle) in PostgreSQL.
+- Admin HTML guides direct-value entry and warns that DB access/backups are sensitive; raw secrets are never re-displayed (status 설정됨/미설정 only).
 
 ## Terraform Checks
 
@@ -148,7 +149,7 @@ Secrets were checked without writing secret values into this document.
   - `RIDER_TELEGRAM_WEBHOOK_SECRET`: empty
 - User decision on 2026-06-18: do not use AWS Secrets Manager for Telegram app values. The user will enter Telegram values directly in the web app.
 - User decision on 2026-06-18: do not use AWS Secrets Manager for Coupang platform account values.
-- Current implementation note: the Admin web app expects SecretRef 핸들 for Coupang login ID, login password, verification email address, and email app password. PostgreSQL `platform_accounts` stores the handles; plaintext values belong in the configured secret store or agent-local resolver.
+- Current implementation note: the Admin web app accepts either direct values or secret handles for Coupang login ID, login password, verification email address, and email app password. PostgreSQL `platform_accounts` stores whichever was entered. The UI never re-displays raw secrets (설정됨/미설정 status only), so treat the DB and backups as sensitive.
 
 ## User Decisions Recorded
 
@@ -163,12 +164,12 @@ Recorded on 2026-06-18:
 3. Coupang platform account values:
    - The user will enter Coupang ID/PW/email app password directly in the web app.
    - Do not rely on AWS Secrets Manager for Coupang platform account values.
-   - Implementation note (aligns with "Secrets State" above): the Admin web app does not store
-     plaintext in `platform_accounts`. It writes SecretRef 핸들 to the DB columns and keeps the
-     plaintext in the configured secret store (or agent-local resolver). The agent resolves the
-     handle at crawl time.
+   - Implementation note (aligns with "Secrets State" above): the Admin web app may store direct
+     plaintext values in `platform_accounts`, or secret handle strings the agent resolves at crawl
+     time (option B). The UI never re-displays raw secrets — credential fields show 설정됨/미설정
+     status only, and new input replaces the stored value.
    - Plain meaning: the server can use the values without a separate AWS Secrets Manager setup,
-     but the secret store and DB backup/access must both be treated as sensitive.
+     but `platform_accounts` (and DB backup/access) must be treated as sensitive.
 4. Admin access:
    - No IP allowlist.
    - No external identity provider or reverse proxy auth for now.

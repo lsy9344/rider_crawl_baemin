@@ -213,6 +213,32 @@ class AdminEntityService:
 
         return await scoped_rule(self._repo, rule_id, tenant_id=tenant_id)
 
+    # ── edit-state 조회(현재값 로드 seam) — tenant scope 강제, 도메인 객체 반환 ─────────
+    # 라우트는 repo 가 아니라 이 read 만 호출한다. write 없음. 비밀값 마스킹은 라우트가 한다.
+    async def get_monitoring_target_for_edit(
+        self, target_id: str, *, tenant_id: str
+    ) -> MonitoringTarget:
+        return await self._scoped_target(target_id, tenant_id=tenant_id)
+
+    async def get_platform_account_for_edit(
+        self, account_id: str, *, tenant_id: str
+    ) -> PlatformAccount:
+        return await self._scoped_platform_account(account_id, tenant_id=tenant_id)
+
+    async def get_subscription_for_edit(
+        self, subscription_id: str, *, tenant_id: str
+    ) -> Subscription:
+        return await self._scoped_subscription(subscription_id, tenant_id=tenant_id)
+
+    async def get_tenant_for_edit(self, tenant_id: str) -> Tenant:
+        return await self._scoped_tenant(tenant_id)
+
+    async def get_delivery_rule_for_edit(
+        self, rule_id: str, *, tenant_id: str
+    ) -> DeliveryRule:
+        rule, _target = await self._scoped_rule(rule_id, tenant_id=tenant_id)
+        return rule
+
     # ══════════════════════════════════════════════════════════════════════
     # 고객 Tenant — create/update(루트, 생성 시 새 tenant_id 발급)
     # ══════════════════════════════════════════════════════════════════════

@@ -2296,3 +2296,511 @@ def test_route_list_delivery_rules_cross_tenant_not_exposed() -> None:
     assert resp.status_code == HTTPStatus.OK
     assert "dr-secret" not in resp.text  # 다른 tenant 규칙 id 미노출
     assert "항목이 없습니다" in resp.text
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-06-29 — 관리 탭 현재값 로드(edit-state): scoped read service + operator-only JSON
+# + 템플릿 hook + 비밀값 미노출 회귀. 비밀값은 설정됨/미설정 라벨만, 일반값은 그대로.
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── (service) edit-state scoped read — tenant scope 강제 ──────────────────────────────
+
+def test_get_monitoring_target_for_edit_is_tenant_scoped() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_monitoring_target(_target(tenant=_OTHER))
+    svc = _svc(repo)
+
+    with pytest.raises(AdminActionNotFound):
+        _run(svc.get_monitoring_target_for_edit("mt-1", tenant_id=_TENANT))
+
+
+def test_get_platform_account_for_edit_is_tenant_scoped() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_platform_account(_account(tenant=_OTHER))
+    svc = _svc(repo)
+
+    with pytest.raises(AdminActionNotFound):
+        _run(svc.get_platform_account_for_edit("pa-1", tenant_id=_TENANT))
+
+
+def test_get_subscription_for_edit_is_tenant_scoped() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_subscription(_subscription(tenant=_OTHER))
+    svc = _svc(repo)
+
+    with pytest.raises(AdminActionNotFound):
+        _run(svc.get_subscription_for_edit("sub-1", tenant_id=_TENANT))
+
+
+def test_get_delivery_rule_for_edit_is_tenant_scoped_through_target() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_monitoring_target(_target("mt-other", tenant=_OTHER))
+    repo.seed_delivery_rule(
+        DeliveryRule(id="rule-1", target_id="mt-other", channel_id="ch-1")
+    )
+    svc = _svc(repo)
+
+    with pytest.raises(AdminActionNotFound):
+        _run(svc.get_delivery_rule_for_edit("rule-1", tenant_id=_TENANT))
+
+
+def test_get_monitoring_target_for_edit_happy_path() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_monitoring_target(_target())
+    svc = _svc(repo)
+
+    target = _run(svc.get_monitoring_target_for_edit("mt-1", tenant_id=_TENANT))
+
+    assert target.id == "mt-1"
+    assert target.name == "가게"
+
+
+# ── (route) edit-state JSON — operator-only, tenant scope, 비밀값 미노출 ────────────────
+
+def test_monitoring_target_edit_state_returns_safe_current_values() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="mt-1",
+            tenant_id="tn-1",
+            platform_account_id="pa-1",
+            name="H&J",
+            center_name="제이앤에이치플러스 의정부남부",
+            external_id="store-77",
+            url="https://example.test/dashboard",
+            interval_minutes=2,
+            schedule_enabled=True,
+            start_time="09:00",
+            stop_time="22:00",
+            status=MonitoringTargetStatus.ACTIVE,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/monitoring-targets/mt-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {
+        "id": "mt-1",
+        "name": "H&J",
+        "center_name": "제이앤에이치플러스 의정부남부",
+        "external_id": "store-77",
+        "url": "https://example.test/dashboard",
+        "interval_minutes": 2,
+        "schedule_enabled": True,
+        "start_time": "09:00",
+        "stop_time": "22:00",
+        "status": "ACTIVE",
+    }
+
+
+def test_platform_account_edit_state_never_returns_raw_credentials() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(
+        PlatformAccount(
+            id="pa-1",
+            tenant_id="tn-1",
+            platform=Platform.BAEMIN,
+            label="쿠팡 운영 계정",
+            username="real-login-id",
+            password="plain-password",
+            verification_email_address="owner@example.test",
+            verification_email_app_password="mail-app-password",
+            verification_email_subject_keyword="인증번호",
+            verification_email_sender_keyword="coupang",
+            auth_state=BaeminAuthState.UNKNOWN,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/platform-accounts/pa-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    body = resp.text
+    assert "real-login-id" not in body
+    assert "plain-password" not in body
+    assert "owner@example.test" not in body
+    assert "mail-app-password" not in body
+    assert resp.json() == {
+        "id": "pa-1",
+        "platform": "BAEMIN",
+        "label": "쿠팡 운영 계정",
+        "username_label": "설정됨",
+        "password_label": "설정됨",
+        "verification_email_address_label": "설정됨",
+        "verification_email_app_password_label": "설정됨",
+        "verification_email_subject_keyword": "인증번호",
+        "verification_email_sender_keyword": "coupang",
+        "auth_state": "UNKNOWN",
+    }
+
+
+def test_platform_account_edit_state_unset_secrets_are_not_configured() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(
+        PlatformAccount(
+            id="pa-1",
+            tenant_id="tn-1",
+            platform=Platform.COUPANG,
+            label="빈 계정",
+            username="",
+            password="",
+            verification_email_address="",
+            verification_email_app_password="",
+            auth_state=BaeminAuthState.UNKNOWN,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    body = client.get("/admin/platform-accounts/pa-1/edit-state?tenant=tn-1").json()
+
+    assert body["username_label"] == "미설정"
+    assert body["password_label"] == "미설정"
+    assert body["verification_email_address_label"] == "미설정"
+    assert body["verification_email_app_password_label"] == "미설정"
+
+
+def test_customer_edit_state_returns_safe_telegram_labels() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(
+        Tenant(
+            id="tn-1",
+            name="H&J",
+            status=CustomerLifecycleState.PAYMENT_ACTIVE,
+            created_at=_NOW,
+            telegram_bot_token="secret-bot-token",
+            telegram_webhook_secret="",
+            sending_enabled=False,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/customers/tn-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "secret-bot-token" not in resp.text
+    assert resp.json() == {
+        "id": "tn-1",
+        "name": "H&J",
+        "status": "PAYMENT_ACTIVE",
+        "telegram_bot_token_label": "설정됨",
+        "telegram_webhook_secret_label": "미설정",
+        "sending_enabled": False,
+        "send_test_passed": False,
+    }
+
+
+def test_subscription_edit_state_returns_status() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_subscription(_subscription(status=SubscriptionStatus.PAYMENT_ACTIVE))
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/subscriptions/sub-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"id": "sub-1", "status": "PAYMENT_ACTIVE"}
+
+
+def test_delivery_rule_edit_state_returns_flags() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_monitoring_target(_target())
+    repo.seed_delivery_rule(
+        DeliveryRule(
+            id="rule-1", target_id="mt-1", channel_id="ch-1", send_only_on_change=True
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/delivery-rules/rule-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {
+        "id": "rule-1",
+        "enabled": True,
+        "send_only_on_change": True,
+    }
+
+
+def test_edit_state_routes_require_operator() -> None:
+    repo = _seeded_repo()
+    repo.seed_monitoring_target(_target())
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    resp = client.get("/admin/monitoring-targets/mt-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+
+
+def test_edit_state_routes_are_tenant_scoped() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_monitoring_target(_target(tenant=_OTHER))
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/monitoring-targets/mt-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.NOT_FOUND
+
+
+def test_platform_account_edit_state_redacts_all_secret_like_values() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(
+        PlatformAccount(
+            id="pa-1",
+            tenant_id="tn-1",
+            platform=Platform.COUPANG,
+            label="계정",
+            username="coupang-real-user",
+            password="coupang-real-password",
+            verification_email_address="mail-owner@example.test",
+            verification_email_app_password="real-mail-app-password",
+            auth_state=BaeminAuthState.UNKNOWN,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.get("/admin/platform-accounts/pa-1/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    text = resp.text
+    for forbidden in (
+        "coupang-real-user",
+        "coupang-real-password",
+        "mail-owner@example.test",
+        "real-mail-app-password",
+    ):
+        assert forbidden not in text
+    for expected in (
+        '"username_label":"설정됨"',
+        '"password_label":"설정됨"',
+        '"verification_email_address_label":"설정됨"',
+        '"verification_email_app_password_label":"설정됨"',
+    ):
+        assert expected in text
+
+
+def test_edit_state_does_not_leak_into_options_fragment() -> None:
+    # /options 는 viewer 도 접근 가능 — credential 상태/URL 같은 상세값을 싣지 않는다.
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(
+        PlatformAccount(
+            id="pa-1",
+            tenant_id="tn-1",
+            platform=Platform.COUPANG,
+            label="계정",
+            username="leak-user",
+            password="leak-pass",
+            auth_state=BaeminAuthState.UNKNOWN,
+        )
+    )
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    body = client.get("/admin/platform-accounts/options?tenant=tn-1").text
+
+    assert "leak-user" not in body
+    assert "leak-pass" not in body
+    assert "설정됨" not in body
+    assert "username_label" not in body
+
+
+# ── (template) 현재값 로드 hook + 비밀값 라벨 전용 + 실패 inline 표시 ────────────────────
+
+def _entity_admin_template() -> str:
+    return Path("src/rider_server/admin/templates/_entity_admin.html").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_entity_admin_has_current_value_load_hooks() -> None:
+    template = _entity_admin_template()
+
+    assert 'onchange="loadTargetEditState(this)"' in template
+    assert 'onchange="loadPlatformAccountEditState(this)"' in template
+    assert 'onchange="loadCustomerEditState(this)"' in template
+    assert 'onchange="loadSubscriptionEditState(this)"' in template
+    assert 'onchange="loadDeliveryRuleEditState(this)"' in template
+    assert "function fetchEditState(" in template
+    assert "/edit-state?tenant=" in template
+
+
+def test_entity_admin_secret_current_values_are_status_labels_only() -> None:
+    template = _entity_admin_template()
+
+    assert 'id="acc-current-username"' in template
+    assert 'id="acc-current-password"' in template
+    assert 'id="acc-current-email"' in template
+    assert 'id="acc-current-email-password"' in template
+    assert "username_label" in template
+    assert "password_label" in template
+    assert "verification_email_app_password_label" in template
+    assert "document.getElementById('acc-edit-password').value = data.password" not in template
+    assert "document.getElementById('acc-edit-email-password').value = data.verification_email_app_password" not in template
+
+
+def test_entity_admin_template_has_no_raw_secret_field_mapping() -> None:
+    template = _entity_admin_template()
+
+    for forbidden_snippet in (
+        ".value = data.username",
+        ".value = data.password",
+        ".value = data.verification_email_address",
+        ".value = data.verification_email_app_password",
+        "data-password",
+        "data-verification-email-app-password",
+    ):
+        assert forbidden_snippet not in template
+
+
+def test_entity_admin_channel_autofill_contract_stays_in_place() -> None:
+    template = _entity_admin_template()
+
+    assert 'onchange="populateChannelFields(this)"' in template
+    assert "function populateChannelFields(select)" in template
+    assert "option.dataset.chat" in template
+    assert "option.dataset.thread" in template
+    assert "option.dataset.kakao" in template
+
+
+def test_entity_admin_edit_state_failure_uses_inline_status() -> None:
+    template = _entity_admin_template()
+
+    assert "현재값 조회 실패 · 권한 또는 대상을 확인하세요" in template
+    assert "select.closest('.edit-row')" in template
+    assert "row.querySelector('.inline-action-status')" in template
+
+
+def test_entity_admin_keeps_partial_update_semantics() -> None:
+    template = _entity_admin_template()
+
+    # filledValues 는 여전히 편집 submit 에 쓰인다(비우면 유지). edit-state 로드는 이를 바꾸지 않는다.
+    assert "function filledValues" in template
+    assert "filledValues({" in template
+    assert "비운 칸은 기존 값을 유지합니다" in template
+    # 비밀값 재노출 안내가 명시돼 있다(설정 여부만 표시).
+    assert "설정 여부만 표시" in template
+
+
+# ── (review fix) 2026-06-29 검토 반영 ─────────────────────────────────────────────────
+
+def test_customer_edit_state_cross_tenant_query_is_not_found() -> None:
+    """Finding 2 — 고객 edit-state 도 활성 tenant(?tenant=) 와 path tenant 불일치를 404 로 막는다."""
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant(_OTHER))  # tn-2 만 존재
+    client = TestClient(_app_with(repo))
+
+    # path 는 tn-2 인데 활성 tenant 는 tn-1 → cross-tenant 조회로 404(존재 누설 방지).
+    resp = client.get("/admin/customers/tn-2/edit-state?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.NOT_FOUND
+    assert "고객" not in resp.text  # tn-2 의 고객명 등 상세를 노출하지 않는다
+
+
+def test_customer_edit_state_same_tenant_query_ok() -> None:
+    """Finding 2 — path tenant 와 활성 tenant 가 같으면 정상 조회된다(빈 ?tenant= 도 허용)."""
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())  # tn-1
+    client = TestClient(_app_with(repo))
+
+    same = client.get("/admin/customers/tn-1/edit-state?tenant=tn-1")
+    no_active = client.get("/admin/customers/tn-1/edit-state")
+
+    assert same.status_code == HTTPStatus.OK
+    assert same.json()["id"] == "tn-1"
+    assert no_active.status_code == HTTPStatus.OK
+    assert no_active.json()["id"] == "tn-1"
+
+
+def test_entity_admin_edit_state_has_stale_response_guard() -> None:
+    """Finding 1 — 모든 loader 가 요청-시점 id 가드(editStateStillCurrent)를 거쳐야 한다.
+
+    A→B 빠른 전환 시 늦게 온 A 응답이 B 폼에 적용되는 경쟁을 막는다. 가드는 (1)현재 선택 유지
+    (2)응답 id 일치 둘 다 확인한다. JS 단언이라 실제 브라우저 비동기까지 잡지는 못하므로 route
+    test 와 함께 둔다.
+    """
+    template = _entity_admin_template()
+
+    assert "function editStateStillCurrent(" in template
+    assert "select.value === requestedId" in template
+    assert "data.id === requestedId" in template
+    # 5개 loader 전부 가드를 호출한다.
+    assert template.count("if (!editStateStillCurrent(select, requestedId, data)) { return; }") >= 5
+    # requestedId 를 응답 전에 캡처한다(select.value 를 then 안에서 다시 읽지 않음).
+    assert "var requestedId = select.value;" in template
+
+
+def test_entity_admin_send_gate_customer_select_loads_state() -> None:
+    """Finding 3 — 실발송 게이트 고객 select 도 선택 시 현재값/게이트 상태를 갱신한다."""
+    template = _entity_admin_template()
+
+    assert 'onchange="loadSendGateCustomerState(this)"' in template
+    assert "function loadSendGateCustomerState(select)" in template
+    # 게이트 통과/ON 허용은 syncSendingGate 로 반영한다.
+    assert "syncSendingGate" in template
+
+
+def test_entity_admin_edit_state_load_gate_locks_save_until_loaded() -> None:
+    """Finding 1 보강 — 선택 직후 ~ 현재값 도착 전 창에서 이전 항목 값으로 저장되는 것을 막는다.
+
+    선택 즉시 입력칸 clear + loadedId 비움(저장 잠금), 응답 stale 가드 통과 후에만 loadedId 채워
+    저장 해제. syncEntityFormButtons 와 crudButton 양쪽에서 loadedId===value 를 강제(이중 방어).
+    """
+    template = _entity_admin_template()
+
+    # 핵심 헬퍼 존재.
+    assert "function beginEditStateLoad(" in template
+    assert "function markEditStateLoaded(" in template
+    assert "function editStateLoaded(" in template
+    assert "select.dataset.loadedId" in template
+
+    # 값 수정 저장 버튼 5종 + 게이트 저장이 data-needs-loaded 로 잠긴다.
+    for select_id in (
+        "tgt-edit-id",
+        "acc-edit-id",
+        "cust-edit-id",
+        "sub-edit-id",
+        "rule-edit-id",
+        "tg-edit-id",
+    ):
+        assert f'data-needs-loaded="{select_id}"' in template
+
+    # syncEntityFormButtons 가 로드 여부를 본다.
+    assert "button.dataset.needsLoaded" in template
+    assert "editStateLoaded(needsLoaded)" in template
+
+    # crudButton 최종 방어선도 동일 게이트를 건다.
+    assert "현재값을 불러오는 중입니다 · 잠시 후 다시 시도하세요" in template
+
+    # 계정 편집은 선택 즉시 비밀번호/앱 비밀번호 입력칸을 비운다(이전 계정 입력 누출 방지).
+    assert "'acc-edit-password'" in template
+    assert "'acc-edit-email-password'" in template
+
+    # 고객 전환 시 텔레그램 봇 토큰/보안키 입력칸도 비우고, 그 저장 버튼도 로드 게이트로 잠근다.
+    assert "'tg-edit-token'" in template
+    assert "'tg-edit-secret'" in template
+    cred_btn = template[
+        template.index("saveTelegramCredentials(this)") - 200 :
+        template.index("saveTelegramCredentials(this)")
+    ]
+    assert 'data-needs-loaded="tg-edit-id"' in cred_btn
+
+    # '현재값 불러옴' 성공 라벨은 stale 가드 통과 후(markEditStateLoaded)에만 표시한다.
+    assert "'현재값 불러옴'" in template
+    markmark = template.index("function markEditStateLoaded(")
+    assert "'현재값 불러옴'" in template[markmark : markmark + 400]
+
+
+def test_entity_admin_deactivate_buttons_not_load_gated() -> None:
+    """비활성화/복구/삭제는 id 만 필요하므로 현재값 로드 게이트를 걸지 않는다(잘못 잠그면 운영 불가)."""
+    template = _entity_admin_template()
+
+    # 비활성화/복구/삭제 onclick 라인에는 data-needs-loaded 가 붙지 않는다.
+    for suffix in ("/deactivate", "/reactivate", "/delete"):
+        for line in template.splitlines():
+            if f"crudButton(this, " in line and f"'{suffix}'" in line:
+                assert "data-needs-loaded" not in line

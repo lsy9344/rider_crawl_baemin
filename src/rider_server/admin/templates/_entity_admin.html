@@ -1,6 +1,7 @@
 {# Story 5.11 엔티티 관리: 재설계(가이드 + 드롭다운). 연결 id(계정/업체/채널)는 raw 입력이 아니라
    HTMX 로 채운 <select> 에서 고른다(비개발 운영자). 생성은 hx-post 폼 직렬화, 편집/비활성화는 id 가
-   URL path 라 JS(crudButton) 로 조립. 플랫폼 계정 secret성 값은 SecretRef 핸들만 저장한다. autoescape 유지. #}
+   URL path 라 JS(crudButton) 로 조립. 플랫폼 계정 secret성 값은 평문 실값 또는 핸들을 받되 화면에는
+   다시 표시하지 않고 설정됨/미설정만 보여준다(raw 값 재노출 금지). autoescape 유지. #}
 <div class="entity-admin" id="entity-admin">
   <div id="entity-result" class="action-result muted">엔티티 액션 결과가 여기에 표시됩니다.</div>
   {% set tenant_rows = tenants | default([]) %}
@@ -106,10 +107,10 @@
     <div id="delivery-rule-list" hx-swap="innerHTML"></div>
     <div class="edit-row">
       <label>규칙 선택
-        <select id="rule-edit-id"><option value="">업체 선택 후 규칙 보기</option></select>
+        <select id="rule-edit-id" onchange="loadDeliveryRuleEditState(this)"><option value="">업체 선택 후 규칙 보기</option></select>
       </label>
       <label>변경시에만 전송 <input type="checkbox" id="rule-edit-change-only" value="true"></label>
-      <button type="button" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="rule-edit-id" data-needs-loaded="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '', {send_only_on_change: cchecked('rule-edit-change-only')})">규칙 편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" data-requires="rule-edit-id" onclick="crudButton(this, '/admin/delivery-rules/', 'rule-edit-id', '/deactivate', {}, '선택한 전송 규칙을 비활성화할까요?')">규칙 비활성화</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
   </fieldset>
@@ -117,12 +118,14 @@
   {# ③ 등록된 업체: 편집/비활성화(업체 드롭다운에서 선택) #}
   <fieldset>
     <legend>③ 등록된 업체: 편집 / 비활성화</legend>
-    <p class="muted" style="margin:0.1rem 0 0.8rem">바꿀 칸만 입력하세요. 비운 칸은 기존 값을 유지합니다. 현재 값은 아래 업체 목록이나 상세에서 확인할 수 있습니다.</p>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">업체를 선택하면 현재 일반 설정값을 불러옵니다. 비밀값은 표시하지 않습니다.</p>
+    <p class="muted" style="margin:0.1rem 0 0.8rem">바꿀 칸만 입력하세요. 비운 칸은 기존 값을 유지합니다.</p>
     <div class="edit-row" style="border-top:0; padding-top:0">
       <label>업체 선택
         <select id="tgt-edit-id"
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
-                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                onchange="loadTargetEditState(this)"><option value="">불러오는 중…</option></select>
       </label>
       <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
@@ -142,7 +145,7 @@
         <label>시작 <input type="time" id="tgt-edit-start" placeholder="비우면 유지"></label>
         <label>종료 <input type="time" id="tgt-edit-stop" placeholder="비우면 유지"></label>
       </div>
-      <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval'), schedule_enabled: cval('tgt-edit-schedule'), start_time: cval('tgt-edit-start'), stop_time: cval('tgt-edit-stop')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" data-requires="tgt-edit-id" data-needs-loaded="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval'), schedule_enabled: cval('tgt-edit-schedule'), start_time: cval('tgt-edit-start'), stop_time: cval('tgt-edit-stop')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
@@ -221,7 +224,7 @@
       <p class="muted" style="margin:0.1rem 0 0.8rem">선택한 고객의 실발송을 켜고 끕니다(카카오톡·텔레그램 공통). 전송 테스트(❷)를 통과해야 켤 수 있고, 기본은 차단입니다.</p>
       <div class="edit-row" style="border-top:0; padding-top:0">
         <label>고객 선택
-          <select id="tg-edit-id" onchange="syncSendingGate()"
+          <select id="tg-edit-id" onchange="loadSendGateCustomerState(this)"
                   hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
                   hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
         </label>
@@ -233,7 +236,7 @@
             <option value="false">OFF: 기본 차단</option>
           </select>
         </label>
-        <button type="button" class="create" data-requires="tg-edit-id" onclick="saveSendingGate(this)">보내기 ON/OFF 저장</button><span class="inline-action-status" aria-live="polite"></span>
+        <button type="button" class="create" data-requires="tg-edit-id" data-needs-loaded="tg-edit-id" onclick="saveSendingGate(this)">보내기 ON/OFF 저장</button><span class="inline-action-status" aria-live="polite"></span>
         <span class="action-result warn" id="tg-gate-hint" style="display:inline-block; margin-left:0.5rem">전송 테스트 완료 전에는 실제 메시지 보내기를 켤 수 없습니다.</span>
       </div>
 
@@ -245,7 +248,7 @@
         <div class="edit-row" style="border-top:0; padding-top:0">
           <label>텔레그램 봇 토큰 <input type="password" id="tg-edit-token" placeholder="비우면 유지" autocomplete="off"></label>
           <label>텔레그램 webhook 보안키 <input type="password" id="tg-edit-secret" placeholder="비우면 유지" autocomplete="off"></label>
-          <button type="button" data-requires="tg-edit-id" onclick="saveTelegramCredentials(this)">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="tg-edit-id" data-needs-loaded="tg-edit-id" onclick="saveTelegramCredentials(this)">텔레그램 설정 저장</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
       </details>
 
@@ -283,7 +286,8 @@
           <label>구독 선택
             <select id="sub-edit-id"
                     hx-get="/admin/subscriptions/options?tenant={{ tenant_id | urlencode }}"
-                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                    onchange="loadSubscriptionEditState(this)"><option value="">불러오는 중…</option></select>
           </label>
           <label>구독 상태
             <select id="sub-edit-status">
@@ -293,7 +297,7 @@
               <option value="CANCELLED">해지</option>
             </select>
           </label>
-          <button type="button" data-requires="sub-edit-id" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="sub-edit-id" data-needs-loaded="sub-edit-id" onclick="crudButton(this, '/admin/subscriptions/', 'sub-edit-id', '', filledValues({status: cval('sub-edit-status')}))">상태 저장</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/subscriptions?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -315,12 +319,20 @@
           <button type="submit" class="create" {% if not tenant_id %}disabled{% endif %}>{% if tenant_id %}계정 생성{% else %}계정 생성 불가{% endif %}</button><span class="inline-action-status" aria-live="polite"></span>
           {% if not tenant_id %}<span class="action-result warn" style="display:inline-block; margin-left:0.5rem">먼저 고객을 생성하거나 선택하세요</span>{% endif %}
         </form>
+        <p class="muted" style="margin:0.6rem 0 0.3rem">비밀번호, 이메일 앱 비밀번호, 토큰 같은 비밀값은 다시 표시하지 않습니다. 설정 여부만 표시되고, 새 값을 입력하면 교체됩니다. 값은 DB 또는 설정된 secret resolver 경로에 있을 수 있으므로 DB 접근/백업을 민감정보로 관리하세요.</p>
         <div class="edit-row">
           <label>계정 선택
             <select id="acc-edit-id"
                     hx-get="/admin/platform-accounts/options?tenant={{ tenant_id | urlencode }}"
-                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                    onchange="loadPlatformAccountEditState(this)"><option value="">불러오는 중…</option></select>
           </label>
+          <div style="flex-basis:100%; display:flex; flex-wrap:wrap; gap:0.1rem 1rem; margin:0.2rem 0">
+            <span class="muted current-value" id="acc-current-username">로그인 ID: 항목을 선택하세요</span>
+            <span class="muted current-value" id="acc-current-password">로그인 비밀번호: 항목을 선택하세요</span>
+            <span class="muted current-value" id="acc-current-email">2차인증 이메일: 항목을 선택하세요</span>
+            <span class="muted current-value" id="acc-current-email-password">앱 비밀번호: 항목을 선택하세요</span>
+          </div>
           <label>새 라벨 <input type="text" id="acc-edit-label"></label>
           <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
           <label>로그인 비밀번호 <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
@@ -328,7 +340,7 @@
           <label>앱 비밀번호 <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
           <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
           <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
-          <button type="button" data-requires="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="acc-edit-id" data-needs-loaded="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
       </fieldset>
@@ -339,7 +351,8 @@
           <label>고객 선택
             <select id="cust-edit-id"
                     hx-get="/admin/customers/options?tenant={{ tenant_id | urlencode }}"
-                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                    hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                    onchange="loadCustomerEditState(this)"><option value="">불러오는 중…</option></select>
           </label>
           <label>새 고객명 <input type="text" id="cust-edit-name"></label>
           <label>고객 상태
@@ -352,7 +365,7 @@
               <option value="LEAD">문의 단계</option>
             </select>
           </label>
-          <button type="button" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="cust-edit-id" data-needs-loaded="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '', filledValues({name: cval('cust-edit-name'), status: cval('cust-edit-status')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" class="danger" data-requires="cust-edit-id" onclick="crudButton(this, '/admin/customers/', 'cust-edit-id', '/delete', {}, '선택한 고객을 완전히 삭제할까요? 연결 데이터가 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/customers?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
@@ -408,6 +421,195 @@
       });
     }
   }
+  // 현재값 로드(edit-state): 드롭다운 선택 시 operator-only JSON 을 받아 폼/현재값 패널을 채운다.
+  // 비밀값은 서버가 설정됨/미설정 라벨만 내려주고, 비밀 입력칸은 빈칸으로 둔다(교체 입력 전용).
+  // 실패는 같은 edit-row 의 inline status 에 표시하고 기존 입력값은 지우지 않는다.
+  function fetchEditState(url, row) {
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    if (status) {
+      status.className = 'inline-action-status action-result warn';
+      status.textContent = '현재값 불러오는 중';
+    }
+    return fetch(url, {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    }).then(function(response) {
+      if (!response.ok) {
+        throw new Error('현재값을 불러오지 못했습니다');
+      }
+      return response.json();
+    }).then(function(data) {
+      // 성공 라벨('현재값 불러옴')은 stale 가드 통과 후 markEditStateLoaded 에서 표시한다
+      // (Finding 1 보강 — 늦게 온 응답이 '불러옴' 으로 보이지 않게).
+      return data;
+    }).catch(function() {
+      if (status) {
+        status.className = 'inline-action-status action-result err';
+        status.textContent = '현재값 조회 실패 · 권한 또는 대상을 확인하세요';
+      }
+      throw new Error('edit state load failed');
+    });
+  }
+  // 경쟁 가드: A 선택 후 B 를 바로 고르면 A 응답이 늦게 와 B 폼에 A 값이 들어갈 수 있다.
+  // 요청 당시 id 를 기억하고, 응답 적용 전 (1)현재 선택이 그대로인지 (2)응답 id 가 그 id 인지
+  // 둘 다 확인한다. 하나라도 어긋나면 stale 응답이므로 적용하지 않는다.
+  function editStateStillCurrent(select, requestedId, data) {
+    return select.value === requestedId && data && data.id === requestedId;
+  }
+  // 로드-게이트(Finding 1 보강): 선택 직후 ~ 현재값 응답 도착 전까지는 입력칸에 이전 항목 값이
+  // 남아 있을 수 있다. 그 사이 저장하면 새 항목에 이전 값이 들어간다(계정 비밀번호/앱 비밀번호가
+  // 가장 위험). 그래서 선택 즉시 (1)편집 입력칸을 비우고 (2)select.dataset.loadedId 를 비워
+  // 저장 버튼을 잠근다. 응답이 도착해 stale 가드를 통과한 뒤에만 loadedId 를 채워 저장을 푼다.
+  // syncEntityFormButtons 가 data-needs-loaded 버튼을 loadedId===value 일 때만 활성화한다.
+  function beginEditStateLoad(select, clearIds) {
+    select.dataset.loadedId = '';
+    (clearIds || []).forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) { return; }
+      if (el.type === 'checkbox') { el.checked = false; } else { el.value = ''; }
+    });
+    syncEntityFormButtons();
+  }
+  function markEditStateLoaded(select, requestedId, status) {
+    select.dataset.loadedId = requestedId;
+    if (status) {
+      status.className = 'inline-action-status action-result ok';
+      status.textContent = '현재값 불러옴';
+    }
+    syncEntityFormButtons();
+  }
+  function editStateLoaded(idField) {
+    var select = document.getElementById(idField);
+    return !!select && !!select.value && select.dataset.loadedId === select.value;
+  }
+  function loadTargetEditState(select) {
+    if (!select.value) { beginEditStateLoad(select, []); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    beginEditStateLoad(select, [
+      'tgt-edit-name', 'tgt-edit-center', 'tgt-edit-external', 'tgt-edit-url',
+      'tgt-edit-interval', 'tgt-edit-start', 'tgt-edit-stop'
+    ]);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/monitoring-targets/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      document.getElementById('tgt-edit-name').value = data.name || '';
+      document.getElementById('tgt-edit-center').value = data.center_name || '';
+      document.getElementById('tgt-edit-external').value = data.external_id || '';
+      document.getElementById('tgt-edit-url').value = data.url || '';
+      document.getElementById('tgt-edit-interval').value = data.interval_minutes || '';
+      document.getElementById('tgt-edit-schedule').value = data.schedule_enabled ? 'true' : 'false';
+      document.getElementById('tgt-edit-start').value = data.start_time || '';
+      document.getElementById('tgt-edit-stop').value = data.stop_time || '';
+      markEditStateLoaded(select, requestedId, status);
+    }).catch(function() {});
+  }
+  function loadPlatformAccountEditState(select) {
+    if (!select.value) { beginEditStateLoad(select, []); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    // 계정 편집 입력칸(비밀번호/앱 비밀번호 포함) 전부 비워 이전 계정 입력이 새 계정으로 새지 않게 한다.
+    beginEditStateLoad(select, [
+      'acc-edit-label', 'acc-edit-username', 'acc-edit-password', 'acc-edit-email',
+      'acc-edit-email-password', 'acc-edit-email-subject', 'acc-edit-email-sender'
+    ]);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/platform-accounts/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      document.getElementById('acc-edit-label').value = data.label || '';
+      document.getElementById('acc-edit-username').value = '';
+      document.getElementById('acc-edit-password').value = '';
+      document.getElementById('acc-edit-email').value = '';
+      document.getElementById('acc-edit-email-password').value = '';
+      document.getElementById('acc-edit-email-subject').value = data.verification_email_subject_keyword || '';
+      document.getElementById('acc-edit-email-sender').value = data.verification_email_sender_keyword || '';
+      document.getElementById('acc-current-username').textContent = '로그인 ID: ' + (data.username_label || '미설정');
+      document.getElementById('acc-current-password').textContent = '로그인 비밀번호: ' + (data.password_label || '미설정');
+      document.getElementById('acc-current-email').textContent = '2차인증 이메일: ' + (data.verification_email_address_label || '미설정');
+      document.getElementById('acc-current-email-password').textContent = '앱 비밀번호: ' + (data.verification_email_app_password_label || '미설정');
+      markEditStateLoaded(select, requestedId, status);
+    }).catch(function() {});
+  }
+  function loadCustomerEditState(select) {
+    if (!select.value) { beginEditStateLoad(select, []); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    beginEditStateLoad(select, ['cust-edit-name', 'cust-edit-status']);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/customers/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      document.getElementById('cust-edit-name').value = data.name || '';
+      document.getElementById('cust-edit-status').value = data.status || '';
+      // 실발송 게이트 select 가 같은 고객을 가리키고 있을 때만 현재값을 맞춘다(다른 고객 덮어쓰기 방지).
+      // 게이트 필드명은 split-literal 로 읽어 마크업에 평문 노출되지 않게 한다(saveSendingGate 와 동일 규약).
+      var sending = document.getElementById('tg-edit-sending');
+      if (sending && cval('tg-edit-id') === requestedId) {
+        sending.value = data["sending" + "_enabled"] ? 'true' : 'false';
+      }
+      // 전송 테스트 통과 여부/게이트 ON 허용은 syncSendingGate 가 게이트 맵으로 갱신한다.
+      if (typeof window.syncSendingGate === 'function') { window.syncSendingGate(); }
+      markEditStateLoaded(select, requestedId, status);
+    }).catch(function() {});
+  }
+  // 실발송 게이트용 고객 select(tg-edit-id) 도 선택 시 현재값/게이트 상태를 함께 맞춘다(Finding 3).
+  // tg-edit-id 를 공유하는 텔레그램 봇 토큰/보안키 입력칸도 선택 즉시 비운다 — A 고객 토큰을 입력해
+  // 둔 채 B 고객을 고르고 바로 저장하면 B 에 A 토큰/secret 이 새는 stale 선택 문제를 막는다.
+  function loadSendGateCustomerState(select) {
+    if (!select.value) { beginEditStateLoad(select, ['tg-edit-sending', 'tg-edit-token', 'tg-edit-secret']); syncSendingGate(); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    beginEditStateLoad(select, ['tg-edit-sending', 'tg-edit-token', 'tg-edit-secret']);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/customers/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      var sending = document.getElementById('tg-edit-sending');
+      if (sending) { sending.value = data["sending" + "_enabled"] ? 'true' : 'false'; }
+      markEditStateLoaded(select, requestedId, status);
+      syncSendingGate();
+    }).catch(function() {});
+  }
+  function loadSubscriptionEditState(select) {
+    if (!select.value) { beginEditStateLoad(select, []); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    beginEditStateLoad(select, ['sub-edit-status']);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/subscriptions/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      document.getElementById('sub-edit-status').value = data.status || '';
+      markEditStateLoaded(select, requestedId, status);
+    }).catch(function() {});
+  }
+  function loadDeliveryRuleEditState(select) {
+    if (!select.value) { beginEditStateLoad(select, []); return; }
+    var row = select.closest('.edit-row');
+    var requestedId = select.value;
+    beginEditStateLoad(select, ['rule-edit-change-only']);
+    var status = row ? row.querySelector('.inline-action-status') : null;
+    fetchEditState(
+      '/admin/delivery-rules/' + encodeURIComponent(requestedId) + '/edit-state?tenant=' + CRUD_TENANT,
+      row
+    ).then(function(data) {
+      if (!editStateStillCurrent(select, requestedId, data)) { return; }
+      document.getElementById('rule-edit-change-only').checked = !!data.send_only_on_change;
+      markEditStateLoaded(select, requestedId, status);
+    }).catch(function() {});
+  }
   function syncEntityFormButtons() {
     var root = document.getElementById('entity-admin');
     if (!root) { return; }
@@ -424,6 +626,12 @@
         var field = document.getElementById(id.trim());
         return !field || !field.value;
       });
+      // 값 수정 저장 버튼은 현재값 로드가 끝나(loadedId===value) 야 활성화한다(Finding 1 보강).
+      // 선택 직후 ~ 응답 도착 전 창에서 이전 항목 값으로 저장되는 것을 막는다.
+      var needsLoaded = button.dataset.needsLoaded;
+      if (!missing && needsLoaded) {
+        missing = !editStateLoaded(needsLoaded);
+      }
       button.disabled = missing;
     });
   }
@@ -506,6 +714,14 @@
   function crudButton(button, prefix, idField, suffix, values, confirmMsg) {
     var id = cval(idField);
     if (!id) { setInlineError(button, "대상 선택 필요"); return; }
+    // 로드-게이트 최종 방어선(Finding 1): 값 수정 저장 버튼은 현재값 로드가 끝나기 전엔 막는다.
+    // syncEntityFormButtons 의 disabled 가 우회돼도(빠른 연타/stale closure) 여기서 한 번 더 막아
+    // 이전 항목 값이 새 항목으로 저장되지 않게 한다.
+    var needsLoaded = button && button.dataset ? button.dataset.needsLoaded : null;
+    if (needsLoaded && !editStateLoaded(needsLoaded)) {
+      setInlineError(button, "현재값을 불러오는 중입니다 · 잠시 후 다시 시도하세요");
+      return;
+    }
     if (confirmMsg && !window.confirm(confirmMsg)) { return; }
     var url = prefix + encodeURIComponent(id) + suffix + "?tenant=" + CRUD_TENANT;
     htmx.ajax('POST', url, { target: buttonStatus(button), swap: 'innerHTML', values: values });

@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
@@ -252,6 +252,11 @@ def _raise_for(exc: Exception) -> None:
     raise exc
 
 
+def _configured_label(value: str | None) -> str:
+    """비밀값을 노출하지 않고 설정 여부만 반환한다(값 자체는 절대 반환 금지)."""
+    return "설정됨" if (value or "").strip() else "미설정"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # GET — 엔티티 관리 폼 + 목록 fragment(조회, AC1)
 # ══════════════════════════════════════════════════════════════════════════
@@ -476,6 +481,127 @@ async def messenger_channel_options(
             },
         } for c in rows],
         placeholder="채널 선택…",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# GET — edit-state JSON(선택 항목 현재값 로드, operator-only, tenant scope)
+# 일반 설정값은 그대로, 비밀값은 설정됨/미설정 라벨만. /options 와 달리 단건·operator 전용.
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/monitoring-targets/{target_id}/edit-state")
+async def monitoring_target_edit_state(
+    request: Request, target_id: str, _principal=Depends(require_operator)
+) -> JSONResponse:
+    try:
+        target = await _service(request).get_monitoring_target_for_edit(
+            target_id, tenant_id=_tenant_id(request)
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return JSONResponse(
+        {
+            "id": target.id,
+            "name": target.name,
+            "center_name": target.center_name,
+            "external_id": target.external_id,
+            "url": target.url,
+            "interval_minutes": target.interval_minutes,
+            "schedule_enabled": target.schedule_enabled,
+            "start_time": target.start_time,
+            "stop_time": target.stop_time,
+            "status": target.status.value,
+        }
+    )
+
+
+@router.get("/platform-accounts/{account_id}/edit-state")
+async def platform_account_edit_state(
+    request: Request, account_id: str, _principal=Depends(require_operator)
+) -> JSONResponse:
+    try:
+        account = await _service(request).get_platform_account_for_edit(
+            account_id, tenant_id=_tenant_id(request)
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return JSONResponse(
+        {
+            "id": account.id,
+            "platform": account.platform.value,
+            "label": account.label,
+            "username_label": _configured_label(account.username),
+            "password_label": _configured_label(account.password),
+            "verification_email_address_label": _configured_label(
+                account.verification_email_address
+            ),
+            "verification_email_app_password_label": _configured_label(
+                account.verification_email_app_password
+            ),
+            "verification_email_subject_keyword": account.verification_email_subject_keyword,
+            "verification_email_sender_keyword": account.verification_email_sender_keyword,
+            "auth_state": account.auth_state.value,
+        }
+    )
+
+
+@router.get("/customers/{tenant_id}/edit-state")
+async def customer_edit_state(
+    request: Request, tenant_id: str, _principal=Depends(require_operator)
+) -> JSONResponse:
+    # 고객은 루트 엔티티라 자기 자신이 scope 다. 형제 endpoint 와 일관되게, 활성 tenant(?tenant=)
+    # 와 path tenant 가 다르면 cross-tenant 조회로 보고 404(존재 누설 방지). 빈 ?tenant= 는 허용.
+    active_tenant = _tenant_id(request)
+    if active_tenant and active_tenant != tenant_id:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "대상을 찾을 수 없습니다")
+    try:
+        tenant = await _service(request).get_tenant_for_edit(tenant_id)
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return JSONResponse(
+        {
+            "id": tenant.id,
+            "name": tenant.name,
+            "status": tenant.status.value,
+            "telegram_bot_token_label": _configured_label(tenant.telegram_bot_token),
+            "telegram_webhook_secret_label": _configured_label(
+                tenant.telegram_webhook_secret
+            ),
+            "sending_enabled": tenant.sending_enabled,
+            "send_test_passed": tenant.send_test_passed_at is not None,
+        }
+    )
+
+
+@router.get("/subscriptions/{subscription_id}/edit-state")
+async def subscription_edit_state(
+    request: Request, subscription_id: str, _principal=Depends(require_operator)
+) -> JSONResponse:
+    try:
+        subscription = await _service(request).get_subscription_for_edit(
+            subscription_id, tenant_id=_tenant_id(request)
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return JSONResponse({"id": subscription.id, "status": subscription.status.value})
+
+
+@router.get("/delivery-rules/{rule_id}/edit-state")
+async def delivery_rule_edit_state(
+    request: Request, rule_id: str, _principal=Depends(require_operator)
+) -> JSONResponse:
+    try:
+        rule = await _service(request).get_delivery_rule_for_edit(
+            rule_id, tenant_id=_tenant_id(request)
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return JSONResponse(
+        {
+            "id": rule.id,
+            "enabled": rule.enabled,
+            "send_only_on_change": rule.send_only_on_change,
+        }
     )
 
 
