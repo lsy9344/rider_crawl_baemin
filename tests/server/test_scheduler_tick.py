@@ -326,7 +326,7 @@ def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
         "expected_display_name": "센터-t-payload",
         "external_id": "DP100",
         "browser_profile_ref": "profile:t-payload",
-        "timeout_seconds": 60,
+        "timeout_seconds": 90,
         "parser_version": "baemin-v1",
         "job_type": JOB_TYPE_CRAWL_BAEMIN,
         "job_origin": "scheduler",
@@ -425,7 +425,7 @@ def test_scheduler_short_interval_crawl_payload_waits_at_least_five_minutes_in_q
     job = backend.job_snapshot(result.outcomes[0].job_id)
     assert job is not None
     payload = job.payload_json
-    assert payload["timeout_seconds"] == 60
+    assert payload["timeout_seconds"] == 90
     assert payload["expires_at"] == "2026-06-14T12:05:00Z"
 
 
@@ -450,7 +450,7 @@ def test_scheduler_coupang_incomplete_2fa_config_uses_default_crawl_timeout() ->
     assert job is not None
     payload = job.payload_json
     assert payload["job_type"] == JOB_TYPE_CRAWL_COUPANG
-    assert payload["timeout_seconds"] == 60
+    assert payload["timeout_seconds"] == 90
     assert payload["coupang_auto_email_2fa_enabled"] is False
 
 

@@ -571,7 +571,7 @@ def _crawl_job_payload(
     timeout_seconds = (
         COUPANG_INLINE_2FA_CRAWL_TIMEOUT_SECONDS
         if coupang_auto_2fa_complete
-        else 60
+        else 90
     )
     expires_in_seconds = max(
         max(0, interval_seconds),

@@ -304,6 +304,7 @@ def _test_crawl_payload(
 ) -> dict[str, object]:
     platform = _platform_for_crawl_job(job_type)
     payload = _target_job_payload(target, job_type=job_type, platform=platform)
+    payload["timeout_seconds"] = 90
     # 쿠팡 crawl 은 로그인/이메일 2FA ref 가 있어야 세션 만료 시 inline 자동복구가 동작한다.
     # scheduled crawl(_crawl_job_payload)은 이 ref 들을 싣는데 수동 test-crawl 은 빠져 있어,
     # '지금 수집(재검증)'이 자격증명 없이 돌다 브라우저도 못 띄우고 빠르게 실패·재시도했다.

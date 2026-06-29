@@ -423,7 +423,7 @@ def test_test_crawl_enqueues_single_job() -> None:
         "primary_url": "https://example.invalid/mt-1",
         "expected_display_name": "센터",
         "browser_profile_ref": "profile:mt-1",
-        "timeout_seconds": 60,
+        "timeout_seconds": 90,
         "parser_version": "baemin-v1",
         "job_type": "CRAWL_BAEMIN",
     }
