@@ -119,7 +119,7 @@ def test_ci_postgres_gate_uses_linux_service_and_pr_path_filter() -> None:
     workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 
     assert "changes:" in workflow
-    assert "dorny/paths-filter@v3" in workflow
+    assert "dorny/paths-filter@v4" in workflow
     assert "postgres-tests:" in workflow
     assert "runs-on: ubuntu-latest" in workflow
     assert "postgres:16" in workflow
