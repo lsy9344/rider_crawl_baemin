@@ -2303,9 +2303,12 @@ def test_registered_settings_send_gate_ignores_global_and_window(monkeypatch) ->
     ).text
 
     assert "강남점" in body
-    # tenant 발송 ON 이므로 두 대상 모두 전송 ON(활성화 상태만 본다 — tg-b 의 disabled 규칙·창 밖
-    # 여부는 무관). 전송 ON 2개(tg-a·tg-b) + 수집 ON 1개(tg-a ACTIVE, tg-b 는 PAUSED) = ON pill 3개.
-    assert body.count("toggle-pill on") == 3
+    # 고객 전송 열은 tenant.sending_enabled 만 본다(전역/창 무관) → tg-a·tg-b 둘 다 고객 전송 ON.
+    # ON pill 집계: 수집 ON 1(tg-a) + 고객 전송 ON 2(tg-a·tg-b) + 대상 연결 ON 1(tg-a, 활성 규칙 있음).
+    # tg-b 는 활성 규칙 0건이라 대상 연결이 '연결 필요'(warn)라 ON pill 에 안 잡힌다 = 총 4개.
+    assert body.count("toggle-pill on") == 4
+    # tg-b: 고객 전송 ON 이나 활성 규칙 0건 → '연결 필요' 표시(전역/창 게이트와 무관).
+    assert "연결 필요" in body
 
 
 def test_registered_settings_send_pill_agrees_with_manage_table() -> None:
@@ -2316,9 +2319,10 @@ def test_registered_settings_send_pill_agrees_with_manage_table() -> None:
     client_on = _settings_app(sending_enabled=True)
     table_on = client_on.get(f"/admin/telegram-settings?tenant={_TENANT}").text
     card_on = client_on.get(f"/admin/registered-settings?tenant={_TENANT}").text
-    # 표: ON 배지. 카드: tg-a·tg-b 전송 ON(활성화 상태만 본다).
+    # 표: ON 배지. 카드: tg-a·tg-b 고객 전송 ON(활성화 상태만 본다).
+    # ON pill 4개 = 수집 ON 1(tg-a) + 고객 전송 ON 2(tg-a·tg-b) + 대상 연결 ON 1(tg-a, 활성 규칙 있음).
     assert "ON" in table_on and "sev-normal" in table_on
-    assert card_on.count("toggle-pill on") == 3
+    assert card_on.count("toggle-pill on") == 4
 
     client_off = _settings_app(sending_enabled=False)
     table_off = client_off.get(f"/admin/telegram-settings?tenant={_TENANT}").text
@@ -2366,4 +2370,143 @@ def test_registered_settings_messenger_label_filter() -> None:
     assert admin_routes._messenger_label("telegram") == "텔레그램"  # 대소문자 무관
     assert admin_routes._messenger_label("UNKNOWN") == "UNKNOWN"  # 미지 코드 그대로
     assert admin_routes._messenger_label(None) == ""
+
+
+# ── 전송 readiness: 고객 전송 토글 ON 과 대상별 채널 연결 완료를 분리 표시 ────────────────
+# 근거: '팀100 남양주동부' 처럼 고객 전송 ON + 활성 DeliveryRule 0건이면 "전송 ON 인데 메신저 —"
+# 로 보여 운영자가 헷갈렸다. 이제 '대상 연결' 열이 '연결 필요'(warn)로 그 구멍을 짚어준다.
+
+async def _readiness_rows(
+    *,
+    sending_enabled: bool,
+    with_active_rule: bool,
+    channel_state: MessengerChannelState = MessengerChannelState.ACTIVE,
+):
+    """단일 대상·단일 채널 tenant 의 SettingsRow 를 조립한다(템플릿 우회, 파생값 단위 검증).
+
+    channel_state 로 채널 상태를 바꿔 readiness 가 실 dispatch 게이트(ACTIVE 채널만 전송)와
+    일치하는지 검증한다(PENDING/INACTIVE 채널 연결은 '연결 필요'여야 한다).
+    """
+    from rider_server.services.admin_entity_service import AdminEntityService
+
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="팀100",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+            sending_enabled=sending_enabled,
+        )
+    )
+    entity_repo.seed_platform_account(
+        PlatformAccount(id="acc-c", tenant_id=_TENANT, platform=Platform.COUPANG, label="쿠팡계정")
+    )
+    entity_repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="tg-x",
+            tenant_id=_TENANT,
+            platform_account_id="acc-c",
+            name="남양주동부",
+            center_name="남양주센터",
+            interval_minutes=5,
+            schedule_enabled=False,
+            status=MonitoringTargetStatus.ACTIVE,
+        )
+    )
+    entity_repo.seed_messenger_channel(
+        MessengerChannel(
+            id="ch-k",
+            tenant_id=_TENANT,
+            messenger=Messenger.KAKAO,
+            kakao_room_name="누나",
+            state=channel_state,
+        )
+    )
+    if with_active_rule:
+        entity_repo.seed_delivery_rule(
+            DeliveryRule(id="r-x", target_id="tg-x", channel_id="ch-k", enabled=True)
+        )
+
+    service = AdminEntityService(entity_repo)
+    tenant = (await service.list_tenants())[0]
+
+    class _Req:  # _settings_rows_for_tenant 가 request 에서 dashboard repo(_repo)만 본다.
+        class app:
+            class state:
+                dashboard_repository = InMemoryDashboardRepository()
+
+    rows = await admin_routes._settings_rows_for_tenant(
+        _Req(), service, tenant=tenant, now=_NOW
+    )
+    return rows[0]
+
+
+def test_readiness_send_on_no_rule_is_connect_needed() -> None:
+    # 고객 전송 ON + 활성 규칙 0건 → '연결 필요'(delivery_ready=False). 팀100 재현.
+    import asyncio
+
+    row = asyncio.run(_readiness_rows(sending_enabled=True, with_active_rule=False))
+    assert row.customer_sending_enabled is True
+    assert row.has_active_delivery_rule is False
+    assert row.delivery_ready is False
+    assert row.delivery_status_label == "연결 필요"
+    assert row.messengers == ()
+
+
+def test_readiness_send_on_with_rule_is_on() -> None:
+    import asyncio
+
+    row = asyncio.run(_readiness_rows(sending_enabled=True, with_active_rule=True))
+    assert row.has_active_delivery_rule is True
+    assert row.delivery_ready is True
+    assert row.delivery_status_label == "ON"
+    assert row.messengers == ("KAKAO",)
+
+
+def test_readiness_send_off_with_rule_is_off() -> None:
+    # 고객 전송 OFF 면 활성 규칙이 있어도 '대상 연결'은 OFF(fail-closed, 고객 토글이 상위 게이트).
+    import asyncio
+
+    row = asyncio.run(_readiness_rows(sending_enabled=False, with_active_rule=True))
+    assert row.customer_sending_enabled is False
+    assert row.delivery_ready is False
+    assert row.delivery_status_label == "OFF"
+
+
+def test_readiness_rule_to_inactive_channel_is_connect_needed() -> None:
+    # 회귀(리뷰 finding): 활성 규칙이라도 채널이 INACTIVE/PENDING 이면 실 dispatch 가 안 보낸다
+    # (snapshot_repository: channel.state == ACTIVE). readiness 도 같은 기준 — '연결 필요'·메신저 — 여야
+    # 한다. 안 그러면 "대상 연결 ON·메신저 KAKAO 인데 실제 미전송" 오해가 생긴다.
+    import asyncio
+
+    for state in (MessengerChannelState.INACTIVE, MessengerChannelState.PENDING):
+        row = asyncio.run(
+            _readiness_rows(
+                sending_enabled=True, with_active_rule=True, channel_state=state
+            )
+        )
+        assert row.has_active_delivery_rule is False, state
+        assert row.delivery_ready is False, state
+        assert row.delivery_status_label == "연결 필요", state
+        assert row.messengers == (), state
+
+
+def test_registered_settings_renders_connect_needed_and_no_rule_note() -> None:
+    # 템플릿: 고객 전송 ON + 활성 규칙 0건이면 '연결 필요' badge 와 메신저 칸 '전송 규칙 없음' 이 뜬다.
+    # 기본 _settings_app 의 tg-b 가 정확히 이 상태(고객 전송 ON, 활성 규칙 0건, 메신저 —)다.
+    body = _settings_app().get(f"/admin/registered-settings?tenant={_TENANT}").text
+    assert "연결 필요" in body
+    assert "전송 규칙 없음" in body
+    # 활성 규칙이 있는 tg-a 는 기존처럼 메신저 라벨이 그대로 보인다(회귀 가드).
+    assert "텔레그램" in body and "카카오" in body
+
+
+def test_registered_settings_all_tenants_shows_customer_and_readiness() -> None:
+    # 전체 고객 뷰에서도 고객명과 readiness('연결 필요')가 함께 보인다.
+    body = _settings_app(seed_second_tenant=True).get(
+        "/admin/registered-settings?tenant=all"
+    ).text
+    assert "고객: 고객B" in body
+    assert "연결 필요" in body  # tn-1 tg-b 가 활성 규칙 0건
 

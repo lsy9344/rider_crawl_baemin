@@ -5,7 +5,7 @@
      id="tenant-telegram-state"
      data-send-test-gate='[{% for row in rows %}{% if not loop.first %},{% endif %}{"id":{{ row.id | tojson }},"passed":{{ row.send_test_passed | tojson }},"sending":{{ row.sending_enabled | tojson }}}{% endfor %}]'>
 <table>
-  <caption class="muted">고객별 텔레그램 설정 ({{ rows | length }}건)</caption>
+  <caption class="muted">고객별 텔레그램 설정 ({{ rows | length }}건) · 전송 테스트 통과는 채널 동작 확인일 뿐, 대상 연결(전송 규칙)은 별도입니다</caption>
   <thead>
     <tr><th>고객명</th><th>봇 토큰</th><th>텔레그램 webhook 보안키</th><th>전송 테스트</th><th>실제 메시지 보내기</th></tr>
   </thead>

@@ -76,20 +76,32 @@
   {# ② 전송 연결: 업체→채널(둘 다 드롭다운, 1:N fan-out) #}
   <fieldset>
     <legend>② 전송 연결 (업체 → 채널)</legend>
-    <p class="muted" style="margin:0.1rem 0 0.8rem">한 업체를 여러 채널에 연결할 수 있습니다(1:N). 채널/방명은 라우팅 식별자(secret 아님).</p>
+    <p class="muted" style="margin:0.1rem 0 0.4rem">한 업체를 여러 채널에 연결할 수 있습니다(1:N). 채널/방명은 라우팅 식별자(secret 아님).</p>
+    {# 채널 생성·전송 테스트와 '대상 연결'은 다른 단계임을 짚는다 — 이 단계가 빠지면 등록된 설정에서
+       '전송 ON 인데 메신저 —'(대상 연결 필요)로 보인다(작업지시서 §5.4/§5.5). #}
+    <p class="action-result warn" style="margin:0.1rem 0 0.8rem">채널 생성·전송 테스트만으로는 전송되지 않습니다. 아래에서 <b>대상 ↔ 채널</b>을 연결해야 등록된 설정의 메신저 칸이 채워집니다.</p>
     <p class="inline-cta"><a href="#entity-channel-form">채널 생성</a></p>
+    {# 대상 1개 + 활성 채널 1개면 빠른 연결 CTA. JS(maybeOfferQuickConnect)가 두 select 옵션이 각각
+       1건일 때 자동 선택 후 이 영역을 노출한다. 자동 생성이 아니라 운영자가 명시적으로 누른다(§5.4). #}
+    <div id="quick-connect" class="action-result warn" style="display:none; margin:0.1rem 0 0.8rem">
+      대상과 채널이 각각 1건입니다. 바로 연결할 수 있습니다.
+      <button type="button" class="create" onclick="quickConnect(this)">이 대상에 채널 연결</button>
+      <span class="inline-action-status" aria-live="polite"></span>
+    </div>
     <form hx-post="/admin/delivery-rules?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
       <label>업체
-        <select name="target_id"
+        <select id="rule-create-target" name="target_id"
                 required
                 hx-get="/admin/monitoring-targets/options?tenant={{ tenant_id | urlencode }}"
-                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                onchange="maybeOfferQuickConnect()"><option value="">불러오는 중…</option></select>
       </label>
       <label>전송 채널
-        <select name="channel_id"
+        <select id="rule-create-channel" name="channel_id"
                 required
                 hx-get="/admin/messenger-channels/options?tenant={{ tenant_id | urlencode }}"
-                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"><option value="">불러오는 중…</option></select>
+                hx-trigger="load, admin-entity-changed from:body" hx-target="this" hx-swap="innerHTML"
+                onchange="maybeOfferQuickConnect()"><option value="">불러오는 중…</option></select>
       </label>
       <input type="hidden" name="template_id" value="">
       <label>변경시에만 전송 <input type="checkbox" name="send_only_on_change" value="true"></label>
@@ -599,6 +611,47 @@
     }
   };
   document.addEventListener('DOMContentLoaded', function () { window.syncSendingGate(); });
+  // 조건(predicate)을 통과하는 value-있는 옵션이 정확히 1개면 그 값을 돌려준다(없으면 "").
+  function _soleOptionValue(select, predicate) {
+    if (!select) { return ""; }
+    var vals = Array.prototype.filter.call(select.options, function (o) {
+      return o.value && (!predicate || predicate(o));
+    });
+    return vals.length === 1 ? vals[0].value : "";
+  }
+  // 대상 1개 + 활성(ACTIVE) 채널 1개면 자동 선택 후 빠른 연결 CTA 를 노출한다(자동 생성 아님 — 운영자가
+  // 누름). 채널은 data-state="ACTIVE" 만 센다 — 실 dispatch 가 ACTIVE 채널만 보내므로 그래야 '대상 연결
+  // 완료'(작업지시서)와 의미가 맞는다(PENDING/INACTIVE 채널뿐이면 CTA 안 띄움).
+  window.maybeOfferQuickConnect = function () {
+    var target = document.getElementById('rule-create-target');
+    var channel = document.getElementById('rule-create-channel');
+    var box = document.getElementById('quick-connect');
+    if (!target || !channel || !box) { return; }
+    var soleTarget = _soleOptionValue(target);
+    var soleChannel = _soleOptionValue(channel, function (o) { return o.getAttribute('data-state') === 'ACTIVE'; });
+    if (soleTarget && !target.value) { target.value = soleTarget; }
+    if (soleChannel && !channel.value) { channel.value = soleChannel; }
+    box.style.display = (target.value && channel.value && soleTarget && soleChannel) ? "block" : "none";
+    syncEntityFormButtons();
+  };
+  // 빠른 연결: 선택된 대상·채널로 기존 POST /admin/delivery-rules 재사용(같은 게이트/검증/HX-Trigger).
+  function quickConnect(button) {
+    var target = cval('rule-create-target');
+    var channel = cval('rule-create-channel');
+    if (!target || !channel) { setInlineError(button, "대상·채널 선택 필요"); return; }
+    var status = buttonStatus(button);
+    status.className = "inline-action-status action-result warn";
+    status.textContent = "연결 중…";
+    htmx.ajax('POST', '/admin/delivery-rules?tenant=' + CRUD_TENANT, {
+      target: status, swap: 'innerHTML',
+      values: { target_id: target, channel_id: channel }
+    });
+  }
+  // 옵션 fragment 가 swap 되면(대상/채널 select) 빠른 연결 가능 여부를 다시 본다.
+  document.body.addEventListener('htmx:afterSwap', function (event) {
+    var id = event.target && event.target.id;
+    if (id === 'rule-create-target' || id === 'rule-create-channel') { window.maybeOfferQuickConnect(); }
+  });
   function loadDeliveryRules(button) {
     var target = cval('rule-list-target');
     if (!target) { setInlineError(button, "업체 선택 필요"); return; }
