@@ -107,6 +107,7 @@ _REASON_TEXT: dict[str, str] = {
     "PROFILE_UNAVAILABLE": "브라우저 프로필 준비 실패 — Agent/Chrome 확인 필요",
     "CDP_UNREACHABLE": "브라우저 연결 실패 — Agent/Chrome 확인 필요",
     "CRAWL_TIMEOUT": "수집 작업이 제한 시간 안에 완료되지 않음 — Agent/Chrome/페이지 로딩 확인(로그인 실패 아님)",
+    "STALE_CRAWL_SKIPPED": "수집 대기 시간이 지나 이번 회차를 건너뜀 — Agent 처리량/큐 대기 확인",
     "PARSER_MISSING_DATA": "수집 데이터 누락 — 확인 필요",
     "RENDER_FAILURE": "메시지 생성 실패",
     "TELEGRAM_FAILURE": "텔레그램 전송 오류",

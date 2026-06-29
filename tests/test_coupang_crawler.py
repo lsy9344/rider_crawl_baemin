@@ -833,6 +833,33 @@ def test_coupang_fetch_target_page_content_reports_vendor_portal_login_structure
         crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
 
 
+def test_coupang_fetch_target_page_content_reports_xauth_login_form_without_vendor_text(tmp_path):
+    config = _config(tmp_path)
+    browser = _FakeBrowser(
+        [
+            _FakePage(
+                config.coupang_eats_url,
+                html="""
+                <html>
+                  <body>
+                    <form action="/auth/realms/eats-partner/login-actions/authenticate">
+                      <input name="username" autocomplete="username">
+                      <input name="password" type="password">
+                      <input name="credentialId">
+                      <button type="submit">로그인</button>
+                    </form>
+                  </body>
+                </html>
+                """,
+                wait_error=FakeTimeout("locator timeout"),
+            )
+        ]
+    )
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(browser, config, load_timeout_errors=(FakeTimeout,))
+
+
 def test_coupang_login_detection_does_not_match_plain_login_word_only():
     page = _FakePage(
         "https://partner.coupangeats.com/page/rider-performance",
@@ -1214,6 +1241,247 @@ def test_coupang_login_drift_stops_when_auto_2fa_disabled(tmp_path):
     assert recover_calls == []
 
 
+# 세션이 만료됐는데 화면이 로그인으로 분류되지 않아 readiness(앵커 텍스트)는 통과하고 peak
+# 파싱만 실패하는 창을 재현하는 HTML. 앵커("피크타임별 현황")는 있지만 parse_peak_dashboard_text
+# 가 요구하는 "업데이트"/배정·처리 물량/거절률/목표·완료 쌍이 없고, 로그인 만료 신호가 있다.
+_PEAK_MISSING_DATA_LOGIN_HTML = (
+    "<html><body><h2>피크타임별 현황</h2>"
+    "세션이 만료되었습니다. 다시 로그인하세요.</body></html>"
+)
+# 데이터는 비었지만 로그인 신호는 없는 화면(영업외/물량 0 같은 정상 인증 상태). 이 경우엔
+# 자동복구를 하면 안 된다(OTP 낭비). 앵커만 있고 나머지 필수 필드가 없다.
+_PEAK_MISSING_DATA_AUTHED_HTML = (
+    "<html><body><h2>피크타임별 현황</h2>아직 집계된 실적이 없습니다.</body></html>"
+)
+
+
+class _MissingDataPeakPage:
+    """readiness 는 통과하지만 첫 content 는 데이터 누락인 peak 페이지.
+
+    ``login_looking`` 이면 누락 화면이 로그인 만료로 보인다(자동복구 게이트 통과). 첫
+    ``content()`` 는 누락 HTML, ``mark_recovered()`` + 재오픈(goto/reload) 뒤에는 정상 peak
+    HTML 을 준다. ``wait_for`` 는 항상 통과한다(앵커 텍스트가 늘 있으므로) — 로그인-만료
+    readiness 경로가 아니라 "ready 통과 + 파싱 실패" 창만 재현한다.
+    """
+
+    def __init__(self, url: str, *, login_looking: bool, ready_html: str) -> None:
+        self.url = url
+        self._login_looking = login_looking
+        self._ready_html = ready_html
+        self._recovered = False
+        self.reopened = False
+        self.required_texts: list[str] = []
+
+    def mark_recovered(self) -> None:
+        self._recovered = True
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def goto(self, _url, **_kwargs):
+        self.reopened = True
+        return None
+
+    def reload(self, **_kwargs):
+        self.reopened = True
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        # 앵커 텍스트는 누락 화면에도 있으므로 readiness 는 항상 통과한다.
+        return None
+
+    def evaluate(self, _script):
+        return []
+
+    def content(self) -> str:
+        if self._recovered and self.reopened:
+            return self._ready_html
+        return (
+            _PEAK_MISSING_DATA_LOGIN_HTML
+            if self._login_looking
+            else _PEAK_MISSING_DATA_AUTHED_HTML
+        )
+
+
+def test_coupang_missing_data_on_login_page_recovers_when_auto_2fa_enabled(tmp_path):
+    # 세션 만료로 데이터 누락 + 화면이 로그인으로 보임 + 자동 2FA 켜짐 → 같은 턴 1회 복구 후
+    # 재파싱 성공. 복구는 정확히 1회.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=True,
+        ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    def _recover(received_page, _config):
+        recover_calls.append(received_page)
+        received_page.mark_recovered()
+        return True
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=_recover,
+        post_load_validate=crawler.parse_peak_dashboard_html,
+    )
+
+    assert recover_calls == [page]
+    assert page.reopened is True
+    assert html == _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+
+def test_coupang_missing_data_on_login_page_escalates_to_auth_required_when_recovery_fails(tmp_path):
+    # 데이터 누락 + 로그인으로 보임 + 복구 실패 → MissingPerformanceDataError 가 아니라
+    # BrowserActionRequiredError 로 올려 워커가 AUTH_REQUIRED 로 표면화하게 한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=True,
+        ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=lambda _page, _config: False,
+            post_load_validate=crawler.parse_peak_dashboard_html,
+        )
+
+
+def test_coupang_missing_data_on_authed_page_does_not_recover_or_escalate(tmp_path):
+    # 데이터는 비었지만 화면이 로그인으로 보이지 않음(정상 인증, 영업외 등) → 복구하지 않고
+    # (OTP 낭비 금지) MissingPerformanceDataError 를 그대로 전파한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=False,
+        ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    with pytest.raises(crawler.MissingPerformanceDataError):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=lambda p, _c: recover_calls.append(p) or True,
+            post_load_validate=crawler.parse_peak_dashboard_html,
+        )
+
+    assert recover_calls == []
+
+
+def test_coupang_missing_data_recovery_disabled_propagates_missing_data(tmp_path):
+    # post_load_validate 가 None(자동 2FA off)이면 검증 자체를 안 한다 → content 를 그대로
+    # 반환하고 회복도 호출하지 않는다(기능 off = 무변화). 누락 판정은 상위 파서가 한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=False)
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=True,
+        ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=lambda p, _c: recover_calls.append(p) or True,
+        post_load_validate=None,
+    )
+
+    assert recover_calls == []
+    assert html == _PEAK_MISSING_DATA_LOGIN_HTML
+
+
+def test_coupang_recovery_runs_at_most_once_across_login_and_missing_data(tmp_path):
+    # readiness 단계에서 먼저 로그인 만료로 복구가 1회 일어난 뒤에도 재파싱이 여전히 누락+
+    # 로그인으로 보이면, 두 번째 복구를 하지 않고(더블 OTP 금지) BrowserActionRequiredError
+    # 로 포기한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    page = _ReadyThenMissingDataPage(config.peak_dashboard_url)
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    def _recover(received_page, _config):
+        recover_calls.append(received_page)
+        received_page.mark_recovered()
+        return True
+
+    with pytest.raises(BrowserActionRequiredError, match="다시 로그인"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            target_url=config.peak_dashboard_url,
+            load_timeout_errors=(FakeTimeout,),
+            recover_session=_recover,
+            post_load_validate=crawler.parse_peak_dashboard_html,
+        )
+
+    assert len(recover_calls) == 1
+
+
+def test_coupang_missing_data_recovery_uses_mailbox_run_lock(tmp_path, monkeypatch):
+    # missing-data 복구도 readiness 복구와 동일하게 메일박스 RunLock 으로 직렬화한다.
+    config = replace(
+        _config(tmp_path, coupang_auto_email_2fa_enabled=True),
+        verification_email_mailbox_lock_id="vault://mail/address",
+    )
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=True,
+        ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+    events: list[str] = []
+
+    class FakeRunLock:
+        def __init__(self, path, *, stale_timeout_seconds):
+            assert stale_timeout_seconds == config.run_lock_timeout_seconds
+
+        def __enter__(self):
+            events.append("lock-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
+    def _recover(received_page, _config):
+        events.append("recover")
+        received_page.mark_recovered()
+        return True
+
+    monkeypatch.setattr(crawler, "RunLock", FakeRunLock)
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=_recover,
+        post_load_validate=crawler.parse_peak_dashboard_html,
+    )
+
+    assert events == ["lock-enter", "recover", "lock-exit"]
+    assert html == _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+
 def _config(
     tmp_path,
     *,
@@ -1450,6 +1718,53 @@ class _SessionRestoredLoginDriftPage:
         if self.url == self._target_url:
             return self._ready_html
         return "<html><body>세션이 만료되었습니다. 다시 로그인하세요.</body></html>"
+
+
+class _ReadyThenMissingDataPage:
+    """readiness 가 먼저 로그인 만료로 1회 복구되지만, 복구 후에도 content 는 여전히 데이터
+    누락+로그인으로 보이는 페이지(거짓 복구 시나리오).
+
+    readiness 복구 경로(BrowserActionRequiredError)와 missing-data 검증 경로가 한 fetch 안에서
+    둘 다 fire 하는 상황을 만든다 — 복구는 최대 1회여야 하고, 두 번째 누락은 재복구 없이
+    BrowserActionRequiredError 로 포기해야 한다(더블 OTP 방지).
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self._recovered = False
+        self.reopened = False
+        self.required_texts: list[str] = []
+
+    def mark_recovered(self) -> None:
+        self._recovered = True
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def goto(self, _url, **_kwargs):
+        self.reopened = True
+        return None
+
+    def reload(self, **_kwargs):
+        self.reopened = True
+        return None
+
+    def get_by_text(self, text: str):
+        self.required_texts.append(text)
+        return self
+
+    def wait_for(self, **_kwargs):
+        # 복구+재오픈 전에는 readiness 가 로그인 만료로 실패(타임아웃)한다.
+        if self._recovered and self.reopened:
+            return None
+        raise FakeTimeout("locator timeout")
+
+    def evaluate(self, _script):
+        return []
+
+    def content(self) -> str:
+        # 복구해도 데이터가 채워지지 않는다(거짓 복구) — 늘 누락+로그인으로 보인다.
+        return _PEAK_MISSING_DATA_LOGIN_HTML
 
 
 class _FakeTabLocator:

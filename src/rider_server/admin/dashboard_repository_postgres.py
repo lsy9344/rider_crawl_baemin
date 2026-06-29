@@ -55,6 +55,7 @@ from rider_server.queue.states import (
     JOB_STATUS_RUNNING,
     JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_KAKAO_SEND,
+    RESULT_REASON_STALE_CRAWL_SKIPPED,
 )
 
 from .dashboard_service import (
@@ -113,6 +114,9 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 #: 유효한 CDP 디버깅 포트 범위(0/음수/65535 초과/non-int 는 화면용 row 에서 버린다).
 _CDP_PORT_MIN = 1
 _CDP_PORT_MAX = 65535
+
+#: 화면 표시 전용 코드 — DB error_code 는 CRAWL_TIMEOUT 그대로 보존한다.
+_DISPLAY_CODE_STALE_CRAWL_SKIPPED = "STALE_CRAWL_SKIPPED"
 
 
 def _optional_cdp_port(value: object) -> int | None:
@@ -483,14 +487,16 @@ class PostgresDashboardRepository(DashboardRepository):
             recovery_state, recovery_reason = _coupang_recovery_detail_from_result_json(
                 result_json
             )
-            _set_latest(
-                latest,
-                str(target_id),
-                error_code,
-                ts,
-                auth_recovery_state=recovery_state,
-                auth_recovery_reason=recovery_reason,
-            )
+            display_code = _display_failure_code(error_code, result_json)
+            if display_code is not None:
+                _set_latest(
+                    latest,
+                    str(target_id),
+                    display_code,
+                    ts,
+                    auth_recovery_state=recovery_state,
+                    auth_recovery_reason=recovery_reason,
+                )
         for target_id, error_code, ts in (await session.execute(delivery_stmt)).all():
             _set_latest(latest, str(target_id), error_code, ts)
         return dict(latest)
@@ -937,7 +943,7 @@ class PostgresDashboardRepository(DashboardRepository):
                         run_after=row.run_after,
                         claimed_at=row.claimed_at,
                         stuck=stuck,
-                        error_code=str(row.error_code) if row.error_code else None,
+                        error_code=_display_failure_code(row.error_code, row.result_json),
                         recently_failed=recently_failed,
                         auth_recovery_detail=coupang_recovery_detail_label(
                             auth_recovery_state=recovery_state,
@@ -946,6 +952,21 @@ class PostgresDashboardRepository(DashboardRepository):
                     )
                 )
         return result
+
+
+def _display_failure_code(error_code: object, result_json: object) -> str | None:
+    """DB 실패 코드를 화면용 코드로 변환한다. 저장된 error_code 는 바꾸지 않는다."""
+
+    if not error_code:
+        return None
+    code = str(error_code)
+    if (
+        code == "CRAWL_TIMEOUT"
+        and isinstance(result_json, dict)
+        and result_json.get("reason") == RESULT_REASON_STALE_CRAWL_SKIPPED
+    ):
+        return _DISPLAY_CODE_STALE_CRAWL_SKIPPED
+    return code
 
 
 def _pick_latest_code(job_row, delivery_row) -> str | None:

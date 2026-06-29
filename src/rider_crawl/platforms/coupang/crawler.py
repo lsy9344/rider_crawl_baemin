@@ -64,11 +64,26 @@ def crawl_performance_snapshot(
         except (BrowserActionRequiredError, MissingPerformanceDataError, RuntimeError):
             current_screen = None
 
-    peak_dashboard_html = (
-        fetch_peak_dashboard_html(config)
-        if fetch_peak_dashboard_html
-        else fetch_page_html(config, target_url=_peak_dashboard_url(config))
-    )
+    # peak-dashboard 는 권위 페이지다. 세션이 만료됐는데 화면이 로그인으로 분류되지 않아
+    # ready 검사는 통과하고 파싱만 실패하는 창(수집데이터누락 고착의 실제 원인)을 같은 턴에
+    # 닫는다: 자동 email 2FA 가 켜져 있으면 page 가 살아 있는 동안 peak 를 파싱해 보고,
+    # MissingPerformanceDataError 면 fetch 내부에서 로그인 게이트로 1회 자동복구 후 재시도한다.
+    # 복구 불가/재시도도 실패면 fetch 가 BrowserActionRequiredError 로 올려 워커가 AUTH_REQUIRED
+    # 로 표면화한다(다음 tick 의 AUTH_COUPANG_2FA 폴백을 깨운다). 꺼져 있으면 None → 기존 동작.
+    # post_load_validate 는 자동 2FA 가 켜졌을 때만 넘긴다. None 이면 키워드를 아예 빼서 기존
+    # 호출 시그니처를 보존한다(monkeypatch 한 fetch 가 새 키워드를 몰라도 무회귀).
+    if fetch_peak_dashboard_html:
+        peak_dashboard_html = fetch_peak_dashboard_html(config)
+    elif config.coupang_auto_email_2fa_enabled:
+        peak_dashboard_html = fetch_page_html(
+            config,
+            target_url=_peak_dashboard_url(config),
+            post_load_validate=parse_peak_dashboard_html,
+        )
+    else:
+        peak_dashboard_html = fetch_page_html(
+            config, target_url=_peak_dashboard_url(config)
+        )
     # 피크 대시보드 헤딩에 기대 센터가 노출되면 그것으로 다른 계정/오래된 탭을 막는다.
     # 권위 페이지라 fail-closed로 둔다: 헤딩에서 센터를 확인하지 못하면(미노출 포함)
     # 검증을 건너뛰지 않고 CoupangCenterValidationError를 던져 잘못된 계정 전송을 막는다.
@@ -466,20 +481,39 @@ def _select_coupang_center(page: Any, config: AppConfig, *, timeout_errors: tupl
     return True
 
 
-def fetch_page_html(config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False) -> str:
+def fetch_page_html(
+    config: AppConfig,
+    *,
+    target_url: str | None = None,
+    force_new_tab: bool = False,
+    post_load_validate: Callable[[str], None] | None = None,
+) -> str:
+    # ``post_load_validate`` 는 page 가 살아 있는 동안 content 를 검증하는 콜백이다(권위 peak
+    # 파싱). MissingPerformanceDataError 를 던지면 fetch 가 로그인 게이트로 1회 자동복구를
+    # 시도한다. None 이면 기존 호출 시그니처 그대로 호출한다(검증 없음 + 하위호환 — 보조
+    # 페이지·테스트가 monkeypatch 한 fetch 가 새 키워드를 몰라도 깨지지 않게).
+    extra = {} if post_load_validate is None else {"post_load_validate": post_load_validate}
     if config.browser_mode == "cdp":
         if target_url is None:
-            return fetch_page_html_via_cdp(config, force_new_tab=force_new_tab)
-        return fetch_page_html_via_cdp(config, target_url=target_url, force_new_tab=force_new_tab)
+            return fetch_page_html_via_cdp(config, force_new_tab=force_new_tab, **extra)
+        return fetch_page_html_via_cdp(
+            config, target_url=target_url, force_new_tab=force_new_tab, **extra
+        )
     if config.browser_mode == "persistent":
         if target_url is None:
-            return fetch_page_html_via_persistent_context(config)
-        return fetch_page_html_via_persistent_context(config, target_url=target_url)
+            return fetch_page_html_via_persistent_context(config, **extra)
+        return fetch_page_html_via_persistent_context(
+            config, target_url=target_url, **extra
+        )
     raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
 
 
 def fetch_page_html_via_cdp(
-    config: AppConfig, *, target_url: str | None = None, force_new_tab: bool = False
+    config: AppConfig,
+    *,
+    target_url: str | None = None,
+    force_new_tab: bool = False,
+    post_load_validate: Callable[[str], None] | None = None,
 ) -> str:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -506,14 +540,23 @@ def fetch_page_html_via_cdp(
             target_url=target_url or config.coupang_eats_url,
             load_timeout_errors=(PlaywrightTimeoutError,),
             force_new_tab=force_new_tab,
+            post_load_validate=post_load_validate,
         )
 
 
-def fetch_page_html_via_persistent_context(config: AppConfig, *, target_url: str | None = None) -> str:
+def fetch_page_html_via_persistent_context(
+    config: AppConfig,
+    *,
+    target_url: str | None = None,
+    post_load_validate: Callable[[str], None] | None = None,
+) -> str:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
     config.browser_user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # CDP 경로와 동일: 이 fetch 안에서 자동복구는 최대 1회(중복 OTP 방지). ponytail: 단순 불리언.
+    recovery_attempted = False
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -545,6 +588,7 @@ def fetch_page_html_via_persistent_context(config: AppConfig, *, target_url: str
                 # 복구를 시도하고 대상 페이지를 다시 준비시킨다. 꺼져 있거나 실패하면 raise.
                 if not _try_recover_coupang_session(page, config, None):
                     raise
+                recovery_attempted = True
                 _reload_target_page(
                     page,
                     config,
@@ -564,7 +608,15 @@ def fetch_page_html_via_persistent_context(config: AppConfig, *, target_url: str
                     target_url=resolved_target,
                     timeout_errors=(PlaywrightTimeoutError,),
                 )
-            return page.content()
+            return _content_with_post_load_recovery(
+                page,
+                config,
+                target_url=resolved_target,
+                load_timeout_errors=(PlaywrightTimeoutError,),
+                recover_session=None,
+                post_load_validate=post_load_validate,
+                recovery_attempted=recovery_attempted,
+            )
         finally:
             context.close()
 
@@ -584,8 +636,14 @@ def _fetch_target_page_content(
     load_timeout_errors: tuple[type[BaseException], ...] = (),
     recover_session: Callable[[Any, AppConfig], bool] | None = None,
     force_new_tab: bool = False,
+    post_load_validate: Callable[[str], None] | None = None,
 ) -> str:
     target_url = target_url or config.coupang_eats_url
+    # 이 fetch 호출 안에서 자동복구는 최대 1회만 한다(로그인-만료 readiness 경로와 신규
+    # missing-data 검증 경로가 둘 다 fire 해 중복 OTP 를 요청하는 것을 막는다). 메일박스
+    # RunLock 은 프로세스 간 직렬화, 이 불리언은 호출 내 중복 제거다(서로 다른 층).
+    # ponytail: 단순 불리언 — 상태 객체 불필요.
+    recovery_attempted = False
     pages = _browser_pages(browser)
     if force_new_tab:
         opened = _open_target_in_new_tab(
@@ -635,12 +693,80 @@ def _fetch_target_page_content(
         # 기존처럼 BrowserActionRequiredError로 탭을 중지한다(빠른 재시도 금지).
         if not _try_recover_coupang_session(page, config, recover_session):
             raise
+        recovery_attempted = True
         _reload_target_page(page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
         _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
     if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
         # 탭을 눌러 다른 센터로 전환했으면, 새 센터 화면이 준비될 때까지 한 번 더 기다린다.
         _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
-    return page.content()
+    return _content_with_post_load_recovery(
+        page,
+        config,
+        target_url=target_url,
+        load_timeout_errors=load_timeout_errors,
+        recover_session=recover_session,
+        post_load_validate=post_load_validate,
+        recovery_attempted=recovery_attempted,
+    )
+
+
+def _content_with_post_load_recovery(
+    page: Any,
+    config: AppConfig,
+    *,
+    target_url: str,
+    load_timeout_errors: tuple[type[BaseException], ...],
+    recover_session: Callable[[Any, AppConfig], bool] | None,
+    post_load_validate: Callable[[str], None] | None,
+    recovery_attempted: bool,
+) -> str:
+    """page content 를 반환하되, ``post_load_validate`` 가 데이터 누락을 알리고 화면이 로그인
+    만료로 보이면 같은 턴에서 1회 자동복구 후 재시도한다.
+
+    세션이 만료됐는데도 화면이 로그인으로 분류되지 않아 readiness 는 통과하고 파싱만 실패하는
+    경우(수집데이터누락 고착)를 닫는다. **로그인 게이트가 필수**다: 진짜로 인증됐지만 데이터가
+    빈(영업외/물량 0) 화면에서 OTP 를 낭비하지 않도록, ``_page_looks_like_coupang_login_required``
+    가 참일 때만 복구한다. 복구 불가/재시도도 빈값이면, 화면이 로그인으로 보이는 한
+    ``BrowserActionRequiredError`` 로 올려 워커가 AUTH_REQUIRED 로 표면화하게 한다(missing-data
+    로 끝나 계정이 ACTIVE 로 굳고 다음 tick 의 인증 복구가 안 깨우던 데드락 방지). 로그인으로
+    보이지 않으면 원래 ``MissingPerformanceDataError`` 를 그대로 전파한다(비인증 케이스 무변화).
+    """
+
+    content = page.content()
+    if post_load_validate is None:
+        return content
+    try:
+        post_load_validate(content)
+        return content
+    except MissingPerformanceDataError as exc:
+        looks_login = _page_looks_like_coupang_login_required(page)
+        if not (
+            not recovery_attempted
+            and looks_login
+            and _try_recover_coupang_session(page, config, recover_session)
+        ):
+            if looks_login:
+                raise BrowserActionRequiredError(
+                    _coupang_login_required_message(target_url)
+                ) from exc
+            raise
+
+    _reload_target_page(page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
+    _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+    if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+        _wait_for_target_page_ready(page, config, target_url=target_url, timeout_errors=load_timeout_errors)
+    content = page.content()
+    try:
+        post_load_validate(content)
+    except MissingPerformanceDataError as exc:
+        # 복구를 해봤는데도 여전히 데이터가 없다. 화면이 로그인으로 보이면 AUTH_REQUIRED 로
+        # 올리고(다음 tick 인증 복구 폴백), 아니면 원래 누락 오류를 전파한다.
+        if _page_looks_like_coupang_login_required(page):
+            raise BrowserActionRequiredError(
+                _coupang_login_required_message(target_url)
+            ) from exc
+        raise
+    return content
 
 
 def _recover_login_page_to_target(
@@ -1047,7 +1173,7 @@ def _html_looks_like_coupang_login_required(html: str) -> bool:
     has_xauth_form = "login-actions/authenticate" in text and "realms/eats-partner" in text
     has_login_fields = "username" in text and "password" in text
     has_visible_login_controls = "아이디 입력" in text and "비밀번호 입력" in text and "로그인" in text
-    return has_vendor_identity and ((has_xauth_form and has_login_fields) or has_visible_login_controls)
+    return (has_xauth_form and has_login_fields) or (has_vendor_identity and has_visible_login_controls)
 
 
 def _coupang_login_required_message(target_url: str) -> str:

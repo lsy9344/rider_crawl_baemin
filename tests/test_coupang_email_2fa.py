@@ -36,8 +36,27 @@ def _config(tmp_path) -> AppConfig:
     )
 
 
+# 코드 제출(인증 완료/확인 등)이 성공하면 화면이 도달하는 권위 대시보드 HTML.
+# recover_*() 가 제출 후 대시보드 도달을 검증하므로(거짓 성공 방지), 성공 시나리오 fake 는
+# submit 클릭 시 이 HTML 로 전환된다. 다른 센터를 검증하지 않는 일반 신호만 담는다.
+_DASHBOARD_HTML_AFTER_SUBMIT = (
+    "<html>라이더 현황 14:02 업데이트 배정 물량 12 처리 물량 9</html>"
+)
+# 제출했지만 인증 실패(코드 오류/이상로그인)로 여전히 2FA 화면에 머무는 경우의 HTML.
+_STILL_ON_2FA_AFTER_SUBMIT = (
+    "<html>2단계 인증 이메일로 인증 인증코드 전송"
+    " 인증코드를 rider@naver.com 으로 보냅니다</html>"
+)
+
+
 class _FakePage:
-    """Records clicks/fills and serves page text, mimicking the Playwright surface."""
+    """Records clicks/fills and serves page text, mimicking the Playwright surface.
+
+    제출(``_SUBMIT_TEXTS``) 계열 클릭 시 ``html`` 을 ``success_html`` 로 전환해, 실제처럼
+    "코드 제출 → 대시보드 도달" 을 모사한다. 기본 ``success_html`` 은 대시보드라 대부분의
+    성공 시나리오가 자동으로 제출-후-검증을 통과한다. 제출 실패를 모사하려면
+    ``success_html=_STILL_ON_2FA_AFTER_SUBMIT`` 처럼 2FA 화면을 넘긴다.
+    """
 
     def __init__(
         self,
@@ -49,6 +68,7 @@ class _FakePage:
         role_click_input_updates: dict[tuple[str, str], tuple[str, ...]] | None = None,
         role_min_timeout: dict[tuple[str, str], int] | None = None,
         input_selectors: tuple[str, ...] = (),
+        success_html: str | None = _DASHBOARD_HTML_AFTER_SUBMIT,
     ):
         self.html = html
         self._clickable = clickable
@@ -57,9 +77,21 @@ class _FakePage:
         self._role_click_input_updates = role_click_input_updates or {}
         self._role_min_timeout = role_min_timeout or {}
         self._input_selectors = input_selectors
+        self._success_html = success_html
         self.clicked_texts: list[str] = []
         self.clicked_roles: list[tuple[str, str]] = []
         self.filled: list[tuple[str, str]] = []
+
+    def on_submit_click(self, label: str) -> None:
+        """제출 계열 라벨 클릭 시 성공 화면(success_html)으로 전환한다.
+
+        단, role_click_updates/role_click_input_updates 로 명시적 전환을 지정한 클릭은
+        그 지정이 우선하므로 여기서 덮어쓰지 않는다(기존 동적 전환 테스트 보존)."""
+
+        if self._success_html is None:
+            return
+        if any(label.casefold() == s.casefold() for s in coupang_email_2fa._SUBMIT_TEXTS):
+            self.html = self._success_html
 
     def content(self) -> str:
         return self.html
@@ -86,6 +118,7 @@ class _FakeTextLocator:
     def click(self, **_kwargs):
         if any(self._text.casefold() in candidate.casefold() for candidate in self._page._clickable):
             self._page.clicked_texts.append(self._text)
+            self._page.on_submit_click(self._text)
             return
         raise RuntimeError(f"no clickable element: {self._text}")
 
@@ -109,6 +142,9 @@ class _FakeRoleLocator:
             updated_html = self._page._role_click_updates.get((self._role, self._name))
             if updated_html is not None:
                 self._page.html = updated_html
+            else:
+                # 명시적 전환이 없으면 제출 계열 클릭은 성공 화면으로 전환한다.
+                self._page.on_submit_click(self._name)
             updated_inputs = self._page._role_click_input_updates.get((self._role, self._name))
             if updated_inputs is not None:
                 self._page._input_selectors = updated_inputs
@@ -217,6 +253,50 @@ def test_recover_returns_true_when_already_on_dashboard(tmp_path):
     assert page.clicked_texts == []
     assert page.clicked_roles == []
     assert page.filled == []
+
+
+def test_recover_returns_false_when_submit_does_not_reach_dashboard(tmp_path):
+    # 코드를 제출했지만(전 단계 모두 정상) 여전히 2FA 화면이면(코드 오류/이상로그인) 성공으로
+    # 오인하지 않고 False 를 돌린다 — 거짓 성공→USER_ACTION_PENDING 데드 상태 방지
+    # (memory: coupang-2fa-false-user-action-required).
+    page = _FakePage(
+        html=(
+            "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다<input placeholder='인증코드'></html>"
+        ),
+        clickable=("이메일로 인증", "인증코드 전송", "인증 완료"),
+        input_selectors=("input[placeholder*='코드']",),
+        # 제출해도 대시보드로 가지 못하고 2FA 화면에 머문다.
+        success_html=_STILL_ON_2FA_AFTER_SUBMIT,
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch("654321"), now=_NOW
+    )
+
+    # 제출까지는 정상 진행했지만 대시보드 미도달 → False.
+    assert result is False
+    assert page.filled == [("input[placeholder*='코드']", "654321")]
+
+
+def test_recover_returns_true_when_submit_reaches_dashboard(tmp_path):
+    # 코드 제출 후 화면이 대시보드로 전환되면 True(정상 복구 완료).
+    page = _FakePage(
+        html=(
+            "<html>2단계 인증 로그인 이메일로 인증 인증코드 전송"
+            " 인증코드를 rider@naver.com 으로 보냅니다<input placeholder='인증코드'></html>"
+        ),
+        clickable=("이메일로 인증", "인증코드 전송", "인증 완료"),
+        input_selectors=("input[placeholder*='코드']",),
+        success_html=_DASHBOARD_HTML_AFTER_SUBMIT,
+    )
+
+    result = recover_coupang_session_with_email_2fa(
+        page, _config(tmp_path), fetch_code=_ok_fetch("654321"), now=_NOW
+    )
+
+    assert result is True
+    assert page.filled == [("input[placeholder*='코드']", "654321")]
 
 
 def test_recover_does_not_false_positive_dashboard_on_login_screen(tmp_path):

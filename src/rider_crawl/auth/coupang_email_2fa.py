@@ -139,7 +139,26 @@ def recover_coupang_session_with_email_2fa(
     code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
     _fill_code_input(page, code, config)
     _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",))
-    return True
+    return _submission_reached_dashboard(page, config)
+
+
+def _submission_reached_dashboard(page: Any, config: AppConfig) -> bool:
+    """코드 제출 후 실제로 대시보드에 도달했는지 검증한다(거짓 성공 방지).
+
+    제출만 하고 성공을 확인하지 않으면, OTP 가 틀렸거나 이상로그인으로 막혀도 ``True`` 를 돌려
+    상위 인증 job 이 계정을 ACTIVE 로 오인하고 데드 상태(USER_ACTION_PENDING)로 고착됐다
+    (memory: coupang-2fa-false-user-action-required). 권위 대시보드 신호가 보일 때까지 요소
+    기반으로 짧게 기다린 뒤, 화면이 대시보드면 ``True``, 여전히 로그인/2FA 화면이면 ``False``.
+    OTP/비밀번호 등은 로그하지 않는다(평문 신호 텍스트만 검사)."""
+
+    # 제출 후 전환 지연을 요소 기반으로 흡수한다(고정 sleep 금지). fake/미지원 page 는 내부에서
+    # 안전히 False 를 돌려주고, 이어지는 content 재독으로 최종 판정한다.
+    _wait_for_any_text_visible(
+        page,
+        _AUTHENTICATED_DASHBOARD_SIGNALS,
+        min(config.page_timeout_seconds, _EMAIL_METHOD_READY_TIMEOUT_MS),
+    )
+    return _is_already_authenticated(_safe_page_text(page), page)
 
 
 class Coupang2faError(RuntimeError):

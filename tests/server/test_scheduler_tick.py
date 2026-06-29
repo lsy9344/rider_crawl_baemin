@@ -411,6 +411,24 @@ def test_scheduler_crawl_payload_contains_scheduled_at_expires_at_and_origin() -
     assert not any("code" in str(k).casefold() and "keyword" not in str(k).casefold() for k in payload)
 
 
+def test_scheduler_short_interval_crawl_payload_waits_at_least_five_minutes_in_queue() -> None:
+    target = _target("t-short-ttl", platform="BAEMIN", interval=1)
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    job = backend.job_snapshot(result.outcomes[0].job_id)
+    assert job is not None
+    payload = job.payload_json
+    assert payload["timeout_seconds"] == 60
+    assert payload["expires_at"] == "2026-06-14T12:05:00Z"
+
+
 def test_scheduler_coupang_incomplete_2fa_config_uses_default_crawl_timeout() -> None:
     target = _target(
         "t-c-incomplete",
@@ -459,7 +477,7 @@ def test_scheduler_coupang_inline_2fa_expiry_uses_timeout_when_interval_is_short
     assert job is not None
     payload = job.payload_json
     assert payload["timeout_seconds"] == 180
-    assert payload["expires_at"] == "2026-06-14T12:03:00Z"
+    assert payload["expires_at"] == "2026-06-14T12:05:00Z"
 
 
 # ── AC2: 중지/비활성 고객 제외 ────────────────────────────────────────────────

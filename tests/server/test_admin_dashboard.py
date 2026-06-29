@@ -1419,6 +1419,10 @@ def test_profile_unavailable_reason_is_operator_readable() -> None:
     assert admin_routes._reason_text("PROFILE_UNAVAILABLE") == "브라우저 프로필 준비 실패 — Agent/Chrome 확인 필요"
 
 
+def test_stale_crawl_skipped_reason_is_operator_readable() -> None:
+    assert admin_routes._reason_text("STALE_CRAWL_SKIPPED") == "수집 대기 시간이 지나 이번 회차를 건너뜀 — Agent 처리량/큐 대기 확인"
+
+
 def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
     # 실파이프라인이 현재 인증실패에 내는 값은 SEVERITY_AUTH_REQUIRED(STOPPED+묵은 코드 아님).
     # 배지 구동은 severity 단일 소스이므로 fixture 도 그 값을 쓴다(2026-06).

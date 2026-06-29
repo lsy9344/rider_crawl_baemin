@@ -34,6 +34,7 @@ from rider_server.queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_RUNNING,
     JOB_TYPE_KAKAO_SEND,
+    RESULT_REASON_STALE_CRAWL_SKIPPED,
 )
 
 _NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
@@ -134,6 +135,23 @@ def test_set_latest_keeps_detail_from_more_recent_failure() -> None:
         _NOW,
         "USER_ACTION_REQUIRED",
         "captcha_or_abnormal_login",
+    )
+
+
+def test_display_failure_code_maps_stale_crawl_timeout_to_queue_skip() -> None:
+    assert (
+        pg_repo._display_failure_code(
+            "CRAWL_TIMEOUT",
+            {"reason": RESULT_REASON_STALE_CRAWL_SKIPPED},
+        )
+        == "STALE_CRAWL_SKIPPED"
+    )
+
+
+def test_display_failure_code_keeps_real_crawl_timeout() -> None:
+    assert (
+        pg_repo._display_failure_code("CRAWL_TIMEOUT", {"reason": "browser_timed_out"})
+        == "CRAWL_TIMEOUT"
     )
 
 

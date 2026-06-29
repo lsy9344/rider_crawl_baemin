@@ -73,6 +73,9 @@ AUTH_COUPANG_2FA_PAYLOAD_TTL = timedelta(minutes=5)
 #: Scheduled Coupang crawl timeout when inline email 2FA can run inside the crawl job.
 COUPANG_INLINE_2FA_CRAWL_TIMEOUT_SECONDS = 180
 
+#: Scheduled crawl jobs wait in queue for at least this long before stale recovery skips them.
+SCHEDULED_CRAWL_MIN_QUEUE_TTL_SECONDS = 5 * 60
+
 
 @dataclass(frozen=True)
 class DueTarget:
@@ -570,7 +573,11 @@ def _crawl_job_payload(
         if coupang_auto_2fa_complete
         else 60
     )
-    expires_in_seconds = max(max(0, interval_seconds), timeout_seconds)
+    expires_in_seconds = max(
+        max(0, interval_seconds),
+        timeout_seconds,
+        SCHEDULED_CRAWL_MIN_QUEUE_TTL_SECONDS,
+    )
     payload: dict[str, object] = {
         "target_id": target.target_id,
         "tenant_id": target.tenant_id,
@@ -583,8 +590,9 @@ def _crawl_job_payload(
         "parser_version": f"{platform}-v1",
         "job_type": job_type,
         # scheduled crawl 의 출처/시간 경계 — recovery 가 stale backlog 를 안전하게 닫는 기준.
-        # expires_at 은 기본적으로 다음 due 윈도 전까지만 유효하되, inline email 2FA crawl 은
-        # timeout 보다 먼저 만료되지 않게 한다.
+        # expires_at 은 기본적으로 다음 due 윈도 전까지만 유효하되, 짧은 주기 고객도 Agent 가
+        # 집어갈 최소 큐 대기시간을 보장하고 inline email 2FA crawl 은 timeout 보다 먼저
+        # 만료되지 않게 한다.
         "job_origin": JOB_ORIGIN_SCHEDULER,
         "scheduled_at": _iso_utc(now),
         "expires_at": _iso_utc(now + timedelta(seconds=expires_in_seconds)),
