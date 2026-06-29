@@ -181,6 +181,41 @@ def test_resume_restores_payment_active() -> None:
     assert repo.audits[-1].action == "SUBSCRIPTION_RESUME"
 
 
+def test_subscription_resume_defers_active_targets_until_next_interval() -> None:
+    # 구독 SUSPENDED→PAYMENT_ACTIVE 복구 시 tenant 의 ACTIVE 대상 next_run_at 이 미래로 재설정돼야
+    # 한다(scheduler 가 구독 게이트로 다시 enqueue 를 허용하므로 즉시 catch-up 금지).
+    from rider_server.scheduler import policy
+
+    from dataclasses import replace
+
+    repo = InMemoryAdminActionRepository()
+    repo.seed_subscription(_sub(SubscriptionStatus.SUSPENDED))
+    repo.seed_target(_target(MonitoringTargetStatus.ACTIVE))  # id=mt-1, interval 10
+    repo.seed_target(
+        replace(_target(MonitoringTargetStatus.PAUSED), id="mt-paused")
+    )  # 같은 tenant PAUSED — reset 대상 아님
+    svc = _service(repo)
+
+    _run(svc.resume_subscription("sub-1", reason="복구", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    expected = policy.reactivation_next_run_at("mt-1", 10, _NOW)
+    assert repo.next_run_at_for("mt-1") == expected
+    assert expected > _NOW
+    assert repo.next_run_at_for("mt-paused") is None
+
+
+def test_subscription_resume_within_allowed_gate_does_not_defer() -> None:
+    # 이미 게이트 허용 상태(PAYMENT_FAILED_GRACE→PAYMENT_ACTIVE)면 schedule reset 은 no-op.
+    repo = InMemoryAdminActionRepository()
+    repo.seed_subscription(_sub(SubscriptionStatus.PAYMENT_FAILED_GRACE))
+    repo.seed_target(_target(MonitoringTargetStatus.ACTIVE))
+    svc = _service(repo)
+
+    _run(svc.resume_subscription("sub-1", reason="복구", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    assert repo.next_run_at_for("mt-1") is None
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (1) AC2 — HELD Dispatch 폐기/재개(게이트 dispose_held — 불변식 ①②)
 # ══════════════════════════════════════════════════════════════════════════
@@ -336,6 +371,32 @@ def test_inactive_target_toggle_rejected() -> None:
         _run(
             svc.set_target_status("mt-1", active=True, tenant_id=_TENANT, actor_id=_ACTOR, reason="", at=_NOW)
         )
+
+
+def test_target_activation_defers_schedule_until_next_interval() -> None:
+    # 대상 PAUSED→ACTIVE 후 next_run_at 이 now+interval(+jitter) 미래로 재설정돼야 한다(catch-up 금지).
+    from rider_server.scheduler import policy
+
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target(MonitoringTargetStatus.PAUSED))
+    svc = _service(repo)
+
+    _run(svc.set_target_status("mt-1", active=True, tenant_id=_TENANT, actor_id=_ACTOR, reason="", at=_NOW))
+
+    expected = policy.reactivation_next_run_at("mt-1", 10, _NOW)
+    assert repo.next_run_at_for("mt-1") == expected
+    assert expected > _NOW
+
+
+def test_already_active_target_toggle_does_not_defer_schedule() -> None:
+    # 이미 ACTIVE 인 대상에 활성화를 다시 누르면 schedule reset 은 no-op(설정 저장만으로 수집 밀림 금지).
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target(MonitoringTargetStatus.ACTIVE))
+    svc = _service(repo)
+
+    _run(svc.set_target_status("mt-1", active=True, tenant_id=_TENANT, actor_id=_ACTOR, reason="", at=_NOW))
+
+    assert repo.next_run_at_for("mt-1") is None
 
 
 def test_test_crawl_enqueues_single_job() -> None:

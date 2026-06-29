@@ -234,12 +234,26 @@ class AdminActionRepository(Protocol):
 
     async def get_held_dispatch(self, dispatch_id: str) -> HeldDispatchRef | None: ...
 
+    async def list_tenant_active_targets(
+        self, tenant_id: str
+    ) -> list[MonitoringTarget]:
+        """tenant 의 ``ACTIVE`` monitoring target 목록(구독 복구 no-catchup reset 입력)."""
+        ...
+
     async def transition_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
     ) -> None: ...
 
     async def transition_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to: datetime | None = None,
     ) -> None: ...
 
     async def transition_job(
@@ -612,6 +626,17 @@ class AdminActionService:
             MonitoringTargetStatus.ACTIVE if active else MonitoringTargetStatus.PAUSED
         )
         updated = replace(target, status=new_status)
+        # no-catchup: PAUSED→ACTIVE 전환에서만 next_run_at 을 다음 주기로 민다(비활성 동안 밀린
+        # 스케줄을 즉시 due 로 만들어 따라잡기 수집이 돌지 않게). 이미 ACTIVE 인 대상에 활성화를
+        # 다시 누른 경우는 no-op(설정 저장만으로 수집이 밀리는 것을 막는다). scheduler.policy 는
+        # 함수 안에서 import 한다 — 모듈 로드 시 import 하면 scheduler 패키지(→ security)와 순환된다.
+        schedule_reset_to = None
+        if active and target.status is not MonitoringTargetStatus.ACTIVE:
+            from rider_server.scheduler.policy import reactivation_next_run_at
+
+            schedule_reset_to = reactivation_next_run_at(
+                target_id, target.interval_minutes, at
+            )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_TARGET_ACTIVATE if active else ACTION_TARGET_PAUSE,
@@ -622,11 +647,21 @@ class AdminActionService:
                 "from_status": target.status.value,
                 "to_status": new_status.value,
                 "reason": reason,
+                **(
+                    {
+                        "schedule_reset": True,
+                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                    }
+                    if schedule_reset_to is not None
+                    else {}
+                ),
             },
             source=source,
             reason=reason,
         )
-        await self._repo.transition_target(updated, audit)
+        await self._repo.transition_target(
+            updated, audit, schedule_reset_to=schedule_reset_to
+        )
         return updated
 
     # ── AC1: Agent 배정(target↔agent affinity) ──────────────────────────────────
@@ -1065,6 +1100,13 @@ class AdminActionService:
         new_sub, change = SubscriptionGate.resume(
             sub, reason=reason, at=at, to_status=to_status
         )
+        # no-catchup: 구독 게이트가 차단(SUSPENDED/CANCELLED)→허용(PAYMENT_ACTIVE/
+        # PAYMENT_FAILED_GRACE)으로 복구되면, scheduler 가 다시 enqueue 를 허용하므로 비활성 동안
+        # 과거가 된 ACTIVE 대상 next_run_at 을 다음 주기로 민다(즉시 catch-up 금지). schedulable
+        # 판정은 scheduler 와 같은 SubscriptionGate 게이트를 재사용한다.
+        schedule_resets = await self._subscription_schedule_resets(
+            change.from_status, change.to_status, tenant_id=tenant_id, at=at
+        )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_SUBSCRIPTION_RESUME,
@@ -1075,12 +1117,52 @@ class AdminActionService:
                 "from_status": change.from_status.value,
                 "to_status": change.to_status.value,
                 "reason": change.reason,
+                **(
+                    {
+                        "schedule_reset_targets": len(schedule_resets),
+                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                    }
+                    if schedule_resets
+                    else {}
+                ),
             },
             source=source,
             reason=reason,
         )
-        await self._repo.transition_subscription(new_sub, audit)
+        await self._repo.transition_subscription(
+            new_sub, audit, schedule_resets=schedule_resets or None
+        )
         return new_sub
+
+    async def _subscription_schedule_resets(
+        self,
+        from_status: SubscriptionStatus,
+        to_status: SubscriptionStatus,
+        *,
+        tenant_id: str,
+        at: datetime,
+    ) -> dict[str, datetime]:
+        """구독 게이트 차단→허용 복구 시 tenant 의 ACTIVE 대상 no-catchup next_run_at 맵.
+
+        scheduler 와 같은 :class:`SubscriptionGate`(``allow_new_crawl_job``)로 schedulable 전이를
+        판정한다(새 정책 0). 허용→허용/차단→차단은 빈 dict(no-op). repository 가
+        ``list_tenant_active_targets`` 를 제공하지 않으면(구 fake) 빈 dict(보수적 — reset 생략).
+        scheduler.policy 는 함수 안에서 import(모듈 로드 순환 회피).
+        """
+
+        was_allowed = SubscriptionGate.evaluate_status(from_status).allow_new_crawl_job
+        now_allowed = SubscriptionGate.evaluate_status(to_status).allow_new_crawl_job
+        if was_allowed or not now_allowed:
+            return {}
+        list_active = getattr(self._repo, "list_tenant_active_targets", None)
+        if not callable(list_active):
+            return {}
+        from rider_server.scheduler.policy import reactivation_schedule_resets
+
+        targets = await list_active(tenant_id)
+        return reactivation_schedule_resets(
+            ((t.id, t.interval_minutes) for t in targets), at
+        )
 
     # ── AC2: HELD Dispatch 폐기/재개(운영자 결정 — 게이트 dispose_held) ──────────
     async def dispose_held_dispatch(
@@ -1155,6 +1237,7 @@ class InMemoryAdminActionRepository:
         self._jobs: dict[str, JobRef] = {}
         self._held: dict[str, HeldDispatchRef] = {}
         self._assignments: dict[str, str] = {}  # target_id → agent_id
+        self._next_run_at: dict[str, datetime] = {}  # target_id → reset next_run_at(가시성)
         self.audits: list[AuditEntry] = []
 
     # ── seed(테스트 전용) ──────────────────────────────────────────────────────
@@ -1180,6 +1263,10 @@ class InMemoryAdminActionRepository:
     def agent_for(self, target_id: str) -> str | None:
         return self._assignments.get(target_id)
 
+    def next_run_at_for(self, target_id: str) -> datetime | None:
+        """reset 된 ``next_run_at``(테스트 가시성). reset 이 없었으면 ``None``."""
+        return self._next_run_at.get(target_id)
+
     # ── read ───────────────────────────────────────────────────────────────────
     async def get_subscription(self, subscription_id: str) -> Subscription | None:
         return self._subscriptions.get(subscription_id)
@@ -1201,17 +1288,39 @@ class InMemoryAdminActionRepository:
     async def get_held_dispatch(self, dispatch_id: str) -> HeldDispatchRef | None:
         return self._held.get(dispatch_id)
 
+    async def list_tenant_active_targets(
+        self, tenant_id: str
+    ) -> list[MonitoringTarget]:
+        return [
+            t
+            for t in self._targets.values()
+            if t.tenant_id == tenant_id
+            and t.status is MonitoringTargetStatus.ACTIVE
+        ]
+
     # ── write + audit(같은 트랜잭션 모사) ───────────────────────────────────────
     async def transition_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
     ) -> None:
         self._subscriptions[subscription.id] = subscription
+        if schedule_resets:
+            self._next_run_at.update(schedule_resets)
         self.audits.append(audit)
 
     async def transition_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to: datetime | None = None,
     ) -> None:
         self._targets[target.id] = target
+        if schedule_reset_to is not None:
+            self._next_run_at[target.id] = schedule_reset_to
         self.audits.append(audit)
 
     async def transition_job(

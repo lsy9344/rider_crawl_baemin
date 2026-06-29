@@ -217,6 +217,49 @@ def test_only_due_targets_are_enqueued() -> None:
     assert set(result.enqueued_target_ids) == {"t-a", "t-b"}
 
 
+def test_scheduler_does_not_catch_up_after_reactivation_reset() -> None:
+    # reactivation no-catchup: reset 된 next_run_at(now+interval+jitter) 이후로는 같은 now tick 에서
+    # enqueue 되지 않고(catch-up 금지), reset 시각 이후 tick 에서만 정상 enqueue 된다.
+    reset_at = policy.reactivation_next_run_at("t-react", _INTERVAL_MIN, _NOW)
+    assert reset_at > _NOW  # reset 은 미래여야 한다(즉시 due 금지)
+    target = _target("t-react", next_run=reset_at)
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    # ① reactivation 직후 같은 now → 즉시 enqueue 0(밀린 주기 replay 안 함).
+    result_now = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+    assert result_now.enqueued_count == 0
+
+    # ② reset 시각 이후 tick → 정상 enqueue 1건.
+    later = reset_at + timedelta(seconds=1)
+    result_later = asyncio.run(SchedulerService().run_tick(repo, backend, now=later))
+    assert result_later.enqueued_count == 1
+    assert set(result_later.enqueued_target_ids) == {"t-react"}
+
+
+def test_reactivation_reset_is_strict_future_even_for_zero_interval() -> None:
+    # Finding 2: interval_minutes<=0 도 reactivation reset 은 strict-future 라 즉시 due 가 아니다.
+    for interval in (0, -5):
+        reset_at = policy.reactivation_next_run_at("t-zero", interval, _NOW)
+        assert reset_at > _NOW
+        assert policy.is_due(reset_at, _NOW) is False
+    # tick 으로도 즉시 enqueue 되지 않음을 확인(interval 0 reset).
+    reset_at = policy.reactivation_next_run_at("t-zero", 0, _NOW)
+    target = _target("t-zero", interval=0, next_run=reset_at)
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+    assert result.enqueued_count == 0
+
+
 def test_enqueued_jobs_use_platform_specific_canonical_job_type() -> None:
     baemin = _target("t-b", platform="BAEMIN")
     coupang = _target("t-c", platform="COUPANG")

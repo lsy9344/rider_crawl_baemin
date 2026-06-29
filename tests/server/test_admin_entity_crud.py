@@ -242,6 +242,66 @@ def test_update_subscription_status_persists_and_audits() -> None:
     assert repo.audits[-1].action == "SUBSCRIPTION_UPDATE"
 
 
+def test_subscription_update_recovery_defers_active_targets() -> None:
+    # update_subscription 의 게이트 차단(SUSPENDED)→허용(PAYMENT_ACTIVE)도 no-catchup reset.
+    from rider_server.scheduler import policy
+
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_subscription(_subscription(status=SubscriptionStatus.SUSPENDED))
+    repo.seed_monitoring_target(_target_with_interval(status=MonitoringTargetStatus.ACTIVE))
+    svc = _svc(repo)
+
+    _run(
+        svc.update_subscription(
+            "sub-1", tenant_id=_TENANT, status=SubscriptionStatus.PAYMENT_ACTIVE,
+            at=_NOW, actor_id=_ACTOR,
+        )
+    )
+
+    expected = policy.reactivation_next_run_at("mt-1", 10, _NOW)
+    assert repo.next_run_at_for("mt-1") == expected
+    assert expected > _NOW
+
+
+def test_subscription_update_within_allowed_gate_does_not_defer() -> None:
+    # 이미 게이트 허용(PAYMENT_FAILED_GRACE→PAYMENT_ACTIVE)이면 no-op.
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_subscription(_subscription(status=SubscriptionStatus.PAYMENT_FAILED_GRACE))
+    repo.seed_monitoring_target(_target_with_interval(status=MonitoringTargetStatus.ACTIVE))
+    svc = _svc(repo)
+
+    _run(
+        svc.update_subscription(
+            "sub-1", tenant_id=_TENANT, status=SubscriptionStatus.PAYMENT_ACTIVE,
+            at=_NOW, actor_id=_ACTOR,
+        )
+    )
+
+    assert repo.next_run_at_for("mt-1") is None
+
+
+def test_zero_interval_target_reactivation_is_still_future_not_due() -> None:
+    # interval_minutes=0 대상도 재활성화 직후 즉시 due(next_run_at <= now)가 되면 안 된다(Finding 2).
+    from rider_server.scheduler import policy
+
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(
+        _target_with_interval(status=MonitoringTargetStatus.INACTIVE, interval=0)
+    )
+    svc = _svc(repo)
+
+    _run(svc.reactivate_monitoring_target("mt-1", tenant_id=_TENANT, at=_NOW, actor_id=_ACTOR))
+
+    next_run = repo.next_run_at_for("mt-1")
+    assert next_run is not None
+    assert next_run > _NOW  # 즉시 due 금지
+    assert next_run == policy.reactivation_next_run_at("mt-1", 0, _NOW)
+    assert policy.is_due(next_run, _NOW) is False
+
+
 def test_create_platform_account_with_secret_refs() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -671,6 +731,81 @@ def test_reactivate_monitoring_target_restores_soft_deleted_target() -> None:
     assert target.status is MonitoringTargetStatus.ACTIVE
     assert _run(repo.get_monitoring_target("mt-1")).status is MonitoringTargetStatus.ACTIVE
     assert repo.audits[-1].action == "MONITORING_TARGET_REACTIVATE"
+
+
+def _target_with_interval(
+    target_id="mt-1", *, tenant=_TENANT, status=MonitoringTargetStatus.ACTIVE, interval=10
+) -> MonitoringTarget:
+    return MonitoringTarget(
+        id=target_id,
+        tenant_id=tenant,
+        platform_account_id="pa-1",
+        name="가게",
+        center_name="센터",
+        interval_minutes=interval,
+        status=status,
+    )
+
+
+def test_target_reactivation_defers_schedule_until_next_interval() -> None:
+    # 설정 CRUD reactivation(INACTIVE→ACTIVE)도 no-catchup: next_run_at 을 미래로 민다.
+    from rider_server.scheduler import policy
+
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(
+        _target_with_interval(status=MonitoringTargetStatus.INACTIVE)
+    )
+    svc = _svc(repo)
+
+    _run(svc.reactivate_monitoring_target("mt-1", tenant_id=_TENANT, at=_NOW, actor_id=_ACTOR))
+
+    expected = policy.reactivation_next_run_at("mt-1", 10, _NOW)
+    assert repo.next_run_at_for("mt-1") == expected
+    assert expected > _NOW
+
+
+def test_customer_reactivation_defers_active_targets_until_next_interval() -> None:
+    # 고객 INACTIVE 계열→ACTIVE 복귀 시 ACTIVE 대상만 next_run_at 재설정, PAUSED/INACTIVE 는 제외.
+    from rider_server.scheduler import policy
+
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())  # 시작 status 는 아래에서 SUSPENDED 로 둔다
+    repo.seed_monitoring_target(
+        _target_with_interval("mt-active", status=MonitoringTargetStatus.ACTIVE)
+    )
+    repo.seed_monitoring_target(
+        _target_with_interval("mt-paused", status=MonitoringTargetStatus.PAUSED)
+    )
+    repo.seed_monitoring_target(
+        _target_with_interval("mt-inactive", status=MonitoringTargetStatus.INACTIVE)
+    )
+    svc = _svc(repo)
+    # 먼저 non-schedulable(SUSPENDED)로 내린다(이 전이는 reset 대상 아님).
+    _run(svc.update_tenant(_TENANT, status=CustomerLifecycleState.SUSPENDED, at=_NOW, actor_id=_ACTOR))
+    assert repo.next_run_at_for("mt-active") is None
+
+    # SUSPENDED→ACTIVE 복귀가 reset 을 일으킨다.
+    _run(svc.update_tenant(_TENANT, status=CustomerLifecycleState.ACTIVE, at=_NOW, actor_id=_ACTOR))
+
+    expected = policy.reactivation_next_run_at("mt-active", 10, _NOW)
+    assert repo.next_run_at_for("mt-active") == expected
+    assert expected > _NOW
+    # PAUSED/INACTIVE 대상은 건드리지 않는다.
+    assert repo.next_run_at_for("mt-paused") is None
+    assert repo.next_run_at_for("mt-inactive") is None
+
+
+def test_customer_active_noop_does_not_defer_schedule() -> None:
+    # 이미 schedulable(ACTIVE) 고객을 일반 설정 저장만 하면 next_run_at 은 밀리지 않는다.
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())  # _tenant() status = ACTIVE
+    repo.seed_monitoring_target(_target_with_interval(status=MonitoringTargetStatus.ACTIVE))
+    svc = _svc(repo)
+
+    _run(svc.update_tenant(_TENANT, name="이름변경", at=_NOW, actor_id=_ACTOR))
+
+    assert repo.next_run_at_for("mt-1") is None
 
 
 def test_deactivate_messenger_channel_soft_delete_inactive() -> None:

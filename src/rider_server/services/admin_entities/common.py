@@ -164,10 +164,20 @@ class AdminEntityRepository(Protocol):
 
     async def create_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None: ...
 
-    async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
+    async def save_tenant(
+        self,
+        tenant: Tenant,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
+    ) -> None: ...
 
     async def save_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
     ) -> None: ...
 
     async def save_platform_account(
@@ -175,7 +185,11 @@ class AdminEntityRepository(Protocol):
     ) -> None: ...
 
     async def save_monitoring_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to: datetime | None = None,
     ) -> None: ...
 
     async def save_messenger_channel(

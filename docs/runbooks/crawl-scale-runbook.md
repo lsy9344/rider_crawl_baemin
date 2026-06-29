@@ -1,5 +1,10 @@
 # Crawl Scale Runbook
 
+> `CRAWL_TIMEOUT` 이 반복되거나 고객 재활성화 직후 잠깐 떴다면 먼저
+> `docs/runbooks/crawl-timeout-investigation.md` 의 단계별 조사 순서를 본다. timeout 은 로그인
+> 실패가 아니라 수집 완료 시간 초과(안전장치)다 — 값을 늘리거나 selector 를 추측 수정하기 전에
+> job timeline·Agent 로그 증거를 먼저 확인한다.
+
 ## 기본 운영 모델
 
 - Agent 기본 동시 처리 1: `rider_agent run` 의 기본 `--max-jobs` 는 1이다. 동시 처리 수를 올리기 전에 CPU/RAM, 브라우저 profile 수, heartbeat lease 연장 상태를 먼저 확인한다.

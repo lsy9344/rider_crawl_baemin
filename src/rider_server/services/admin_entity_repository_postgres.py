@@ -17,6 +17,7 @@ audit 값 변환·target/actor UUID 파싱은 5.7 :func:`_audit_values` 를 재�
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -339,35 +340,73 @@ class PostgresAdminEntityRepository:
             raise _duplicate_error(exc) from exc
 
     # ── save(UPDATE + audit, 동일 트랜잭션) ─────────────────────────────────────
-    async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:
-        await self._update_with_audit(
-            TenantRow,
-            tenant.id,
-            {
-                "name": tenant.name,
-                "status": tenant.status.value,
-                "telegram_bot_token": tenant.telegram_bot_token,
-                "telegram_webhook_secret": tenant.telegram_webhook_secret,
-                "sending_enabled": tenant.sending_enabled,
-                "send_test_passed_at": tenant.send_test_passed_at,
-            },
-            audit,
-        )
+    async def save_tenant(
+        self,
+        tenant: Tenant,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
+    ) -> None:
+        values = {
+            "name": tenant.name,
+            "status": tenant.status.value,
+            "telegram_bot_token": tenant.telegram_bot_token,
+            "telegram_webhook_secret": tenant.telegram_webhook_secret,
+            "sending_enabled": tenant.sending_enabled,
+            "send_test_passed_at": tenant.send_test_passed_at,
+        }
+        # no-catchup: 고객 reactivation 시 tenant UPDATE + ACTIVE targets next_run_at reset + audit
+        # 를 **한 세션·한 commit** 으로 묶는다(부분 반영 없음). last_enqueued_at/last_success_at 은
+        # 건드리지 않는다(실제 enqueue 아님, 성공 이력은 snapshots 파생).
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(TenantRow).where(TenantRow.id == tenant.id).values(**values)
+                )
+                for target_id, next_run_at in (schedule_resets or {}).items():
+                    await session.execute(
+                        update(MonitoringTargetRow)
+                        .where(MonitoringTargetRow.id == _uuid(target_id))
+                        .values(next_run_at=next_run_at)
+                    )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise _duplicate_error(exc) from exc
 
     async def save_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
     ) -> None:
-        await self._update_with_audit(
-            SubscriptionRow,
-            subscription.id,
-            {
-                "plan": subscription.plan,
-                "status": subscription.status.value,
-                "current_period_end": subscription.current_period_end,
-                "quotas": subscription.quotas,
-            },
-            audit,
-        )
+        values = {
+            "plan": subscription.plan,
+            "status": subscription.status.value,
+            "current_period_end": subscription.current_period_end,
+            "quotas": subscription.quotas,
+        }
+        # no-catchup: 구독 복구 시 subscription UPDATE + tenant 의 ACTIVE targets next_run_at reset
+        # + audit 를 **한 세션·한 commit** 으로 묶는다(부분 반영 없음). schedule_resets 없으면 기존
+        # 단일 UPDATE 동작과 동일하다.
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(SubscriptionRow)
+                    .where(SubscriptionRow.id == subscription.id)
+                    .values(**values)
+                )
+                for target_id, next_run_at in (schedule_resets or {}).items():
+                    await session.execute(
+                        update(MonitoringTargetRow)
+                        .where(MonitoringTargetRow.id == _uuid(target_id))
+                        .values(next_run_at=next_run_at)
+                    )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise _duplicate_error(exc) from exc
 
     async def save_platform_account(
         self, account: PlatformAccount, audit: AuditEntry
@@ -388,22 +427,31 @@ class PostgresAdminEntityRepository:
         )
 
     async def save_monitoring_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to: datetime | None = None,
     ) -> None:
+        values = {
+            "name": target.name,
+            "center_name": target.center_name,
+            "external_id": target.external_id,
+            "url": target.url,
+            "interval_minutes": target.interval_minutes,
+            "schedule_enabled": target.schedule_enabled,
+            "start_time": target.start_time,
+            "stop_time": target.stop_time,
+            "status": target.status.value,  # soft delete = INACTIVE 포함
+        }
+        # no-catchup: CRUD reactivation(INACTIVE→ACTIVE)은 status 와 같은 UPDATE 로 next_run_at 을
+        # 민다(같은 트랜잭션). 일반 편집(schedule_reset_to=None)은 next_run_at 을 건드리지 않는다.
+        if schedule_reset_to is not None:
+            values["next_run_at"] = schedule_reset_to
         await self._update_with_audit(
             MonitoringTargetRow,
             target.id,
-            {
-                "name": target.name,
-                "center_name": target.center_name,
-                "external_id": target.external_id,
-                "url": target.url,
-                "interval_minutes": target.interval_minutes,
-                "schedule_enabled": target.schedule_enabled,
-                "start_time": target.start_time,
-                "stop_time": target.stop_time,
-                "status": target.status.value,  # soft delete = INACTIVE 포함
-            },
+            values,
             audit,
         )
 

@@ -241,10 +241,27 @@ class PostgresAdminActionRepository:
         # 열린 질문 #1: HELD Dispatch 영속 표현 미정 → 보수적 미노출(Epic 3/5 reconcile).
         return None
 
+    async def list_tenant_active_targets(
+        self, tenant_id: str
+    ) -> list[MonitoringTarget]:
+        stmt = select(MonitoringTargetRow).where(
+            MonitoringTargetRow.tenant_id == tenant_id,
+            MonitoringTargetRow.status == MonitoringTargetStatus.ACTIVE.value,
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return [_target_to_domain(row) for row in rows]
+
     # ── write + audit(같은 트랜잭션) ────────────────────────────────────────────
     async def transition_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets=None,
     ) -> None:
+        # no-catchup: 구독 복구 시 subscription UPDATE + tenant 의 ACTIVE targets next_run_at reset
+        # + audit 를 **한 세션·한 commit** 으로 묶는다(부분 반영 없음).
         async with self._session_factory() as session:
             result = await session.execute(
                 update(SubscriptionRow)
@@ -253,17 +270,33 @@ class PostgresAdminActionRepository:
             )
             if result.rowcount == 0:
                 raise AdminActionNotFound("subscription", subscription.id)
+            for target_id, next_run_at in (schedule_resets or {}).items():
+                await session.execute(
+                    update(MonitoringTargetRow)
+                    .where(MonitoringTargetRow.id == target_id)
+                    .values(next_run_at=next_run_at)
+                )
             await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
             await session.commit()
 
     async def transition_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to=None,
     ) -> None:
+        # no-catchup: schedule_reset_to 가 있으면 status 전이와 같은 UPDATE 로 next_run_at 을 민다
+        # (같은 트랜잭션 — 전이만 되고 schedule 이 안 밀리는 부분 반영 없음). last_enqueued_at/
+        # last_success_at 은 건드리지 않는다(실제 enqueue 아님, 성공 이력은 snapshots 파생).
+        values = {"status": target.status.value}
+        if schedule_reset_to is not None:
+            values["next_run_at"] = schedule_reset_to
         async with self._session_factory() as session:
             result = await session.execute(
                 update(MonitoringTargetRow)
                 .where(MonitoringTargetRow.id == target.id)
-                .values(status=target.status.value)
+                .values(**values)
             )
             if result.rowcount == 0:
                 raise AdminActionNotFound("monitoring_target", target.id)

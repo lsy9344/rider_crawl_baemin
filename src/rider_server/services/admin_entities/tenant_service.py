@@ -11,7 +11,11 @@ from typing import Any, Awaitable, Callable
 # 동형이되, None 자체가 유효 값이라 별도 sentinel 사용).
 _UNSET: Any = object()
 
-from rider_server.domain import CustomerLifecycleState, Tenant
+from rider_server.domain import (
+    CustomerLifecycleState,
+    MonitoringTargetStatus,
+    Tenant,
+)
 from rider_server.services.admin_action_service import AuditEntry
 
 from .common import (
@@ -120,6 +124,32 @@ class TenantAdminEntityService:
             ),
             send_test_passed_at=next_send_test_passed_at,
         )
+        # no-catchup: 고객이 non-schedulable→schedulable(ACTIVE/PAYMENT_ACTIVE)로 복귀하면, 해당
+        # tenant 의 ACTIVE 대상만 next_run_at 을 다음 주기로 민다 — 비활성 동안 밀린 스케줄을 즉시
+        # due 로 만들어 따라잡기 수집이 돌지 않게. PAUSED/INACTIVE 대상은 건드리지 않는다. 이미
+        # schedulable 인 고객을 다시 저장하는 no-op update 는 reset 하지 않는다(설정 저장만으로
+        # 수집이 밀리는 것을 막는다). schedulable 기준은 scheduler 와 같다(ACTIVE_LIFECYCLE_STATES).
+        # scheduler.policy 는 함수 안에서 import — 모듈 로드 시 import 하면 scheduler 패키지
+        # (→ security)와 순환된다.
+        from rider_server.scheduler.policy import (
+            ACTIVE_LIFECYCLE_STATES,
+            reactivation_schedule_resets,
+        )
+
+        reactivated = (
+            existing.status not in ACTIVE_LIFECYCLE_STATES
+            and updated.status in ACTIVE_LIFECYCLE_STATES
+        )
+        schedule_resets: dict[str, datetime] = {}
+        if reactivated:
+            schedule_resets = reactivation_schedule_resets(
+                (
+                    (target.id, target.interval_minutes)
+                    for target in await self._repo.list_monitoring_targets(tenant_id)
+                    if target.status is MonitoringTargetStatus.ACTIVE
+                ),
+                at,
+            )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_TENANT_UPDATE,
@@ -131,6 +161,14 @@ class TenantAdminEntityService:
                 "to_name": updated.name,
                 "from_status": existing.status.value,
                 "to_status": updated.status.value,
+                **(
+                    {
+                        "schedule_reset_targets": len(schedule_resets),
+                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                    }
+                    if schedule_resets
+                    else {}
+                ),
                 "telegram_bot_token": _secret_change_label(
                     existing.telegram_bot_token, updated.telegram_bot_token
                 ),
@@ -154,7 +192,9 @@ class TenantAdminEntityService:
             source=source,
             reason=reason,
         )
-        await self._repo.save_tenant(updated, audit)
+        await self._repo.save_tenant(
+            updated, audit, schedule_resets=schedule_resets or None
+        )
         return updated
 
     async def delete_tenant(

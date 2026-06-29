@@ -18,6 +18,7 @@ job type 상수는 :mod:`rider_server.queue.states` 미러 6종에서 쓴다(``r
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -82,6 +83,52 @@ def is_due(next_run_at_value: datetime | None, now: datetime) -> bool:
     """due 판정 — ``next_run_at`` 이 ``None``(미초기화=즉시 due)이거나 ``<= now`` 면 due."""
 
     return next_run_at_value is None or next_run_at_value <= now
+
+
+# 재활성화 no-catchup 의 최소 defer(초). interval_minutes <= 0(0/미설정/음수) 대상도 재활성화
+# 직후 즉시 due(next_run_at <= now)가 되지 않게 보장하는 하한이다. 0-interval 대상은 평소엔
+# scheduler 설계상 "항상 due" 지만, 재활성화 직후의 즉시 catch-up 수집만은 이 하한으로 막는다.
+# ponytail: 고정 60초 하한. 운영상 더 정밀한 "다음 tick" 의미가 필요하면 호출부에서 scheduler
+# interval(SCHEDULER_INTERVAL_SECONDS)을 주입해 올린다.
+REACTIVATION_MIN_DEFER_SECONDS = 60
+
+
+def reactivation_next_run_at(
+    target_id: str, interval_minutes: int, now: datetime
+) -> datetime:
+    """비활성→활성 복귀 시 다음 수집 시각(결정적, **항상 ``> now``**).
+
+    inactive/paused 동안 밀린 스케줄을 즉시 due 로 만들어 따라잡기(catch-up) 수집이 돌지 않게,
+    재활성화 시 ``next_run_at`` 을 미래로 민다. **scheduler 와 같은 계산식**(:func:`compute_jitter`
+    + :func:`next_run_at`)을 재사용해 평행 정책을 만들지 않는다 — 같은 ``target_id`` 는 scheduler
+    전진과 동일한 결정적 jitter 를 받는다.
+
+    ``interval_minutes`` 가 0/음수면 ``now + interval + jitter == now`` 가 돼 즉시 due(``<= now``)가
+    되므로, :data:`REACTIVATION_MIN_DEFER_SECONDS` 하한으로 strict-future 를 보장한다(이 경로의
+    유일한 목적이 "즉시 catch-up 금지" 이므로 0-interval 도 예외 없이 미래로 민다).
+    """
+
+    interval_seconds = interval_minutes * 60
+    jitter = compute_jitter(target_id, interval_seconds)
+    candidate = next_run_at(now, interval_seconds, jitter)
+    floor = now + timedelta(seconds=REACTIVATION_MIN_DEFER_SECONDS)
+    return candidate if candidate > floor else floor
+
+
+def reactivation_schedule_resets(
+    targets: Iterable[tuple[str, int]], now: datetime
+) -> dict[str, datetime]:
+    """``(target_id, interval_minutes)`` 들에 대한 no-catchup ``next_run_at`` 맵(결정적).
+
+    고객/구독 단위 재활성화에서 여러 ACTIVE 대상의 schedule 을 한 번에 reset 할 때 쓴다 —
+    :func:`reactivation_next_run_at` 를 대상별로 호출한다(같은 ``target_id`` 는 같은 jitter).
+    ACTIVE 필터는 호출부 책임이다(이 함수는 받은 대상만 계산한다).
+    """
+
+    return {
+        target_id: reactivation_next_run_at(target_id, interval_minutes, now)
+        for target_id, interval_minutes in targets
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════

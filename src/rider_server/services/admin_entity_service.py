@@ -380,6 +380,13 @@ class AdminEntityService:
 
         existing = await self._scoped_subscription(subscription_id, tenant_id=tenant_id)
         updated = replace(existing, status=status)
+        # no-catchup: 구독 게이트가 차단(SUSPENDED/CANCELLED)에서 허용(PAYMENT_ACTIVE/
+        # PAYMENT_FAILED_GRACE)으로 바뀌면 scheduler 가 다시 enqueue 를 허용하므로, 비활성 동안
+        # 과거가 된 ACTIVE 대상 next_run_at 을 다음 주기로 민다(즉시 catch-up 금지). schedulable
+        # 판정은 scheduler 와 같은 SubscriptionGate 를 재사용한다(새 정책 만들지 않음).
+        schedule_resets = await self._reactivation_schedule_resets_for_subscription(
+            existing.status, updated.status, tenant_id=tenant_id, at=at
+        )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_SUBSCRIPTION_UPDATE,
@@ -390,12 +397,53 @@ class AdminEntityService:
                 "from_status": existing.status.value,
                 "to_status": updated.status.value,
                 "reason": reason,
+                **(
+                    {
+                        "schedule_reset_targets": len(schedule_resets),
+                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                    }
+                    if schedule_resets
+                    else {}
+                ),
             },
             source=source,
             reason=reason,
         )
-        await self._repo.save_subscription(updated, audit)
+        await self._repo.save_subscription(
+            updated, audit, schedule_resets=schedule_resets or None
+        )
         return updated
+
+    async def _reactivation_schedule_resets_for_subscription(
+        self,
+        from_status: SubscriptionStatus,
+        to_status: SubscriptionStatus,
+        *,
+        tenant_id: str,
+        at: datetime,
+    ) -> dict[str, datetime]:
+        """구독 게이트가 차단→허용으로 바뀔 때 tenant 의 ACTIVE 대상 no-catchup next_run_at 맵.
+
+        scheduler 와 같은 :class:`SubscriptionGate` 게이트(``allow_new_crawl_job``)로 schedulable
+        전이를 판정한다 — 새 구독 정책을 만들지 않는다. 허용→허용/차단→차단은 빈 dict(no-op).
+        scheduler.policy 는 함수 안에서 import(모듈 로드 순환 회피).
+        """
+
+        from rider_server.scheduler.policy import reactivation_schedule_resets
+        from rider_server.services.subscription_gate import SubscriptionGate
+
+        was_allowed = SubscriptionGate.evaluate_status(from_status).allow_new_crawl_job
+        now_allowed = SubscriptionGate.evaluate_status(to_status).allow_new_crawl_job
+        if was_allowed or not now_allowed:
+            return {}
+        return reactivation_schedule_resets(
+            (
+                (target.id, target.interval_minutes)
+                for target in await self._repo.list_monitoring_targets(tenant_id)
+                if target.status is MonitoringTargetStatus.ACTIVE
+            ),
+            at,
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # 플랫폼 계정 PlatformAccount — create/update(secret성 값은 ref 핸들만 저장)
@@ -1065,6 +1113,7 @@ class InMemoryAdminEntityRepository:
         self._channels: dict[str, MessengerChannel] = {}
         self._rules: dict[str, DeliveryRule] = {}
         self._registration_codes: dict[str, str] = {}  # channel_id → code(라우팅 — 비domain)
+        self._next_run_at: dict[str, datetime] = {}  # target_id → reset next_run_at(가시성)
         self.audits: list[AuditEntry] = []
 
     # ── read(get) ───────────────────────────────────────────────────────────
@@ -1153,14 +1202,28 @@ class InMemoryAdminEntityRepository:
         self.audits.append(audit)
 
     # ── save(UPDATE) + audit(같은 트랜잭션 모사) ────────────────────────────────
-    async def save_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:
+    async def save_tenant(
+        self,
+        tenant: Tenant,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
+    ) -> None:
         self._tenants[tenant.id] = tenant
+        if schedule_resets:
+            self._next_run_at.update(schedule_resets)
         self.audits.append(audit)
 
     async def save_subscription(
-        self, subscription: Subscription, audit: AuditEntry
+        self,
+        subscription: Subscription,
+        audit: AuditEntry,
+        *,
+        schedule_resets: dict[str, datetime] | None = None,
     ) -> None:
         self._subscriptions[subscription.id] = subscription
+        if schedule_resets:
+            self._next_run_at.update(schedule_resets)
         self.audits.append(audit)
 
     async def save_platform_account(
@@ -1170,9 +1233,15 @@ class InMemoryAdminEntityRepository:
         self.audits.append(audit)
 
     async def save_monitoring_target(
-        self, target: MonitoringTarget, audit: AuditEntry
+        self,
+        target: MonitoringTarget,
+        audit: AuditEntry,
+        *,
+        schedule_reset_to: datetime | None = None,
     ) -> None:
         self._targets[target.id] = target
+        if schedule_reset_to is not None:
+            self._next_run_at[target.id] = schedule_reset_to
         self.audits.append(audit)
 
     async def save_messenger_channel(
@@ -1208,3 +1277,7 @@ class InMemoryAdminEntityRepository:
 
     def seed_delivery_rule(self, rule: DeliveryRule) -> None:
         self._rules[rule.id] = rule
+
+    def next_run_at_for(self, target_id: str) -> datetime | None:
+        """reset 된 ``next_run_at``(테스트 가시성). reset 이 없었으면 ``None``."""
+        return self._next_run_at.get(target_id)

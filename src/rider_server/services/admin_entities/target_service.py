@@ -259,6 +259,14 @@ class TargetAdminEntityService:
         if existing.status is not MonitoringTargetStatus.INACTIVE:
             return existing
         updated = replace(existing, status=MonitoringTargetStatus.ACTIVE)
+        # no-catchup: INACTIVE→ACTIVE 복귀 시 next_run_at 을 다음 주기로 민다(비활성 동안 밀린
+        # 스케줄을 즉시 due 로 만들지 않는다). scheduler 와 같은 결정적 계산식 재사용. policy 는
+        # 함수 안에서 import — 모듈 로드 시 import 하면 scheduler 패키지(→ security)와 순환된다.
+        from rider_server.scheduler.policy import reactivation_next_run_at
+
+        schedule_reset_to = reactivation_next_run_at(
+            target_id, existing.interval_minutes, at
+        )
         audit = self._audit(
             actor_id=actor_id,
             action=ACTION_MONITORING_TARGET_REACTIVATE,
@@ -269,9 +277,13 @@ class TargetAdminEntityService:
                 "from_status": existing.status.value,
                 "to_status": updated.status.value,
                 "reason": reason,
+                "schedule_reset": True,
+                "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
             },
             source=source,
             reason=reason,
         )
-        await self._repo.save_monitoring_target(updated, audit)
+        await self._repo.save_monitoring_target(
+            updated, audit, schedule_reset_to=schedule_reset_to
+        )
         return updated
