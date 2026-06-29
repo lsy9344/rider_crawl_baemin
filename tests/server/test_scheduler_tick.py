@@ -174,6 +174,7 @@ def _target(
     auto_recovery_failed_at=None,
     auto_recovery_cooldown_until=None,
     active_auth_job_count=0,
+    external_id="",
 ):
     return DueTarget(
         target_id=tid,
@@ -184,6 +185,7 @@ def _target(
         platform_account_id=f"acct-{tid}",
         primary_url=f"https://example.invalid/{tid}",
         expected_display_name=f"센터-{tid}",
+        external_id=external_id,
         username=username,
         password=password,
         verification_email_address=verification_email_address,
@@ -296,7 +298,7 @@ def test_scheduler_preserves_target_agent_affinity_on_enqueued_job() -> None:
 
 
 def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
-    target = _target("t-payload", platform="BAEMIN")
+    target = _target("t-payload", platform="BAEMIN", external_id="DP100")
     repo = FakeSchedulerRepo(
         targets=[target],
         gates={target.tenant_id: _ACTIVE_GATE},
@@ -315,6 +317,7 @@ def test_scheduler_enqueues_crawl_payload_needed_by_agent_worker() -> None:
         "platform_account_id": "acct-t-payload",
         "primary_url": "https://example.invalid/t-payload",
         "expected_display_name": "센터-t-payload",
+        "external_id": "DP100",
         "browser_profile_ref": "profile:t-payload",
         "timeout_seconds": 60,
         "parser_version": "baemin-v1",

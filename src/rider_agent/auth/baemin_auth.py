@@ -12,8 +12,9 @@
   (fail-closed = 인증으로 막힌 대상에 잘못된 메시지 0, NFR-2).
 * :func:`execute_open_auth_browser_job` — ``OPEN_AUTH_BROWSER`` job 실행자. 주입
   ``open_auth_browser`` 로 프로필 브라우저를 **열고**, 주입 ``detect_completion`` 으로 사람이
-  완료한 로그인 상태를 **read-only 로 감지**(``AUTH_VERIFIED``)한다. **휴대폰 인증 코드(OTP)를
-  취득·자동입력·우회·자동 통과하려 시도하지 않는다(ADD-15 — 이 스토리의 핵심 금지).** 재인증
+  완료한 로그인 상태를 감지한다(``AUTH_VERIFIED``). 배민은 로그인 후 협력사 선택/대상 페이지
+  재진입만 기존 크롤러 로직으로 수행한다. **휴대폰 인증 코드(OTP)를 취득·자동입력·우회·자동
+  통과하려 시도하지 않는다(ADD-15 — 이 스토리의 핵심 금지).** 재인증
   대기는 주입 ``now``/``sleep`` + 상한(``max_wait_seconds``/``max_attempts``)으로 **bounded**
   하며, 상한 내 미완료면 ``AUTH_REQUIRED``(사유 ``auth_timeout``)로 **멈춘다**(무한 재시도 금지,
   NFR-4).
@@ -362,9 +363,10 @@ def default_detect_completion(
     *,
     secret_resolver: Callable[[str], str | None] | None = None,
 ) -> bool:
-    """기본 사람-완료 감지(read-only).
+    """기본 사람-완료 감지.
 
-    로그인 완료 여부만 다시 probe 한다. 인증번호를 읽거나 입력·제출하지 않는다.
+    Coupang 은 준비된 대상 탭만 확인한다. Baemin 은 로그인 완료 뒤 남을 수 있는 협력사 선택과
+    대상 페이지 재진입을 기존 크롤러 로직으로 수행한다. 인증번호를 읽거나 입력·제출하지 않는다.
     """
 
     platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
@@ -388,9 +390,86 @@ def _detect_baemin_completion(
         with _sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(config.cdp_url)
             pages = _browser_pages(browser)
+            if _baemin_has_ready_page(pages, target_url):
+                return True
+            if _prepare_baemin_ready_page(browser, config):
+                return True
+            pages = _browser_pages(browser)
             return _baemin_has_ready_page(pages, target_url)
     except Exception:
         return False
+
+
+def _prepare_baemin_ready_page(browser: Any, config: Any) -> bool:
+    from rider_crawl import crawler as baemin_crawler
+
+    pages = _browser_pages(browser)
+    report_url = baemin_crawler._baemin_report_url(config)
+    page = baemin_crawler._select_page_by_url(pages, report_url)
+    target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+    if page is None and target_url:
+        page = baemin_crawler._select_page_by_url(pages, target_url)
+    if page is None:
+        page = baemin_crawler._select_page_by_url(
+            pages, baemin_crawler._BAEMIN_CENTER_CHANGE_URL
+        )
+    if page is None:
+        page = _first_logged_in_baemin_page(pages)
+    if page is None:
+        return False
+
+    try:
+        _bring_page_to_front(page)
+        timeout_errors = _playwright_timeout_errors()
+        if baemin_crawler._has_configured_baemin_center(config):
+            _goto_baemin_page_sync(
+                page, baemin_crawler._BAEMIN_CENTER_CHANGE_URL, config, timeout_errors
+            )
+            baemin_crawler._select_baemin_center_sync(page, config)
+
+        _goto_baemin_page_sync(page, report_url, config, timeout_errors)
+        if baemin_crawler._url_matches(
+            str(getattr(page, "url", "")), baemin_crawler._BAEMIN_CENTER_CHANGE_URL
+        ):
+            baemin_crawler._select_baemin_center_sync(page, config)
+            _goto_baemin_page_sync(page, report_url, config, timeout_errors)
+
+        if not baemin_crawler._url_matches(str(getattr(page, "url", "")), report_url):
+            _goto_baemin_page_sync(page, report_url, config, timeout_errors)
+    except Exception:
+        return False
+    return _baemin_has_ready_page([page], report_url)
+
+
+def _first_logged_in_baemin_page(pages: list[Any]) -> Any | None:
+    for page in pages:
+        url = str(getattr(page, "url", ""))
+        parsed = urlsplit(url)
+        if (
+            (parsed.hostname or "").casefold() == _BAEMIN_HOST
+            and not _url_looks_like_baemin_auth(url)
+        ):
+            return page
+    return None
+
+
+def _goto_baemin_page_sync(
+    page: Any,
+    url: str,
+    config: Any,
+    timeout_errors: tuple[type[BaseException], ...],
+) -> None:
+    page.goto(
+        url,
+        wait_until="domcontentloaded",
+        timeout=getattr(config, "page_timeout_seconds", _INTERACTION_TIMEOUT_MS),
+    )
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except timeout_errors:
+        pass
+    except Exception:
+        pass
 
 
 def _detect_coupang_completion(

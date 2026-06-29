@@ -157,6 +157,8 @@ def _operator_action_message(exc: ValueError) -> str:
     message = str(exc)
     if message == "active manual job already exists":
         return "이미 진행 중인 인증 작업이 있습니다. 잠시 후 상태를 확인하세요."
+    if message == "no online capable agent available":
+        return "온라인 Agent가 없습니다. Agent PC에서 Agent를 등록/실행한 뒤 다시 시도하세요."
     return message
 
 
@@ -242,6 +244,14 @@ async def test_crawl(
                 "이미 진행 중인 수집 작업이 있습니다. 완료 후 검증 결과를 확인하세요.",
                 ok=False,
                 status_code=HTTPStatus.CONFLICT,
+                trigger_changed=False,
+            )
+        if str(exc) == "no online capable agent available":
+            return _fragment(
+                request,
+                _operator_action_message(exc),
+                ok=False,
+                status_code=HTTPStatus.BAD_REQUEST,
                 trigger_changed=False,
             )
         _raise_for(exc)

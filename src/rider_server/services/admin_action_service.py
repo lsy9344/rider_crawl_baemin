@@ -447,7 +447,7 @@ def _auth_start_payload(
 def _target_job_payload(
     target: MonitoringTarget, *, job_type: str, platform: str
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "target_id": target.id,
         "tenant_id": target.tenant_id,
         "platform": platform,
@@ -459,6 +459,10 @@ def _target_job_payload(
         "parser_version": f"{platform}-v1",
         "job_type": job_type,
     }
+    external_id = str(target.external_id or "").strip()
+    if platform == "baemin" and external_id:
+        payload["external_id"] = external_id
+    return payload
 
 
 def _platform_for_crawl_job(job_type: str) -> str:

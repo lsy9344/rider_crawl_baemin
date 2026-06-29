@@ -109,6 +109,40 @@ def _assigned_agent_id_from_agent_capacity(
     return None
 
 
+def _has_online_capable_agent(agent_rows, *, job_type: str, now) -> bool:
+    """Return whether at least one online agent advertises the requested job type."""
+
+    for row in agent_rows:
+        if _is_online_capable_agent(
+            agent_rows=(row,),
+            agent_id=row.id,
+            job_type=job_type,
+            now=now,
+        ):
+            return True
+    return False
+
+
+def _is_online_capable_agent(
+    agent_rows, *, agent_id: uuid.UUID, job_type: str, now
+) -> bool:
+    """Return whether a specific agent row is online and can run ``job_type``."""
+
+    target_agent_id = _uuid_or_none(agent_id)
+    if target_agent_id is None:
+        return False
+    for row in agent_rows:
+        if _uuid_or_none(row.id) != target_agent_id:
+            continue
+        if not is_agent_online(row.last_heartbeat_at, now):
+            continue
+        data = row.capacity_json or {}
+        capabilities = data.get("capabilities") if isinstance(data, dict) else None
+        if isinstance(capabilities, list) and job_type in capabilities:
+            return True
+    return False
+
+
 def _sub_to_domain(row: SubscriptionRow) -> Subscription:
     return Subscription(
         id=str(row.id),
@@ -393,16 +427,23 @@ class PostgresAdminActionRepository:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            if assigned_agent_id is None:
-                agent_rows = (
-                    await session.execute(
-                        select(
-                            AgentRow.id,
-                            AgentRow.last_heartbeat_at,
-                            AgentRow.capacity_json,
-                        )
+            agent_rows = (
+                await session.execute(
+                    select(
+                        AgentRow.id,
+                        AgentRow.last_heartbeat_at,
+                        AgentRow.capacity_json,
                     )
-                ).all()
+                )
+            ).all()
+            if assigned_agent_id is not None and not _is_online_capable_agent(
+                agent_rows,
+                agent_id=assigned_agent_id,
+                job_type=job_type,
+                now=now,
+            ):
+                assigned_agent_id = None
+            if assigned_agent_id is None:
                 assigned_agent_id = _assigned_agent_id_from_agent_capacity(
                     agent_rows,
                     target_id=target_uuid,
@@ -440,6 +481,12 @@ class PostgresAdminActionRepository:
             ).scalar_one_or_none()
             if existing is not None:
                 raise ValueError("active manual job already exists")
+            if assigned_agent_id is None and not _has_online_capable_agent(
+                agent_rows,
+                job_type=job_type,
+                now=now,
+            ):
+                raise ValueError("no online capable agent available")
             session.add(
                 JobRow(
                     id=job_uuid,

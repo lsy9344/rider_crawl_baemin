@@ -114,3 +114,65 @@ def test_manual_crawl_does_not_guess_when_multiple_agents_can_run_job() -> None:
     )
 
     assert assigned is None
+
+
+def test_manual_crawl_detects_no_online_capable_agent() -> None:
+    assert hasattr(repository, "_has_online_capable_agent")
+
+    has_agent = repository._has_online_capable_agent(
+        [
+            _agent_row(
+                _AGENT,
+                heartbeat_age=timedelta(minutes=3),
+                capacity_json={"capabilities": [JOB_TYPE_CRAWL_COUPANG]},
+            ),
+            _agent_row(_OTHER_AGENT, capacity_json={"capabilities": ["KAKAO_SEND"]}),
+        ],
+        job_type=JOB_TYPE_CRAWL_COUPANG,
+        now=_NOW,
+    )
+
+    assert has_agent is False
+
+
+def test_manual_crawl_rejects_stale_assigned_agent() -> None:
+    assert hasattr(repository, "_is_online_capable_agent")
+
+    assert (
+        repository._is_online_capable_agent(
+            [
+                _agent_row(
+                    _AGENT,
+                    heartbeat_age=timedelta(minutes=3),
+                    capacity_json={"capabilities": [JOB_TYPE_CRAWL_COUPANG]},
+                )
+            ],
+            agent_id=_AGENT,
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            now=_NOW,
+        )
+        is False
+    )
+    assert (
+        repository._is_online_capable_agent(
+            [_agent_row(_AGENT, capacity_json={"capabilities": ["KAKAO_SEND"]})],
+            agent_id=_AGENT,
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            now=_NOW,
+        )
+        is False
+    )
+    assert (
+        repository._is_online_capable_agent(
+            [
+                _agent_row(
+                    _AGENT,
+                    capacity_json={"capabilities": [JOB_TYPE_CRAWL_COUPANG]},
+                )
+            ],
+            agent_id=_AGENT,
+            job_type=JOB_TYPE_CRAWL_COUPANG,
+            now=_NOW,
+        )
+        is True
+    )

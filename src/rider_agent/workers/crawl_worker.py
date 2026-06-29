@@ -90,6 +90,7 @@ class CrawlJobPayload:
     verification_email_sender_keyword: str = ""
     coupang_auto_email_2fa_enabled: bool = False
     expires_at: str = ""
+    target_external_id: str = ""
 
 
 class CrawlWorker:
@@ -507,6 +508,9 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
             else False
         ),
         expires_at=str(raw.get("expires_at") or "").strip(),
+        target_external_id=_text(
+            raw, "external_id", "target_external_id", "baemin_center_id"
+        ),
     )
 
 
@@ -663,7 +667,7 @@ def _build_config(
     return AppConfig(
         coupang_eats_url=payload.primary_url,
         baemin_center_name=payload.expected_display_name,
-        baemin_center_id=payload.target_id,
+        baemin_center_id=payload.target_external_id or payload.target_id,
         browser_mode="cdp",
         cdp_url=cdp_url,
         browser_user_data_dir=user_data_dir,

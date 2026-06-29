@@ -120,6 +120,26 @@ def test_auth_job_config_uses_profile_assignment_from_payload(tmp_path):
     assert config.browser_user_data_dir == profile_dir
 
 
+def test_auth_job_config_uses_external_id_for_baemin_center_id():
+    from rider_agent.auth import baemin_auth
+
+    config = baemin_auth._config_from_auth_job(
+        _auth_job(
+            payload={
+                "target_id": FAKE_TARGET,
+                "tenant_id": "tenant-fake-1",
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "표준경기남양주C팀100퍼센트",
+                "external_id": "DP100",
+            }
+        )
+    )
+
+    assert config.baemin_center_name == "표준경기남양주C팀100퍼센트"
+    assert config.baemin_center_id == "DP100"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC1 — 분류기: BrowserActionRequiredError→AUTH_REQUIRED, 비-auth 예외 오분류 금지
 # ══════════════════════════════════════════════════════════════════════════
@@ -439,6 +459,170 @@ def test_default_detect_completion_baemin_returns_true_for_ready_target_without_
 
     assert completed is True
     assert crawl_calls == []
+
+
+def test_default_detect_completion_baemin_prefers_existing_ready_tab(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeReadyPage:
+        url = "https://deliverycenter.baemin.com/delivery/report"
+
+        def goto(self, *args, **kwargs):
+            actions.append(("goto-ready-tab", args, kwargs))
+            raise AssertionError("ready Baemin report tab should not be changed")
+
+    class FakePartnerPage:
+        url = "https://deliverycenter.baemin.com/center/change"
+
+    class FakeContext:
+        pages = [FakeReadyPage(), FakePartnerPage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "target_id": FAKE_TARGET,
+                "tenant_id": "tenant-fake-1",
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "표준경기남양주C팀100퍼센트",
+                "external_id": "DP100",
+            },
+        )
+    )
+
+    assert completed is True
+    assert actions == []
+
+
+def test_default_detect_completion_baemin_selects_partner_before_verified(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeSelect:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 1
+
+        def select_option(self, *, value=None, label=None, timeout=None):
+            actions.append(("select_option", value, label, timeout))
+            if value != "DP100":
+                raise TimeoutError("wrong baemin center value")
+
+    class FakeButton:
+        first = None
+
+        def __init__(self, role, name):
+            self.role = role
+            self.name = name
+            self.first = self
+
+        def click(self, timeout=None):
+            actions.append(("click", self.role, self.name, timeout))
+
+        def filter(self, visible=True):
+            return self
+
+    class FakePage:
+        url = "https://deliverycenter.baemin.com/center/change"
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
+            actions.append(("goto", url, wait_until, timeout))
+
+        def locator(self, selector):
+            actions.append(("locator", selector))
+            if selector == "select":
+                return FakeSelect()
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def get_by_role(self, role, name, exact=False):
+            return FakeButton(role, name)
+
+        def wait_for_load_state(self, state, timeout=None):
+            actions.append(("wait_for_load_state", state, timeout))
+
+    page = FakePage()
+
+    class FakeContext:
+        pages = [page]
+
+        def new_page(self):
+            return page
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "target_id": FAKE_TARGET,
+                "tenant_id": "tenant-fake-1",
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "표준경기남양주C팀100퍼센트",
+                "external_id": "DP100",
+            },
+        )
+    )
+
+    assert completed is True
+    assert (
+        "goto",
+        "https://deliverycenter.baemin.com/center/change",
+        "domcontentloaded",
+        60_000,
+    ) in actions
+    assert ("select_option", "DP100", None, 60_000) in actions
+    assert ("click", "button", "선택 완료", 60_000) in actions
+    assert (
+        "goto",
+        "https://deliverycenter.baemin.com/delivery/report",
+        "domcontentloaded",
+        60_000,
+    ) in actions
 
 
 def test_default_detect_completion_baemin_returns_false_for_auth_tab_only(monkeypatch):

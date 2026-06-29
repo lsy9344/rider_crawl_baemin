@@ -86,6 +86,7 @@ class DueTarget:
     platform_account_id: str = ""
     primary_url: str = ""
     expected_display_name: str = ""
+    external_id: str = ""
     username: str = ""
     password: str = ""
     verification_email_address: str = ""
@@ -586,6 +587,9 @@ def _crawl_job_payload(
         "scheduled_at": _iso_utc(now),
         "expires_at": _iso_utc(now + timedelta(seconds=expires_in_seconds)),
     }
+    external_id = str(target.external_id or "").strip()
+    if platform == "baemin" and external_id:
+        payload["external_id"] = external_id
     if platform == "coupang":
         payload.update(
             {

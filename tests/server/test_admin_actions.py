@@ -86,13 +86,16 @@ def _sub(status=SubscriptionStatus.PAYMENT_ACTIVE, *, tenant=_TENANT) -> Subscri
     return Subscription(id="sub-1", tenant_id=tenant, plan="basic", status=status)
 
 
-def _target(status=MonitoringTargetStatus.ACTIVE, *, tenant=_TENANT) -> MonitoringTarget:
+def _target(
+    status=MonitoringTargetStatus.ACTIVE, *, tenant=_TENANT, external_id: str = ""
+) -> MonitoringTarget:
     return MonitoringTarget(
         id="mt-1",
         tenant_id=tenant,
         platform_account_id="pa-1",
         name="가게",
         center_name="센터",
+        external_id=external_id,
         url="https://example.invalid/mt-1",
         interval_minutes=10,
         status=status,
@@ -838,6 +841,20 @@ def test_start_auth_enqueues_open_auth_browser_for_baemin_and_audits() -> None:
     assert repo.audits[-1].diff_redacted["job_type"] == "OPEN_AUTH_BROWSER"
 
 
+def test_start_auth_for_baemin_includes_external_id_when_configured() -> None:
+    repo = InMemoryAdminActionRepository()
+    repo.seed_target(_target(external_id="DP100"))
+    repo.seed_platform_account(_platform_account())
+    queue = InMemoryQueueBackend()
+    svc = _service(repo, queue)
+
+    job_id = _run(svc.start_auth(target_id="mt-1", tenant_id=_TENANT, actor_id=_ACTOR, at=_NOW))
+
+    job = queue.job_snapshot(job_id)
+    assert job is not None
+    assert job.payload_json["external_id"] == "DP100"
+
+
 def test_start_auth_payload_contains_requested_at_and_expires_at() -> None:
     """OPEN_AUTH_BROWSER carries a short operator-intent TTL."""
 
@@ -1312,6 +1329,26 @@ def test_route_test_crawl_duplicate_returns_operator_message() -> None:
     assert "이미 진행 중인 수집 작업이 있습니다" in resp.text
     assert "허용되지 않은 액션입니다" not in resp.text
     assert "active manual job already exists" not in resp.text
+
+
+def test_route_test_crawl_no_online_agent_returns_operator_message() -> None:
+    class NoOnlineAgentRepository(InMemoryAdminActionRepository):
+        async def enqueue_manual_job(self, **_kwargs):
+            raise ValueError("no online capable agent available")
+
+    repo = NoOnlineAgentRepository()
+    repo.seed_target(_target())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/targets/mt-1/test-crawl?tenant=tn-1",
+        data=_confirmed({"platform": "BAEMIN"}),
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "온라인 Agent가 없습니다" in resp.text
+    assert "허용되지 않은 액션입니다" not in resp.text
+    assert "no online capable agent available" not in resp.text
 
 
 def test_route_dry_run_returns_preview_without_send() -> None:
