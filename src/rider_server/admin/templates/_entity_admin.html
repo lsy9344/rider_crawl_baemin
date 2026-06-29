@@ -81,10 +81,10 @@
        '전송 ON 인데 메신저 —'(대상 연결 필요)로 보인다(작업지시서 §5.4/§5.5). #}
     <p class="action-result warn" style="margin:0.1rem 0 0.8rem">채널 생성·전송 테스트만으로는 전송되지 않습니다. 아래에서 <b>대상 ↔ 채널</b>을 연결해야 등록된 설정의 메신저 칸이 채워집니다.</p>
     <p class="inline-cta"><a href="#entity-channel-form">채널 생성</a></p>
-    {# 대상 1개 + 활성 채널 1개면 빠른 연결 CTA. JS(maybeOfferQuickConnect)가 두 select 옵션이 각각
-       1건일 때 자동 선택 후 이 영역을 노출한다. 자동 생성이 아니라 운영자가 명시적으로 누른다(§5.4). #}
+    {# 대상 1개 + 활성 채널 1개면 빠른 연결 CTA. JS(maybeOfferQuickConnect)가 대상 1건과
+       ACTIVE 채널 1건일 때 자동 선택 후 이 영역을 노출한다. 자동 생성이 아니라 운영자가 명시적으로 누른다(§5.4). #}
     <div id="quick-connect" class="action-result warn" style="display:none; margin:0.1rem 0 0.8rem">
-      대상과 채널이 각각 1건입니다. 바로 연결할 수 있습니다.
+      대상 1건과 활성 채널 1건입니다. 바로 연결할 수 있습니다.
       <button type="button" class="create" onclick="quickConnect(this)">이 대상에 채널 연결</button>
       <span class="inline-action-status" aria-live="polite"></span>
     </div>
@@ -619,6 +619,9 @@
     });
     return vals.length === 1 ? vals[0].value : "";
   }
+  function _selectedOption(select) {
+    return select && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+  }
   // 대상 1개 + 활성(ACTIVE) 채널 1개면 자동 선택 후 빠른 연결 CTA 를 노출한다(자동 생성 아님 — 운영자가
   // 누름). 채널은 data-state="ACTIVE" 만 센다 — 실 dispatch 가 ACTIVE 채널만 보내므로 그래야 '대상 연결
   // 완료'(작업지시서)와 의미가 맞는다(PENDING/INACTIVE 채널뿐이면 CTA 안 띄움).
@@ -631,14 +634,22 @@
     var soleChannel = _soleOptionValue(channel, function (o) { return o.getAttribute('data-state') === 'ACTIVE'; });
     if (soleTarget && !target.value) { target.value = soleTarget; }
     if (soleChannel && !channel.value) { channel.value = soleChannel; }
-    box.style.display = (target.value && channel.value && soleTarget && soleChannel) ? "block" : "none";
+    var selectedChannel = _selectedOption(channel);
+    var channelIsSoleActive = selectedChannel && selectedChannel.value === soleChannel && selectedChannel.getAttribute('data-state') === 'ACTIVE';
+    box.style.display = (target.value === soleTarget && channelIsSoleActive) ? "block" : "none";
     syncEntityFormButtons();
   };
   // 빠른 연결: 선택된 대상·채널로 기존 POST /admin/delivery-rules 재사용(같은 게이트/검증/HX-Trigger).
   function quickConnect(button) {
+    var channelSelect = document.getElementById('rule-create-channel');
     var target = cval('rule-create-target');
     var channel = cval('rule-create-channel');
     if (!target || !channel) { setInlineError(button, "대상·채널 선택 필요"); return; }
+    var selectedChannel = _selectedOption(channelSelect);
+    var soleChannel = _soleOptionValue(channelSelect, function (o) { return o.getAttribute('data-state') === 'ACTIVE'; });
+    if (!selectedChannel || selectedChannel.value !== soleChannel || selectedChannel.getAttribute('data-state') !== 'ACTIVE') {
+      setInlineError(button, "활성 채널 선택 필요"); return;
+    }
     var status = buttonStatus(button);
     status.className = "inline-action-status action-result warn";
     status.textContent = "연결 중…";

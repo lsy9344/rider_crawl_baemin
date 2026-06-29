@@ -1113,7 +1113,7 @@ def test_entities_form_exposes_full_edit_and_delivery_rule_controls() -> None:
 
 def test_entities_form_exposes_delivery_connect_guidance_and_quick_connect() -> None:
     # 전송 연결 섹션: '채널 생성·전송 테스트 ≠ 대상 연결'을 짚는 문구와 빠른 연결 CTA/JS 가 노출된다.
-    # (작업지시서 §5.4/§5.5 — 대상 1개+채널 1개일 때 운영자가 명시적으로 누르는 빠른 연결)
+    # (작업지시서 §5.4/§5.5 — 대상 1개+활성 채널 1개일 때 운영자가 명시적으로 누르는 빠른 연결)
     repo = _seeded_repo()
     client = TestClient(_app_with(repo, principal=_VIEWER))
 
@@ -1127,6 +1127,9 @@ def test_entities_form_exposes_delivery_connect_guidance_and_quick_connect() -> 
         "이 대상에 채널 연결",
         "maybeOfferQuickConnect",
         "quickConnect",
+        "대상 1건과 활성 채널 1건입니다",
+        "selectedChannel.value === soleChannel",
+        "활성 채널 선택 필요",
         # 빠른 연결은 새 엔드포인트가 아니라 기존 POST /admin/delivery-rules 를 재사용한다.
         "/admin/delivery-rules?tenant=",
     ):
