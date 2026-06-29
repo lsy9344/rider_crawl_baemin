@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from ..domain import MonitoringTargetStatus
+from ..domain import MessengerChannelState, MonitoringTargetStatus
 from ..security.access import enforce_session
 from .dashboard_service import ALL_TENANTS, DashboardRepository, DashboardService
 from . import severity as severity_policy
@@ -391,6 +391,13 @@ class SettingsRow:
     interval_minutes: int
     messengers: tuple[str, ...]  # 연결 채널 메신저 distinct(TELEGRAM/KAKAO)
     platform: str  # BAEMIN/COUPANG
+    # 전송 준비 readiness — '고객 전송 토글 ON'과 '대상별 채널 연결 완료'를 분리해 표시한다.
+    # send_enabled(=customer_sending_enabled)만으론 "전송 ON 인데 메신저 —" 오해가 생겨서다.
+    # delivery_ready 는 운영 UI 표시용이며, 실 dispatch 최종 게이트는 계속 runtime 이 본다.
+    customer_sending_enabled: bool = False  # = send_enabled. tenant 발송 토글.
+    has_active_delivery_rule: bool = False  # 대상에 활성 DeliveryRule 1건 이상.
+    delivery_ready: bool = False  # customer_sending_enabled and has_active_delivery_rule.
+    delivery_status_label: str = "OFF"  # 'OFF' | '연결 필요' | 'ON'
     customer_name: str = ""
     status: str = ""  # 원시 MonitoringTargetStatus 값
 
@@ -453,7 +460,14 @@ async def _settings_rows_for_tenant(
     customer_name = tenant.name
 
     account_platform = {a.id: a.platform.value for a in accounts}
-    channel_messenger = {c.id: c.messenger.value for c in channels}
+    # 대상 연결 readiness/메신저 표시는 실 dispatch 게이트와 같은 기준을 본다 — 활성 규칙 + ACTIVE 채널
+    # (snapshot_repository: enabled rule AND channel.state == ACTIVE). PENDING/INACTIVE 채널에 규칙이
+    # 걸려도 실제로는 안 나가므로 readiness 에서 빼야 "대상 연결 ON 인데 미전송" 오해가 안 생긴다.
+    channel_messenger = {
+        c.id: c.messenger.value
+        for c in channels
+        if c.state is MessengerChannelState.ACTIVE
+    }
 
     # 라이브 severity(램프)는 targets 카드와 동일 정제(_target_row_for_display)로 맞춘다 — STOPPED 가
     # AUTH_REQUIRED/검증실패 등으로 분기해 두 카드의 램프 색이 어긋나지 않게 한다.
@@ -466,20 +480,31 @@ async def _settings_rows_for_tenant(
     for t in targets:
         # N+1: 대상별 delivery rule 조회. 벌크 list_* 가 없어 대상마다 1쿼리지만 ~100건 규모라 허용.
         rules = await service.list_delivery_rules(t.id, tenant_id=tenant_id)
-        messengers = tuple(
-            sorted(
-                {
-                    channel_messenger[r.channel_id]
-                    for r in rules
-                    if r.enabled and r.channel_id in channel_messenger
-                }
-            )
+        # ACTIVE 채널로 연결된 활성 규칙만 readiness/메신저에 센다(channel_messenger 는 ACTIVE 채널만
+        # 담는다 — PENDING/INACTIVE 채널 연결은 실 dispatch 가 안 보내므로 여기서도 제외).
+        active_messengers = sorted(
+            {
+                channel_messenger[r.channel_id]
+                for r in rules
+                if r.enabled and r.channel_id in channel_messenger
+            }
         )
+        messengers = tuple(active_messengers)
         # 전송 ON/OFF 는 '관리' 화면의 ❸ 실제 메시지 보내기 토글과 같은 의미 — tenant 발송 활성화
-        # 상태(tenant.sending_enabled)만 반영한다. 전역 게이트/전송 시간창/채널 ACTIVE 같은 실 dispatch
-        # 게이트는 _enqueue_dispatch_records 가 실행 시점에 따로 본다(여긴 '등록 상태' 표시이지 실행
-        # 게이트가 아니다 — 두 화면이 같은 활성화 상태를 보여 운영자가 헷갈리지 않게 한다).
+        # 상태(tenant.sending_enabled)만 반영한다. 전역 게이트/전송 시간창 같은 실 dispatch 게이트는
+        # _enqueue_dispatch_records 가 실행 시점에 따로 본다(여긴 '등록 상태' 표시이지 실행 게이트가
+        # 아니다 — 두 화면이 같은 활성화 상태를 보여 운영자가 헷갈리지 않게 한다).
         send_enabled = tenant_sending_enabled
+        # 대상 연결 readiness: 고객 전송 ON 인데 ACTIVE 채널로 연결된 활성 규칙이 0건이면 '연결 필요'
+        # (fail-closed). 이래야 "전송 ON 인데 메신저 —" 가 운영자에게 '연결 빠짐'으로 읽힌다.
+        has_active_delivery_rule = bool(active_messengers)
+        delivery_ready = send_enabled and has_active_delivery_rule
+        if not send_enabled:
+            delivery_status_label = "OFF"
+        elif has_active_delivery_rule:
+            delivery_status_label = "ON"
+        else:
+            delivery_status_label = "연결 필요"
         rows.append(
             SettingsRow(
                 target_id=t.id,
@@ -494,6 +519,10 @@ async def _settings_rows_for_tenant(
                 interval_minutes=t.interval_minutes,
                 messengers=messengers,
                 platform=account_platform.get(t.platform_account_id, ""),
+                customer_sending_enabled=send_enabled,
+                has_active_delivery_rule=has_active_delivery_rule,
+                delivery_ready=delivery_ready,
+                delivery_status_label=delivery_status_label,
                 customer_name=customer_name,
                 status=t.status.value,
             )

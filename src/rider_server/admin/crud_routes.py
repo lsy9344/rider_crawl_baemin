@@ -478,6 +478,9 @@ async def messenger_channel_options(
                 "thread": c.thread_id or "",
                 "kakao": c.kakao_room_name or "",
                 "messenger": c.messenger.value,
+                # 빠른 연결 CTA 가 '활성 채널 1개' 조건을 정확히 보게 채널 상태를 같이 싣는다(전체 채널은
+                # 드롭다운에 그대로 두되, ACTIVE 만 자동 선택/CTA 대상으로 센다 — 실 dispatch 와 같은 기준).
+                "state": c.state.value,
             },
         } for c in rows],
         placeholder="채널 선택…",
