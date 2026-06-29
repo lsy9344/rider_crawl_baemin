@@ -390,6 +390,103 @@ def test_default_detect_completion_coupang_returns_true_for_ready_target_without
     assert crawl_calls == []
 
 
+def test_default_detect_completion_baemin_returns_true_for_ready_target_without_crawl(monkeypatch):
+    from types import SimpleNamespace
+
+    crawl_calls = []
+    monkeypatch.setattr(
+        "rider_agent.reuse.crawl_snapshot",
+        lambda *args, **kwargs: crawl_calls.append((args, kwargs)),
+    )
+
+    class FakeAuthPage:
+        url = "https://deliverycenter.baemin.com/sign-in/auth"
+
+    class FakeReadyPage:
+        url = "https://deliverycenter.baemin.com/delivery/report"
+
+    class FakeContext:
+        # An old auth tab may remain after the human completed verification.
+        pages = [FakeAuthPage(), FakeReadyPage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "배민센터A",
+            },
+        )
+    )
+
+    assert completed is True
+    assert crawl_calls == []
+
+
+def test_default_detect_completion_baemin_returns_false_for_auth_tab_only(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "rider_agent.reuse.crawl_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("completion detection must not crawl")
+        ),
+    )
+
+    class FakeAuthPage:
+        url = "https://deliverycenter.baemin.com/sign-in/auth"
+
+    class FakeContext:
+        pages = [FakeAuthPage()]
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+    class FakePlaywright:
+        chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: FakeBrowser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(),
+    )
+
+    completed = default_detect_completion(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+            },
+        )
+    )
+
+    assert completed is False
+
+
 def test_default_detect_completion_coupang_returns_false_for_login_required_page(monkeypatch):
     from types import SimpleNamespace
 
@@ -795,6 +892,147 @@ def test_default_open_auth_browser_handles_actual_baemin_auth_screen(monkeypatch
     assert ("wait_for_selector", "button:has-text('인증번호 받기')", 10_000) in actions
     assert ("click", "role", "button:인증번호 받기") in actions
     assert not any(item[0] == "fill" and "verification" in item[2] for item in actions)
+
+
+def test_default_open_auth_browser_requests_phone_code_on_new_baemin_auth_tab(monkeypatch):
+    from types import SimpleNamespace
+
+    actions = []
+
+    class FakeLocator:
+        def __init__(self, page, kind, name, *, usable=True):
+            self.page = page
+            self.kind = kind
+            self.name = name
+            self.usable = usable
+            self.first = self
+
+        def click(self, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("click", self.page.label, self.kind, self.name))
+            if self.page.label == "report" and self.name == "button:로그인":
+                self.page.context.open_auth_tab()
+
+        def press(self, key, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("press", self.page.label, self.kind, self.name, key))
+
+        def press_sequentially(self, value, timeout=None, delay=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("type", self.page.label, self.kind, self.name, value))
+
+        def fill(self, value, timeout=None):
+            if not self.usable:
+                raise TimeoutError(self.name)
+            actions.append(("fill", self.page.label, self.kind, self.name, value))
+
+        def filter(self, visible=True):
+            return self
+
+    class FakePage:
+        def __init__(self, label, url, context=None):
+            self.label = label
+            self.url = url
+            self.context = context
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
+            actions.append(("goto", self.label, url, wait_until, timeout))
+
+        def bring_to_front(self):
+            actions.append(("front", self.label))
+
+        def locator(self, selector):
+            if self.label == "report":
+                return FakeLocator(self, "locator", selector)
+            return FakeLocator(self, "locator", selector, usable=False)
+
+        def get_by_role(self, role, name, exact=False):
+            if self.label == "report" and role == "button" and name == "로그인":
+                return FakeLocator(self, "role", "button:로그인")
+            if self.label == "auth" and role == "button" and name == "인증번호 받기":
+                return FakeLocator(self, "role", "button:인증번호 받기")
+            return FakeLocator(self, "role", f"{role}:{name}", usable=False)
+
+        def get_by_text(self, text, exact=False):
+            return FakeLocator(self, "text", text, usable=False)
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            actions.append(("wait_for_load_state", self.label))
+
+        def wait_for_timeout(self, timeout):
+            actions.append(("wait_for_timeout", self.label, timeout))
+
+        def wait_for_selector(self, selector, timeout=None):
+            actions.append(("wait_for_selector", self.label, selector, timeout))
+            if self.label == "auth" and selector == "button:has-text('인증번호 받기')":
+                return True
+            raise TimeoutError(selector)
+
+    class FakeContext:
+        def __init__(self):
+            self.pages = []
+            self.report_page = FakePage(
+                "report", "https://deliverycenter.baemin.com/delivery/report", self
+            )
+            self.pages.append(self.report_page)
+
+        def new_page(self):
+            return self.pages[0]
+
+        def open_auth_tab(self):
+            if any(page.label == "auth" for page in self.pages):
+                return
+            self.pages.append(
+                FakePage("auth", "https://deliverycenter.baemin.com/sign-in/auth", self)
+            )
+
+    class FakeBrowser:
+        def __init__(self, context):
+            self.contexts = [context]
+
+        def new_context(self):
+            return self.contexts[0]
+
+    class FakePlaywright:
+        def __init__(self, browser):
+            self.chromium = SimpleNamespace(connect_over_cdp=lambda _cdp_url: browser)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    context = FakeContext()
+    monkeypatch.setattr("rider_agent.reuse.prepare_chrome", lambda config, *, platform_name=None: "ok")
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright(FakeBrowser(context)),
+    )
+
+    default_open_auth_browser(
+        _auth_job(
+            type=CAPABILITY_OPEN_AUTH_BROWSER,
+            payload={
+                "tenant_id": "tenant-fake-1",
+                "target_id": FAKE_TARGET,
+                "platform": "baemin",
+                "primary_url": "https://deliverycenter.baemin.com/delivery/report",
+                "expected_display_name": "배민센터A",
+                "login_id_ref": "baemin-login-id",
+                "login_password_ref": "baemin-login-password",
+            },
+        )
+    )
+
+    assert ("front", "auth") in actions
+    assert ("wait_for_selector", "auth", "button:has-text('인증번호 받기')", 10_000) in actions
+    assert ("click", "auth", "role", "button:인증번호 받기") in actions
+    assert ("click", "report", "role", "button:인증번호 받기") not in actions
 
 
 def test_open_auth_browser_for_coupang_does_not_run_email_2fa(monkeypatch):
@@ -1599,7 +1837,9 @@ def test_default_login_probe_maps_ambiguous_errors_to_unknown(monkeypatch):
     assert default_login_probe(_auth_job(payload={"platform": "baemin"})) == AUTH_STATE_UNKNOWN
 
 
-def test_default_open_auth_browser_and_detect_completion_reuse_existing_seams(monkeypatch):
+def test_default_open_auth_browser_and_detect_completion_use_browser_tabs(monkeypatch):
+    from types import SimpleNamespace
+
     prepare_calls = []
 
     def fake_prepare_chrome(config, *, platform_name=None):
@@ -1625,10 +1865,47 @@ def test_default_open_auth_browser_and_detect_completion_reuse_existing_seams(mo
     assert platform_name == "Windows"
     assert config.coupang_eats_url == "https://self.baemin.example/stats"
 
-    monkeypatch.setattr("rider_agent.auth.baemin_auth.default_login_probe", lambda j: AUTH_STATE_ACTIVE)
-    assert default_detect_completion(job) is True
+    class FakeReadyPage:
+        url = "https://self.baemin.example/stats"
+
+    class FakeAuthPage:
+        url = "https://deliverycenter.baemin.com/sign-in/auth"
+
+    class FakeContext:
+        def __init__(self, pages):
+            self.pages = pages
+
+    class FakeBrowser:
+        def __init__(self, pages):
+            self.contexts = [FakeContext(pages)]
+
+    class FakePlaywright:
+        def __init__(self, pages):
+            self.chromium = SimpleNamespace(
+                connect_over_cdp=lambda _cdp_url: FakeBrowser(pages)
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     monkeypatch.setattr(
-        "rider_agent.auth.baemin_auth.default_login_probe", lambda j: AUTH_STATE_AUTH_REQUIRED
+        "rider_agent.auth.baemin_auth.default_login_probe",
+        lambda _job: (_ for _ in ()).throw(
+            AssertionError("Baemin completion detection must not crawl")
+        ),
+    )
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright([FakeAuthPage(), FakeReadyPage()]),
+    )
+    assert default_detect_completion(job) is True
+
+    monkeypatch.setattr(
+        "rider_agent.auth.baemin_auth._sync_playwright",
+        lambda: FakePlaywright([FakeAuthPage()]),
     )
     assert default_detect_completion(job) is False
 

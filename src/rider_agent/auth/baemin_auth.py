@@ -51,6 +51,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from rider_crawl.redaction import redact
 
@@ -153,6 +154,8 @@ _BAEMIN_PHONE_CODE_READY_SELECTORS = (
     "button:has-text('인증번호 요청')",
     "input[name='verificationCode']",
 )
+_BAEMIN_HOST = "deliverycenter.baemin.com"
+_BAEMIN_AUTH_PATH_TOKENS = ("sign-in", "signin", "login", "auth")
 
 # 인증 화면이 '입력 가능' 상태가 됐는지 판정해 대기하는 selector 모음(로그인/2FA 공통).
 # networkidle 대신 이 요소들이 보이면 바로 진행한다 — 쿠팡 partner 페이지는 백그라운드
@@ -367,9 +370,27 @@ def default_detect_completion(
     platform = str((job.payload or {}).get("platform") or "baemin").strip().casefold()
     if platform == "coupang":
         return _detect_coupang_completion(job, secret_resolver=secret_resolver)
+    if platform == "baemin":
+        return _detect_baemin_completion(job, secret_resolver=secret_resolver)
     if secret_resolver is None:
         return default_login_probe(job) == AUTH_STATE_ACTIVE
     return default_login_probe(job, secret_resolver=secret_resolver) == AUTH_STATE_ACTIVE
+
+
+def _detect_baemin_completion(
+    job: ClaimedJob,
+    *,
+    secret_resolver: Callable[[str], str | None] | None = None,
+) -> bool:
+    try:
+        config = _config_from_auth_job(job, secret_resolver=secret_resolver)
+        target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+        with _sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+            pages = _browser_pages(browser)
+            return _baemin_has_ready_page(pages, target_url)
+    except Exception:
+        return False
 
 
 def _detect_coupang_completion(
@@ -444,6 +465,7 @@ def _drive_baemin_login_flow(config: Any) -> None:
         context = browser.contexts[0] if getattr(browser, "contexts", None) else browser.new_context()
         page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
         _navigate_to_auth_target(page, config)
+        before_login_pages = list(getattr(context, "pages", []) or [])
         _fill_first_input(
             page,
             _USERNAME_INPUT_SELECTORS,
@@ -458,10 +480,35 @@ def _drive_baemin_login_flow(config: Any) -> None:
         )
         _click_first_by_text(page, _LOGIN_BUTTON_TEXTS, config, roles=("button",))
         _wait_after_action(page, config)
+        page = _baemin_auth_page_after_login(context, page, before_login_pages) or page
+        _bring_page_to_front(page)
+        _wait_after_action(page, config)
         _wait_for_baemin_phone_code_request(page, config)
         _click_first_by_text(
             page, _PHONE_CODE_REQUEST_TEXTS, config, roles=("button", "link")
         )
+
+
+def _baemin_auth_page_after_login(
+    context: Any,
+    current_page: Any,
+    before_pages: list[Any],
+) -> Any | None:
+    pages = list(getattr(context, "pages", []) or [])
+    before_ids = {id(page) for page in before_pages}
+    new_pages = [page for page in pages if id(page) not in before_ids]
+
+    for page in reversed(new_pages):
+        if _url_looks_like_baemin_auth(str(getattr(page, "url", ""))):
+            return page
+    if _url_looks_like_baemin_auth(str(getattr(current_page, "url", ""))):
+        return current_page
+    for page in reversed(pages):
+        if _url_looks_like_baemin_auth(str(getattr(page, "url", ""))):
+            return page
+    if len(new_pages) == 1:
+        return new_pages[0]
+    return None
 
 
 def _wait_for_baemin_phone_code_request(page: Any, config: Any) -> None:
@@ -492,6 +539,52 @@ def _first_browser_page(browser: Any) -> Any | None:
     if not callable(new_page):
         return None
     return new_page()
+
+
+def _browser_pages(browser: Any) -> list[Any]:
+    pages: list[Any] = []
+    for context in list(getattr(browser, "contexts", []) or []):
+        pages.extend(list(getattr(context, "pages", []) or []))
+    return pages
+
+
+def _baemin_has_ready_page(pages: list[Any], target_url: str) -> bool:
+    if target_url:
+        target = urlsplit(target_url)
+        target_host = (target.hostname or "").casefold()
+        target_path = _normalize_path(target.path)
+        for page in pages:
+            parsed = urlsplit(str(getattr(page, "url", "")))
+            if (
+                (parsed.hostname or "").casefold() == target_host
+                and _normalize_path(parsed.path) == target_path
+                and not _url_looks_like_baemin_auth(str(getattr(page, "url", "")))
+            ):
+                return True
+
+    for page in pages:
+        url = str(getattr(page, "url", ""))
+        parsed = urlsplit(url)
+        if (
+            (parsed.hostname or "").casefold() == _BAEMIN_HOST
+            and _normalize_path(parsed.path).startswith("/delivery/")
+            and not _url_looks_like_baemin_auth(url)
+        ):
+            return True
+    return False
+
+
+def _url_looks_like_baemin_auth(url: str) -> bool:
+    parsed = urlsplit(str(url or ""))
+    host = (parsed.hostname or "").casefold()
+    path = _normalize_path(parsed.path).casefold()
+    if host != _BAEMIN_HOST:
+        return False
+    return any(token in path for token in _BAEMIN_AUTH_PATH_TOKENS)
+
+
+def _normalize_path(path: str) -> str:
+    return str(path or "").rstrip("/") or "/"
 
 
 def _playwright_timeout_errors() -> tuple[type[BaseException], ...]:
