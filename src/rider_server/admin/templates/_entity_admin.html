@@ -58,7 +58,7 @@
       <label>주소(url) <input type="text" name="url"></label>
       <details class="advanced-fields">
         <summary>고급 설정</summary>
-        <label>관리 코드(선택) <input type="text" name="external_id"></label>
+        <label>DP번호 (배민 센터 ID·필수) <input type="text" name="external_id"></label>
       </details>
       <label>수집 주기(분) <input type="number" name="interval_minutes" value="5"></label>
       <div class="schedule-group">
@@ -141,7 +141,7 @@
       </label>
       <label>표시명 <input type="text" id="tgt-edit-name" placeholder="비우면 유지"></label>
       <label>센터/상점명 <input type="text" id="tgt-edit-center" placeholder="비우면 유지"></label>
-      <label>관리 코드(선택) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
+      <label>DP번호 (배민 센터 ID) <input type="text" id="tgt-edit-external" placeholder="비우면 유지"></label>
       <label>주소(url) <input type="text" id="tgt-edit-url" placeholder="비우면 유지"></label>
       <label>수집 주기(분) <input type="number" id="tgt-edit-interval" placeholder="비우면 유지"></label>
       <div class="schedule-group">
@@ -160,6 +160,7 @@
       <button type="button" data-requires="tgt-edit-id" data-needs-loaded="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '', filledValues({name: cval('tgt-edit-name'), center_name: cval('tgt-edit-center'), external_id: cval('tgt-edit-external'), url: cval('tgt-edit-url'), interval_minutes: cval('tgt-edit-interval'), schedule_enabled: cval('tgt-edit-schedule'), start_time: cval('tgt-edit-start'), stop_time: cval('tgt-edit-stop')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/reactivate', {}, '선택한 업체를 복구할까요?')">복구</button><span class="inline-action-status" aria-live="polite"></span>
       <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/deactivate', {}, '선택한 업체를 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
+      <button type="button" class="danger" data-requires="tgt-edit-id" onclick="crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/delete', {}, '선택한 업체를 삭제할까요? 연결된 전송 규칙이나 수집 기록이 있으면 삭제되지 않습니다.')">삭제</button><span class="inline-action-status" aria-live="polite"></span>
     </div>
     <div hx-get="/admin/monitoring-targets?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
   </fieldset>
@@ -316,18 +317,18 @@
 
       <fieldset id="entity-account-form">
         <legend>플랫폼 계정</legend>
-        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡 로그인 ID/비밀번호와 2차인증 이메일 주소·앱 비밀번호를 <strong>실제 값 그대로</strong> 입력하세요. 에이전트가 이 값으로 자동 로그인하고 IMAP 2차인증을 처리합니다. (값은 DB에 저장되므로 DB 접근/백업을 민감정보로 관리하세요. <code>vault://</code>·<code>env:</code> 같은 핸들을 넣으면 에이전트가 로컬 저장소에서 resolve 합니다.)</p>
+        <p class="muted" style="margin:0.1rem 0 0.8rem">쿠팡이츠 계정은 로그인 ID/비밀번호와 2차인증 이메일 주소·앱 비밀번호를 <strong>실제 값 그대로</strong> 입력합니다. 배민 선택 시 2차인증 입력칸은 자동으로 잠깁니다. (값은 DB에 저장되므로 DB 접근/백업을 민감정보로 관리하세요. <code>vault://</code>·<code>env:</code> 같은 핸들을 넣으면 에이전트가 로컬 저장소에서 resolve 합니다.)</p>
         <form hx-post="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-target="find .inline-action-status" hx-swap="innerHTML">
           <label>플랫폼
-            <select name="platform"><option value="BAEMIN">배민</option><option value="COUPANG">쿠팡이츠</option></select>
+            <select name="platform" onchange="syncPlatformAccount2faFields()"><option value="BAEMIN">배민</option><option value="COUPANG">쿠팡이츠</option></select>
           </label>
           <label>라벨 <input type="text" name="label"></label>
           <label>로그인 ID <input type="text" name="username" placeholder="쿠팡 로그인 ID"></label>
           <label>로그인 비밀번호 <input type="text" name="password" autocomplete="off" placeholder="쿠팡 로그인 비밀번호"></label>
-          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" placeholder="example@gmail.com / @naver.com"></label>
-          <label>이메일 앱 비밀번호 <input type="text" name="verification_email_app_password" autocomplete="off" placeholder="IMAP 앱 비밀번호"></label>
-          <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" placeholder="인증번호"></label>
-          <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" placeholder="coupang"></label>
+          <label>2차인증 이메일 주소 <input type="text" name="verification_email_address" data-coupang-2fa-field="create" placeholder="example@gmail.com / @naver.com"></label>
+          <label>이메일 앱 비밀번호 <input type="text" name="verification_email_app_password" data-coupang-2fa-field="create" autocomplete="off" placeholder="IMAP 앱 비밀번호"></label>
+          <label>인증 메일 제목 키워드 <input type="text" name="verification_email_subject_keyword" data-coupang-2fa-field="create" placeholder="인증번호"></label>
+          <label>인증 메일 발신자 키워드 <input type="text" name="verification_email_sender_keyword" data-coupang-2fa-field="create" placeholder="coupang"></label>
           <button type="submit" class="create" {% if not tenant_id %}disabled{% endif %}>{% if tenant_id %}계정 생성{% else %}계정 생성 불가{% endif %}</button><span class="inline-action-status" aria-live="polite"></span>
           {% if not tenant_id %}<span class="action-result warn" style="display:inline-block; margin-left:0.5rem">먼저 고객을 생성하거나 선택하세요</span>{% endif %}
         </form>
@@ -348,10 +349,10 @@
           <label>새 라벨 <input type="text" id="acc-edit-label"></label>
           <label>로그인 ID <input type="text" id="acc-edit-username" placeholder="비우면 유지"></label>
           <label>로그인 비밀번호 <input type="text" id="acc-edit-password" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>2차인증 이메일 <input type="text" id="acc-edit-email" placeholder="비우면 유지"></label>
-          <label>앱 비밀번호 <input type="text" id="acc-edit-email-password" placeholder="비우면 유지" autocomplete="off"></label>
-          <label>제목 키워드 <input type="text" id="acc-edit-email-subject" placeholder="비우면 유지"></label>
-          <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" placeholder="비우면 유지"></label>
+          <label>2차인증 이메일 <input type="text" id="acc-edit-email" data-coupang-2fa-field="edit" placeholder="비우면 유지"></label>
+          <label>앱 비밀번호 <input type="text" id="acc-edit-email-password" data-coupang-2fa-field="edit" placeholder="비우면 유지" autocomplete="off"></label>
+          <label>제목 키워드 <input type="text" id="acc-edit-email-subject" data-coupang-2fa-field="edit" placeholder="비우면 유지"></label>
+          <label>발신자 키워드 <input type="text" id="acc-edit-email-sender" data-coupang-2fa-field="edit" placeholder="비우면 유지"></label>
           <button type="button" data-requires="acc-edit-id" data-needs-loaded="acc-edit-id" onclick="crudButton(this, '/admin/platform-accounts/', 'acc-edit-id', '', filledValues({label: cval('acc-edit-label'), username: cval('acc-edit-username'), password: cval('acc-edit-password'), verification_email_address: cval('acc-edit-email'), verification_email_app_password: cval('acc-edit-email-password'), verification_email_subject_keyword: cval('acc-edit-email-subject'), verification_email_sender_keyword: cval('acc-edit-email-sender')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
         <div hx-get="/admin/platform-accounts?tenant={{ tenant_id | urlencode }}" hx-trigger="load, admin-entity-changed from:body, every 30s" hx-swap="innerHTML"></div>
@@ -419,6 +420,27 @@
     document.querySelectorAll('#entity-channel-form [data-channel-messenger]').forEach(function(field) {
       field.disabled = field.dataset.channelMessenger !== messenger;
     });
+  }
+  function setPlatformAccount2faFields(selector, enabled) {
+    document.querySelectorAll(selector).forEach(function(field) {
+      var label = field.closest('label');
+      field.disabled = !enabled;
+      field.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+      if (!enabled) { field.value = ''; }
+      if (label) {
+        label.classList.toggle('is-disabled-by-platform', !enabled);
+      }
+    });
+  }
+  function syncPlatformAccount2faFields() {
+    var select = document.querySelector('#entity-account-form select[name="platform"]');
+    var platform = select ? select.value : '';
+    var enabled = platform === 'COUPANG';
+    setPlatformAccount2faFields('#entity-account-form [data-coupang-2fa-field="create"]', enabled);
+  }
+  function syncPlatformAccountEdit2faFields(platform) {
+    var enabled = platform === 'COUPANG';
+    setPlatformAccount2faFields('#entity-account-form [data-coupang-2fa-field="edit"]', enabled);
   }
   function populateChannelFields(select) {
     var option = select.selectedOptions[0];
@@ -520,7 +542,7 @@
     }).catch(function() {});
   }
   function loadPlatformAccountEditState(select) {
-    if (!select.value) { beginEditStateLoad(select, []); return; }
+    if (!select.value) { beginEditStateLoad(select, []); syncPlatformAccountEdit2faFields(''); return; }
     var row = select.closest('.edit-row');
     var requestedId = select.value;
     // 계정 편집 입력칸(비밀번호/앱 비밀번호 포함) 전부 비워 이전 계정 입력이 새 계정으로 새지 않게 한다.
@@ -541,6 +563,7 @@
       document.getElementById('acc-edit-email-password').value = '';
       document.getElementById('acc-edit-email-subject').value = data.verification_email_subject_keyword || '';
       document.getElementById('acc-edit-email-sender').value = data.verification_email_sender_keyword || '';
+      syncPlatformAccountEdit2faFields(data.platform || '');
       document.getElementById('acc-current-username').textContent = '로그인 ID: ' + (data.username_label || '미설정');
       document.getElementById('acc-current-password').textContent = '로그인 비밀번호: ' + (data.password_label || '미설정');
       document.getElementById('acc-current-email').textContent = '2차인증 이메일: ' + (data.verification_email_address_label || '미설정');
@@ -691,6 +714,8 @@
     return scope ? scope.querySelector('.inline-action-status') : null;
   }
   document.addEventListener('DOMContentLoaded', syncChannelCreateFields);
+  document.addEventListener('DOMContentLoaded', syncPlatformAccount2faFields);
+  document.addEventListener('DOMContentLoaded', function () { syncPlatformAccountEdit2faFields(''); });
   document.addEventListener('DOMContentLoaded', syncEntityFormButtons);
   document.addEventListener('change', function(event) {
     if (event.target.closest && event.target.closest('#entity-admin')) {

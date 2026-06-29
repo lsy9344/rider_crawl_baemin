@@ -23,11 +23,14 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from rider_server.db.models.agent import BrowserProfile as BrowserProfileRow
+from rider_server.db.models.agent import Job as JobRow
 from rider_server.db.models.account import MonitoringTarget as MonitoringTargetRow
 from rider_server.db.models.account import PlatformAccount as PlatformAccountRow
 from rider_server.db.models.audit import AuditLog as AuditLogRow
 from rider_server.db.models.messaging import DeliveryRule as DeliveryRuleRow
 from rider_server.db.models.messaging import MessengerChannel as MessengerChannelRow
+from rider_server.db.models.messaging import Snapshot as SnapshotRow
 from rider_server.db.models.tenancy import Subscription as SubscriptionRow
 from rider_server.db.models.tenancy import Tenant as TenantRow
 from rider_server.domain import (
@@ -222,6 +225,24 @@ class PostgresAdminEntityRepository:
             .limit(1),
             select(MessengerChannelRow.id)
             .where(MessengerChannelRow.tenant_id == tenant_uuid)
+            .limit(1),
+        )
+        async with self._session_factory() as session:
+            for stmt in dependency_queries:
+                if (await session.execute(stmt)).first() is not None:
+                    return True
+        return False
+
+    async def monitoring_target_has_dependencies(self, target_id: str) -> bool:
+        target_uuid = _uuid(target_id)
+        dependency_queries = (
+            select(DeliveryRuleRow.id)
+            .where(DeliveryRuleRow.target_id == target_uuid)
+            .limit(1),
+            select(SnapshotRow.id).where(SnapshotRow.target_id == target_uuid).limit(1),
+            select(JobRow.id).where(JobRow.target_id == target_uuid).limit(1),
+            select(BrowserProfileRow.id)
+            .where(BrowserProfileRow.target_id == target_uuid)
             .limit(1),
         )
         async with self._session_factory() as session:
@@ -494,6 +515,23 @@ class PostgresAdminEntityRepository:
         except IntegrityError as exc:
             raise AdminEntityDeleteBlockedError(
                 "연결 데이터가 있어 고객을 삭제할 수 없습니다"
+            ) from exc
+
+    async def delete_monitoring_target(
+        self, target_id: str, audit: AuditEntry
+    ) -> None:
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    delete(MonitoringTargetRow).where(
+                        MonitoringTargetRow.id == _uuid(target_id)
+                    )
+                )
+                await session.execute(insert(AuditLogRow).values(**_audit_values(audit)))
+                await session.commit()
+        except IntegrityError as exc:
+            raise AdminEntityDeleteBlockedError(
+                "연결 데이터가 있어 업체를 삭제할 수 없습니다"
             ) from exc
 
     # ── 공통: INSERT/UPDATE + audit INSERT 를 한 세션·한 commit 으로 ─────────────

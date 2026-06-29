@@ -16,8 +16,10 @@ from rider_server.services.admin_action_service import AuditEntry, TARGET_TYPE_T
 from .common import (
     ACTION_MONITORING_TARGET_CREATE,
     ACTION_MONITORING_TARGET_DEACTIVATE,
+    ACTION_MONITORING_TARGET_DELETE,
     ACTION_MONITORING_TARGET_REACTIVATE,
     ACTION_MONITORING_TARGET_UPDATE,
+    AdminEntityDeleteBlockedError,
     AdminEntityRepository,
     TargetWriteResult,
     is_center_name_risky,
@@ -54,6 +56,10 @@ def _validated_send_window(
     return schedule_enabled, start, stop
 
 
+def _normalized_target_name(value: str) -> str:
+    return (value or "").strip()
+
+
 class TargetAdminEntityService:
     """Monitoring target create/update/deactivate behavior."""
 
@@ -88,11 +94,15 @@ class TargetAdminEntityService:
         source: str | None = None,
         reason: str | None = None,
     ) -> TargetWriteResult:
-        if not (name or "").strip():
+        normalized_name = _normalized_target_name(name)
+        if not normalized_name:
             raise ValueError("대상 표시명(name)이 필요합니다")
         account = await self._scoped_platform_account(
             platform_account_id, tenant_id=tenant_id
         )
+        for existing in await self._repo.list_monitoring_targets(tenant_id):
+            if _normalized_target_name(existing.name) == normalized_name:
+                return TargetWriteResult(target=existing, center_name_risky=False)
         risky = is_center_name_risky(account.platform, center_name)
         if risky:
             raise ValueError("쿠팡 센터/상점명(center_name)이 필요합니다")
@@ -105,7 +115,7 @@ class TargetAdminEntityService:
             id=entity_id,
             tenant_id=tenant_id,
             platform_account_id=platform_account_id,
-            name=name,
+            name=normalized_name,
             center_name=center_name,
             external_id=external_id,
             url=url,
@@ -124,7 +134,7 @@ class TargetAdminEntityService:
             diff={
                 "op": "create",
                 "platform_account_id": platform_account_id,
-                "name": name,
+                "name": normalized_name,
                 "center_name": center_name,
                 "center_name_risky": risky,
                 "schedule_enabled": schedule_enabled,
@@ -244,6 +254,39 @@ class TargetAdminEntityService:
         )
         await self._repo.save_monitoring_target(updated, audit)
         return updated
+
+    async def delete_monitoring_target(
+        self,
+        target_id: str,
+        *,
+        tenant_id: str,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> MonitoringTarget:
+        existing = await self._scoped_target(target_id, tenant_id=tenant_id)
+        if await self._repo.monitoring_target_has_dependencies(target_id):
+            raise AdminEntityDeleteBlockedError(
+                "연결 데이터가 있어 업체를 삭제할 수 없습니다"
+            )
+        audit = self._audit(
+            actor_id=actor_id,
+            action=ACTION_MONITORING_TARGET_DELETE,
+            target_type=TARGET_TYPE_TARGET,
+            target_id=target_id,
+            at=at,
+            diff={
+                "op": "delete",
+                "name": existing.name,
+                "from_status": existing.status.value,
+                "reason": reason,
+            },
+            source=source,
+            reason=reason,
+        )
+        await self._repo.delete_monitoring_target(target_id, audit)
+        return existing
 
     async def reactivate_monitoring_target(
         self,

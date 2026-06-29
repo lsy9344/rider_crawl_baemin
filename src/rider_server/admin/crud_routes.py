@@ -244,9 +244,7 @@ def _raise_for(exc: Exception) -> None:
     if isinstance(exc, AdminEntityDuplicateError):
         raise HTTPException(HTTPStatus.CONFLICT, str(exc)) from exc
     if isinstance(exc, AdminEntityDeleteBlockedError):
-        raise HTTPException(
-            HTTPStatus.CONFLICT, "연결 데이터가 있어 고객을 삭제할 수 없습니다"
-        ) from exc
+        raise HTTPException(HTTPStatus.CONFLICT, str(exc)) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(HTTPStatus.BAD_REQUEST, "허용되지 않은 입력입니다") from exc
     raise exc
@@ -830,9 +828,10 @@ async def create_monitoring_target(
     request: Request, _principal=Depends(require_operator)
 ) -> HTMLResponse:
     form = await _form(request)
+    entity_id = _new_id()
     try:
         result = await _service(request).create_monitoring_target(
-            entity_id=_new_id(),
+            entity_id=entity_id,
             tenant_id=_tenant_id(request),
             platform_account_id=form.get("platform_account_id", "").strip(),
             name=form.get("name", "").strip(),
@@ -850,6 +849,12 @@ async def create_monitoring_target(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
+    if result.target.id != entity_id:
+        return _fragment(
+            request,
+            f"이미 등록됨 ({result.target.name})",
+            trigger=ENTITY_OPTIONS_CHANGED,
+        )
     return _fragment(
         request,
         _target_message("모니터링 대상 생성됨", result),
@@ -911,6 +916,29 @@ async def deactivate_monitoring_target(
     return _fragment(
         request,
         f"모니터링 대상 비활성화됨 (상태: {target.status.value})",
+        trigger=ENTITY_OPTIONS_CHANGED,
+    )
+
+
+@router.post("/monitoring-targets/{target_id}/delete", response_class=HTMLResponse)
+async def delete_monitoring_target(
+    request: Request, target_id: str, _principal=Depends(require_operator)
+) -> HTMLResponse:
+    reason = (await _form(request)).get("reason", "")
+    try:
+        target = await _service(request).delete_monitoring_target(
+            target_id,
+            tenant_id=_tenant_id(request),
+            at=_now(),
+            actor_id=_resolve_actor(request),
+            source=_resolve_source(request),
+            reason=reason,
+        )
+    except (LookupError, ValueError) as exc:
+        _raise_for(exc)
+    return _fragment(
+        request,
+        f"모니터링 대상 삭제됨 ({target.name})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
@@ -1065,9 +1093,10 @@ async def create_delivery_rule(
     channel_id = form.get("channel_id", "").strip()
     if not target_id or not channel_id:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "target_id 와 channel_id 가 필요합니다")
+    entity_id = _new_id()
     try:
         rule = await _service(request).create_delivery_rule(
-            entity_id=_new_id(),
+            entity_id=entity_id,
             tenant_id=_tenant_id(request),
             target_id=target_id,
             channel_id=channel_id,
@@ -1080,6 +1109,8 @@ async def create_delivery_rule(
         )
     except (LookupError, ValueError) as exc:
         _raise_for(exc)
+    if rule.id != entity_id:
+        return _fragment(request, "이미 연결됨", trigger=ENTITY_OPTIONS_CHANGED)
     return _fragment(
         request,
         f"전송 규칙 생성됨 ({'활성' if rule.enabled else '비활성'})",

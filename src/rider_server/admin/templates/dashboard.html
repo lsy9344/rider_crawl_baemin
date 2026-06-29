@@ -274,6 +274,8 @@
     .tg-credentials[open] > summary::before { content: "▾ "; }
     #view-manage label { display: inline-flex; flex-direction: column; gap: 0.3rem; margin: 0 0.7rem 0.75rem 0; vertical-align: bottom; font-size: 0.875rem; font-weight: 500; color: var(--muted-foreground); }
     #view-manage input[type="text"], #view-manage input[type="number"], #view-manage input[type="password"], #view-manage select { font-family: var(--font-sans); font-size: 0.875rem; padding: 0.46rem 0.6rem; min-width: 11rem; color: var(--foreground); background: var(--background); border: 1px solid var(--input); border-radius: var(--radius-sm); }
+    #view-manage label.is-disabled-by-platform { color: color-mix(in srgb, var(--muted-foreground) 58%, var(--background)); }
+    #view-manage label.is-disabled-by-platform input:disabled { color: color-mix(in srgb, var(--muted-foreground) 68%, var(--background)); background: color-mix(in srgb, var(--muted) 58%, var(--background)); border-color: color-mix(in srgb, var(--border) 62%, var(--background)); cursor: not-allowed; opacity: 0.78; }
     #view-manage .field-help { max-width: 13rem; font-size: 0.875rem; line-height: 1.35; color: var(--muted-foreground); }
     #view-manage input:focus, #view-manage select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 28%, transparent); }
     #view-manage input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--primary); }

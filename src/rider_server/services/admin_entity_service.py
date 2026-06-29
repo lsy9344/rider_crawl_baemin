@@ -716,6 +716,27 @@ class AdminEntityService:
             reason=reason,
         )
 
+    async def delete_monitoring_target(
+        self,
+        target_id: str,
+        *,
+        tenant_id: str,
+        at: datetime,
+        actor_id: str | None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> MonitoringTarget:
+        """대상 물리 삭제 — 전송 규칙 등 연결 데이터가 있으면 삭제하지 않는다."""
+
+        return await self._target_service.delete_monitoring_target(
+            target_id,
+            tenant_id=tenant_id,
+            at=at,
+            actor_id=actor_id,
+            source=source,
+            reason=reason,
+        )
+
     async def reactivate_monitoring_target(
         self,
         target_id: str,
@@ -995,6 +1016,17 @@ class AdminEntityService:
 
         await self._scoped_target(target_id, tenant_id=tenant_id)
         await self._scoped_channel(channel_id, tenant_id=tenant_id)
+        existing = next(
+            (
+                rule
+                for rule in await self._repo.list_delivery_rules(target_id)
+                if rule.channel_id == channel_id and rule.enabled is True
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+
         rule = DeliveryRule(
             id=entity_id,
             target_id=target_id,
@@ -1162,6 +1194,9 @@ class InMemoryAdminEntityRepository:
             or any(c.tenant_id == tenant_id for c in self._channels.values())
         )
 
+    async def monitoring_target_has_dependencies(self, target_id: str) -> bool:
+        return any(r.target_id == target_id for r in self._rules.values())
+
     # ── create + audit(같은 트랜잭션 모사) ──────────────────────────────────────
     async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None:
         self._tenants[tenant.id] = tenant
@@ -1257,6 +1292,12 @@ class InMemoryAdminEntityRepository:
     # ── delete + audit(같은 트랜잭션 모사) ─────────────────────────────────────
     async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None:
         self._tenants.pop(tenant_id, None)
+        self.audits.append(audit)
+
+    async def delete_monitoring_target(
+        self, target_id: str, audit: AuditEntry
+    ) -> None:
+        self._targets.pop(target_id, None)
         self.audits.append(audit)
 
     # ── seed(테스트 전용) ──────────────────────────────────────────────────────

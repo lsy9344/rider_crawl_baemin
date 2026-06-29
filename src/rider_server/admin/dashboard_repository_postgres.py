@@ -717,6 +717,7 @@ class PostgresDashboardRepository(DashboardRepository):
             return []
         account_conditions = [
             MonitoringTarget.tenant_id == PlatformAccount.tenant_id,
+            MonitoringTarget.status != MonitoringTargetStatus.INACTIVE.value,
             PlatformAccount.auth_state.in_(_ACCOUNT_AUTH_REQUIRED_STATES),
         ]
         session_conditions = [

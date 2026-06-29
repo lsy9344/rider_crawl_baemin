@@ -38,6 +38,7 @@ ACTION_MONITORING_TARGET_CREATE = "MONITORING_TARGET_CREATE"
 ACTION_MONITORING_TARGET_UPDATE = "MONITORING_TARGET_UPDATE"
 ACTION_MONITORING_TARGET_DEACTIVATE = "MONITORING_TARGET_DEACTIVATE"
 ACTION_MONITORING_TARGET_REACTIVATE = "MONITORING_TARGET_REACTIVATE"
+ACTION_MONITORING_TARGET_DELETE = "MONITORING_TARGET_DELETE"
 ACTION_MESSENGER_CHANNEL_CREATE = "MESSENGER_CHANNEL_CREATE"
 ACTION_MESSENGER_CHANNEL_UPDATE = "MESSENGER_CHANNEL_UPDATE"
 ACTION_MESSENGER_CHANNEL_ACTIVATE = "MESSENGER_CHANNEL_ACTIVATE"
@@ -140,6 +141,8 @@ class AdminEntityRepository(Protocol):
 
     async def tenant_has_dependencies(self, tenant_id: str) -> bool: ...
 
+    async def monitoring_target_has_dependencies(self, target_id: str) -> bool: ...
+
     async def create_tenant(self, tenant: Tenant, audit: AuditEntry) -> None: ...
 
     async def create_subscription(
@@ -199,6 +202,10 @@ class AdminEntityRepository(Protocol):
     async def save_delivery_rule(self, rule: DeliveryRule, audit: AuditEntry) -> None: ...
 
     async def delete_tenant(self, tenant_id: str, audit: AuditEntry) -> None: ...
+
+    async def delete_monitoring_target(
+        self, target_id: str, audit: AuditEntry
+    ) -> None: ...
 
 
 def build_admin_audit(

@@ -440,6 +440,41 @@ def test_create_monitoring_target_links_account_and_flags_valid_coupang_center()
     assert repo.audits[-1].action == "MONITORING_TARGET_CREATE"
 
 
+def test_create_monitoring_target_same_tenant_same_name_is_idempotent() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    svc = _svc(repo)
+
+    first = _run(
+        svc.create_monitoring_target(
+            entity_id="mt-first",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name="가게",
+            center_name="센터",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+    second = _run(
+        svc.create_monitoring_target(
+            entity_id="mt-second",
+            tenant_id=_TENANT,
+            platform_account_id="pa-1",
+            name=" 가게 ",
+            center_name="센터",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    targets = _run(repo.list_monitoring_targets(_TENANT))
+    assert second.target.id == first.target.id == "mt-first"
+    assert [t.id for t in targets] == ["mt-first"]
+    assert [a.action for a in repo.audits] == ["MONITORING_TARGET_CREATE"]
+
+
 def test_create_monitoring_target_persists_send_window() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -626,6 +661,42 @@ def test_create_delivery_rule_fan_out_one_target_two_channels() -> None:
     assert rule_a.target_id == rule_b.target_id == "mt-1"
     assert rule_a.channel_id != rule_b.channel_id  # 1:N fan-out
     assert {r.id for r in _run(repo.list_delivery_rules("mt-1"))} == {"dr-a", "dr-b"}
+
+
+def test_create_delivery_rule_same_target_channel_is_idempotent() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target())
+    repo.seed_messenger_channel(_channel("ch-1"))
+    svc = _svc(repo)
+
+    first = _run(
+        svc.create_delivery_rule(
+            entity_id="dr-first",
+            tenant_id=_TENANT,
+            target_id="mt-1",
+            channel_id="ch-1",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+    second = _run(
+        svc.create_delivery_rule(
+            entity_id="dr-second",
+            tenant_id=_TENANT,
+            target_id="mt-1",
+            channel_id="ch-1",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    rules = _run(repo.list_delivery_rules("mt-1"))
+    assert second.id == first.id == "dr-first"
+    assert [(r.target_id, r.channel_id, r.enabled) for r in rules] == [
+        ("mt-1", "ch-1", True)
+    ]
+    assert [a.action for a in repo.audits] == ["DELIVERY_RULE_CREATE"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2345,6 +2416,30 @@ def test_route_create_delivery_rule_fan_out_persists() -> None:
     assert len(_run(repo.list_delivery_rules("mt-1"))) == 2
 
 
+def test_route_create_delivery_rule_duplicate_post_does_not_duplicate_rule() -> None:
+    """같은 대상↔채널 POST 재시도는 빠른 연결/일반 폼 중복 클릭이어도 규칙 1개만 남긴다."""
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target())
+    repo.seed_messenger_channel(_channel("ch-1"))
+    client = TestClient(_app_with(repo))
+
+    first = client.post(
+        "/admin/delivery-rules?tenant=tn-1",
+        data={"target_id": "mt-1", "channel_id": "ch-1"},
+    )
+    second = client.post(
+        "/admin/delivery-rules?tenant=tn-1",
+        data={"target_id": "mt-1", "channel_id": "ch-1"},
+    )
+
+    assert first.status_code == HTTPStatus.OK
+    assert second.status_code == HTTPStatus.OK
+    assert "이미 연결됨" in second.text
+    assert len(_run(repo.list_delivery_rules("mt-1"))) == 1
+    assert [a.action for a in repo.audits] == ["DELIVERY_RULE_CREATE"]
+
+
 def test_route_create_delivery_rule_missing_fields_400() -> None:
     """G20 — target_id/channel_id 누락 → 400(라우트 선검증)."""
     repo = InMemoryAdminEntityRepository()
@@ -2354,6 +2449,38 @@ def test_route_create_delivery_rule_missing_fields_400() -> None:
     resp = client.post("/admin/delivery-rules?tenant=tn-1", data={"target_id": "mt-1"})
 
     assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_route_create_monitoring_target_duplicate_name_does_not_duplicate() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_platform_account(_account())
+    client = TestClient(_app_with(repo))
+
+    first = client.post(
+        "/admin/monitoring-targets?tenant=tn-1",
+        data={
+            "platform_account_id": "pa-1",
+            "name": "가게",
+            "center_name": "센터",
+            "interval_minutes": "5",
+        },
+    )
+    second = client.post(
+        "/admin/monitoring-targets?tenant=tn-1",
+        data={
+            "platform_account_id": "pa-1",
+            "name": " 가게 ",
+            "center_name": "센터",
+            "interval_minutes": "5",
+        },
+    )
+
+    assert first.status_code == HTTPStatus.OK
+    assert second.status_code == HTTPStatus.OK
+    assert "이미 등록됨" in second.text
+    assert len(_run(repo.list_monitoring_targets(_TENANT))) == 1
+    assert [a.action for a in repo.audits] == ["MONITORING_TARGET_CREATE"]
 
 
 def test_route_deactivate_target_soft_delete() -> None:
@@ -2367,6 +2494,36 @@ def test_route_deactivate_target_soft_delete() -> None:
 
     assert resp.status_code == HTTPStatus.OK
     assert _run(repo.get_monitoring_target("mt-1")).status is MonitoringTargetStatus.INACTIVE
+
+
+def test_route_delete_target_removes_unlinked_target() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/monitoring-targets/mt-1/delete?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.OK
+    assert "모니터링 대상 삭제됨" in resp.text
+    assert resp.headers["HX-Trigger"] == "admin-entity-changed"
+    assert _run(repo.get_monitoring_target("mt-1")) is None
+    assert repo.audits[-1].action == "MONITORING_TARGET_DELETE"
+
+
+def test_route_delete_target_with_delivery_rule_returns_conflict() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    repo.seed_monitoring_target(_target())
+    repo.seed_delivery_rule(DeliveryRule(id="dr-1", target_id="mt-1", channel_id="ch-1"))
+    client = TestClient(_app_with(repo))
+
+    resp = client.post("/admin/monitoring-targets/mt-1/delete?tenant=tn-1")
+
+    assert resp.status_code == HTTPStatus.CONFLICT
+    assert "연결 데이터" in resp.text
+    assert _run(repo.get_monitoring_target("mt-1")) is not None
+    assert repo.audits == []
 
 
 def test_route_reactivate_target_restores_soft_delete() -> None:
@@ -2806,6 +2963,12 @@ def _entity_admin_template() -> str:
     )
 
 
+def _dashboard_template() -> str:
+    return Path("src/rider_server/admin/templates/dashboard.html").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_entity_admin_has_current_value_load_hooks() -> None:
     template = _entity_admin_template()
 
@@ -2873,6 +3036,49 @@ def test_entity_admin_keeps_partial_update_semantics() -> None:
     assert "비운 칸은 기존 값을 유지합니다" in template
     # 비밀값 재노출 안내가 명시돼 있다(설정 여부만 표시).
     assert "설정 여부만 표시" in template
+
+
+def test_platform_account_2fa_fields_are_coupang_only_in_manage_ui() -> None:
+    template = _entity_admin_template()
+    dashboard = _dashboard_template()
+
+    assert 'select name="platform" onchange="syncPlatformAccount2faFields()"' in template
+    for name in (
+        "verification_email_address",
+        "verification_email_app_password",
+        "verification_email_subject_keyword",
+        "verification_email_sender_keyword",
+    ):
+        assert f'name="{name}"' in template
+        assert f'name="{name}"' in template[
+            template.index('data-coupang-2fa-field="create"') - 300 :
+        ]
+    assert "function syncPlatformAccount2faFields()" in template
+    assert "field.disabled = !enabled;" in template
+    assert "label.classList.toggle('is-disabled-by-platform', !enabled);" in template
+    assert "document.addEventListener('DOMContentLoaded', syncPlatformAccount2faFields);" in template
+
+    assert "label.is-disabled-by-platform" in dashboard
+    assert "input:disabled" in dashboard
+    assert "cursor: not-allowed" in dashboard
+
+
+def test_platform_account_edit_2fa_fields_follow_loaded_platform() -> None:
+    template = _entity_admin_template()
+
+    for field_id in (
+        "acc-edit-email",
+        "acc-edit-email-password",
+        "acc-edit-email-subject",
+        "acc-edit-email-sender",
+    ):
+        assert f'id="{field_id}"' in template
+        assert f'id="{field_id}"' in template[
+            template.index('data-coupang-2fa-field="edit"') - 300 :
+        ]
+    assert "function syncPlatformAccountEdit2faFields(platform)" in template
+    assert "syncPlatformAccountEdit2faFields(data.platform || '')" in template
+    assert "syncPlatformAccountEdit2faFields('')" in template
 
 
 # ── (review fix) 2026-06-29 검토 반영 ─────────────────────────────────────────────────
@@ -2993,3 +3199,11 @@ def test_entity_admin_deactivate_buttons_not_load_gated() -> None:
         for line in template.splitlines():
             if f"crudButton(this, " in line and f"'{suffix}'" in line:
                 assert "data-needs-loaded" not in line
+
+
+def test_entity_admin_exposes_monitoring_target_delete_button() -> None:
+    template = _entity_admin_template()
+
+    assert "선택한 업체를 삭제할까요?" in template
+    assert "연결된 전송 규칙이나 수집 기록이 있으면 삭제되지 않습니다." in template
+    assert "crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/delete'" in template
