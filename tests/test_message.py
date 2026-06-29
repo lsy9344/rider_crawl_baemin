@@ -216,3 +216,69 @@ def test_render_current_screen_message_drops_reject_rate_line():
 
     assert "거절율" not in message
     assert "취소율 : 8.3%" in message
+
+
+def test_render_current_screen_message_shows_active_riders_when_history_merged():
+    # 배달현황을 함께 읽으면(취소율이 채워지면) '수행중인원'(운행상태가 '운행중'인 라이더
+    # 수)을 쿠팡 메시지처럼 붙인다. 줄 순서는 취소율 다음(맨 끝)이다.
+    snapshot = CurrentScreenSnapshot(
+        center_name="표준서울마포B이츠앤홀딩스3",
+        date_label="26-06-17",
+        shift_label="주간 배달 현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at="20:30",
+        available_current=0,
+        available_total=0,
+        waiting_count=0,
+        online_riders=23,
+        rejected_ignored_count=0,
+        cancelled_count=0,
+        completed_count=0,
+        sequence_violation_count=0,
+        lunch_peak_count=0,
+        afternoon_non_peak_count=0,
+        dinner_peak_count=0,
+        dinner_non_peak_count=0,
+        non_peak_count=0,
+        active_riders=23,
+        reject_rate=11.82,
+        cancel_rate=4.7,
+    )
+
+    message = render_current_screen_message(snapshot)
+
+    assert "수행중인원 : 23명" in message
+    lines = message.splitlines()
+    assert lines.index("취소율 : 4.7%") < lines.index("수행중인원 : 23명")
+
+
+def test_render_current_screen_message_omits_active_riders_without_history():
+    # 달성현황만 읽어 취소율이 없으면(=배달현황 미수집) 수행중인원도 생략한다.
+    snapshot = CurrentScreenSnapshot(
+        center_name="표준서울마포B이츠앤홀딩스3",
+        date_label="26-06-17",
+        shift_label="주간 배달 현황",
+        shift_time_range="",
+        shift_status="",
+        updated_at="20:30",
+        available_current=0,
+        available_total=0,
+        waiting_count=0,
+        online_riders=0,
+        rejected_ignored_count=0,
+        cancelled_count=0,
+        completed_count=0,
+        sequence_violation_count=0,
+        lunch_peak_count=323,
+        afternoon_non_peak_count=296,
+        dinner_peak_count=433,
+        dinner_non_peak_count=374,
+        non_peak_count=670,
+        active_riders=0,
+        reject_rate=11.82,
+    )
+
+    message = render_current_screen_message(snapshot)
+
+    assert "수행중인원" not in message

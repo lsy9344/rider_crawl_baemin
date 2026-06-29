@@ -82,7 +82,12 @@ def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, so
         snapshot.dinner_non_peak_goal,
         snapshot.dinner_non_peak_rate,
     )
-    tail_lines = _cancel_rate_lines(snapshot.cancel_rate)
+    tail_lines = list(_cancel_rate_lines(snapshot.cancel_rate))
+    if snapshot.cancel_rate is not None:
+        # '수행중인원'은 배달현황 표의 운행상태가 '운행중'인 라이더 수다(쿠팡의 '수행중인원'과
+        # 같은 개념). 배달현황을 함께 읽었을 때만 채워지고, 그때 취소율도 같은 표에서 함께
+        # 들어오므로 cancel_rate 유무로 표기 여부를 결정한다(달성현황만 읽은 경우엔 생략).
+        tail_lines.append(f"수행중인원 : {_format_count(snapshot.active_riders)}명")
     if tail_lines:
         lines.extend(["", *tail_lines])
     return "\n".join(lines)
