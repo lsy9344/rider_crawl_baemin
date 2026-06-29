@@ -593,20 +593,28 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
         options = await _baemin_select_options(select)
         if len(options) == 1:
             option = options[0]
-            if option["value"]:
-                await select.select_option(
-                    value=option["value"], timeout=config.page_timeout_seconds
-                )
-            else:
-                await select.select_option(
-                    label=option["label"], timeout=config.page_timeout_seconds
-                )
+            await select.select_option(
+                **_baemin_select_option_kwargs(option, config.page_timeout_seconds)
+            )
             await page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
             try:
                 await page.wait_for_load_state("networkidle", timeout=10_000)
             except Exception:
                 pass
             return
+        matched_option = _matching_baemin_select_option(options, config)
+        if matched_option is not None:
+            await select.select_option(
+                **_baemin_select_option_kwargs(matched_option, config.page_timeout_seconds)
+            )
+            await page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            return
+        if options:
+            raise RuntimeError(_baemin_center_not_found_message(config))
         if config.baemin_center_id.strip():
             try:
                 await select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
@@ -625,7 +633,7 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
             except Exception:
                 continue
         else:
-            raise RuntimeError("배민 협력사 드롭다운에서 목표 센터를 찾지 못했습니다")
+            raise RuntimeError(_baemin_center_not_found_message(config))
     else:
         await _click_first_visible_text(page, *target_labels)
 
@@ -665,20 +673,28 @@ def _select_baemin_center_sync(page: Any, config: AppConfig) -> None:
         options = _baemin_select_options_sync(select)
         if len(options) == 1:
             option = options[0]
-            if option["value"]:
-                select.select_option(
-                    value=option["value"], timeout=config.page_timeout_seconds
-                )
-            else:
-                select.select_option(
-                    label=option["label"], timeout=config.page_timeout_seconds
-                )
+            select.select_option(
+                **_baemin_select_option_kwargs(option, config.page_timeout_seconds)
+            )
             page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
             try:
                 page.wait_for_load_state("networkidle", timeout=10_000)
             except Exception:
                 pass
             return
+        matched_option = _matching_baemin_select_option(options, config)
+        if matched_option is not None:
+            select.select_option(
+                **_baemin_select_option_kwargs(matched_option, config.page_timeout_seconds)
+            )
+            page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            return
+        if options:
+            raise RuntimeError(_baemin_center_not_found_message(config))
         if config.baemin_center_id.strip():
             try:
                 select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
@@ -697,7 +713,7 @@ def _select_baemin_center_sync(page: Any, config: AppConfig) -> None:
             except Exception:
                 continue
         else:
-            raise RuntimeError("배민 협력사 드롭다운에서 목표 센터를 찾지 못했습니다")
+            raise RuntimeError(_baemin_center_not_found_message(config))
     else:
         _click_first_visible_text_sync(page, *target_labels)
 
@@ -727,6 +743,43 @@ def _baemin_select_options_sync(select: Any) -> list[dict[str, str]]:
             continue
         options.append({"label": label, "value": value})
     return options
+
+
+def _matching_baemin_select_option(
+    options: list[dict[str, str]], config: AppConfig
+) -> dict[str, str] | None:
+    expected_id = _normalize_center_id(config.baemin_center_id)
+    expected_name = config.baemin_center_name.strip()
+    if expected_id:
+        for option in options:
+            option_ids = (
+                option.get("value", ""),
+                _extract_baemin_center_id(option.get("label", "")),
+            )
+            if any(_normalize_center_id(value) == expected_id for value in option_ids if value):
+                return option
+        return None
+    if expected_name:
+        for option in options:
+            label = option.get("label", "")
+            option_id = _extract_baemin_center_id(label) or option.get("value", "")
+            if _center_name_matches(label, expected_name, option_id):
+                return option
+    return None
+
+
+def _baemin_select_option_kwargs(option: dict[str, str], timeout_ms: int) -> dict[str, object]:
+    if option.get("value"):
+        return {"value": option["value"], "timeout": timeout_ms}
+    return {"label": option.get("label", ""), "timeout": timeout_ms}
+
+
+def _baemin_center_not_found_message(config: AppConfig) -> str:
+    return (
+        "배민 센터 검증 실패: 협력사 드롭다운에서 목표 센터를 찾지 못했습니다.\n"
+        f"설정 센터명: {config.baemin_center_name or '(비어 있음)'}\n"
+        f"설정 센터 ID: {config.baemin_center_id or '(비어 있음)'}"
+    )
 
 
 def _click_first_visible_text_sync(page: Any, *texts: str) -> None:

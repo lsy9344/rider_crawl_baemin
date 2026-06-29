@@ -678,7 +678,7 @@ def _build_config(
     return AppConfig(
         coupang_eats_url=payload.primary_url,
         baemin_center_name=payload.expected_display_name,
-        baemin_center_id=payload.target_external_id or payload.target_id,
+        baemin_center_id=payload.target_external_id,
         browser_mode="cdp",
         cdp_url=cdp_url,
         browser_user_data_dir=user_data_dir,

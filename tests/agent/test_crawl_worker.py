@@ -198,6 +198,40 @@ def test_baemin_page_timeout_leaves_hard_timeout_grace() -> None:
     assert captured["config"].page_timeout_seconds == 55_000
 
 
+def test_baemin_job_without_external_id_does_not_use_target_id_as_center_id() -> None:
+    captured = {}
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["config"] = config
+        return _baemin_snapshot()
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["config"].baemin_center_id == ""
+
+
+def test_baemin_job_uses_external_id_as_center_id_when_present() -> None:
+    captured = {}
+    base_job = _crawl_job()
+    job = ClaimedJob(
+        job_id=base_job.job_id,
+        type=base_job.type,
+        target_id=base_job.target_id,
+        lease_expires_at=base_job.lease_expires_at,
+        payload={**base_job.payload, "external_id": "DP100"},
+    )
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["config"] = config
+        return _baemin_snapshot()
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["config"].baemin_center_id == "DP100"
+
+
 def test_coupang_page_timeout_preserves_full_job_timeout() -> None:
     captured = {}
 

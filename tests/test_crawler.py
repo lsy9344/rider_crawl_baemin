@@ -973,6 +973,48 @@ def test_select_baemin_center_sync_accepts_single_option_even_when_id_differs(tm
     assert page.clicked_buttons == ["선택 완료"]
 
 
+def test_select_baemin_center_uses_name_match_when_id_missing(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준경기남양주C팀100퍼센트",
+        baemin_center_id="",
+    )
+    select = _FakeOptionsAsyncSelect(
+        [
+            {"label": "다른센터 (DP999)", "value": "DP999"},
+            {"label": "표준경기남양주C팀100퍼센트 (DP100)", "value": "DP100"},
+        ]
+    )
+    page = _FakeCenterSelectAsyncPage(select)
+
+    asyncio.run(crawler._select_baemin_center(page, config))
+
+    assert select.selected == [("value", "DP100", 60000)]
+    assert page.clicked_buttons == ["선택 완료"]
+
+
+def test_select_baemin_center_sync_uses_name_match_when_id_missing(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준경기남양주C팀100퍼센트",
+        baemin_center_id="",
+    )
+    select = _FakeOptionsSyncSelect(
+        [
+            {"label": "다른센터 (DP999)", "value": "DP999"},
+            {"label": "표준경기남양주C팀100퍼센트 (DP100)", "value": "DP100"},
+        ]
+    )
+    page = _FakeCenterSelectSyncPage(select)
+
+    crawler._select_baemin_center_sync(page, config)
+
+    assert select.selected == [("value", "DP100", 60000)]
+    assert page.clicked_buttons == ["선택 완료"]
+
+
 def test_crawl_baemin_cancel_summary_uses_short_optional_timeout(tmp_path, monkeypatch):
     # 취소율/수행중 인원은 보조 정보다. 이 경로가 page_timeout 60초를 그대로 쓰면
     # 주 수집이 끝나도 Agent 전체 timeout을 잡아먹어 CRAWL_TIMEOUT 이 된다.
@@ -1593,8 +1635,66 @@ class _FakeSingleOptionSyncSelect:
             self.selected.append(("label", label, timeout))
 
 
+class _FakeOptionsAsyncSelect:
+    def __init__(self, options: list[dict[str, str]]) -> None:
+        self._options = options
+        self.selected: list[tuple[str, str, int | None]] = []
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1
+
+    def locator(self, selector: str):
+        assert selector == "option"
+        return self
+
+    async def evaluate_all(self, _script: str):
+        return self._options
+
+    async def select_option(self, *, value=None, label=None, timeout=None):
+        if value is not None and any(option["value"] == value for option in self._options):
+            self.selected.append(("value", value, timeout))
+            return
+        if label is not None and any(option["label"] == label for option in self._options):
+            self.selected.append(("label", label, timeout))
+            return
+        raise TimeoutError("option not found")
+
+
+class _FakeOptionsSyncSelect:
+    def __init__(self, options: list[dict[str, str]]) -> None:
+        self._options = options
+        self.selected: list[tuple[str, str, int | None]] = []
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def locator(self, selector: str):
+        assert selector == "option"
+        return self
+
+    def evaluate_all(self, _script: str):
+        return self._options
+
+    def select_option(self, *, value=None, label=None, timeout=None):
+        if value is not None and any(option["value"] == value for option in self._options):
+            self.selected.append(("value", value, timeout))
+            return
+        if label is not None and any(option["label"] == label for option in self._options):
+            self.selected.append(("label", label, timeout))
+            return
+        raise TimeoutError("option not found")
+
+
 class _FakeCenterSelectAsyncPage:
-    def __init__(self, select: _FakeSingleOptionAsyncSelect) -> None:
+    def __init__(self, select) -> None:
         self._select = select
         self.clicked_buttons: list[str] = []
 
@@ -1611,7 +1711,7 @@ class _FakeCenterSelectAsyncPage:
 
 
 class _FakeCenterSelectSyncPage:
-    def __init__(self, select: _FakeSingleOptionSyncSelect) -> None:
+    def __init__(self, select) -> None:
         self._select = select
         self.clicked_buttons: list[str] = []
 
