@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-작성일: 2026-06-29  
-상태: 작업 전  
-대상 저장소: `rider_result_mornitoring`  
+작성일: 2026-06-29
+상태: 작업 전
+대상 저장소: `rider_result_mornitoring`
 근거: 2026-06-29 관리자 웹앱 관리 탭 코드 확인, 운영자 질문 "드롭다운 선택 시 기존 설정값을 볼 수 있는가"
 
 **Goal:** `/admin` 관리 탭에서 기존 항목을 선택하면 비밀값을 노출하지 않으면서 현재 설정 상태를 바로 확인하고 수정할 수 있게 만든다.

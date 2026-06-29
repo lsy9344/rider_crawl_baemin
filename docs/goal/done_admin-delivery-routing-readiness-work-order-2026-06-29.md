@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-작성일: 2026-06-29  
-상태: 작업 전  
-대상 저장소: `rider_result_mornitoring`  
+작성일: 2026-06-29
+상태: 작업 전
+대상 저장소: `rider_result_mornitoring`
 근거: 2026-06-29 운영 Admin 확인. `팀100 남양주동부`의 `등록된 설정`에서 `전송 ON`이면서 `메신저 —`로 표시되는 상태 검토.
 
 **Goal:** Admin UI가 "고객 전송 토글 ON"과 "대상별 실제 전송 준비 완료"를 구분해서 보여주고, 대상과 채널을 연결하는 전송 규칙 생성 누락을 운영자가 바로 알아차리고 해결할 수 있게 만든다.
@@ -413,4 +413,3 @@ Expected:
 - `DeliveryRule`은 대상별 라우팅의 정본으로 유지한다.
 - UI는 `고객 전송 ON`과 `대상 연결 완료`를 분리해서 보여준다.
 - fail-closed 원칙을 유지한다. 애매하면 보내지 않는다.
-

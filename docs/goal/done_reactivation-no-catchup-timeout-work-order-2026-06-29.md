@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:systematic-debugging` before changing behavior, then use `superpowers:executing-plans` or `superpowers:subagent-driven-development` to implement task-by-task. This work touches scheduling and may touch protected admin/action paths; do not start with a quick patch.
 
-작성일: 2026-06-29  
-상태: 작업 전  
-대상 저장소: `rider_result_mornitoring`  
+작성일: 2026-06-29
+상태: 작업 전
+대상 저장소: `rider_result_mornitoring`
 근거: H&J / 팀100 남양주동부 고객을 inactive 후 active 했을 때 `CRAWL_TIMEOUT` 위험 표시가 잠깐 발생한 운영 검토, 2026-06-29 코드 확인
 
 **Goal:** 고객 또는 대상이 inactive/paused 상태에서 active로 돌아올 때, 비활성 기간 동안 지난 수집 시간을 따라잡는 즉시 수집이 돌지 않게 한다. 일반 스케줄은 다음 주기부터 재개하고, timeout은 안전장치로 유지하되 원인 조사와 운영 표시를 명확히 한다.
@@ -417,4 +417,3 @@ LIMIT 20;
 1. 고객 active 복귀 시 "다음 주기"를 `now + interval + jitter`로 둘지, `now + jitter only`로 둘지 결정해야 한다. 이 문서는 `now + interval + jitter`를 기본값으로 둔다. 이유는 "밀린 수집 금지" 요구에 가장 보수적이기 때문이다.
 2. pause/inactive 시점에 이미 있던 pending scheduled crawl을 즉시 닫을지 여부는 Task 4 조사 후 결정한다.
 3. 대시보드가 active 직후 "마지막 수집 성공 10시간 전" 때문에 계속 위험으로 보이는 UX는 별도 이슈다. no-catchup 정책은 새 수집 job을 막지만, 과거 성공 시각 기반 freshness 표시는 그대로다. 필요하면 "활성화 직후 grace window"를 별도 작업지시서로 분리한다.
-
