@@ -135,6 +135,13 @@ def test_platform_failure_window_applies_platform_breaker_failure_filter() -> No
     assert "_platform_breaker_failure_filter()" in source
 
 
+def test_active_crawl_job_targets_include_recent_failed_suppression_window() -> None:
+    source = inspect.getsource(PostgresSchedulerRepository.active_crawl_job_target_ids)
+    assert "_RECENT_FAILED_CRAWL_SUPPRESSION_WINDOW" in source
+    assert "JOB_STATUS_FAILED" in source
+    assert "last_failed_at" in source
+
+
 def test_postgres_repository_has_release_due_target_for_enqueue_failures() -> None:
     assert hasattr(PostgresSchedulerRepository, "release_due_target")
 
@@ -263,7 +270,8 @@ class _CoalesceRepo(SchedulerRepository):
     async def has_active_crawl_job(self, target_id):
         return target_id in self._active
 
-    async def active_crawl_job_target_ids(self, target_ids):
+    async def active_crawl_job_target_ids(self, target_ids, *, now=None):
+        del now
         return {tid for tid in target_ids if tid in self._active}
 
     async def capacity_snapshot(self, *, now):

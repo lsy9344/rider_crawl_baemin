@@ -63,6 +63,7 @@ REASON_PAYLOAD_EXPIRED = "payload_expired"
 QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
 _MAX_DIAGNOSTIC_MESSAGE_LENGTH = 800
+_BAEMIN_PAGE_TIMEOUT_GRACE_SECONDS = 5.0
 
 
 class SecretRefUnresolved(RuntimeError):
@@ -629,6 +630,16 @@ def _default_secret_resolver(ref: str) -> str | None:
         return None
 
 
+def _page_timeout_ms(payload: CrawlJobPayload) -> int:
+    timeout_ms = max(1_000, int(float(payload.timeout_seconds) * 1000))
+    if str(payload.platform or "").strip().casefold() != "baemin":
+        return timeout_ms
+    grace_ms = int(_BAEMIN_PAGE_TIMEOUT_GRACE_SECONDS * 1000)
+    if timeout_ms <= grace_ms + 1_000:
+        return timeout_ms
+    return timeout_ms - grace_ms
+
+
 def _build_config(
     payload: CrawlJobPayload,
     *,
@@ -678,7 +689,7 @@ def _build_config(
         send_only_on_change=False,
         timezone="Asia/Seoul",
         run_lock_timeout_seconds=max(60, int(payload.timeout_seconds * 2)),
-        page_timeout_seconds=int(payload.timeout_seconds * 1000),
+        page_timeout_seconds=_page_timeout_ms(payload),
         messenger_name="telegram",
         crawl_name=payload.expected_display_name or payload.target_id,
         state_subdir=payload.target_id,

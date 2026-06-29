@@ -19,7 +19,7 @@ PG-gated 테스트에서만 실행되고, always-run in-memory 테스트가 brea
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -66,6 +66,7 @@ _PLATFORM_BREAKER_IGNORED_FAILURE_CODES = (
 # (crawl-coupang-auth-separation Task 7: 중복 OTP 요청·동시 복구 방지).
 _AUTH_JOB_TYPES = (JOB_TYPE_AUTH_COUPANG_2FA, JOB_TYPE_OPEN_AUTH_BROWSER)
 _ACTIVE_JOB_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
+_RECENT_FAILED_CRAWL_SUPPRESSION_WINDOW = timedelta(minutes=5)
 
 
 def _safe_uuid(value: object) -> uuid.UUID | None:
@@ -360,16 +361,24 @@ class PostgresSchedulerRepository(SchedulerRepository):
             count = (await session.execute(stmt)).scalar_one()
         return int(count) > 0
 
-    async def active_crawl_job_target_ids(self, target_ids: list[str]) -> set[str]:
+    async def active_crawl_job_target_ids(
+        self, target_ids: list[str], *, now: datetime
+    ) -> set[str]:
         unique_ids = list(dict.fromkeys(tid for tid in target_ids if tid))
         if not unique_ids:
             return set()
+        failed_at = func.coalesce(Job.last_failed_at, Job.completed_at)
+        recent_failed = (
+            (Job.status == JOB_STATUS_FAILED)
+            & failed_at.is_not(None)
+            & (failed_at >= now - _RECENT_FAILED_CRAWL_SUPPRESSION_WINDOW)
+        )
         stmt = (
             select(Job.target_id)
             .where(
                 Job.target_id.in_(unique_ids),
                 Job.type.in_(_CRAWL_JOB_TYPES),
-                Job.status.in_(_ACTIVE_JOB_STATUSES),
+                Job.status.in_(_ACTIVE_JOB_STATUSES) | recent_failed,
             )
             .distinct()
         )

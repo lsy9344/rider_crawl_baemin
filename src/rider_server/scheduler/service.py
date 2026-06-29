@@ -170,8 +170,10 @@ class SchedulerRepository(abc.ABC):
         """대상에 활성 CrawlJob(PENDING/CLAIMED/RUNNING)이 이미 있는가(멱등성, AC4)."""
 
     @abc.abstractmethod
-    async def active_crawl_job_target_ids(self, target_ids: list[str]) -> set[str]:
-        """여러 target 중 활성 CrawlJob 이 있는 target id 집합을 bulk 조회한다."""
+    async def active_crawl_job_target_ids(
+        self, target_ids: list[str], *, now: datetime
+    ) -> set[str]:
+        """여러 target 중 활성/최근 실패 CrawlJob 이 있는 target id 집합을 bulk 조회한다."""
 
     async def active_auth_job_target_ids(self, target_ids: list[str]) -> set[str]:
         """여러 target 중 활성 인증 job(AUTH_COUPANG_2FA/OPEN_AUTH_BROWSER)이 있는 target id 집합.
@@ -325,7 +327,7 @@ class SchedulerService:
             list(dict.fromkeys(target.tenant_id for target in due))
         )
         active_target_ids = await repo.active_crawl_job_target_ids(
-            [target.target_id for target in due]
+            [target.target_id for target in due], now=now
         )
         # crawl-coupang-auth-separation Task 7: 같은 대상에 이미 진행 중인 인증 job 이 있으면
         # 자동 복구 auth job 을 또 만들지 않는다(중복 OTP 요청 방지). repository 가 bulk 로 채운

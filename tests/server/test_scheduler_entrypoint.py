@@ -51,7 +51,8 @@ class _Repo(SchedulerRepository):
     async def has_active_crawl_job(self, target_id):
         return False
 
-    async def active_crawl_job_target_ids(self, target_ids):
+    async def active_crawl_job_target_ids(self, target_ids, *, now=None):
+        del now
         return set()
 
     async def capacity_snapshot(self, *, now):

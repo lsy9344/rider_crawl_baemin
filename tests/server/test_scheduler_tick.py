@@ -65,6 +65,7 @@ class FakeSchedulerRepo(SchedulerRepository):
         failure_windows=None,
         active_jobs=(),
         active_auth_jobs=(),
+        recent_failed_jobs=(),
         capacity,
     ) -> None:
         self._targets = {t.target_id: t for t in targets}
@@ -72,6 +73,7 @@ class FakeSchedulerRepo(SchedulerRepository):
         self._failure_windows = dict(failure_windows or {})
         self._active_jobs = set(active_jobs)
         self._active_auth_jobs = set(active_auth_jobs)
+        self._recent_failed_jobs = set(recent_failed_jobs)
         self._capacity = capacity
         self.claim_wins: list[str] = []
         self.release_calls: list[tuple[str, datetime, datetime | None]] = []
@@ -105,9 +107,14 @@ class FakeSchedulerRepo(SchedulerRepository):
         self.has_active_crawl_job_calls += 1
         return target_id in self._active_jobs
 
-    async def active_crawl_job_target_ids(self, target_ids):
+    async def active_crawl_job_target_ids(self, target_ids, *, now=None):
         self.bulk_active_job_calls += 1
-        return {target_id for target_id in target_ids if target_id in self._active_jobs}
+        active = {target_id for target_id in target_ids if target_id in self._active_jobs}
+        if now is not None:
+            active |= {
+                target_id for target_id in target_ids if target_id in self._recent_failed_jobs
+            }
+        return active
 
     async def active_auth_job_target_ids(self, target_ids):
         self.bulk_active_auth_job_calls += 1
@@ -564,6 +571,23 @@ def test_active_crawl_job_blocks_reenqueue() -> None:
     assert result.outcomes[0].reason == REASON_ACTIVE_JOB_EXISTS
     # 활성 job 이 있으면 next_run_at 도 전진하지 않는다(재진입 차단, job 종료 후 재시도).
     assert repo.next_run_at_of("t-a") is None
+
+
+def test_recent_failed_crawl_temporarily_blocks_scheduled_reenqueue() -> None:
+    target = _target("t-a", interval=1, next_run=_NOW - timedelta(minutes=1))
+    repo = FakeSchedulerRepo(
+        targets=[target],
+        gates={target.tenant_id: _ACTIVE_GATE},
+        recent_failed_jobs={"t-a"},
+        capacity=_capacity(),
+    )
+    backend = InMemoryQueueBackend()
+
+    result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
+
+    assert result.enqueued_count == 0
+    assert result.outcomes[0].reason == REASON_ACTIVE_JOB_EXISTS
+    assert repo.claim_wins == []
 
 
 def test_repeated_tick_same_due_window_creates_exactly_one_job() -> None:

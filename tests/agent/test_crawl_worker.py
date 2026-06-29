@@ -183,6 +183,38 @@ def test_baemin_job_ignores_coupang_email_2fa_payload() -> None:
     assert captured["config"].coupang_auto_email_2fa_enabled is False
 
 
+def test_baemin_page_timeout_leaves_hard_timeout_grace() -> None:
+    captured = {}
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["platform_name"] = platform_name
+        captured["config"] = config
+        return _baemin_snapshot()
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(_crawl_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["platform_name"] == "baemin"
+    assert captured["config"].page_timeout_seconds == 55_000
+
+
+def test_coupang_page_timeout_preserves_full_job_timeout() -> None:
+    captured = {}
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["platform_name"] = platform_name
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    result = CrawlWorker(crawl_snapshot=fake_crawl).execute(
+        _crawl_job(CAPABILITY_CRAWL_COUPANG, platform="coupang", expected="쿠팡상점A")
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["platform_name"] == "coupang"
+    assert captured["config"].page_timeout_seconds == 60_000
+
+
 def test_crawl_worker_rejects_expired_payload_before_profile_prepare() -> None:
     """crawl_worker checks expires_at before ensure_profile."""
 
