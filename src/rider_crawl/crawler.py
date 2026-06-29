@@ -68,6 +68,8 @@ def _merge_cancel_rate(
 
 _BAEMIN_HISTORY_PAGE_SIZE = 100
 _BAEMIN_HISTORY_MAX_PAGES = 20
+_BAEMIN_OPTIONAL_HISTORY_TIMEOUT_MS = 10_000
+_BAEMIN_OPTIONAL_HISTORY_BUDGET_SECONDS = 20.0
 
 
 def _baemin_history_base_url(config: AppConfig) -> str:
@@ -90,12 +92,20 @@ def _baemin_history_page_url(config: AppConfig, page_index: int) -> str:
 
 def crawl_baemin_cancel_summary(config: AppConfig) -> CurrentScreenSnapshot | None:
     try:
-        tables = _fetch_baemin_delivery_history_tables(config)
+        tables = _fetch_baemin_delivery_history_tables(_baemin_cancel_summary_config(config))
         if not tables:
             return None
         return baemin_delivery_history_to_snapshot(_combine_history_page_tables(tables))
     except Exception:
         return None
+
+
+def _baemin_cancel_summary_config(config: AppConfig) -> AppConfig:
+    timeout = min(
+        config.page_timeout_seconds,
+        _BAEMIN_OPTIONAL_HISTORY_TIMEOUT_MS,
+    )
+    return replace(config, page_timeout_seconds=max(1_000, timeout))
 
 
 def _combine_history_page_tables(
@@ -135,7 +145,10 @@ async def _fetch_baemin_history_tables_via_cdp_async(
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
         page = await context.new_page()
         try:
-            return await _collect_baemin_history_tables(page, config)
+            return await asyncio.wait_for(
+                _collect_baemin_history_tables(page, config),
+                timeout=_BAEMIN_OPTIONAL_HISTORY_BUDGET_SECONDS,
+            )
         finally:
             await page.close()
 
@@ -415,8 +428,12 @@ async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) ->
         page = await context.new_page()
 
     if _has_configured_baemin_center(config):
-        await _goto_page(page, _BAEMIN_CENTER_CHANGE_URL, config)
-        await _select_baemin_center(page, config)
+        if not (
+            _url_matches(str(page.url), report_url)
+            and await _page_matches_configured_baemin_center(page, config)
+        ):
+            await _goto_page(page, _BAEMIN_CENTER_CHANGE_URL, config)
+            await _select_baemin_center(page, config)
 
     await _goto_page(page, report_url, config)
     if _url_matches(str(page.url), _BAEMIN_CENTER_CHANGE_URL):
@@ -427,6 +444,15 @@ async def _open_baemin_delivery_history_page(browser: Any, config: AppConfig) ->
         await _goto_page(page, report_url, config)
 
     return page
+
+
+async def _page_matches_configured_baemin_center(page: Any, config: AppConfig) -> bool:
+    try:
+        html = await page.content()
+        _validate_baemin_center_in_html(config, html, require_evidence=True)
+        return True
+    except Exception:
+        return False
 
 
 async def _goto_page(page: Any, url: str, config: AppConfig) -> None:
@@ -564,6 +590,23 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
 
     select = page.locator("select").first
     if await select.count():
+        options = await _baemin_select_options(select)
+        if len(options) == 1:
+            option = options[0]
+            if option["value"]:
+                await select.select_option(
+                    value=option["value"], timeout=config.page_timeout_seconds
+                )
+            else:
+                await select.select_option(
+                    label=option["label"], timeout=config.page_timeout_seconds
+                )
+            await page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            return
         if config.baemin_center_id.strip():
             try:
                 await select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
@@ -593,11 +636,49 @@ async def _select_baemin_center(page: Any, config: AppConfig) -> None:
         pass
 
 
+async def _baemin_select_options(select: Any) -> list[dict[str, str]]:
+    try:
+        raw_options = await select.locator("option").evaluate_all(
+            """(options) => options.map((option) => ({
+                label: (option.innerText || option.textContent || '').trim(),
+                value: (option.value || '').trim()
+            }))"""
+        )
+    except Exception:
+        return []
+
+    options: list[dict[str, str]] = []
+    for raw in raw_options:
+        label = _normalize_visible_text(str(raw.get("label") or raw.get("text") or ""))
+        value = str(raw.get("value") or "").strip()
+        if not label and not value:
+            continue
+        options.append({"label": label, "value": value})
+    return options
+
+
 def _select_baemin_center_sync(page: Any, config: AppConfig) -> None:
     target_labels = _baemin_center_labels(config)
 
     select = page.locator("select").first
     if select.count():
+        options = _baemin_select_options_sync(select)
+        if len(options) == 1:
+            option = options[0]
+            if option["value"]:
+                select.select_option(
+                    value=option["value"], timeout=config.page_timeout_seconds
+                )
+            else:
+                select.select_option(
+                    label=option["label"], timeout=config.page_timeout_seconds
+                )
+            page.get_by_role("button", name="선택 완료").click(timeout=config.page_timeout_seconds)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            return
         if config.baemin_center_id.strip():
             try:
                 select.select_option(value=config.baemin_center_id.strip(), timeout=config.page_timeout_seconds)
@@ -625,6 +706,27 @@ def _select_baemin_center_sync(page: Any, config: AppConfig) -> None:
         page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
         pass
+
+
+def _baemin_select_options_sync(select: Any) -> list[dict[str, str]]:
+    try:
+        raw_options = select.locator("option").evaluate_all(
+            """(options) => options.map((option) => ({
+                label: (option.innerText || option.textContent || '').trim(),
+                value: (option.value || '').trim()
+            }))"""
+        )
+    except Exception:
+        return []
+
+    options: list[dict[str, str]] = []
+    for raw in raw_options:
+        label = _normalize_visible_text(str(raw.get("label") or raw.get("text") or ""))
+        value = str(raw.get("value") or "").strip()
+        if not label and not value:
+            continue
+        options.append({"label": label, "value": value})
+    return options
 
 
 def _click_first_visible_text_sync(page: Any, *texts: str) -> None:

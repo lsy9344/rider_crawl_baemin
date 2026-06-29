@@ -911,6 +911,84 @@ def test_open_baemin_delivery_history_page_reuses_logged_in_tab(tmp_path, monkey
     assert browser.contexts[0].new_page_calls == 0
 
 
+def test_open_baemin_delivery_history_page_uses_ready_report_tab_without_center_change(tmp_path, monkeypatch):
+    # 이미 첫 번째 report 탭이 설정 센터로 준비되어 있으면 매 수집마다 /center/change 로
+    # 튕기지 않는다. 사용 가능한 메인 탭을 그대로 쓰는 것이 운영자가 본 실제 성공 상태다.
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준경기남양주C팀100퍼센트",
+        baemin_center_id="DP100",
+    )
+    report_url = crawler._baemin_report_url(config)
+    page = _FakeAsyncNavigationPage(
+        report_url,
+        html="<span>표준경기남양주C팀100퍼센트(DP100)</span>",
+    )
+    browser = _GuardBrowser([page])
+
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.async_api",
+        types.SimpleNamespace(TimeoutError=TimeoutError),
+    )
+
+    opened = asyncio.run(crawler._open_baemin_delivery_history_page(browser, config))
+
+    assert opened is page
+    assert crawler._BAEMIN_CENTER_CHANGE_URL not in page.goto_urls
+    assert browser.contexts[0].new_page_calls == 0
+
+
+def test_select_baemin_center_accepts_single_option_even_when_id_differs(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준경기남양주C팀100퍼센트",
+        baemin_center_id="DP100",
+    )
+    select = _FakeSingleOptionAsyncSelect(label="센터명 표기", value="DPONLY")
+    page = _FakeCenterSelectAsyncPage(select)
+
+    asyncio.run(crawler._select_baemin_center(page, config))
+
+    assert select.selected == [("value", "DPONLY", 60000)]
+    assert page.clicked_buttons == ["선택 완료"]
+
+
+def test_select_baemin_center_sync_accepts_single_option_even_when_id_differs(tmp_path):
+    config = _config(
+        tmp_path,
+        browser_mode="cdp",
+        baemin_center_name="표준경기남양주C팀100퍼센트",
+        baemin_center_id="DP100",
+    )
+    select = _FakeSingleOptionSyncSelect(label="센터명 표기", value="DPONLY")
+    page = _FakeCenterSelectSyncPage(select)
+
+    crawler._select_baemin_center_sync(page, config)
+
+    assert select.selected == [("value", "DPONLY", 60000)]
+    assert page.clicked_buttons == ["선택 완료"]
+
+
+def test_crawl_baemin_cancel_summary_uses_short_optional_timeout(tmp_path, monkeypatch):
+    # 취소율/수행중 인원은 보조 정보다. 이 경로가 page_timeout 60초를 그대로 쓰면
+    # 주 수집이 끝나도 Agent 전체 timeout을 잡아먹어 CRAWL_TIMEOUT 이 된다.
+    config = _config(tmp_path, browser_mode="cdp")
+    seen_timeouts: list[int] = []
+
+    def fake_fetch(received_config):
+        seen_timeouts.append(received_config.page_timeout_seconds)
+        raise RuntimeError("optional history stuck")
+
+    monkeypatch.setattr(crawler, "_fetch_baemin_delivery_history_tables", fake_fetch)
+
+    assert crawler.crawl_baemin_cancel_summary(config) is None
+    assert seen_timeouts == [10000]
+
+
 def test_fetch_target_page_content_does_not_close_cdp_browser(tmp_path):
     config = _config(tmp_path, browser_mode="cdp")
     browser = _FakeBrowser(
@@ -1425,8 +1503,9 @@ class _FakeAsyncPage:
 
 
 class _FakeAsyncNavigationPage:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, html: str = "") -> None:
         self.url = url
+        self._html = html
         self.goto_urls: list[str] = []
 
     async def goto(self, url: str, **_kwargs):
@@ -1435,6 +1514,9 @@ class _FakeAsyncNavigationPage:
 
     async def wait_for_load_state(self, *_args, **_kwargs):
         return None
+
+    async def content(self) -> str:
+        return self._html
 
 
 class _FakeAsyncButton:
@@ -1455,6 +1537,112 @@ class _FakeAsyncLocator:
     @property
     def first(self):
         return _FakeAsyncLocatorTarget()
+
+
+class _FakeSingleOptionAsyncSelect:
+    def __init__(self, *, label: str, value: str) -> None:
+        self._label = label
+        self._value = value
+        self.selected: list[tuple[str, str, int | None]] = []
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1
+
+    def locator(self, selector: str):
+        assert selector == "option"
+        return self
+
+    async def evaluate_all(self, _script: str):
+        return [{"label": self._label, "value": self._value}]
+
+    async def select_option(self, *, value=None, label=None, timeout=None):
+        if value is not None:
+            self.selected.append(("value", value, timeout))
+        else:
+            self.selected.append(("label", label, timeout))
+
+
+class _FakeSingleOptionSyncSelect:
+    def __init__(self, *, label: str, value: str) -> None:
+        self._label = label
+        self._value = value
+        self.selected: list[tuple[str, str, int | None]] = []
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def locator(self, selector: str):
+        assert selector == "option"
+        return self
+
+    def evaluate_all(self, _script: str):
+        return [{"label": self._label, "value": self._value}]
+
+    def select_option(self, *, value=None, label=None, timeout=None):
+        if value is not None:
+            self.selected.append(("value", value, timeout))
+        else:
+            self.selected.append(("label", label, timeout))
+
+
+class _FakeCenterSelectAsyncPage:
+    def __init__(self, select: _FakeSingleOptionAsyncSelect) -> None:
+        self._select = select
+        self.clicked_buttons: list[str] = []
+
+    def locator(self, selector: str):
+        assert selector == "select"
+        return self._select
+
+    def get_by_role(self, role: str, *, name: str, **_kwargs):
+        assert role == "button"
+        return _FakeRecordingAsyncButton(self.clicked_buttons, name)
+
+    async def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeCenterSelectSyncPage:
+    def __init__(self, select: _FakeSingleOptionSyncSelect) -> None:
+        self._select = select
+        self.clicked_buttons: list[str] = []
+
+    def locator(self, selector: str):
+        assert selector == "select"
+        return self._select
+
+    def get_by_role(self, role: str, *, name: str, **_kwargs):
+        assert role == "button"
+        return _FakeRecordingSyncButton(self.clicked_buttons, name)
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeRecordingAsyncButton:
+    def __init__(self, clicks: list[str], name: str) -> None:
+        self._clicks = clicks
+        self._name = name
+
+    async def click(self, **_kwargs):
+        self._clicks.append(self._name)
+
+
+class _FakeRecordingSyncButton:
+    def __init__(self, clicks: list[str], name: str) -> None:
+        self._clicks = clicks
+        self._name = name
+
+    def click(self, **_kwargs):
+        self._clicks.append(self._name)
 
 
 class _FakeAsyncContentPage:

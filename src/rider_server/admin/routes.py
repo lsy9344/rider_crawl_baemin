@@ -118,6 +118,14 @@ _PLATFORM_CLASSES: dict[str, str] = {"BAEMIN": "plat-baemin", "COUPANG": "plat-c
 _MESSENGER_LABELS: dict[str, str] = {"TELEGRAM": "텔레그램", "KAKAO": "카카오"}
 
 
+def _settings_identity_key(name: str, center_name: str) -> tuple[str, str]:
+    return (_settings_identity_part(name), _settings_identity_part(center_name))
+
+
+def _settings_identity_part(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
 def _reason_text(code: str | None) -> str:
     """실패 코드 → 사람이 읽는 사유 문장. 미지 코드는 코드값을 괄호로 보조."""
     if not code:
@@ -477,7 +485,18 @@ async def _settings_rows_for_tenant(
     }
 
     rows: list[SettingsRow] = []
+    active_setting_keys = {
+        _settings_identity_key(t.name, t.center_name)
+        for t in targets
+        if t.status is MonitoringTargetStatus.ACTIVE
+    }
     for t in targets:
+        setting_key = _settings_identity_key(t.name, t.center_name)
+        if (
+            t.status is not MonitoringTargetStatus.ACTIVE
+            and setting_key in active_setting_keys
+        ):
+            continue
         # N+1: 대상별 delivery rule 조회. 벌크 list_* 가 없어 대상마다 1쿼리지만 ~100건 규모라 허용.
         rules = await service.list_delivery_rules(t.id, tenant_id=tenant_id)
         # ACTIVE 채널로 연결된 활성 규칙만 readiness/메신저에 센다(channel_messenger 는 ACTIVE 채널만

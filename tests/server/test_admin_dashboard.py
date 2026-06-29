@@ -2360,6 +2360,65 @@ def test_registered_settings_fragment_renders_assembled_rows() -> None:
     assert "sev-normal" in body
 
 
+def test_registered_settings_hides_stopped_duplicate_replaced_by_active_platform() -> None:
+    entity_repo = InMemoryAdminEntityRepository()
+    entity_repo.seed_tenant(
+        Tenant(
+            id=_TENANT,
+            name="고객",
+            status=CustomerLifecycleState.ACTIVE,
+            created_at=_NOW,
+            sending_enabled=True,
+        )
+    )
+    entity_repo.seed_platform_account(
+        PlatformAccount(id="acc-old", tenant_id=_TENANT, platform=Platform.COUPANG, label="예전 쿠팡")
+    )
+    entity_repo.seed_platform_account(
+        PlatformAccount(id="acc-new", tenant_id=_TENANT, platform=Platform.BAEMIN, label="배민")
+    )
+    entity_repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="old-coupang",
+            tenant_id=_TENANT,
+            platform_account_id="acc-old",
+            name="표준경기남양주C팀100퍼센트",
+            center_name="표준경기남양주C팀100퍼센트",
+            interval_minutes=35,
+            schedule_enabled=False,
+            status=MonitoringTargetStatus.PAUSED,
+        )
+    )
+    entity_repo.seed_monitoring_target(
+        MonitoringTarget(
+            id="new-baemin",
+            tenant_id=_TENANT,
+            platform_account_id="acc-new",
+            name="표준경기남양주C팀100퍼센트",
+            center_name="표준경기남양주C팀100퍼센트",
+            interval_minutes=1,
+            schedule_enabled=True,
+            status=MonitoringTargetStatus.ACTIVE,
+        )
+    )
+    app = _allow_viewer(
+        create_app(
+            Settings(app_env="test", app_version="9.9.9", build_sha=None, build_time=None),
+            dashboard_repository=InMemoryDashboardRepository(),
+            admin_entity_service=AdminEntityService(entity_repo),
+        )
+    )
+
+    body = TestClient(app, raise_server_exceptions=False).get(
+        f"/admin/registered-settings?tenant={_TENANT}"
+    ).text
+
+    assert "표준경기남양주C팀100퍼센트" in body
+    assert "배민" in body
+    assert "쿠팡" not in body
+    assert "old-coupang" not in body
+
+
 def test_registered_settings_send_gate_respects_tenant_sending_enabled() -> None:
     # 전송 ON/OFF 는 '관리' 화면의 ❸ 실제 메시지 보내기 토글과 같은 의미 — tenant.sending_enabled
     # 만 반영한다. 전역 게이트/전송 시간창/채널 ACTIVE 같은 실 dispatch 게이트는 여기서 보지 않는다
