@@ -15,10 +15,11 @@
     {% for r in auth_required %}
     {% set is_auth_pending = r.reason == "AUTH_SESSION_PENDING" %}
     {% set is_coupang = (r.platform | lower) == 'coupang' %}
+    {% set display_reason = r.auth_recovery_detail or (r.reason | reason_text) %}
     <tr>
       <td>{{ r.target_name or "대상명 없음" }}</td>
       <td>{% if r.platform %}<span class="plat {{ r.platform | platform_class }}">{{ r.platform | platform_label }}</span>{% else %}<span class="muted">-</span>{% endif %}</td>
-      <td>{{ r.reason | reason_text }}</td>
+      <td>{{ display_reason }}</td>
       <td>{% if r.profile_id %}{{ r.profile_id }}{% else %}<span class="muted">-</span>{% endif %}</td>
       <td>
         {% if r.target_id %}

@@ -30,6 +30,64 @@ class ImapAuthError(Imap2faError):
     상위 복구가 이걸 ``EMAIL_AUTH_REQUIRED`` 로 분류해 사람이 메일 설정을 고치게 한다. 메시지에
     인증번호/앱 비밀번호를 넣지 않는다(부모와 동일 정책)."""
 
+    def __init__(self, *args: object, reason: str = "email_auth_required") -> None:
+        super().__init__(*args)
+        self.reason = reason
+
+
+def classify_imap_auth_failure(exc: BaseException) -> str:
+    """Return a safe reason code from an IMAP/provider auth failure."""
+
+    text = re.sub(r"\s+", " ", f"{type(exc).__name__} {exc}".casefold()).strip()
+    if any(
+        signal in text
+        for signal in (
+            "imap access is disabled",
+            "imap access disabled",
+            "imap access not enabled",
+            "imap is disabled",
+            "imap not enabled",
+            "imap has not been enabled",
+            "enable imap",
+        )
+    ):
+        return "imap_access_disabled"
+    if any(
+        signal in text
+        for signal in (
+            "too many login",
+            "too many failed",
+            "security block",
+            "temporary auth block",
+            "temporarily blocked",
+            "authentication blocked",
+            "account blocked",
+            "account temporarily locked",
+            "suspicious sign-in",
+        )
+    ):
+        return "mailbox_auth_blocked"
+    if any(
+        signal in text
+        for signal in (
+            "invalid credentials",
+            "invalid credential",
+            "application-specific password",
+            "application specific password",
+            "app-specific password",
+            "app password",
+            "username and password not accepted",
+            "authenticationfailed",
+            "authentication failed",
+            "auth failed",
+            "bad credentials",
+            "invalid password",
+            "incorrect password",
+        )
+    ):
+        return "mail_app_password_invalid"
+    return "mailbox_login_failed"
+
 
 def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[-1].strip().casefold() if "@" in (address or "") else ""
@@ -39,7 +97,8 @@ def imap_host_for_email(address: str) -> str:
     host = IMAP_HOST_BY_DOMAIN.get(domain_of(address))
     if not host:
         raise ImapAuthError(
-            "지원하지 않는 인증 이메일 도메인입니다. naver.com 또는 gmail.com 주소를 입력하세요."
+            "지원하지 않는 인증 이메일 도메인입니다. naver.com 또는 gmail.com 주소를 입력하세요.",
+            reason="unsupported_email_domain",
         )
     return host
 
@@ -233,7 +292,8 @@ def _imap_connect(host: str, port: int, email_address: str, app_password: str) -
         server.login(email_address, app_password)
     except Exception as exc:
         raise ImapAuthError(
-            "IMAP 로그인 실패. 메일의 IMAP 사용 설정과 앱 비밀번호를 확인하세요."
+            "IMAP 로그인 실패. 메일의 IMAP 사용 설정과 앱 비밀번호를 확인하세요.",
+            reason=classify_imap_auth_failure(exc),
         ) from exc
     return server
 

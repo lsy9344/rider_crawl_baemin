@@ -255,6 +255,11 @@ COUPANG_RECOVERY_DETAIL_BY_STATE: dict[str, str] = {
 #: 고정 reason(result_json.reason / metrics.reason) → 한글 detail 라벨(상태보다 구체적인 경우).
 COUPANG_RECOVERY_DETAIL_BY_REASON: dict[str, str] = {
     "email_auth_required": "메일 인증 필요",
+    "mail_app_password_invalid": "앱 비밀번호 오류",
+    "imap_access_disabled": "IMAP 사용 꺼짐",
+    "unsupported_email_domain": "지원하지 않는 메일 도메인",
+    "mailbox_auth_blocked": "메일함 인증 차단",
+    "mailbox_login_failed": "메일함 로그인 실패",
     "captcha_or_abnormal_login": "캡차/이상 로그인",
     "verification_mail_delayed": "인증 메일 지연",
     "repeated_recovery_failure": "자동 인증 실패",

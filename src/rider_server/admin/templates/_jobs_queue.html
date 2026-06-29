@@ -31,7 +31,7 @@
       <td>
         {% if j.target_name %}{{ j.target_name }}{% else %}<span class="muted">대상 없음</span>{% endif %}
         {% if j.center_name %}<span class="muted"> · {{ j.center_name }}</span>{% endif %}
-        {% if j.recently_failed and j.error_code %}<br><span class="job-reason">{{ j.error_code | reason_text }}</span>{% endif %}
+        {% if j.recently_failed and (j.auth_recovery_detail or j.error_code) %}<br><span class="job-reason">{{ j.auth_recovery_detail or (j.error_code | reason_text) }}</span>{% endif %}
       </td>
       <td>
         {% if j.agent_name %}{{ j.agent_name }}

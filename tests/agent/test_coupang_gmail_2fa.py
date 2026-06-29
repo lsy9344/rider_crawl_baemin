@@ -677,6 +677,77 @@ def test_execute_auth_coupang_2fa_job_maps_mail_auth_to_auth_required_detail():
     assert FAKE_EMAIL not in blob  # 평문 이메일은 결과에 없다(ref 만)
 
 
+def test_recover_coupang_mailbox_preserves_safe_email_auth_reason():
+    from rider_crawl.auth.imap_2fa import ImapAuthError
+
+    def recover():
+        raise ImapAuthError(
+            "IMAP 로그인 실패. 메일 설정을 확인하세요.",
+            reason="mail_app_password_invalid",
+        )
+
+    result = recover_coupang_mailbox(
+        mailbox_id=FAKE_MBX_1,
+        recover=recover,
+        locks=MailboxLockRegistry(),
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_EMAIL_AUTH_REQUIRED
+    assert result.result_json["state"] == STATE_EMAIL_AUTH_REQUIRED
+    assert result.result_json["reason"] == "mail_app_password_invalid"
+
+
+def test_recover_coupang_mailbox_falls_back_to_email_auth_required_reason():
+    from rider_crawl.auth.imap_2fa import ImapAuthError
+
+    result = recover_coupang_mailbox(
+        mailbox_id=FAKE_MBX_1,
+        recover=_recover(raises=ImapAuthError("imap login failed")),
+        locks=MailboxLockRegistry(),
+        sleep=lambda _s: None,
+    )
+
+    assert result.result_json["state"] == STATE_EMAIL_AUTH_REQUIRED
+    assert result.result_json["reason"] == REASON_EMAIL_AUTH
+
+
+def test_execute_auth_coupang_2fa_job_preserves_safe_mailbox_reason_without_raw_imap():
+    from rider_crawl.auth.imap_2fa import ImapAuthError
+
+    def recover():
+        raise ImapAuthError(
+            f"AUTHENTICATIONFAILED invalid credentials pw={FAKE_APP_PASSWORD} otp={FAKE_OTP}",
+            reason="mail_app_password_invalid",
+        )
+
+    result = execute_auth_coupang_2fa_job(
+        _auth_2fa_job(),
+        recover=recover,
+        secret_resolver=_FAKE_SECRET_MAP.get,
+        max_attempts=3,
+        sleep=lambda _s: None,
+    )
+
+    assert result.status == JOB_STATUS_FAILED
+    assert result.error_code == ERROR_AUTH_REQUIRED
+    assert result.result_json["auth_recovery_state"] == STATE_EMAIL_AUTH_REQUIRED
+    assert result.result_json["reason"] == "mail_app_password_invalid"
+
+    blob = json.dumps(
+        {
+            "result_json": result.result_json,
+            "metrics": result.metrics,
+            "error_message_redacted": result.error_message_redacted,
+        },
+        ensure_ascii=False,
+    )
+    assert FAKE_APP_PASSWORD not in blob
+    assert FAKE_OTP not in blob
+    assert "AUTHENTICATIONFAILED" not in blob
+
+
 def test_execute_auth_coupang_2fa_job_mail_delay_is_recovery_failed():
     """Slow mail beyond bounded timeout reports RECOVERY_FAILED / verification_mail_delayed."""
     result = execute_auth_coupang_2fa_job(

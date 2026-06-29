@@ -472,6 +472,34 @@ def test_auth_required_rows_collapse_duplicate_target_and_prefer_pending_session
     )
 
 
+def test_auth_required_rows_preserve_coupang_recovery_detail_when_collapsing() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="t-auth",
+            profile_id="p-old",
+            reason="ACCOUNT_AUTH_REQUIRED",
+            target_name="가게",
+            platform="COUPANG",
+            auth_recovery_detail="앱 비밀번호 오류",
+        )
+    )
+    repo.seed_auth_required(
+        AuthRequiredRow(
+            tenant_id=_TENANT,
+            target_id="t-auth",
+            profile_id="p-ready",
+            reason="AUTH_SESSION_PENDING",
+        )
+    )
+
+    rows = asyncio.run(DashboardService().auth_required_rows(repo, tenant_id=_TENANT, now=_NOW))
+
+    assert rows[0].reason == "AUTH_SESSION_PENDING"
+    assert rows[0].auth_recovery_detail == "앱 비밀번호 오류"
+
+
 # ── 실시간 큐 뷰(active job) ─────────────────────────────────────────────────────
 
 
@@ -488,6 +516,7 @@ def _job(
     agent_online: bool | None = None,
     error_code: str | None = None,
     recently_failed: bool = False,
+    auth_recovery_detail: str | None = None,
 ) -> JobQueueRow:
     return JobQueueRow(
         job_id=job_id,
@@ -505,6 +534,7 @@ def _job(
         stuck=stuck,
         error_code=error_code,
         recently_failed=recently_failed,
+        auth_recovery_detail=auth_recovery_detail,
     )
 
 
@@ -576,6 +606,25 @@ def test_jobs_fragment_route_shows_failed_reason() -> None:
     assert 'class="job-failed"' in body
     assert 'data-queue-active="0"' in body
     assert 'data-queue-failed="1"' in body
+
+
+def test_jobs_fragment_prefers_coupang_recovery_detail_for_recent_failure() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_active_job(
+        _job(
+            job_id="auth-mail",
+            status="FAILED",
+            job_type="AUTH_COUPANG_2FA",
+            recently_failed=True,
+            error_code="AUTH_REQUIRED",
+            auth_recovery_detail="앱 비밀번호 오류",
+        )
+    )
+
+    body = _client(repo).get(f"/admin/jobs?tenant={_TENANT}").text
+
+    assert "앱 비밀번호 오류" in body
+    assert "로그인 만료" not in body
 
 
 def test_dashboard_queue_summary_counts_recent_failure_separately() -> None:
@@ -1315,6 +1364,27 @@ def test_targets_fragment_prefers_coupang_recovery_detail_for_auth_required() ->
     assert "로그인 만료 · 인증 확인 필요" not in html
 
 
+def test_targets_fragment_surfaces_mail_app_password_detail() -> None:
+    row = TargetRow(
+        target_id="t-auth",
+        tenant_id=_TENANT,
+        name="인증가게",
+        center_name="센터",
+        platform="COUPANG",
+        interval_minutes=10,
+        last_success_at=None,
+        last_delivery_at=None,
+        last_failure_code="AUTH_REQUIRED",
+        severity=SEVERITY_AUTH_REQUIRED,
+        auth_recovery_detail="앱 비밀번호 오류",
+    )
+
+    html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
+
+    assert 'data-reason="앱 비밀번호 오류"' in html
+    assert "앱 비밀번호 오류" in html
+
+
 def test_auth_session_pending_target_prompts_user_to_enter_code_and_recheck() -> None:
     repo = InMemoryDashboardRepository()
     repo.seed_target(
@@ -1753,6 +1823,26 @@ def test_auth_required_fragment_names_the_target_not_generic_label() -> None:
     assert "인증 필요 대상</td>" not in body
     assert "ACCOUNT_AUTH_REQUIRED" not in body
     assert "/admin/targets/t-stopped/auth-start" in body
+
+
+def test_auth_required_fragment_prefers_coupang_recovery_detail() -> None:
+    html = admin_routes.templates.env.get_template("_auth_required.html").render(
+        auth_required=[
+            AuthRequiredRow(
+                tenant_id=_TENANT,
+                target_id="t-auth",
+                profile_id="p1",
+                reason="ACCOUNT_AUTH_REQUIRED",
+                target_name="쿠팡가게",
+                platform="COUPANG",
+                auth_recovery_detail="앱 비밀번호 오류",
+            )
+        ],
+        tenant_id=_TENANT,
+    )
+
+    assert "앱 비밀번호 오류" in html
+    assert "로그인 만료" not in html
 
 
 def test_auth_required_fragment_uses_row_tenant_for_all_tenants_action() -> None:

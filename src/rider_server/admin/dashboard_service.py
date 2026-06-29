@@ -160,6 +160,7 @@ class AuthRequiredRow:
     reason: str
     target_name: str | None = None
     platform: str | None = None
+    auth_recovery_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,7 @@ class JobQueueRow:
     stuck: bool
     error_code: str | None = None  # 최근 실패 job 의 실패 코드(active job 은 None)
     recently_failed: bool = False  # 짧은 윈도 안에 terminal FAILED 된 job(사라지기 전 사유 표시)
+    auth_recovery_detail: str | None = None  # AUTH_COUPANG_2FA result detail label
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -423,6 +425,8 @@ class DashboardService:
                 profile_id=row.profile_id,
                 reason=row.reason,
                 target_name=row.target_name or targets.get(row.target_id or ""),
+                platform=row.platform,
+                auth_recovery_detail=row.auth_recovery_detail,
             )
             for row in rows
         ]
@@ -453,6 +457,7 @@ class DashboardService:
                 reason=winner.reason,
                 target_name=winner.target_name or fallback.target_name,
                 platform=winner.platform or fallback.platform,
+                auth_recovery_detail=winner.auth_recovery_detail or fallback.auth_recovery_detail,
             )
 
         collapsed: dict[tuple[str, str], AuthRequiredRow] = {}

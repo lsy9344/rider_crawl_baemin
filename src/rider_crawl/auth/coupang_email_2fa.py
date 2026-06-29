@@ -150,9 +150,15 @@ class Coupang2faError(RuntimeError):
     같은 일시적 실패와 운영자 조치형 실패를 구분한다(검토 Medium).
     """
 
-    def __init__(self, *args: object, email_auth_required: bool = False) -> None:
+    def __init__(
+        self,
+        *args: object,
+        email_auth_required: bool = False,
+        email_auth_reason: str | None = None,
+    ) -> None:
         super().__init__(*args)
         self.email_auth_required = email_auth_required
+        self.email_auth_reason = email_auth_reason
 
 
 class CoupangCaptchaError(Coupang2faError):
@@ -184,7 +190,9 @@ def _fetch_code(
         )
     except Imap2faError as exc:
         raise Coupang2faError(
-            str(exc), email_auth_required=isinstance(exc, ImapAuthError)
+            str(exc),
+            email_auth_required=isinstance(exc, ImapAuthError),
+            email_auth_reason=getattr(exc, "reason", None),
         ) from exc
 
     if not code:

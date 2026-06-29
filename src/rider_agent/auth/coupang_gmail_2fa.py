@@ -65,6 +65,17 @@ RECOVERY_MODE_COUPANG_AUTO_EMAIL_2FA = "coupang_auto_email_2fa"
 # 필수 secret ref 미해소 시 fail-closed reason.
 REASON_SECRET_REF_UNRESOLVED = "secret_ref_unresolved"
 
+_SAFE_EMAIL_AUTH_REASONS = frozenset(
+    {
+        REASON_EMAIL_AUTH,
+        "mail_app_password_invalid",
+        "imap_access_disabled",
+        "unsupported_email_domain",
+        "mailbox_auth_blocked",
+        "mailbox_login_failed",
+    }
+)
+
 # 세부 복구 상태 → 계정 coarse gate 상태(Decision 3: account=coarse gate, job=detailed state).
 _RECOVERY_STATE_TO_GATE: dict[str, str] = {
     STATE_RECOVERED: AUTH_STATE_ACTIVE,
@@ -170,6 +181,37 @@ def _email_auth_flag(
         return None
 
 
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _safe_email_auth_reason(value: object) -> str | None:
+    reason = str(value or "").strip()
+    if reason in _SAFE_EMAIL_AUTH_REASONS:
+        return reason
+    return None
+
+
+def default_email_auth_reason(exc: BaseException) -> str:
+    """Return only a fixed safe reason code for mailbox auth failures."""
+
+    for current in _exception_chain(exc):
+        reason = _safe_email_auth_reason(getattr(current, "email_auth_reason", None))
+        if reason is not None:
+            return reason
+        reason = _safe_email_auth_reason(getattr(current, "reason", None))
+        if reason is not None:
+            return reason
+        if getattr(current, "email_auth_required", False):
+            return REASON_EMAIL_AUTH
+    return REASON_EMAIL_AUTH
+
+
 def default_is_email_auth_required(exc: BaseException) -> bool:
     """기본 운영 predicate — IMAP 로그인/이메일 설정 실패면 ``EMAIL_AUTH_REQUIRED`` 로 본다.
 
@@ -185,15 +227,11 @@ def default_is_email_auth_required(exc: BaseException) -> bool:
     except Exception:  # pragma: no cover - 의존성 부재 환경에선 보수적으로 미지정.
         return False
 
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    for current in _exception_chain(exc):
         if isinstance(current, ImapAuthError):
             return True
         if isinstance(current, Coupang2faError) and getattr(current, "email_auth_required", False):
             return True
-        current = current.__cause__ or current.__context__
     return False
 
 
@@ -281,7 +319,7 @@ def recover_coupang_mailbox(
     sleep: Callable[[float], None] = time.sleep,
     max_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS,
     backoff_seconds: float = DEFAULT_RECOVERY_BACKOFF_SECONDS,
-    is_email_auth_required: Callable[[BaseException], bool] | None = None,
+    is_email_auth_required: Callable[[BaseException], bool] | None = default_is_email_auth_required,
     is_user_action_required: Callable[[BaseException], bool] | None = default_is_user_action_required,
     is_browser_unavailable: Callable[[BaseException], bool] | None = default_is_browser_unavailable,
     log: Callable[[str], None] | None = None,
@@ -307,7 +345,13 @@ def recover_coupang_mailbox(
                         state, mailbox_ref, REASON_CAPTCHA_OR_ABNORMAL, attempts, log
                     )
                 if state == STATE_EMAIL_AUTH_REQUIRED:
-                    return _failure_result(state, mailbox_ref, REASON_EMAIL_AUTH, attempts, log)
+                    return _failure_result(
+                        state,
+                        mailbox_ref,
+                        default_email_auth_reason(exc),
+                        attempts,
+                        log,
+                    )
                 if _email_auth_flag(is_browser_unavailable, exc) is True:
                     return _failure_result(
                         STATE_RECOVERY_FAILED,

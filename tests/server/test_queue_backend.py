@@ -932,6 +932,27 @@ def test_auth_coupang_2fa_email_auth_required_keeps_account_auth_required_with_d
     assert values["auto_recovery_cooldown_until"] == _T0 + COUPANG_AUTO_RECOVERY_COOLDOWN
 
 
+def test_auth_coupang_2fa_preserves_specific_mailbox_reason() -> None:
+    """Specific safe mailbox reasons stay in job result while account gate remains coarse."""
+    job = _auth_2fa_completed_job(
+        auth_state=BaeminAuthState.AUTH_REQUIRED.value,
+        auth_recovery_state="EMAIL_AUTH_REQUIRED",
+        reason="mail_app_password_invalid",
+    )
+
+    assert _platform_account_auth_update(job, "AUTH_REQUIRED") == (
+        _PA_ID,
+        BaeminAuthState.AUTH_REQUIRED.value,
+    )
+    assert job.result_json["auth_recovery_state"] == "EMAIL_AUTH_REQUIRED"
+    assert job.result_json["reason"] == "mail_app_password_invalid"
+
+    cooldown = coupang_recovery_state_values(job=job, status=JOB_STATUS_FAILED, now=_T0)
+    assert cooldown is not None
+    _account, values = cooldown
+    assert values["auto_recovery_cooldown_until"] == _T0 + COUPANG_AUTO_RECOVERY_COOLDOWN
+
+
 def test_auth_coupang_2fa_user_action_required_marks_account_user_action_pending() -> None:
     """Manual intervention states are visible to scheduler/dashboard."""
     job = _auth_2fa_completed_job(

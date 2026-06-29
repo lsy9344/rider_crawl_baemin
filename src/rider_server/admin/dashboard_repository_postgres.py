@@ -53,6 +53,7 @@ from rider_server.queue.states import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
+    JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_KAKAO_SEND,
 )
 
@@ -68,7 +69,7 @@ from .dashboard_service import (
     _optional_bool,
     _optional_str,
 )
-from .severity import is_agent_online
+from .severity import coupang_recovery_detail_label, is_agent_online
 
 #: Telegram 전송 오류 집계 윈도(최근 10분 — ops-contract 정합, 정밀화는 5.9).
 _TELEGRAM_ERROR_WINDOW = timedelta(minutes=10)
@@ -796,7 +797,58 @@ class PostgresDashboardRepository(DashboardRepository):
                         platform=str(row.platform) if row.platform else None,
                     )
                 )
+            details = await self._latest_auth_recovery_details(
+                session, [row.target_id for row in rows if row.target_id]
+            )
+            if details:
+                rows = [
+                    AuthRequiredRow(
+                        tenant_id=row.tenant_id,
+                        target_id=row.target_id,
+                        profile_id=row.profile_id,
+                        reason=row.reason,
+                        target_name=row.target_name,
+                        platform=row.platform,
+                        auth_recovery_detail=details.get(row.target_id or ""),
+                    )
+                    for row in rows
+                ]
         return rows
+
+    async def _latest_auth_recovery_details(
+        self, session: AsyncSession, target_ids: list[str]
+    ) -> dict[str, str]:
+        if not target_ids:
+            return {}
+        ts = func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at)
+        stmt = (
+            select(Job.target_id, Job.result_json, ts.label("ts"))
+            .where(
+                Job.target_id.in_(target_ids),
+                Job.type == JOB_TYPE_AUTH_COUPANG_2FA,
+                Job.result_json.is_not(None),
+            )
+        )
+        latest: dict[str, tuple[datetime | None, str | None, str | None]] = {}
+        for target_id, result_json, row_ts in (await session.execute(stmt)).all():
+            recovery_state, recovery_reason = _coupang_recovery_detail_from_result_json(
+                result_json
+            )
+            key = str(target_id)
+            current = latest.get(key)
+            if current is None or (
+                row_ts is not None and (current[0] is None or row_ts > current[0])
+            ):
+                latest[key] = (row_ts, recovery_state, recovery_reason)
+        details: dict[str, str] = {}
+        for target_id, (_ts, recovery_state, recovery_reason) in latest.items():
+            label = coupang_recovery_detail_label(
+                auth_recovery_state=recovery_state,
+                reason=recovery_reason,
+            )
+            if label:
+                details[target_id] = label
+        return details
 
     async def active_jobs(
         self, *, tenant_id: str, now: datetime, limit: int = 100
@@ -833,6 +885,7 @@ class PostgresDashboardRepository(DashboardRepository):
                 Job.claimed_at,
                 Job.lease_expires_at,
                 Job.error_code,
+                Job.result_json,
                 failed_at.label("failed_at"),
                 MonitoringTarget.tenant_id.label("tenant_id"),
                 MonitoringTarget.name.label("target_name"),
@@ -850,6 +903,9 @@ class PostgresDashboardRepository(DashboardRepository):
         result: list[JobQueueRow] = []
         async with self._session_factory() as session:
             for row in (await session.execute(stmt)).all():
+                recovery_state, recovery_reason = _coupang_recovery_detail_from_result_json(
+                    row.result_json
+                )
                 agent_online = (
                     is_agent_online(row.agent_heartbeat, now)
                     if row.agent_name is not None
@@ -882,6 +938,10 @@ class PostgresDashboardRepository(DashboardRepository):
                         stuck=stuck,
                         error_code=str(row.error_code) if row.error_code else None,
                         recently_failed=recently_failed,
+                        auth_recovery_detail=coupang_recovery_detail_label(
+                            auth_recovery_state=recovery_state,
+                            reason=recovery_reason,
+                        ),
                     )
                 )
         return result

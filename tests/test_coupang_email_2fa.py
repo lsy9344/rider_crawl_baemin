@@ -9,7 +9,7 @@ from rider_crawl.auth.coupang_email_2fa import (
     CoupangCaptchaError,
     recover_coupang_session_with_email_2fa,
 )
-from rider_crawl.auth.imap_2fa import Imap2faError
+from rider_crawl.auth.imap_2fa import Imap2faError, ImapAuthError
 from rider_crawl.config import AppConfig
 
 
@@ -630,6 +630,28 @@ def test_recover_raises_when_imap_fetch_fails(tmp_path):
         recover_coupang_session_with_email_2fa(
             page, _config(tmp_path), fetch_code=_fetch, now=_NOW
         )
+
+
+def test_recover_preserves_safe_imap_auth_reason(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냅니다</html>",
+        clickable=("이메일", "인증번호 발송"),
+        input_selectors=("input[name='code']",),
+    )
+
+    def _fetch(**_kwargs):
+        raise ImapAuthError(
+            "IMAP 로그인 실패. 메일 설정을 확인하세요.",
+            reason="mail_app_password_invalid",
+        )
+
+    with pytest.raises(Coupang2faError) as exc_info:
+        recover_coupang_session_with_email_2fa(
+            page, _config(tmp_path), fetch_code=_fetch, now=_NOW
+        )
+
+    assert exc_info.value.email_auth_required is True
+    assert exc_info.value.email_auth_reason == "mail_app_password_invalid"
 
 
 def test_recover_proceeds_when_screen_recipient_matches_tab_address(tmp_path):

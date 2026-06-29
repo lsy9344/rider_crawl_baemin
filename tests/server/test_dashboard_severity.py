@@ -380,6 +380,36 @@ def test_dashboard_surfaces_coupang_email_auth_required_detail() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("reason", "label"),
+    [
+        ("mail_app_password_invalid", "앱 비밀번호 오류"),
+        ("imap_access_disabled", "IMAP 사용 꺼짐"),
+        ("unsupported_email_domain", "지원하지 않는 메일 도메인"),
+        ("mailbox_auth_blocked", "메일함 인증 차단"),
+        ("mailbox_login_failed", "메일함 로그인 실패"),
+    ],
+)
+def test_dashboard_surfaces_specific_mailbox_auth_reason(reason: str, label: str) -> None:
+    assert (
+        coupang_recovery_detail_label(
+            auth_recovery_state="EMAIL_AUTH_REQUIRED",
+            reason=reason,
+        )
+        == label
+    )
+
+
+def test_dashboard_specific_mailbox_reason_takes_precedence_over_email_auth_state() -> None:
+    assert (
+        coupang_recovery_detail_label(
+            auth_recovery_state="EMAIL_AUTH_REQUIRED",
+            reason="mail_app_password_invalid",
+        )
+        == "앱 비밀번호 오류"
+    )
+
+
 def test_dashboard_surfaces_coupang_recovery_failed_detail() -> None:
     """Repeated/mail-delay recovery failures are not shown as generic crawl failure."""
     # 메일 지연은 "인증 메일 지연"으로, 반복 실패는 "자동 인증 실패"로 구분된다.

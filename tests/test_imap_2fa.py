@@ -7,6 +7,7 @@ import pytest
 from rider_crawl.auth import imap_2fa
 from rider_crawl.auth.imap_2fa import (
     Imap2faError,
+    ImapAuthError,
     domain_of,
     fetch_latest_verification_code,
     imap_host_for_email,
@@ -21,8 +22,35 @@ def test_imap_host_for_email_maps_naver_and_gmail():
 
 
 def test_imap_host_for_email_rejects_unsupported_domain():
-    with pytest.raises(Imap2faError, match="지원하지 않는"):
+    with pytest.raises(ImapAuthError, match="지원하지 않는") as exc_info:
         imap_host_for_email("user@daum.net")
+    assert exc_info.value.reason == "unsupported_email_domain"
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        ("Invalid credentials", "mail_app_password_invalid"),
+        ("Application-specific password required", "mail_app_password_invalid"),
+        ("IMAP access is disabled", "imap_access_disabled"),
+        ("IMAP not enabled for this account", "imap_access_disabled"),
+        ("too many login attempts", "mailbox_auth_blocked"),
+        ("temporary security block on this account", "mailbox_auth_blocked"),
+        ("LOGIN failed", "mailbox_login_failed"),
+    ],
+)
+def test_classify_imap_auth_failure_uses_provider_signal_only(message, reason):
+    assert imap_2fa.classify_imap_auth_failure(RuntimeError(message)) == reason
+
+
+def test_classify_imap_auth_failure_never_returns_raw_secret_like_message():
+    reason = imap_2fa.classify_imap_auth_failure(
+        RuntimeError("Invalid credentials for password=super-secret-app-pass otp=123456")
+    )
+
+    assert reason == "mail_app_password_invalid"
+    assert "super-secret-app-pass" not in reason
+    assert "123456" not in reason
 
 
 def test_domain_of_handles_missing_at():
