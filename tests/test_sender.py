@@ -296,7 +296,9 @@ def test_remembered_handle_is_not_reused_across_different_chat_names(monkeypatch
 
 
 def test_focus_kakao_main_window_picks_exact_main_title(monkeypatch):
-    main_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
+    main_window = _FakeKakaoWindow(
+        "카카오톡", handle=1, with_input=False, main_contact_controls=True
+    )
     chat_window = _FakeKakaoWindow("실적봇_A", handle=11, with_input=True)
 
     def fake_windows(backend):
@@ -309,6 +311,22 @@ def test_focus_kakao_main_window_picks_exact_main_title(monkeypatch):
     selected = sender_module._focus_kakao_main_window()
 
     assert sender_module._window_handle(selected) == 1
+    assert brought == [main_window]
+
+
+def test_focus_kakao_main_window_skips_title_only_login_window(monkeypatch):
+    login_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
+    main_window = _FakeKakaoWindow(
+        "카카오톡", handle=2, with_input=False, main_contact_controls=True
+    )
+
+    _patch_desktop(monkeypatch, lambda backend: [login_window, main_window])
+    brought = []
+    monkeypatch.setattr(sender_module, "_bring_window_to_front", lambda window: brought.append(window))
+
+    selected = sender_module._focus_kakao_main_window()
+
+    assert sender_module._window_handle(selected) == 2
     assert brought == [main_window]
 
 
@@ -333,7 +351,9 @@ def test_focus_kakao_main_window_unsafe_when_no_backend_scannable(monkeypatch):
 
 def test_open_from_main_focuses_main_window_not_arbitrary_kakao(monkeypatch):
     chat_window = _FakeKakaoWindow("실적봇_A", handle=11, with_input=True)
-    main_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
+    main_window = _FakeKakaoWindow(
+        "카카오톡", handle=1, with_input=False, main_contact_controls=True
+    )
     _patch_desktop(monkeypatch, lambda backend: [chat_window, main_window])
 
     focused = []
@@ -351,7 +371,9 @@ def test_open_from_main_selects_existing_search_text_before_pasting(monkeypatch)
     # 검색창에 이전 실행 키워드가 남아 있으면 paste 가 덧붙어 잘못된 채팅방을 찾는다.
     # ctrl+f 직후 기존 텍스트를 선택해 paste 가 덮어쓰게 한다. 카카오톡 검색창에서는
     # ctrl+a 가 '친구추가'로 가로채이므로 전체 선택은 ctrl+shift+a 를 쓴다.
-    main_window = _FakeKakaoWindow("카카오톡", handle=1, with_input=False)
+    main_window = _FakeKakaoWindow(
+        "카카오톡", handle=1, with_input=False, main_contact_controls=True
+    )
     _patch_desktop(monkeypatch, lambda backend: [main_window])
 
     pyautogui = _RecordingPyAutoGui()
@@ -793,19 +815,36 @@ class _FakeControl:
 
 
 class _FakeKakaoWindow:
-    def __init__(self, title: str, *, handle: int, with_input: bool) -> None:
+    def __init__(
+        self,
+        title: str,
+        *,
+        handle: int,
+        with_input: bool,
+        main_contact_controls: bool = False,
+    ) -> None:
         self.title = title
         self.handle = handle
         self.element_info = _FakeElementInfo(class_name="EVA_Window_Dblclk")
         self._inputs = (
             [_FakeControl("Edit", "RICHEDIT50W", "메시지 입력")] if with_input else []
         )
+        self._main_controls = (
+            [
+                _FakeControl("", "EVA_Window", "ContactListView_0x1"),
+                _FakeControl("", "EVA_VH_ListControl_Dblclk", "ChatRoomListCtrl_0x2"),
+            ]
+            if main_contact_controls
+            else []
+        )
 
     def window_text(self) -> str:
         return self.title
 
     def descendants(self, control_type: str | None = None):
-        if control_type in (None, "Document", "Edit"):
+        if control_type is None:
+            return [*self._inputs, *self._main_controls]
+        if control_type in ("Document", "Edit"):
             return list(self._inputs)
         return []
 
@@ -966,11 +1005,26 @@ class _FakePyperclip:
 class _ProbeWindow:
     """probe 용 fake 창 — title/class/visible 만 노출(라이브 관측 형태 모사)."""
 
-    def __init__(self, title: str, *, class_name: str = "EVA_Window_Dblclk", visible: bool = True) -> None:
+    def __init__(
+        self,
+        title: str,
+        *,
+        class_name: str = "EVA_Window_Dblclk",
+        visible: bool = True,
+        main_contact_controls: bool = False,
+    ) -> None:
         self.title = title
         self.element_info = _FakeElementInfo(class_name=class_name)
         self._visible = visible
         self.handle = abs(hash((title, class_name))) % 100000
+        self._main_controls = (
+            [
+                _FakeControl("", "EVA_Window", "ContactListView_0x1"),
+                _FakeControl("", "EVA_VH_ListControl_Dblclk", "ChatRoomListCtrl_0x2"),
+            ]
+            if main_contact_controls
+            else []
+        )
 
     def window_text(self) -> str:
         return self.title
@@ -978,19 +1032,31 @@ class _ProbeWindow:
     def is_visible(self) -> bool:
         return self._visible
 
+    def descendants(self, control_type: str | None = None):
+        return list(self._main_controls) if control_type is None else []
+
 
 def test_kakao_login_available_true_when_main_contact_window_visible():
     # 로그인 상태: 메인 연락처 창(title 카카오톡 + EVA_Window* + visible)이 있으면 True.
     windows = [
-        _ProbeWindow("카카오톡"),
+        _ProbeWindow("카카오톡", main_contact_controls=True),
         _ProbeWindow("실적봇_의정부남부"),  # 열린 채팅방
     ]
     assert sender_module.kakao_login_available(list_windows=lambda: windows) is True
 
 
 def test_kakao_login_available_true_for_english_main_title():
-    windows = [_ProbeWindow("KakaoTalk")]
+    windows = [_ProbeWindow("KakaoTalk", main_contact_controls=True)]
     assert sender_module.kakao_login_available(list_windows=lambda: windows) is True
+
+
+def test_kakao_login_available_false_when_title_only_login_window_visible():
+    windows = [
+        _ProbeWindow("카카오톡", class_name="EVA_Window"),
+        _ProbeWindow("실적봇_의정부남부"),
+    ]
+
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
 
 
 def test_kakao_login_available_false_when_only_login_or_chat_windows():
@@ -1008,10 +1074,11 @@ def test_kakao_login_available_none_when_only_chat_windows_visible():
     assert sender_module.kakao_login_available(list_windows=lambda: windows) is None
 
 
-def test_kakao_login_available_false_when_main_window_hidden():
-    # 메인 창 제목이지만 visible 하지 않으면 로그인으로 보지 않는다.
-    windows = [_ProbeWindow("카카오톡", visible=False)]
-    assert sender_module.kakao_login_available(list_windows=lambda: windows) is False
+def test_kakao_login_available_true_when_main_contact_window_reports_hidden():
+    # 실제 KakaoTalk Win32 창은 메인 연락처 컨트롤이 있어도 is_visible=False 로 보일 수 있다.
+    # 전송 전 _bring_window_to_front 가 restore 하므로 이 경우는 로그인/전송 가능 신호로 본다.
+    windows = [_ProbeWindow("카카오톡", visible=False, main_contact_controls=True)]
+    assert sender_module.kakao_login_available(list_windows=lambda: windows) is True
 
 
 def test_kakao_login_available_false_when_no_kakao_windows():

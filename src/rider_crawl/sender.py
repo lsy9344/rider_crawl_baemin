@@ -865,16 +865,52 @@ def _has_kakao_class(window: object) -> bool:
 #: 메인 연락처 창의 정확한 제목 — 채팅방/로그인 창과 구분하는 anchor.
 _KAKAO_MAIN_WINDOW_TITLES = ("카카오톡", "KakaoTalk")
 _KAKAO_LOGIN_WINDOW_TITLE_PARTS = ("로그인", "Login")
+_KAKAO_MAIN_CONTACT_CONTROL_MARKERS = (
+    "ContactListView",
+    "ContactListCtrl",
+    "ChatRoomListView",
+    "ChatRoomListCtrl",
+)
 
 
 def _is_kakao_main_contact_window(window: object) -> bool:
-    """로그인 시에만 존재하는 메인 연락처 창인가(가시 + EVA_Window* + 정확한 메인 제목)."""
+    """로그인 시에만 존재하는 메인 연락처 창인가.
 
-    if not _is_visible(window):
-        return False
+    KakaoTalk 버전에 따라 로그인/계정 입력 창도 제목이 ``카카오톡`` 일 수 있다. 제목만으로
+    판단하면 Ctrl+F 검색을 로그인 창에 보내므로, 연락처/채팅 목록 컨트롤이 보이는 창만 메인
+    연락처 창으로 인정한다.
+    """
+
     if not _window_class_name(window).startswith("EVA_Window"):
         return False
-    return _window_title(window) in _KAKAO_MAIN_WINDOW_TITLES
+    if _window_title(window) not in _KAKAO_MAIN_WINDOW_TITLES:
+        return False
+    return _has_kakao_main_contact_controls(window)
+
+
+def _has_kakao_main_contact_controls(window: object) -> bool:
+    descendants = getattr(window, "descendants", None)
+    if not callable(descendants):
+        return False
+    try:
+        controls = descendants()
+    except Exception:
+        return False
+    for control in controls:
+        element_info = getattr(control, "element_info", None)
+        values = (
+            _window_title(control),
+            _window_class_name(control),
+            str(getattr(element_info, "name", "") or ""),
+            str(getattr(element_info, "class_name", "") or ""),
+        )
+        if any(
+            marker in value
+            for marker in _KAKAO_MAIN_CONTACT_CONTROL_MARKERS
+            for value in values
+        ):
+            return True
+    return False
 
 
 def _is_kakao_login_window(window: object) -> bool:
@@ -1439,7 +1475,7 @@ def _is_kakao_main_window(window: object) -> bool:
 
     if not _is_kakao_window(window):
         return False
-    return _normalize_kakao_title(_window_title(window)) in {"카카오톡", "KakaoTalk"}
+    return _is_kakao_main_contact_window(window)
 
 
 def _bring_window_to_front(window: object) -> None:
