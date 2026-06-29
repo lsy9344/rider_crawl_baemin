@@ -609,19 +609,20 @@ def test_default_detect_completion_baemin_selects_partner_before_verified(monkey
     )
 
     assert completed is True
+    expected_timeout = 55_000
     assert (
         "goto",
         "https://deliverycenter.baemin.com/center/change",
         "domcontentloaded",
-        60_000,
+        expected_timeout,
     ) in actions
-    assert ("select_option", "DP100", None, 60_000) in actions
-    assert ("click", "button", "선택 완료", 60_000) in actions
+    assert ("select_option", "DP100", None, expected_timeout) in actions
+    assert ("click", "button", "선택 완료", expected_timeout) in actions
     assert (
         "goto",
         "https://deliverycenter.baemin.com/delivery/report",
         "domcontentloaded",
-        60_000,
+        expected_timeout,
     ) in actions
 
 
