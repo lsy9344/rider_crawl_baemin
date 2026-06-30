@@ -31,6 +31,10 @@ JOB_TYPE_OPEN_AUTH_BROWSER = "OPEN_AUTH_BROWSER"
 JOB_TYPE_AUTH_COUPANG_2FA = "AUTH_COUPANG_2FA"
 JOB_TYPE_KAKAO_SEND = "KAKAO_SEND"
 JOB_TYPE_CAPTURE_DIAGNOSTIC = "CAPTURE_DIAGNOSTIC"
+# 카카오 인바운드 명령 트리거 라이더 조회(Phase 4 worker). 결과는 요청 채널 한정 KAKAO_SEND
+# 답장이지 스냅샷 fanout 이 아니므로 CRAWL_BAEMIN 을 재사용하지 않고 별도 type 을 둔다. Agent
+# capability ``CAPABILITY_RIDER_LOOKUP`` 와 **문자열로 일치**하되 import 하지 않는다(값만 미러).
+JOB_TYPE_RIDER_LOOKUP = "RIDER_LOOKUP"
 
 #: 정본 job type. tuple 로 두어 우발적 변이를 막는다(후속이 늘려도 count-lock 없음 — superset
 #: 허용. Agent ``DEFAULT_CAPABILITIES`` 와 같은 문자열 집합이어야 claim 매칭이 된다).
@@ -42,6 +46,7 @@ JOB_TYPES: tuple[str, ...] = (
     JOB_TYPE_AUTH_COUPANG_2FA,
     JOB_TYPE_KAKAO_SEND,
     JOB_TYPE_CAPTURE_DIAGNOSTIC,
+    JOB_TYPE_RIDER_LOOKUP,
 )
 
 # ── job status 정본(UPPER_SNAKE plain-string) ────────────────────────────────────
