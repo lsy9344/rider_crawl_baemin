@@ -62,6 +62,13 @@ class MessengerChannel(Base):
     # secret 아님). 고객 ``/register <code>`` → webhook 이 telegram_chat_id/thread_id 를 채운다.
     # 0004 가 additive 로 추가(nullable). 활성 (chat_id, thread_id) 부분 유니크도 0004 가 건다.
     registration_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 카카오 인바운드 명령 트리거(Phase 3) — 0024 가 additive 로 추가. ``kakao_chat_id`` 는
+    # 라우팅 식별자(secret 아님)로, 룸명만 설정된 채널은 첫 인바운드 매칭 시 서버가 바인딩한다.
+    # ``command_trigger_enabled`` 가 false(기본)면 그 채널은 명령 트리거를 받지 않는다(opt-in).
+    kakao_chat_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    command_trigger_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
 
 
 class DeliveryRule(Base):

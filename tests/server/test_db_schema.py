@@ -277,6 +277,24 @@ def test_monitoring_targets_have_send_window_columns():
     assert isinstance(table.c.stop_time.type, sa.String)
 
 
+def test_messenger_channels_have_kakao_command_columns():
+    table = Base.metadata.tables["messenger_channels"]
+
+    # kakao_chat_id: 라우팅 식별자(secret 아님) — nullable String.
+    assert isinstance(table.c.kakao_chat_id.type, sa.String)
+    assert table.c.kakao_chat_id.nullable is True
+    # command_trigger_enabled: opt-in 플래그 — NOT NULL Boolean(기본 미허용).
+    assert isinstance(table.c.command_trigger_enabled.type, sa.Boolean)
+    assert table.c.command_trigger_enabled.nullable is False
+
+
+def test_offline_upgrade_emits_messenger_channel_kakao_command_columns():
+    sql = _offline_sql("upgrade")
+
+    assert "ALTER TABLE messenger_channels ADD COLUMN kakao_chat_id" in sql
+    assert "ALTER TABLE messenger_channels ADD COLUMN command_trigger_enabled" in sql
+
+
 def test_browser_profile_and_kakao_active_room_unique_indexes():
     browser_indexes = {
         index.name: tuple(column.name for column in index.columns)
@@ -700,8 +718,13 @@ def test_single_migration_head_with_initial_base():
     script = ScriptDirectory.from_config(_alembic_config(_OFFLINE_PG_URL))
     heads = script.get_heads()
     assert len(heads) == 1, f"단일 head 여야 한다(분기 금지): {heads}"
-    # 0023: tenant 전송 테스트 게이트(send_test_passed_at) on top of Coupang auto recovery state.
-    assert heads[0] == "0023_tenant_send_test_gate"
+    # 0024: 카카오 인바운드 명령 트리거 컬럼(kakao_chat_id/command_trigger_enabled) on top of
+    # tenant 전송 테스트 게이트.
+    assert heads[0] == "0024_channel_kakao_command"
+    assert (
+        script.get_revision("0024_channel_kakao_command").down_revision
+        == "0023_tenant_send_test_gate"
+    )
     assert (
         script.get_revision("0023_tenant_send_test_gate").down_revision
         == "0022_coupang_auto_recovery_state"
