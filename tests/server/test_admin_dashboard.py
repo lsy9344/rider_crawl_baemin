@@ -390,7 +390,8 @@ def test_browser_profile_rows_drops_unsafe_capacity_values() -> None:
     assert rows[2].cdp_port is None
 
 
-def test_agents_fragment_renders_browser_profile_state() -> None:
+def test_agents_fragment_simplifies_browser_profile_runtime_details() -> None:
+    target_id = "24e238e6-5d73-40e5-acab-c06be8cfcbd6"
     html = admin_routes.templates.env.get_template("_agents.html").render(
         agents=[
             AgentRow(
@@ -404,18 +405,26 @@ def test_agents_fragment_renders_browser_profile_state() -> None:
                 browser_profiles=(
                     AgentBrowserProfileRow(
                         profile_id="profile-1",
-                        target_id="target-1",
-                        state="AUTH_REQUIRED",
-                        cdp_port=9222,
+                        target_id=target_id,
+                        state="READY",
+                        cdp_port=50500,
+                        auth_state="ACTIVE",
+                        last_probe_at="2026-06-30T01:07:23Z",
                     ),
                 ),
             )
         ]
     )
 
-    assert "AUTH_REQUIRED" in html
-    assert "9222" in html
-    assert "heartbeat runtime" in html
+    assert "Chrome 상태" in html
+    assert "정상" in html
+    assert "포트 50500" in html
+    assert "2026-06-30T01:07:23Z 확인" in html
+    assert target_id not in html
+    assert "CDP 50500" not in html
+    assert "ACTIVE" not in html
+    assert "checked" not in html
+    assert "heartbeat runtime" not in html
 
 
 def test_channel_health_separates_kakao_lag_and_telegram_error() -> None:

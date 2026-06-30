@@ -12,7 +12,7 @@
       <th>마지막 heartbeat</th>
       <th>현재 job</th>
       <th>처리 가능 job type</th>
-      <th>Chrome 현재 상태<br><span class="muted">heartbeat runtime</span></th>
+      <th>Chrome 상태</th>
       <th>Kakao 상태</th>
     </tr>
   </thead>
@@ -29,12 +29,15 @@
         {% if a.browser_profiles %}
           {% for p in a.browser_profiles %}
           <div class="browser-profile-row">
-            {% if p.state %}<span class="muted">{{ p.state }}</span>{% else %}<span class="muted">-</span>{% endif %}
-            {% if p.target_id %}<span class="muted">target {{ p.target_id }}</span>{% endif %}
-            {% if p.cdp_port is not none %}<span class="muted">CDP {{ p.cdp_port }}</span>{% endif %}
-            {% if p.auth_state %}<span class="muted">{{ p.auth_state }}</span>{% endif %}
-            {% if p.last_error_code %}<span class="sev-warning">{{ p.last_error_code }}</span>{% endif %}
-            {% if p.last_probe_at %}<span class="muted">checked {{ p.last_probe_at }}</span>{% endif %}
+            {% if p.last_error_code %}<span class="sev-warning">확인 필요</span>
+            {% elif p.auth_state == "AUTH_REQUIRED" or p.state == "AUTH_REQUIRED" %}<span class="sev-warning">로그인 필요</span>
+            {% elif p.state == "READY" %}<span class="sev-normal">정상</span>
+            {% elif p.state %}<span class="muted">{{ p.state }}</span>
+            {% else %}<span class="muted">상태 미확인</span>{% endif %}
+            {% if p.cdp_port is not none %}<span class="muted">포트 {{ p.cdp_port }}</span>{% endif %}
+            {% if p.last_error_code %}<span class="muted">{{ p.last_error_code }}</span>{% endif %}
+            {% if p.auth_state and p.auth_state != "ACTIVE" and p.auth_state != p.state %}<span class="muted">{{ p.auth_state }}</span>{% endif %}
+            {% if p.last_probe_at %}<span class="muted">{{ p.last_probe_at }} 확인</span>{% endif %}
           </div>
           {% endfor %}
         {% else %}
