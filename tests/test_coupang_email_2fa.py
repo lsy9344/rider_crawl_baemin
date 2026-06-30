@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import logging
 
 import pytest
 
@@ -213,6 +214,41 @@ def test_recover_clicks_email_method_send_and_fills_code(tmp_path):
     assert captured["requested_after"] < _NOW()
     assert captured["requested_after"] >= _NOW() - timedelta(minutes=2)
     assert captured["code_digits"] == 6
+
+
+def test_recover_logs_redacted_2fa_steps_without_secrets(tmp_path, caplog):
+    page = _FakePage(
+        html="<html>이메일 인증을 선택하세요 인증코드를 rider@naver.com 으로 보냅니다</html>",
+        clickable=("이메일", "인증번호 발송", "확인"),
+        input_selectors=("input[name='code']",),
+    )
+    config = replace(
+        _config(tmp_path),
+        verification_email_address="rider@naver.com",
+        verification_email_app_password="app-secret",
+        coupang_login_password="coupang-secret",
+    )
+
+    def _fetch(**_kwargs):
+        return "246802"
+
+    with caplog.at_level(logging.INFO, logger="rider_crawl.auth.coupang_email_2fa"):
+        result = recover_coupang_session_with_email_2fa(
+            page, config, fetch_code=_fetch, now=_NOW
+        )
+
+    assert result is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "coupang email 2fa recovery started" in log_text
+    assert "coupang email 2fa method selected" in log_text
+    assert "coupang email 2fa code requested" in log_text
+    assert "coupang email 2fa mail fetch started" in log_text
+    assert "coupang email 2fa mail fetch succeeded" in log_text
+    assert "coupang email 2fa code submitted" in log_text
+    assert "coupang email 2fa target page reached" in log_text
+    assert "246802" not in log_text
+    assert "app-secret" not in log_text
+    assert "coupang-secret" not in log_text
 
 
 def test_recover_raises_captcha_error_on_captcha_screen(tmp_path):

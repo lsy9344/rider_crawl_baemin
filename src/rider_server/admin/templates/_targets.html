@@ -50,8 +50,8 @@
     {% set primary_label = '상세' %}
     {% set primary_style = 'ghost' %}
   {% endif %}
-  {% set display_failure_code = t.last_failure_code if t.severity != 'NORMAL' and t.last_failure_code else '' %}
-  {% set display_failure_label = display_failure_code | reason_text if display_failure_code and not is_auth_required and not is_target_validation and not is_operator_stopped else '' %}
+  {% set display_failure_code = t.last_failure_code or '' %}
+  {% set display_failure_label = display_failure_code | reason_text if display_failure_code and (t.severity == 'NORMAL' or (not is_auth_required and not is_target_validation and not is_operator_stopped)) else '' %}
   <div class="trow trow--{{ t.severity | lower }}"
        onclick="if(!event.target.closest('button'))openTargetDrawer(this, this)"
        data-name="{{ t.name }}"

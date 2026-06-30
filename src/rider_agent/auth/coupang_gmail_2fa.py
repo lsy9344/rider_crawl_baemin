@@ -389,6 +389,7 @@ def build_coupang_recover(
     store: SecretStore | None = None,
     recover_session: Callable[..., bool] = recover_coupang_session_with_email_2fa,
     fetch_code: Callable[..., str] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> Callable[[], bool]:
     resolved_address = email_address or str(getattr(config, "verification_email_address", "") or "")
     resolved_password = app_password or resolve_mailbox_app_password(store, mailbox_id) or ""
@@ -399,6 +400,13 @@ def build_coupang_recover(
     )
 
     def _recover() -> bool:
+        if log is not None:
+            return recover_session(
+                page,
+                mailbox_config,
+                fetch_code=fetch_code,
+                log=lambda message: log(redact(message)),
+            )
         return recover_session(page, mailbox_config, fetch_code=fetch_code)
 
     return _recover
@@ -482,6 +490,7 @@ def _default_coupang_recover(
     job: ClaimedJob,
     *,
     secret_resolver: Callable[[str], str | None] | None,
+    log: Callable[[str], None] | None = None,
 ) -> Callable[[], bool]:
     """기본 recover() 클로저 — page 획득 + ``build_coupang_recover`` 합성(실 브라우저는 lazy).
 
@@ -503,6 +512,7 @@ def _default_coupang_recover(
                 mailbox_id=email_address,
                 email_address=email_address,
                 app_password=app_password,
+                log=log,
             )
             return bool(inner())
 
@@ -648,7 +658,9 @@ def execute_auth_coupang_2fa_job(
         else is_email_auth_required
     )
 
-    recover_fn = recover or _default_coupang_recover(job, secret_resolver=secret_resolver)
+    recover_fn = recover or _default_coupang_recover(
+        job, secret_resolver=secret_resolver, log=log
+    )
     inner = recover_coupang_mailbox(
         mailbox_id=mailbox_id,
         recover=recover_fn,

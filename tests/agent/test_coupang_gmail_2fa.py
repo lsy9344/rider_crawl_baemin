@@ -222,6 +222,32 @@ def test_build_coupang_recover_uses_verification_email_and_app_password_from_sto
     }
 
 
+def test_build_coupang_recover_forwards_redacted_step_log_to_recover_session(tmp_path):
+    logs: list[str] = []
+
+    def spy_recover_session(_page, _config, *, log=None, **_kw):
+        assert log is not None
+        log(f"stage ok otp={FAKE_OTP} password={FAKE_APP_PASSWORD} email={FAKE_EMAIL}")
+        return True
+
+    recover = build_coupang_recover(
+        page="page-1",
+        config=_FakeConfig(),
+        mailbox_id=FAKE_MBX_1,
+        email_address=FAKE_EMAIL,
+        app_password=FAKE_APP_PASSWORD,
+        recover_session=spy_recover_session,
+        log=logs.append,
+    )
+
+    assert recover() is True
+    joined = "\n".join(logs)
+    assert "stage ok" in joined
+    assert FAKE_OTP not in joined
+    assert FAKE_APP_PASSWORD not in joined
+    assert FAKE_EMAIL not in joined
+
+
 def test_build_coupang_recover_allows_explicit_app_password_without_token_path():
     captured: dict[str, str] = {}
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -95,6 +96,7 @@ _LOGIN_BUTTON_TEXTS = ("로그인", "login")
 _USERNAME_STEP_BUTTON_TEXTS = ("다음", "계속", "로그인", "login", "next", "continue")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Za-z0-9._%*+\-]+@[A-Za-z0-9.*\-]+\.[A-Za-z]{2,})")
 _SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
+_LOGGER = logging.getLogger(__name__)
 
 
 def recover_coupang_session_with_email_2fa(
@@ -103,13 +105,16 @@ def recover_coupang_session_with_email_2fa(
     *,
     fetch_code: Callable[..., str] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    log: Callable[[str], None] | None = None,
 ) -> bool:
     """Attempt to recover an expired Coupang session via email 2FA."""
 
+    _log_step(log, "coupang email 2fa recovery started")
     page_text = _safe_page_text(page)
     if _contains_any(page_text, _CAPTCHA_SIGNALS):
         # 실제 캡차/이상 로그인 화면 — 사람 조치 필요. 단순 복구 미완(False)과 구분하기 위해
         # 전용 예외로 올린다(상위 분류기가 USER_ACTION_REQUIRED 로만 표면화).
+        _log_step(log, "coupang email 2fa captcha detected")
         raise CoupangCaptchaError("captcha or abnormal login screen detected")
 
     # 세션이 이미 정상이라 복구할 게 없는 경우(에이전트가 이미 로그인/2FA 를 끝내고 대시보드에
@@ -117,29 +122,60 @@ def recover_coupang_session_with_email_2fa(
     # 상위에서 "캡차/이상 로그인" 으로 오분류되던 데드 상태를 막는다. 단, 로그인/2FA 화면이면
     # 정상적으로 복구를 진행한다(아래로 흐른다).
     if _is_already_authenticated(page_text, page):
+        _log_step(log, "coupang email 2fa already authenticated")
         return True
 
     if _is_primary_login_screen(page_text, page):
+        _log_step(log, "coupang email 2fa primary login required")
         if not _submit_primary_login(page, config):
+            _log_step(log, "coupang email 2fa primary login unavailable")
             return False
+        _log_step(log, "coupang email 2fa primary login submitted")
         _wait_after_action(page, config)
 
-    _click_first_by_text(page, _EMAIL_METHOD_TEXTS, config, roles=("tab", "button"))
+    if _click_first_by_text(page, _EMAIL_METHOD_TEXTS, config, roles=("tab", "button")):
+        _log_step(log, "coupang email 2fa method selected")
+    else:
+        _log_step(log, "coupang email 2fa method selector not found")
     refreshed_text = _safe_page_text(page)
     if _is_primary_login_screen(refreshed_text, page):
+        _log_step(log, "coupang email 2fa still on primary login")
         return False
 
     requested_after = now() - timedelta(seconds=_REQUESTED_AFTER_SAFETY_SECONDS)
     if not _click_first_by_text(page, _SEND_CODE_TEXTS, config, roles=("button",)):
+        _log_step(log, "coupang email 2fa send-code button unavailable")
         return False
+    _log_step(log, "coupang email 2fa code requested")
 
     if not _account_matches_screen(page, config.verification_email_address):
+        _log_step(log, "coupang email 2fa screen account mismatch")
         return False
 
-    code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
+    _log_step(log, "coupang email 2fa mail fetch started")
+    try:
+        code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
+    except Coupang2faError:
+        _log_step(log, "coupang email 2fa mail fetch failed")
+        raise
+    _log_step(log, "coupang email 2fa mail fetch succeeded")
     _fill_code_input(page, code, config)
-    _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",))
-    return _submission_reached_dashboard(page, config)
+    if _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",)):
+        _log_step(log, "coupang email 2fa code submitted")
+    else:
+        _log_step(log, "coupang email 2fa submit button unavailable")
+    reached_dashboard = _submission_reached_dashboard(page, config)
+    if reached_dashboard:
+        _log_step(log, "coupang email 2fa target page reached")
+    else:
+        _log_step(log, "coupang email 2fa target page not reached")
+    return reached_dashboard
+
+
+def _log_step(log: Callable[[str], None] | None, message: str) -> None:
+    if log is not None:
+        log(message)
+    _LOGGER.info(message)
 
 
 def _submission_reached_dashboard(page: Any, config: AppConfig) -> bool:

@@ -1429,7 +1429,17 @@ def test_profile_unavailable_reason_is_operator_readable() -> None:
 
 
 def test_stale_crawl_skipped_reason_is_operator_readable() -> None:
-    assert admin_routes._reason_text("STALE_CRAWL_SKIPPED") == "수집 대기 시간이 지나 이번 회차를 건너뜀 — Agent 처리량/큐 대기 확인"
+    assert (
+        admin_routes._reason_text("STALE_CRAWL_SKIPPED")
+        == "큐 대기 만료로 이번 수집을 건너뜀 — Agent 처리량/수집 주기 확인"
+    )
+
+
+def test_coupang_parser_missing_data_reason_points_to_login_or_wrong_page() -> None:
+    assert (
+        admin_routes._reason_text("PARSER_MISSING_DATA")
+        == "수집 데이터 누락 — 쿠팡 로그인 화면 또는 대시보드가 아닌 화면일 수 있음"
+    )
 
 
 def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
@@ -1586,7 +1596,7 @@ def test_auth_verified_with_stale_failure_hides_auth_badge_in_dashboard() -> Non
 
 
 def test_template_normal_severity_with_stale_failure_code_shows_no_auth_badge() -> None:
-    # 템플릿 단독 락(Edit5) — severity 가 NORMAL 이면 묵은 last_failure_code 가 있어도 배지 없음.
+    # 정상 상태면 묵은 실패가 배지/조치로 살아나면 안 된다. 단 드로어 이력용 data 는 남긴다.
     row = TargetRow(
         target_id="t-verified",
         tenant_id=_TENANT,
@@ -1602,8 +1612,9 @@ def test_template_normal_severity_with_stale_failure_code_shows_no_auth_badge() 
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
-    assert "로그인 만료 · 인증 확인 필요" not in html
-    assert 'data-failcode="AUTH_REQUIRED"' not in html
+    assert 'data-failcode="AUTH_REQUIRED"' in html
+    assert 'data-failure-label="로그인 만료 · 인증 확인 필요"' in html
+    assert 'data-reason=""' in html
     assert 'data-primary-action="auth-start"' not in html
 
 
