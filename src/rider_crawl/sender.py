@@ -1361,6 +1361,8 @@ def _meaningful_message_lines(value: str) -> list[str]:
 _KAKAO_INPUT_PLACEHOLDERS = {
     "메시지 입력",
     "메시지 입력 RichEdit Control",
+    "관리자 메시지 입력",
+    "관리자 메시지 입력 RichEdit Control",
     "메시지를 입력하세요",
     "RichEdit Control",
 }
