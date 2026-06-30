@@ -785,6 +785,49 @@ def test_dashboard_full_page_includes_realtime_queue_section() -> None:
     assert "every 5s" in body
 
 
+# ── 시스템 전체 판정 배너 + "지금 조치" 묶음(레이아웃 개선) ─────────────────
+def _fresh_target(**kw):
+    # 풀 페이지 라우트는 서버 실시간(datetime.now)으로 severity 를 매기므로(_now, routes.py),
+    # NORMAL 을 보장하려면 last_success_at 을 실시간 기준 최근으로 둔다(_NOW 프리즈 무관).
+    kw.setdefault("last_success_at", datetime.now(timezone.utc) - timedelta(minutes=2))
+    return _target(**kw)
+
+
+def _clean_repo() -> InMemoryDashboardRepository:
+    """전부 정상: NORMAL 대상만, 채널 무이상, 인증필요·offline·stuck 없음."""
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(_fresh_target(target_id="t-ok"))
+    repo.seed_channel_health(_TENANT, ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=0))
+    return repo
+
+
+def test_status_banner_green_when_all_clear() -> None:
+    body = _client(_clean_repo()).get(f"/admin?tenant={_TENANT}").text
+    assert 'class="statusbanner sb-ok"' in body
+    assert "모두 정상 운영 중" in body
+    # 이상 없으면 "지금 조치" 묶음은 렌더되지 않는다.
+    assert '<div class="actnow">' not in body
+
+
+def test_status_banner_red_when_only_channel_down() -> None:
+    """대상은 전부 정상이어도 채널(Telegram)만 죽으면 배너는 빨강.
+    '정상' 착시 회귀 차단(메모리: kakao-no-login-probe-shows-normal)."""
+    repo = InMemoryDashboardRepository()
+    repo.seed_target(_fresh_target(target_id="t-ok"))
+    repo.seed_channel_health(_TENANT, ChannelHealthRow(kakao_queue_lag_seconds=0, telegram_error_count=2))
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+    assert 'class="statusbanner sb-crit"' in body
+    assert "Telegram 2건 오류" in body
+
+
+def test_act_now_block_shows_for_auth_required() -> None:
+    # _seeded_repo: 위험 대상 + 인증필요 → 배너 빨강 + "지금 조치"에 인증 칩.
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+    assert 'class="statusbanner sb-crit"' in body
+    assert '<div class="actnow">' in body
+    assert 'onclick="focusAuthRequired()"' in body
+
+
 def test_targets_fragment_db_failure_returns_safe_partial() -> None:
     class _FailingRepo(InMemoryDashboardRepository):
         async def target_health(self, **kw):  # type: ignore[override]
@@ -1287,15 +1330,14 @@ def test_failclosed_display_severity_drives_primary_actions_without_failure_code
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=rows)
 
+    # 색점 칩 그리드: 조치는 클릭→드로어에서 처리한다. 칩은 드로어를 구동하는 data-* 만 싣는다.
+    # display severity 가 어떤 1차 조치를 띄울지(primary_action)를 결정하는 계약은 그대로다.
     assert 'data-primary-action="auth-check"' in html
-    assert "/admin/targets/t-auth/auth-start" in html
     assert 'data-primary-action="center-name"' in html
+    # 사유는 드로어가 읽는 data-reason 에 보존된다(인라인 텍스트 제거).
     assert "로그인 만료 · 인증 확인 필요" in html
     assert "센터/상점명 불일치" in html
-    # 센터명 정정 후 같은 행에서 바로 재검증할 수 있도록 test-crawl 버튼이 노출돼야 한다
-    # (불일치 해소 여부를 다음 스케줄 주기까지 기다리지 않게 한다).
-    assert "/admin/targets/t-center/test-crawl" in html
-    assert "지금 수집(재검증)" in html
+    assert 'data-primary-label="센터명 설정"' in html
 
 
 def test_auth_required_reason_takes_precedence_over_latest_profile_failure() -> None:
@@ -1418,10 +1460,10 @@ def test_auth_session_pending_target_prompts_user_to_enter_code_and_recheck() ->
 
     assert rows[0].severity == SEVERITY_STOPPED
     assert display_rows[0].severity == SEVERITY_AUTH_REQUIRED
+    # 인증번호 대기 안내는 드로어가 읽는 data-reason 에 보존된다.
     assert "인증번호 입력 필요" in html
+    # 대기 상태의 1차 조치는 auth-start 가 아니라 상태 재확인(auth-check)이다(드로어가 이 계약을 소비).
     assert 'data-primary-action="auth-check"' in html
-    assert "/admin/targets/t-pending/auth-check" in html
-    assert "/admin/targets/t-pending/auth-start" not in html
 
 
 def test_profile_unavailable_reason_is_operator_readable() -> None:
@@ -1442,9 +1484,9 @@ def test_coupang_parser_missing_data_reason_points_to_login_or_wrong_page() -> N
     )
 
 
-def test_target_rows_use_explicit_detail_button_and_local_result_region() -> None:
+def test_target_chip_opens_drawer_and_carries_drawer_data() -> None:
+    # 색점 칩 그리드: 칩 클릭 → 드로어에서 조치/상세를 처리한다(인라인 버튼·결과영역 제거).
     # 실파이프라인이 현재 인증실패에 내는 값은 SEVERITY_AUTH_REQUIRED(STOPPED+묵은 코드 아님).
-    # 배지 구동은 severity 단일 소스이므로 fixture 도 그 값을 쓴다(2026-06).
     row = TargetRow(
         target_id="t-auth",
         tenant_id=_TENANT,
@@ -1460,11 +1502,14 @@ def test_target_rows_use_explicit_detail_button_and_local_result_region() -> Non
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
-    assert 'role="button"' not in html
+    # 칩은 드로어를 열고, 드로어를 구동하는 data-* 를 싣는다.
+    assert "openTargetDrawer(this, this)" in html
+    assert 'data-target="t-auth"' in html
     assert 'data-primary-action="auth-check"' in html
-    assert 'aria-label="가게 상세 열기"' in html
-    assert 'id="target-result-t-auth"' in html
-    assert 'hx-target="#target-result-t-auth"' in html
+    assert "가게" in html
+    # 인라인 액션/결과영역은 칩에서 사라졌다(조치는 드로어로 일원화).
+    assert 'id="target-result-t-auth"' not in html
+    assert "hx-post" not in html
 
 
 def test_coupang_auth_required_recheck_uses_coupang_test_crawl_not_auth_check() -> None:
@@ -1483,9 +1528,11 @@ def test_coupang_auth_required_recheck_uses_coupang_test_crawl_not_auth_check() 
 
     html = admin_routes.templates.env.get_template("_targets.html").render(targets=[row])
 
-    assert "/admin/targets/t-coupang-auth/test-crawl" in html
-    assert "/admin/targets/t-coupang-auth/auth-check" not in html
-    assert '"platform": "COUPANG"' in html
+    # 칩 그리드: Coupang 재확인을 test-crawl 로 보낼지(auth-check 대신)는 드로어 JS(recheckAuth)가
+    # data-platform 으로 분기한다. 칩은 그 신호(COUPANG + auth-check 1차조치)를 싣는다.
+    # 인증필요 패널 쪽 동일 계약은 _auth_required.html 테스트(아래)가 인라인으로 계속 잠근다.
+    assert 'data-platform="COUPANG"' in html
+    assert 'data-primary-action="auth-check"' in html
 
 
 def test_auth_required_fragment_coupang_recheck_uses_coupang_test_crawl() -> None:
@@ -1823,11 +1870,23 @@ def test_dashboard_mobile_actions_keep_touch_target_size() -> None:
     body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
     mobile_css = body[body.index("@media (max-width: 720px)"):]
 
+    # 조치는 드로어로 일원화됨 — 모바일 터치 타깃(44px)은 드로어 액션 버튼에 보장한다.
     assert "min-height: 44px" in mobile_css
-    assert ".trow > .sev-badge { display: none; }" not in mobile_css
-    assert '"bar badge badge"' in mobile_css
-    assert ".trow > .sev-badge { grid-area: badge;" in mobile_css
-    assert ".t-reason { grid-area: reason;" in mobile_css
+    assert ".drawer-actions .btn" in mobile_css
+
+
+def test_main_card_uses_three_column_chip_grid() -> None:
+    body = _client(_seeded_repo()).get(f"/admin?tenant={_TENANT}").text
+
+    # 메인 카드(대상 워크벤치)는 한 줄 3칸 고정 색바 칩 그리드다.
+    assert ".tgrid { display: grid; grid-template-columns: repeat(3, 1fr);" in body
+    # 좁아지면 2칸→1칸으로만 줄고(구 행 레이아웃 grid-areas 재적용 없음).
+    assert "@media (max-width: 560px) { .tgrid { grid-template-columns: repeat(2, 1fr); } }" in body
+    assert '"bar badge badge"' not in body  # 구 모바일 행 레이아웃 제거 확인
+    # 회귀 차단: 컨테이너에 .tlist 클래스가 같이 붙으면 `.tlist{display:flex;column}` 이 소스 순서로
+    # `.tgrid{display:grid}` 를 덮어 1칸이 된다. id 는 #tlist 유지하되 클래스는 tgrid 단독이어야 한다.
+    assert 'class="tgrid" id="tlist"' in body
+    assert 'class="tlist tgrid"' not in body
 
 
 def test_dashboard_mobile_status_text_can_wrap() -> None:
@@ -2083,9 +2142,11 @@ def test_dashboard_all_tenants_renders_option_customer_names_and_safe_action_ten
     assert '<option value="all" selected>전체 고객</option>' in body
     assert 'hx-get="/admin/targets?tenant=all"' in body
     assert "고객: 고객A" in body and "고객: 고객B" in body
-    assert "/admin/targets/t-a/test-crawl?tenant=tn-1" in body
-    assert "/admin/targets/t-b/test-crawl?tenant=tn-2" in body
-    assert "/admin/targets/t-a/test-crawl?tenant=all" not in body
+    # 조치는 드로어가 data-tenant 로 URL 을 만든다. 전체 고객 뷰에서도 칩은 각 대상의 실제 tenant 를
+    # 싣고(tenant=all 금지) → 크로스-테넌트 오조치 차단(이 테스트의 본래 안전 계약).
+    assert 'data-target="t-a"' in body and 'data-tenant="tn-1"' in body
+    assert 'data-target="t-b"' in body and 'data-tenant="tn-2"' in body
+    assert 'data-tenant="all"' not in body
     assert "전체 고객 보기에서는 작업 고객을 먼저 선택하세요." in body
 
 
@@ -2382,6 +2443,10 @@ def test_registered_settings_fragment_renders_assembled_rows() -> None:
     assert "배민" in body and "쿠팡" in body
     # 라이브 램프: tg-a 최근 성공 → 정상(sev-normal).
     assert "sev-normal" in body
+    # 최근 수집/전송 컬럼: tg-a 는 2분 전 수집 성공(전송 기록은 없음 → —).
+    assert "최근 수집 / 전송" in body
+    assert "수집 2분 전" in body
+    assert "전송 —" in body
 
 
 def test_registered_settings_hides_stopped_duplicate_replaced_by_active_platform() -> None:
@@ -2515,7 +2580,7 @@ def test_registered_settings_empty_state() -> None:
 def test_dashboard_full_page_includes_registered_settings_card() -> None:
     body = _settings_app().get(f"/admin?tenant={_TENANT}").text
 
-    assert "등록된 설정" in body
+    assert "수집 대상 현황" in body
     assert 'id="registered-settings"' in body
     assert "/admin/registered-settings?tenant=" in body
     # 등록 config 변경 후 갱신 트리거(쓰기 커밋 착지 대기 delay:2s, targets 카드 선례).

@@ -127,6 +127,31 @@
     .ministatus .seg::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ok); }
     .ministatus .seg.bad::before { background: var(--crit); }
 
+    /* ── 시스템 전체 판정 배너(0.5초 한눈 판정): 배경=최악 심각도색. 대상+Agent+채널 합산. ──
+       sev-* 토큰 재사용. ok/warn/crit 3색만, 텍스트는 판정 1줄 + 사유 1줄. */
+    .statusbanner { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 0.9rem; padding: 0.95rem 1.15rem;
+      border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+    .statusbanner .sb-icon { font-size: 1.6rem; line-height: 1; }
+    .statusbanner .sb-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+    .statusbanner .sb-verdict { font-weight: 700; font-size: 1.15rem; line-height: 1.2; }
+    .statusbanner .sb-detail { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); }
+    .statusbanner.sb-ok { background: color-mix(in srgb, var(--ok) 12%, var(--card)); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+    .statusbanner.sb-ok .sb-icon, .statusbanner.sb-ok .sb-verdict { color: var(--ok); }
+    .statusbanner.sb-warn { background: color-mix(in srgb, var(--warn) 12%, var(--card)); border-color: color-mix(in srgb, var(--warn) 38%, var(--border)); }
+    .statusbanner.sb-warn .sb-icon, .statusbanner.sb-warn .sb-verdict { color: var(--warn); }
+    .statusbanner.sb-crit { background: color-mix(in srgb, var(--crit) 13%, var(--card)); border-color: color-mix(in srgb, var(--crit) 42%, var(--border)); }
+    .statusbanner.sb-crit .sb-icon, .statusbanner.sb-crit .sb-verdict { color: var(--crit); }
+
+    /* ── "지금 조치" 묶음: 인증필요·멈춘 큐가 있을 때만 워크벤치 위 노출(항상 펼침). ── */
+    .actnow { margin-bottom: 0.9rem; padding: 0.75rem 1rem; border-radius: var(--radius);
+      background: color-mix(in srgb, var(--crit) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--crit) 35%, var(--border)); box-shadow: var(--shadow-xs); }
+    .actnow .an-head { display: flex; align-items: center; gap: 0.4rem; font-weight: 700; font-size: 0.875rem; color: var(--crit); margin-bottom: 0.55rem; }
+    .actnow .an-items { display: flex; flex-wrap: wrap; gap: 0.55rem; }
+    .actnow .an-chip { display: inline-flex; align-items: center; gap: 0.5rem; font-weight: 600; font-size: 0.875rem; cursor: pointer;
+      padding: 0.4rem 0.75rem; border-radius: 999px; background: var(--card); color: var(--foreground); border: 1px solid color-mix(in srgb, var(--crit) 30%, var(--border)); }
+    .actnow .an-chip:hover { border-color: var(--crit); background: color-mix(in srgb, var(--crit) 10%, var(--card)); }
+    .actnow .an-chip .n { font-family: var(--font-mono); color: var(--crit); }
+
     /* ── 워크벤치 ───────────────────────────────────────────────────────── */
     .workbench { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem; padding: 0.75rem 0.9rem;
@@ -144,8 +169,35 @@
     .toolbar-spacer { flex: 1; }
     .count { font-family: var(--font-mono); font-size: 0.875rem; color: var(--muted-foreground); white-space: nowrap; }
 
-    /* ── 대상 행(리스트): 데스크톱: 고정폭 트랙으로 행 간 정렬 일치 ──────── */
-    .tlist { display: flex; flex-direction: column; }
+    /* ── 메인 카드: 색바 카드 그리드(C타입) — 한 줄 3칸 고정, 좌측 심각도 바 + 이름/상태. ──
+       조치/상세는 칩 클릭→드로어. .tgrid 가 아래 일반 .trow 그리드 규칙을 특이도로 덮는다(구 행 CSS 무삭제).
+       --sev: 심각도색(바·상태점 공유). '조치필요'(stopped/검증실패 등)는 위험과 같은 빨강으로 묶어 3색만. */
+    .tgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; padding: 0.9rem; }
+    .tgrid .trow { display: grid; grid-template-columns: 0.32rem 1fr; align-items: center; gap: 0 0.7rem; width: auto;
+      --sev: var(--neutral); padding: 0.7rem 0.85rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: var(--card); box-shadow: var(--shadow-xs); overflow: hidden;
+      cursor: pointer; transition: border-color .12s, transform .08s, background .12s; }
+    .tgrid .trow:hover { transform: translateY(-2px); border-color: var(--muted-foreground); background: var(--accent); }
+    .tgrid .trow:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+    .tgrid .trow--normal   { --sev: var(--ok); }
+    .tgrid .trow--warning  { --sev: var(--warn); }
+    .tgrid .trow--critical { --sev: var(--crit); }
+    .tgrid .trow[data-severity-class="sev-stopped"],
+    .tgrid .trow[data-severity-class="sev-critical"] { --sev: var(--crit); }
+    .tgrid .tbar { grid-row: 1 / span 2; width: 0.32rem; height: 2.3rem; border-radius: 999px; background: var(--sev); }
+    .tgrid .tbody { min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+    .tgrid .tnm { font-weight: 650; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--foreground); }
+    .tgrid .tcust { font-size: 0.72rem; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tgrid .tsr { display: inline-flex; align-items: center; gap: 0.35rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted-foreground); }
+    .tgrid .tsr::before { content: ""; flex: none; width: 0.42rem; height: 0.42rem; border-radius: 50%; background: var(--sev); }
+    .tgrid .allgood, .tgrid .more-targets { grid-column: 1 / -1; }
+    /* 3칸 유지(데스크톱·태블릿). 좁아지면 2칸→1칸. 구 모바일 .trow 규칙이 칩 내부 레이아웃을
+       덮지 않도록 칩 그리드 컬럼은 .tgrid .trow 로 항상 재고정한다(아래 max-width:720px 블록 대비). */
+    @media (max-width: 560px) { .tgrid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 360px) { .tgrid { grid-template-columns: 1fr; } }
+
+    /* ── (구) 대상 행 리스트 규칙: 메인 카드는 .tgrid 칩 그리드로 대체됨. 아래 .trow/.t-* 는
+       현재 어느 요소도 쓰지 않지만 .plat/.sev-badge 등 공유 토큰과 엮여 있어 그대로 둔다(무해). ── */
     .trow { display: grid; align-items: center; column-gap: 1.15rem;
       /* 심각도 배지 칸(4번째)은 nowrap 라벨 중 긴 "대상 검증 실패"
          까지 담아야 한다. 고정 5rem 이면 4자 넘는 라벨이 칸을 넘쳐 옆 사유 칸과 겹친다.
@@ -343,11 +395,8 @@
     @media (max-width: 720px) {
       body { font-size: 14px; } .brand-sub { display: none; } .ministatus { margin-left: 0; width: 100%; }
       .ministatus .seg, .inline-action-status, .inline-action-status .action-result { white-space: normal; overflow-wrap: anywhere; }
-      .trow { grid-template-columns: 0.4rem 1fr auto; grid-template-areas: "bar name plat" "bar badge badge" "bar reason reason" "bar act act"; gap: 0.35rem 0.6rem; padding: 0.8rem 0.85rem; }
-      .sevbar { grid-area: bar; height: 100%; } .t-name { grid-area: name; } .plat { grid-area: plat; align-self: start; }
-      .trow > .sev-badge { grid-area: badge; justify-self: start; align-self: start; } .t-reason { grid-area: reason; padding-top: 0.05rem; } .t-reason .rs { white-space: normal; }
-      .t-act { grid-area: act; justify-self: start; margin-top: 0.2rem; flex-wrap: wrap; }
-      .t-act .btn, .drawer-actions .btn, #view-manage button { min-height: 44px; }
+      /* 메인 카드는 색바 칩 그리드(.tgrid)로 바뀜 — 구 행 레이아웃(.t-name/.t-reason/.t-act 등) 모바일 규칙 제거. */
+      .drawer-actions .btn, #view-manage button { min-height: 44px; }
       #view-manage input[type="text"], #view-manage input[type="number"], #view-manage input[type="password"], #view-manage select { min-width: 8.5rem; }
     }
     @media (min-width: 721px) { #view-manage .trow { grid-template-columns: 0.4rem minmax(0, 1fr) 4.5rem 6rem; } }
@@ -419,6 +468,40 @@
 
   {# ════════════ 모니터링 모드 (기본 · J1 트리아지) ════════════ #}
   <main class="container" id="view-monitor" role="tabpanel">
+    {# ── 시스템 전체 판정 배너: 대상+Agent+채널 합산 → 채널 죽어도 '정상' 착시 차단(메모리: kakao-no-login-probe).
+       crit: 위험 대상 / 인증필요 / 멈춘 큐 / Telegram 오류 중 하나라도 → 빨강.
+       warn: 주의 대상 / Agent 오프라인 / Kakao 지연 → 노랑.  else: 초록. ── #}
+    {% set sb_crit = tg_critical + auth_n + jobs_stuck + (channels.telegram_error_count or 0) %}
+    {% set sb_warn = tg_warning + ag_offline + (1 if channels.kakao_queue_lag_seconds else 0) %}
+    {% if sb_crit > 0 %}{% set sb_class, sb_icon, sb_verdict = 'sb-crit', '⛔', '위험 · 지금 조치 필요' %}
+    {% elif sb_warn > 0 %}{% set sb_class, sb_icon, sb_verdict = 'sb-warn', '⚠', '주의 · 확인 권장' %}
+    {% else %}{% set sb_class, sb_icon, sb_verdict = 'sb-ok', '✓', '모두 정상 운영 중' %}{% endif %}
+    {% set sb_bits = [] %}
+    {% if tg_critical %}{% set _ = sb_bits.append('위험 ' ~ tg_critical) %}{% endif %}
+    {% if tg_stopped %}{% set _ = sb_bits.append('조치필요 ' ~ tg_stopped) %}{% endif %}
+    {% if tg_warning %}{% set _ = sb_bits.append('주의 ' ~ tg_warning) %}{% endif %}
+    {% if auth_n %}{% set _ = sb_bits.append('인증필요 ' ~ auth_n) %}{% endif %}
+    {% if jobs_stuck %}{% set _ = sb_bits.append('멈춘 큐 ' ~ jobs_stuck) %}{% endif %}
+    {% if ag_offline %}{% set _ = sb_bits.append('Agent ' ~ ag_offline ~ '대 오프라인') %}{% endif %}
+    {% if channels.kakao_queue_lag_seconds %}{% set _ = sb_bits.append('Kakao ' ~ channels.kakao_queue_lag_seconds ~ '초 지연') %}{% endif %}
+    {% if channels.telegram_error_count %}{% set _ = sb_bits.append('Telegram ' ~ channels.telegram_error_count ~ '건 오류') %}{% endif %}
+    <div class="statusbanner {{ sb_class }}" role="status" aria-live="polite">
+      <span class="sb-icon" aria-hidden="true">{{ sb_icon }}</span>
+      <span class="sb-text">
+        <span class="sb-verdict">{{ sb_verdict }}</span>
+        <span class="sb-detail">{{ sb_bits | join(' · ') if sb_bits else '대상 ' ~ tg_total ~ '곳 · 전부 정상' }}</span>
+      </span>
+    </div>
+    {# ── "지금 조치" 묶음: 인증필요·멈춘 큐 있을 때만. 칩 클릭 → 해당 섹션으로 이동/필터. ── #}
+    {% if auth_n or jobs_stuck %}
+    <div class="actnow">
+      <div class="an-head"><span aria-hidden="true">🔴</span> 지금 조치</div>
+      <div class="an-items">
+        {% if auth_n %}<button type="button" class="an-chip" onclick="focusAuthRequired()">인증 필요 <span class="n">{{ auth_n }}</span>건</button>{% endif %}
+        {% if jobs_stuck %}<button type="button" class="an-chip" onclick="focusStuckQueue()">멈춘 큐 <span class="n">{{ jobs_stuck }}</span>건</button>{% endif %}
+      </div>
+    </div>
+    {% endif %}
     <div class="summary">
       <button class="kpichip k-all" aria-pressed="true" data-sevclass="all" onclick="setSevFilter(this)"><span class="n" id="target-count-all">{{ tg_total }}</span><span class="lbl">전체</span></button>
       <button class="kpichip k-ok" aria-pressed="false" data-sevclass="sev-normal" onclick="setSevFilter(this)"><span class="n" id="target-count-normal">{{ tg_normal }}</span><span class="lbl">정상</span></button>
@@ -431,7 +514,7 @@
         <span class="seg {{ 'bad' if channels.telegram_error_count else '' }}"><b>Telegram</b> {{ channels.telegram_error_count }}건 오류</span>
       </div>
     </div>
-    <p class="lead">{% if attention > 0 %}<b>지금 조치할 {{ attention }}건</b>이 위로 정렬됩니다.{% else %}<b>모두 정상 운영 중</b>입니다.{% endif %} 대상 표는 <b>30초마다 자동 갱신</b>되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor·시각이 audit 기록됩니다.</p>
+    <p class="lead">대상은 <b>위험 → 조치필요 → 주의 → 정상</b> 순으로 정렬됩니다. 대상 표는 <b>30초마다 자동 갱신</b>되며, 액션은 service 레이어를 통해서만 상태를 바꾸고 actor·시각이 audit 기록됩니다.</p>
 
     <section class="workbench" aria-label="대상 워크벤치">
       <div class="toolbar">
@@ -455,7 +538,7 @@
        + 라이브 램프 신선도(30s)로 갱신. 관리 탭 쓰기 후 delay:2s 로 커밋 착지를 기다린다(targets 카드 선례). #}
     {% set st_total = (settings_rows | default([])) | list | length %}
     <details class="aux">
-      <summary>등록된 설정 <span class="tag">{{ st_total }}건 · 30s</span></summary>
+      <summary>수집 대상 현황 <span class="tag">{{ st_total }}건 · 30s</span></summary>
       <div class="aux-body">
         <div id="registered-settings" hx-get="/admin/registered-settings?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, admin-entity-changed from:body delay:2s, every 30s" hx-swap="innerHTML swap:0.15s">{% include "_registered_settings.html" %}</div>
       </div>
@@ -895,6 +978,15 @@
       for (var i = 0; i < rows.length; i++) if (rows[i].dataset.target === targetId) return rows[i];
       return null;
     }
+    // ── "지금 조치" 칩 → 해당 섹션 펼치고 스크롤(섹션은 30s 폴링으로 자체 갱신). ──
+    function revealSection(el) {
+      if (!el) return;
+      var box = el.closest ? el.closest("details.aux") : null;
+      if (box) box.open = true;
+      (box || el).scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    function focusAuthRequired() { revealSection(document.getElementById("auth-required-section")); }
+    function focusStuckQueue() { revealSection(document.getElementById("jobs-queue")); }
     function openAuthRequiredTarget(targetId) {
       var row = findTargetRow(targetId);
       if (row) openTargetDrawer(row, row);

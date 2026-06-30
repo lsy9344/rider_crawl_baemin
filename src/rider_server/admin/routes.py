@@ -409,6 +409,9 @@ class SettingsRow:
     delivery_status_label: str = "OFF"  # 'OFF' | '연결 필요' | 'ON'
     customer_name: str = ""
     status: str = ""  # 원시 MonitoringTargetStatus 값
+    # 최근 기록(라이브 램프와 같은 facts join 에서 옴 — 추가 쿼리 없음). 표시 전용.
+    last_success_at: datetime | None = None  # MAX(snapshots.collected_at WHERE quality_state='OK')
+    last_delivery_at: datetime | None = None  # MAX(delivery_logs.sent_at WHERE status='SENT')
 
 
 async def _settings_rows_for_display(
@@ -484,6 +487,7 @@ async def _settings_rows_for_tenant(
     sev_by_id = {
         f.target_id: _target_row_for_display(f, now).severity for f in facts_rows
     }
+    facts_by_id = {f.target_id: f for f in facts_rows}
 
     rows: list[SettingsRow] = []
     active_setting_keys = {
@@ -545,6 +549,8 @@ async def _settings_rows_for_tenant(
                 delivery_status_label=delivery_status_label,
                 customer_name=customer_name,
                 status=t.status.value,
+                last_success_at=getattr(facts_by_id.get(t.id), "last_success_at", None),
+                last_delivery_at=getattr(facts_by_id.get(t.id), "last_delivery_at", None),
             )
         )
     return rows
