@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -63,3 +64,66 @@ def test_run_lock_refresh_keeps_live_owner_from_being_treated_as_stale(tmp_path,
         with pytest.raises(LockAlreadyHeldError):
             with RunLock(lock_path, stale_timeout_seconds=10):
                 pass
+
+
+class _FakePsutil:
+    def __init__(self, alive):
+        self._alive = alive
+
+    def pid_exists(self, pid):
+        return self._alive
+
+
+def test_run_lock_reclaims_fresh_lock_from_dead_owner(tmp_path, monkeypatch):
+    # A crawl process crashed without releasing its lock: the timestamp is still
+    # fresh (well within the stale timeout) but the owning PID is gone.
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text(str(time.time()), encoding="utf-8")
+    lock_module._owner_path(lock_path).write_text(
+        f"4242 {lock_module._HOSTNAME}", encoding="utf-8"
+    )
+    monkeypatch.setattr(lock_module, "psutil", _FakePsutil(alive=False))
+
+    # Despite the fresh timestamp, the dead owner lets the next run reclaim it.
+    with RunLock(lock_path, stale_timeout_seconds=900) as lock:
+        assert lock._held
+        assert lock_path.exists()
+
+
+def test_run_lock_keeps_fresh_lock_for_live_owner(tmp_path, monkeypatch):
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text(str(time.time()), encoding="utf-8")
+    lock_module._owner_path(lock_path).write_text(
+        f"4242 {lock_module._HOSTNAME}", encoding="utf-8"
+    )
+    monkeypatch.setattr(lock_module, "psutil", _FakePsutil(alive=True))
+
+    with pytest.raises(LockAlreadyHeldError):
+        with RunLock(lock_path, stale_timeout_seconds=900):
+            pass
+
+
+def test_run_lock_ignores_liveness_for_other_host(tmp_path, monkeypatch):
+    # An owner recorded on a different host must not be judged by local PIDs.
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text(str(time.time()), encoding="utf-8")
+    lock_module._owner_path(lock_path).write_text("4242 some-other-host", encoding="utf-8")
+    monkeypatch.setattr(lock_module, "psutil", _FakePsutil(alive=False))
+
+    with pytest.raises(LockAlreadyHeldError):
+        with RunLock(lock_path, stale_timeout_seconds=900):
+            pass
+
+
+def test_run_lock_writes_and_clears_owner_file(tmp_path):
+    lock_path = tmp_path / "run.lock"
+    owner_path = lock_module._owner_path(lock_path)
+
+    with RunLock(lock_path, stale_timeout_seconds=900):
+        assert owner_path.exists()
+        pid, host = lock_module._read_owner(lock_path)
+        assert pid == os.getpid()
+        assert host == lock_module._HOSTNAME
+
+    assert not lock_path.exists()
+    assert not owner_path.exists()

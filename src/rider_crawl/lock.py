@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 import time
 from pathlib import Path
+
+try:  # psutil is a project dependency; degrade gracefully if it is unavailable.
+    import psutil
+except Exception:  # pragma: no cover - a missing psutil must never break locking
+    psutil = None
+
+
+_HOSTNAME = socket.gethostname()
 
 
 class LockAlreadyHeldError(RuntimeError):
@@ -28,18 +37,25 @@ class RunLock:
             try:
                 descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
             except FileExistsError:
-                timestamp = _read_lock_timestamp(self.path)
-                if timestamp is None or now - timestamp < self.stale_timeout_seconds:
-                    raise LockAlreadyHeldError(f"run lock is already held: {self.path}")
+                # A lock file already exists. Reclaim it only when it is safe:
+                # either the owning process is provably gone (it crashed without
+                # releasing the lock), or the lock has not been refreshed within
+                # the stale timeout. Otherwise treat it as actively held.
+                if not _owner_is_dead(self.path):
+                    timestamp = _read_lock_timestamp(self.path)
+                    if timestamp is None or now - timestamp < self.stale_timeout_seconds:
+                        raise LockAlreadyHeldError(f"run lock is already held: {self.path}")
                 try:
                     self.path.unlink()
                 except FileNotFoundError:
                     continue
+                _clear_owner(self.path)
                 continue
 
             self._lock_value = str(now)
             with os.fdopen(descriptor, "w", encoding="utf-8") as file:
                 file.write(self._lock_value)
+            _write_owner(self.path)
             self._held = True
             self._start_refresh_thread()
             return self
@@ -50,6 +66,7 @@ class RunLock:
             lock_value = self._lock_value
         if self._held and _read_lock_value(self.path) == lock_value:
             self.path.unlink()
+            _clear_owner(self.path)
         self._held = False
         with self._value_lock:
             self._lock_value = ""
@@ -115,3 +132,66 @@ def _read_lock_value(path: Path) -> str:
     except OSError:
         return ""
 
+
+# --- owner liveness ---------------------------------------------------------
+#
+# The lock file body stays a single timestamp line (its refresh marker and
+# owner token). Process identity is recorded in a sibling ``<lock>.owner`` file
+# so the staleness check can be short-circuited when the owning process has
+# already died. This is purely additive: when the owner is unknown, on another
+# host, or psutil is unavailable, we fall back to the time-based stale timeout.
+
+
+def _owner_path(path: Path) -> Path:
+    return path.with_name(path.name + ".owner")
+
+
+def _write_owner(path: Path) -> None:
+    try:
+        _owner_path(path).write_text(f"{os.getpid()} {_HOSTNAME}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_owner(path: Path) -> None:
+    try:
+        _owner_path(path).unlink()
+    except OSError:
+        pass
+
+
+def _read_owner(path: Path) -> tuple[int | None, str]:
+    try:
+        parts = _owner_path(path).read_text(encoding="utf-8").split()
+    except OSError:
+        return None, ""
+    if not parts:
+        return None, ""
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None, ""
+    host = parts[1] if len(parts) > 1 else ""
+    return pid, host
+
+
+def _owner_is_dead(path: Path) -> bool:
+    """Return True only when the owning process is provably gone.
+
+    Conservative by design: any uncertainty (missing owner file, a different
+    host, psutil unavailable, or a lookup error) returns ``False`` so the
+    time-based stale check still governs. This must never reclaim a lock that a
+    live process is holding.
+    """
+
+    pid, host = _read_owner(path)
+    if pid is None or pid <= 0:
+        return False
+    if host and host != _HOSTNAME:
+        return False
+    if psutil is None:
+        return False
+    try:
+        return not psutil.pid_exists(pid)
+    except Exception:
+        return False
