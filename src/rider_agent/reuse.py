@@ -59,6 +59,22 @@ from rider_crawl.sender import (
     send_kakao_text,
 )
 
+# Kakao 로컬 DB 리더(Phase 2 inbound watcher) — 선택적 SQLCipher 는 리더 함수 내부에서
+# lazy import 하므로 이 seam 을 eager import 해도 import-safe 하다(sqlcipher3 미설치여도 무탈).
+from rider_crawl.kakao_db import (
+    DEFAULT_ACCEPTED_CHAT_TYPES,
+    ChatRoomListReader,
+    KakaoDbDependencyMissing,
+    KakaoDbError,
+    KakaoMessageRef,
+    KakaoRoomRef,
+    chat_type_accepted,
+    sqlcipher_available,
+)
+
+# 공유 라이더 조회 명령 코어(Kakao/Telegram 공용 계약) — 파서는 transport-neutral.
+from rider_crawl.rider_lookup import RiderLookupCommand, parse_rider_lookup_command
+
 __all__ = [
     # 수집
     "crawl_snapshot",
@@ -90,4 +106,16 @@ __all__ = [
     "KakaoUnsafeSelectionError",
     "KakaoMessenger",
     "dispatch_text_message",
+    # Kakao 로컬 DB 리더(Phase 2)
+    "ChatRoomListReader",
+    "KakaoRoomRef",
+    "KakaoMessageRef",
+    "KakaoDbError",
+    "KakaoDbDependencyMissing",
+    "chat_type_accepted",
+    "sqlcipher_available",
+    "DEFAULT_ACCEPTED_CHAT_TYPES",
+    # 공유 명령 코어
+    "RiderLookupCommand",
+    "parse_rider_lookup_command",
 ]
