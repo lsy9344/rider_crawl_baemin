@@ -469,6 +469,87 @@ def test_recover_single_transient_default_reason_is_mail_delay():
     assert result.metrics["reason"] == REASON_MAIL_DELAY
 
 
+def test_recover_failed_false_and_otp_miss_have_distinct_safe_reasons():
+    from rider_crawl.auth.coupang_email_2fa import Coupang2faError
+
+    false_result = recover_coupang_mailbox(
+        mailbox_id=FAKE_MBX_1,
+        recover=_recover(False),
+        sleep=lambda _s: None,
+    )
+
+    otp_error = Coupang2faError("인증 메일 미도착")
+    otp_error.recovery_step = "fetch_otp"
+    otp_error.recovery_reason = "otp_not_found"
+    otp_error.recovery_diagnostics = {
+        "code_found": False,
+        "msgs_found": 0,
+        "latest_code_age_s": None,
+        "within_poll_window": False,
+        "email_2fa_poll_seconds": 60,
+        "email_2fa_poll_interval_seconds": 5,
+    }
+    otp_result = recover_coupang_mailbox(
+        mailbox_id=FAKE_MBX_1,
+        recover=_recover(raises=otp_error),
+        sleep=lambda _s: None,
+    )
+
+    assert false_result.result_json["state"] == STATE_RECOVERY_FAILED
+    assert otp_result.result_json["state"] == STATE_RECOVERY_FAILED
+    assert false_result.result_json["reason"] == "non_target_or_submit_failed"
+    assert otp_result.result_json["reason"] == "otp_not_found"
+    assert false_result.result_json["reason"] != otp_result.result_json["reason"]
+
+
+def test_recover_failure_logs_step_exception_and_safe_diagnostics_without_secrets():
+    from rider_crawl.auth.coupang_email_2fa import Coupang2faError
+
+    logs: list[str] = []
+    exc = Coupang2faError(f"mail delayed otp={FAKE_OTP} password={FAKE_APP_PASSWORD}")
+    exc.recovery_step = "fetch_otp"
+    exc.recovery_reason = "otp_not_found"
+    exc.recovery_diagnostics = {
+        "code_found": False,
+        "msgs_found": 1,
+        "latest_code_age_s": 91,
+        "within_poll_window": False,
+        "email_2fa_poll_seconds": 60,
+        "email_2fa_poll_interval_seconds": 5,
+        "page_host": "partner.coupangeats.com",
+        "page_path": "/page/rider-performance",
+        "login_page": True,
+    }
+
+    result = recover_coupang_mailbox(
+        mailbox_id=FAKE_EMAIL,
+        recover=_recover(raises=exc),
+        max_attempts=1,
+        log=logs.append,
+        sleep=lambda _s: None,
+    )
+
+    assert result.result_json["reason"] == "otp_not_found"
+    assert result.result_json["step"] == "fetch_otp"
+    assert result.result_json["exception_class"] == "Coupang2faError"
+    assert result.metrics["code_found"] is False
+    assert result.metrics["msgs_found"] == 1
+    assert result.metrics["latest_code_age_s"] == 91
+    assert result.metrics["within_poll_window"] is False
+    assert result.metrics["email_2fa_poll_seconds"] == 60
+    assert result.metrics["email_2fa_poll_interval_seconds"] == 5
+
+    blob = json.dumps(
+        {"result_json": result.result_json, "metrics": result.metrics, "logs": logs},
+        ensure_ascii=False,
+    )
+    assert "step=fetch_otp" in "\n".join(logs)
+    assert "exception_class=Coupang2faError" in "\n".join(logs)
+    assert FAKE_OTP not in blob
+    assert FAKE_APP_PASSWORD not in blob
+    assert FAKE_EMAIL not in blob
+
+
 def test_default_max_recovery_attempts_is_finite_small():
     assert DEFAULT_MAX_RECOVERY_ATTEMPTS >= 1
     assert DEFAULT_MAX_RECOVERY_ATTEMPTS < 10

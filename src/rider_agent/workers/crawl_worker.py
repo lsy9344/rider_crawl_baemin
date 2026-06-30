@@ -216,8 +216,8 @@ class CrawlWorker:
 
         auth_state 는 result_json 이 명시한 값(성공/인증필요/center mismatch)을 그대로 쓰고,
         없으면 ``UNKNOWN`` 으로 둔다(parser/CDP/timeout 등을 인증 문제로 단정하지 않는다).
-        last_error_code 는 실패 시 result.error_code(진단 힌트)다. 진단 기록 실패는 흡수하며
-        job 결과를 바꾸지 않는다.
+        last_error_code 는 실패 시 result.error_code(진단 힌트)이고, 성공 시에는 이전 실패 코드를
+        지운다. 진단 기록 실패는 흡수하며 job 결과를 바꾸지 않는다.
         """
 
         if self._profile_manager is None:
@@ -243,6 +243,7 @@ class CrawlWorker:
                 auth_state=auth_state,
                 last_error_code=last_error_code,
                 last_probe_at=_iso_utc(self._now()),
+                clear_last_error_code=result.status == JOB_STATUS_SUCCESS,
             )
         except Exception:  # noqa: BLE001 - diagnostic recording must not change job result.
             if self._log is not None:

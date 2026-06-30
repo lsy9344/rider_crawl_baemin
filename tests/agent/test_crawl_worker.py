@@ -874,7 +874,14 @@ class _RecordingProfiles:
         )
 
     def record_profile_diagnostic(
-        self, tenant_id, target_id, *, auth_state=None, last_error_code=None, last_probe_at=None
+        self,
+        tenant_id,
+        target_id,
+        *,
+        auth_state=None,
+        last_error_code=None,
+        last_probe_at=None,
+        clear_last_error_code=False,
     ):
         self.events.append("record")
         self.diagnostics.append(
@@ -884,6 +891,7 @@ class _RecordingProfiles:
                 "auth_state": auth_state,
                 "last_error_code": last_error_code,
                 "last_probe_at": last_probe_at,
+                "clear_last_error_code": clear_last_error_code,
             }
         )
 
@@ -915,6 +923,7 @@ def test_crawl_success_records_active_diagnostic() -> None:
         "auth_state": AUTH_STATE_ACTIVE,
         "last_error_code": None,
         "last_probe_at": "2026-06-28T10:20:30Z",
+        "clear_last_error_code": True,
     }
 
 

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 
 import pytest
@@ -746,6 +747,51 @@ def test_recover_raises_when_imap_fetch_fails(tmp_path):
         recover_coupang_session_with_email_2fa(
             page, _config(tmp_path), fetch_code=_fetch, now=_NOW
         )
+
+
+def test_recover_imap_failure_carries_safe_diagnostics_without_code_value(tmp_path):
+    page = _FakePage(
+        html="<html>이메일 인증 인증코드를 rider@naver.com 으로 보냅니다</html>",
+        clickable=("이메일", "인증번호 발송"),
+        input_selectors=("input[name='code']",),
+    )
+    page.url = "https://partner.coupangeats.com/page/rider-performance?token=secret"
+    config = replace(
+        _config(tmp_path),
+        email_2fa_poll_seconds=60,
+        email_2fa_poll_interval_seconds=5,
+    )
+
+    def _fetch(**kwargs):
+        kwargs["diagnostics"].update(
+            {
+                "code_found": True,
+                "msgs_found": 1,
+                "latest_code_age_s": 90,
+                "within_poll_window": False,
+            }
+        )
+        raise Imap2faError("인증 메일 미도착 OTP=123456")
+
+    with pytest.raises(Coupang2faError) as exc_info:
+        recover_coupang_session_with_email_2fa(
+            page, config, fetch_code=_fetch, now=_NOW
+        )
+
+    assert exc_info.value.recovery_step == "fetch_otp"
+    assert exc_info.value.recovery_reason == "otp_not_found"
+    diagnostics = exc_info.value.recovery_diagnostics
+    assert diagnostics["code_found"] is True
+    assert diagnostics["msgs_found"] == 1
+    assert diagnostics["latest_code_age_s"] == 90
+    assert diagnostics["within_poll_window"] is False
+    assert diagnostics["email_2fa_poll_seconds"] == 60
+    assert diagnostics["email_2fa_poll_interval_seconds"] == 5
+    assert diagnostics["page_host"] == "partner.coupangeats.com"
+    assert diagnostics["page_path"] == "/page/rider-performance"
+    blob = json.dumps(diagnostics, ensure_ascii=False)
+    assert "123456" not in blob
+    assert "token=secret" not in blob
 
 
 def test_recover_preserves_safe_imap_auth_reason(tmp_path):

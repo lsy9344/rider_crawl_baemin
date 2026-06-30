@@ -163,6 +163,22 @@ def test_fetch_ignores_mail_before_requested_after():
         _fetch(server)
 
 
+def test_fetch_updates_diagnostics_for_stale_code_without_code_value():
+    server = _FakeImap(
+        {1: _message(code_text="인증번호 111111", internal=_REQUESTED_AFTER - timedelta(seconds=90))}
+    )
+    diagnostics: dict[str, object] = {}
+
+    with pytest.raises(Imap2faError, match="요청 시각 이후"):
+        _fetch(server, diagnostics=diagnostics, now=lambda: _REQUESTED_AFTER)
+
+    assert diagnostics["code_found"] is True
+    assert diagnostics["msgs_found"] == 1
+    assert diagnostics["latest_code_age_s"] == 90
+    assert diagnostics["within_poll_window"] is False
+    assert "111111" not in str(diagnostics)
+
+
 def test_fetch_picks_newest_after_requested_after():
     server = _FakeImap(
         {

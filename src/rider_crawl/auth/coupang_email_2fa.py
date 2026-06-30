@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+from inspect import Parameter, signature
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from rider_crawl.auth.imap_2fa import (
     IMAP_HOST_BY_DOMAIN,
@@ -97,6 +99,47 @@ _USERNAME_STEP_BUTTON_TEXTS = ("다음", "계속", "로그인", "login", "next",
 _EMAIL_RE = re.compile(r"(?P<email>[A-Za-z0-9._%*+\-]+@[A-Za-z0-9.*\-]+\.[A-Za-z]{2,})")
 _SUPPORTED_SCREEN_DOMAINS = set(IMAP_HOST_BY_DOMAIN)
 _LOGGER = logging.getLogger(__name__)
+_SAFE_RECOVERY_STEPS = frozenset(
+    {
+        "primary_login",
+        "select_email_auth",
+        "click_send_code",
+        "fetch_otp",
+        "fill_code",
+        "submit",
+        "reopen_target",
+        "page_selection",
+    }
+)
+_SAFE_RECOVERY_REASONS = frozenset(
+    {
+        "otp_not_found",
+        "non_target_or_submit_failed",
+        "verification_mail_delayed",
+        "repeated_recovery_failure",
+        "browser_unavailable",
+        "captcha_or_abnormal_login",
+        "email_auth_required",
+        "mail_app_password_invalid",
+        "imap_access_disabled",
+        "unsupported_email_domain",
+        "mailbox_auth_blocked",
+        "mailbox_login_failed",
+    }
+)
+_SAFE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "code_found",
+        "msgs_found",
+        "latest_code_age_s",
+        "within_poll_window",
+        "email_2fa_poll_seconds",
+        "email_2fa_poll_interval_seconds",
+        "page_host",
+        "page_path",
+        "login_page",
+    }
+)
 
 
 def recover_coupang_session_with_email_2fa(
@@ -155,11 +198,25 @@ def recover_coupang_session_with_email_2fa(
     _log_step(log, "coupang email 2fa mail fetch started")
     try:
         code = _fetch_code(config, requested_after=requested_after, fetch_code=fetch_code)
-    except Coupang2faError:
+    except Coupang2faError as exc:
+        _annotate_recovery_exception(
+            exc,
+            step="fetch_otp",
+            diagnostics=_page_recovery_diagnostics(page),
+        )
         _log_step(log, "coupang email 2fa mail fetch failed")
         raise
     _log_step(log, "coupang email 2fa mail fetch succeeded")
-    _fill_code_input(page, code, config)
+    try:
+        _fill_code_input(page, code, config)
+    except Coupang2faError as exc:
+        _annotate_recovery_exception(
+            exc,
+            step="fill_code",
+            reason="non_target_or_submit_failed",
+            diagnostics=_page_recovery_diagnostics(page),
+        )
+        raise
     if _click_first_by_text(page, _SUBMIT_TEXTS, config, roles=("button",)):
         _log_step(log, "coupang email 2fa code submitted")
     else:
@@ -232,33 +289,133 @@ def _fetch_code(
     fetch_code: Callable[..., str] | None,
 ) -> str:
     fetcher = fetch_code or _imap_fetch
+    diagnostics = {
+        "email_2fa_poll_seconds": int(config.email_2fa_poll_seconds),
+        "email_2fa_poll_interval_seconds": int(config.email_2fa_poll_interval_seconds),
+    }
     try:
-        code = fetcher(
-            email_address=config.verification_email_address,
-            app_password=config.verification_email_app_password,
-            subject_keyword=config.verification_email_subject_keyword,
-            sender_keyword=config.verification_email_sender_keyword,
-            requested_after=requested_after,
-            poll_seconds=config.email_2fa_poll_seconds,
-            poll_interval_seconds=config.email_2fa_poll_interval_seconds,
-            code_digits=config.coupang_2fa_code_digits,
+        code = _call_fetcher(
+            fetcher,
+            diagnostics=diagnostics,
+            kwargs={
+                "email_address": config.verification_email_address,
+                "app_password": config.verification_email_app_password,
+                "subject_keyword": config.verification_email_subject_keyword,
+                "sender_keyword": config.verification_email_sender_keyword,
+                "requested_after": requested_after,
+                "poll_seconds": config.email_2fa_poll_seconds,
+                "poll_interval_seconds": config.email_2fa_poll_interval_seconds,
+                "code_digits": config.coupang_2fa_code_digits,
+            },
         )
     except Imap2faError as exc:
-        raise Coupang2faError(
+        wrapped = Coupang2faError(
             str(exc),
             email_auth_required=isinstance(exc, ImapAuthError),
             email_auth_reason=getattr(exc, "reason", None),
-        ) from exc
+        )
+        _annotate_recovery_exception(
+            wrapped,
+            step="fetch_otp",
+            reason=None if isinstance(exc, ImapAuthError) else "otp_not_found",
+            diagnostics=diagnostics,
+        )
+        raise wrapped from exc
 
     if not code:
-        raise Coupang2faError("이메일에서 인증번호를 받지 못했습니다.")
+        exc = Coupang2faError("이메일에서 인증번호를 받지 못했습니다.")
+        _annotate_recovery_exception(
+            exc,
+            step="fetch_otp",
+            reason="otp_not_found",
+            diagnostics=diagnostics,
+        )
+        raise exc
     return code
+
+
+def _call_fetcher(
+    fetcher: Callable[..., str],
+    *,
+    diagnostics: dict[str, object],
+    kwargs: dict[str, object],
+) -> str:
+    if _accepts_keyword(fetcher, "diagnostics"):
+        kwargs = {**kwargs, "diagnostics": diagnostics}
+    return fetcher(**kwargs)
+
+
+def _accepts_keyword(fetcher: Callable[..., str], name: str) -> bool:
+    try:
+        params = signature(fetcher).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(param.kind == Parameter.VAR_KEYWORD or param.name == name for param in params)
 
 
 def _imap_fetch(**kwargs: Any) -> str:
     from rider_crawl.auth.imap_2fa import fetch_latest_verification_code
 
     return fetch_latest_verification_code(**kwargs)
+
+
+def _annotate_recovery_exception(
+    exc: BaseException,
+    *,
+    step: str | None = None,
+    reason: str | None = None,
+    diagnostics: dict[str, object] | None = None,
+) -> None:
+    if step in _SAFE_RECOVERY_STEPS and not getattr(exc, "recovery_step", None):
+        setattr(exc, "recovery_step", step)
+    if reason in _SAFE_RECOVERY_REASONS and not getattr(exc, "recovery_reason", None):
+        setattr(exc, "recovery_reason", reason)
+    safe = _safe_recovery_diagnostics(getattr(exc, "recovery_diagnostics", None))
+    safe.update(_safe_recovery_diagnostics(diagnostics))
+    if safe:
+        setattr(exc, "recovery_diagnostics", safe)
+
+
+def _safe_recovery_diagnostics(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, object] = {}
+    for key in _SAFE_DIAGNOSTIC_KEYS:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if key in {"code_found", "within_poll_window", "login_page"}:
+            if isinstance(item, bool):
+                safe[key] = item
+        elif key in {
+            "msgs_found",
+            "latest_code_age_s",
+            "email_2fa_poll_seconds",
+            "email_2fa_poll_interval_seconds",
+        }:
+            if item is None and key == "latest_code_age_s":
+                safe[key] = None
+            elif isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+                safe[key] = item
+        elif key in {"page_host", "page_path"} and isinstance(item, str):
+            clean = item.strip()
+            if clean and len(clean) <= 200:
+                safe[key] = clean
+    return safe
+
+
+def _page_recovery_diagnostics(page: Any) -> dict[str, object]:
+    diagnostics: dict[str, object] = {}
+    url = str(getattr(page, "url", "") or "")
+    if url:
+        parsed = urlsplit(url)
+        if parsed.hostname:
+            diagnostics["page_host"] = parsed.hostname
+        if parsed.path:
+            diagnostics["page_path"] = parsed.path
+    page_text = _safe_page_text(page)
+    diagnostics["login_page"] = _is_primary_login_screen(page_text, page)
+    return diagnostics
 
 
 def _onscreen_recipients(page: Any) -> set[str]:

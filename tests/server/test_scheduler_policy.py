@@ -73,9 +73,12 @@ def test_is_due_boundary_inclusive_now() -> None:
     assert policy.is_due(_NOW + timedelta(seconds=1), _NOW) is False
 
 
-def test_next_run_at_advances_by_interval_plus_jitter() -> None:
+def test_next_run_at_advances_by_configured_interval_not_jitter() -> None:
     assert policy.next_run_at(_NOW, _INTERVAL_S, 17) == _NOW + timedelta(
-        seconds=_INTERVAL_S + 17
+        seconds=_INTERVAL_S
+    )
+    assert policy.next_run_at(_NOW, _INTERVAL_S, _INTERVAL_S - 1) == _NOW + timedelta(
+        seconds=_INTERVAL_S
     )
 
 

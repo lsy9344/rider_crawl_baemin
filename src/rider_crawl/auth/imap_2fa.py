@@ -118,6 +118,7 @@ def fetch_latest_verification_code(
     connect: Callable[[str, int, str, str], Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    diagnostics: dict[str, object] | None = None,
 ) -> str:
     """Return the newest verification code that arrived after ``requested_after``."""
 
@@ -139,6 +140,8 @@ def fetch_latest_verification_code(
                     sender_keyword=sender_keyword,
                     requested_after=requested_after_utc,
                     code_digits=code_digits,
+                    diagnostics=diagnostics,
+                    now=now(),
                 )
             except Imap2faError as exc:
                 last_error, code = exc, None
@@ -210,10 +213,16 @@ def _find_code_once(
     sender_keyword: str,
     requested_after: datetime,
     code_digits: int,
+    diagnostics: dict[str, object] | None = None,
+    now: datetime | None = None,
 ) -> str | None:
     best_dt: datetime | None = None
     best_folder: str | None = None
     best_uid: Any = None
+    latest_candidate_dt: datetime | None = None
+    latest_candidate_folder: str | None = None
+    latest_candidate_uid: Any = None
+    msgs_found = 0
     for folder in _candidate_folders(server):
         try:
             server.select_folder(folder, readonly=True)
@@ -228,7 +237,7 @@ def _find_code_once(
             continue
         for uid, data in meta.items():
             internal = _to_utc(data.get(b"INTERNALDATE"))
-            if internal is None or internal < requested_after:
+            if internal is None:
                 continue
             headers = data.get(b"BODY[HEADER.FIELDS (SUBJECT FROM)]", b"")
             subject = _decode_header_value(headers, "Subject")
@@ -237,10 +246,33 @@ def _find_code_once(
                 continue
             if sender_keyword and sender_keyword.casefold() not in sender.casefold():
                 continue
+            msgs_found += 1
+            if latest_candidate_dt is None or internal > latest_candidate_dt:
+                latest_candidate_dt = internal
+                latest_candidate_folder = folder
+                latest_candidate_uid = uid
+            if internal < requested_after:
+                continue
             if best_dt is None or internal > best_dt:
                 best_dt, best_folder, best_uid = internal, folder, uid
 
     if best_folder is None:
+        code_found = False
+        if diagnostics is not None:
+            code_found = _candidate_has_code(
+                server,
+                folder=latest_candidate_folder,
+                uid=latest_candidate_uid,
+                code_digits=code_digits,
+            )
+        _record_diagnostics(
+            diagnostics,
+            msgs_found=msgs_found,
+            code_found=code_found,
+            latest_code_dt=latest_candidate_dt if code_found else None,
+            requested_after=requested_after,
+            now=now,
+        )
         return None
 
     server.select_folder(best_folder, readonly=True)
@@ -248,8 +280,70 @@ def _find_code_once(
     body = _message_text(email.message_from_bytes(raw))
     code = extract_verification_code(body, code_digits=code_digits)
     if code is not None:
+        _record_diagnostics(
+            diagnostics,
+            msgs_found=msgs_found,
+            code_found=True,
+            latest_code_dt=best_dt,
+            requested_after=requested_after,
+            now=now,
+        )
         return code
+    _record_diagnostics(
+        diagnostics,
+        msgs_found=msgs_found,
+        code_found=False,
+        latest_code_dt=None,
+        requested_after=requested_after,
+        now=now,
+    )
     raise Imap2faError("최신 인증 메일에서 인증번호를 추출하지 못했습니다(자리수/형식 확인).")
+
+
+def _candidate_has_code(
+    server: Any,
+    *,
+    folder: str | None,
+    uid: Any,
+    code_digits: int,
+) -> bool:
+    if folder is None or uid is None:
+        return False
+    try:
+        server.select_folder(folder, readonly=True)
+        raw = server.fetch([uid], ["BODY.PEEK[]"])[uid][b"BODY[]"]
+        body = _message_text(email.message_from_bytes(raw))
+        return extract_verification_code(body, code_digits=code_digits) is not None
+    except Exception:
+        return False
+
+
+def _record_diagnostics(
+    diagnostics: dict[str, object] | None,
+    *,
+    msgs_found: int,
+    code_found: bool,
+    latest_code_dt: datetime | None,
+    requested_after: datetime,
+    now: datetime | None,
+) -> None:
+    if diagnostics is None:
+        return
+    latest_code_age_s: int | None = None
+    if latest_code_dt is not None and now is not None:
+        latest_code_age_s = max(0, int((now - latest_code_dt).total_seconds()))
+    diagnostics.update(
+        {
+            "code_found": bool(code_found),
+            "msgs_found": int(msgs_found),
+            "latest_code_age_s": latest_code_age_s,
+            "within_poll_window": bool(
+                code_found
+                and latest_code_dt is not None
+                and latest_code_dt >= requested_after
+            ),
+        }
+    )
 
 
 def _message_text(msg: Message) -> str:

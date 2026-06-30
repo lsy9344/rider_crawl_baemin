@@ -584,6 +584,7 @@ class BrowserProfileManager:
         auth_state: str | None = None,
         last_error_code: str | None = None,
         last_probe_at: str | None = None,
+        clear_last_error_code: bool = False,
     ) -> None:
         """기존 profile assignment 에 optional 진단값을 기록한다(heartbeat 투영용).
 
@@ -591,6 +592,7 @@ class BrowserProfileManager:
           그래서 profile 생성 전 실패는 heartbeat row 로 새로 보이지 않는다(job result 로만 확인).
         - ``ProfileAssignment`` 가 frozen 이라 직접 대입하지 않고 ``replace`` 로 갱신한다.
         - ``None`` 인자는 기존 값을 덮어쓰지 않는다(부분 갱신 허용).
+        - ``clear_last_error_code`` 는 성공 진단 후 남은 stale 실패 코드를 명시적으로 지운다.
         - 문자열은 과도하게 길지 않게 상한을 둔다(서버 sanitizer 도 자르지만 여기서도 방어).
         - secret/URL/HTML/screenshot/clipboard 는 진단값에 넣지 않는다(호출자 책임이지만
           이 메서드는 위 3개 필드 외에는 받지 않는다).
@@ -611,7 +613,7 @@ class BrowserProfileManager:
                 last_error_code=(
                     _clip_diagnostic(last_error_code)
                     if last_error_code is not None
-                    else assignment.last_error_code
+                    else (None if clear_last_error_code else assignment.last_error_code)
                 ),
                 last_probe_at=(
                     _clip_diagnostic(last_probe_at)

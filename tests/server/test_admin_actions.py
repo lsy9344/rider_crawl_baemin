@@ -377,7 +377,7 @@ def test_inactive_target_toggle_rejected() -> None:
 
 
 def test_target_activation_defers_schedule_until_next_interval() -> None:
-    # 대상 PAUSED→ACTIVE 후 next_run_at 이 now+interval(+jitter) 미래로 재설정돼야 한다(catch-up 금지).
+    # 대상 PAUSED→ACTIVE 후 next_run_at 이 now+interval 미래로 재설정돼야 한다(catch-up 금지).
     from rider_server.scheduler import policy
 
     repo = InMemoryAdminActionRepository()

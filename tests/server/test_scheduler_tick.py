@@ -2,8 +2,9 @@
 
 5.3 ``InMemoryQueueBackend`` + fake 대상/구독/agent 데이터로 ``SchedulerService.run_tick`` 한
 바퀴를 돌려 due 만 enqueue·중지/비활성 제외·breaker open 플랫폼 제외·capacity throttle·**멱등성**
-(같은 due 에 tick 2회 → CrawlJob 정확히 1건)을 결정적으로 잠근다. 추가로 100 fake 대상 storm
-미발생(jitter 분산 + capacity throttle)을 1차 잠근다(부하/타이밍 차원 확장은 Story 5.10).
+(같은 due 에 tick 2회 → CrawlJob 정확히 1건)을 결정적으로 잠근다. 추가로 100 fake 대상도
+설정 주기로 전진하고 capacity throttle 로 tick 폭주를 막는지 1차 잠근다(부하/타이밍 차원 확장은
+Story 5.10).
 
 ``pytest-asyncio`` 미도입 → ``asyncio.run`` 으로 async tick 을 구동(5.1 선례). 시각·데이터는
 주입(결정적). fake fixture 만 — 실제 토큰/전화/이메일/chat_id 형태 없음.
@@ -227,7 +228,7 @@ def test_only_due_targets_are_enqueued() -> None:
 
 
 def test_scheduler_does_not_catch_up_after_reactivation_reset() -> None:
-    # reactivation no-catchup: reset 된 next_run_at(now+interval+jitter) 이후로는 같은 now tick 에서
+    # reactivation no-catchup: reset 된 next_run_at(now+interval) 이후로는 같은 now tick 에서
     # enqueue 되지 않고(catch-up 금지), reset 시각 이후 tick 에서만 정상 enqueue 된다.
     reset_at = policy.reactivation_next_run_at("t-react", _INTERVAL_MIN, _NOW)
     assert reset_at > _NOW  # reset 은 미래여야 한다(즉시 due 금지)
@@ -623,7 +624,7 @@ def test_repeated_tick_same_due_window_creates_exactly_one_job() -> None:
 
     assert r1.enqueued_count == 1
     assert r2.enqueued_count == 0  # 두 번째 tick 은 next_run_at 전진으로 due 아님.
-    # next_run_at 이 now + interval + jitter 로 전진했다.
+    # next_run_at 이 now + interval 로 전진해 설정 주기를 지킨다.
     expected = policy.next_run_at(
         _NOW, _INTERVAL_MIN * 60, policy.compute_jitter("t-a", _INTERVAL_MIN * 60)
     )
@@ -653,7 +654,7 @@ def test_concurrent_ticks_create_exactly_one_job() -> None:
 
 # ── AC1 (c): 100 fake 대상 storm 미발생 결정적 검증 (5.10 1차 잠금) ───────────
 
-def test_hundred_targets_no_storm_jitter_spread_and_capacity_bound() -> None:
+def test_hundred_targets_advance_by_configured_interval() -> None:
     targets = [_target(f"target-{i}", interval=_INTERVAL_MIN) for i in range(100)]
     repo = FakeSchedulerRepo(
         targets=targets,
@@ -664,10 +665,9 @@ def test_hundred_targets_no_storm_jitter_spread_and_capacity_bound() -> None:
     result = asyncio.run(SchedulerService().run_tick(repo, backend, now=_NOW))
 
     assert result.enqueued_count == 100
-    # 전진된 next_run_at 이 같은 초에 몰리지 않는다(jitter 분산 — storm 미발생).
+    # 전진된 next_run_at 은 고객 설정 주기 그대로여야 한다.
     next_runs = [repo.next_run_at_of(f"target-{i}") for i in range(100)]
-    distinct_seconds = {dt.replace(microsecond=0) for dt in next_runs}
-    assert len(distinct_seconds) >= 85, f"next_run_at 분산 부족: {len(distinct_seconds)}"
+    assert set(next_runs) == {_NOW + timedelta(minutes=_INTERVAL_MIN)}
 
 
 def test_hundred_targets_capacity_bound_prevents_storm() -> None:
@@ -742,14 +742,14 @@ def test_scheduler_tick_uses_bulk_gate_and_active_job_lookups() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 # Story 5.10 / AC1 — 100 fake target scheduling smoke로 확장성 입증(NFR-26, P4 smoke)
 # (재구현 금지: 위 5.4 smoke 두 건은 무변경 유지. 본 smoke 는 AC1 문구를 명시적으로 단정한다 —
-#  단일 tick·exception/race/throttle 0·전부 PENDING·jitter 분산으로 storm 미발생.)
+#  단일 tick·exception/race/throttle 0·전부 PENDING·설정 주기 유지.)
 # ══════════════════════════════════════════════════════════════════════════
 
-def test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_jitter_spread() -> None:
+def test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_interval_preserved() -> None:
     """AC1: 100 대상 전부 due·capacity=100 → 단일 tick 에서 (1) enqueued_count==100,
     (2) 모든 outcome reason==REASON_ENQUEUED(예외/RACE_LOST/THROTTLED_CAPACITY 0),
-    (3) 각 job 이 queue 에 PENDING 으로 기록(상태 전환 정상), (4) next_run_at ≥85 distinct
-    seconds 분산(같은 초 몰림=job storm 차단).
+    (3) 각 job 이 queue 에 PENDING 으로 기록(상태 전환 정상), (4) next_run_at 이 설정 주기만큼
+    전진.
     """
 
     targets = [_target(f"target-{i}", interval=_INTERVAL_MIN) for i in range(100)]
@@ -778,16 +778,15 @@ def test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_jitter_spread
         assert snap is not None
         assert snap.status == "PENDING"
 
-    # (4) jitter 로 next_run_at 이 여러 초로 분산 → 같은 초 몰림(storm) 미발생(결정적 ≥85).
+    # (4) next_run_at 은 설정 주기 그대로 전진한다.
     next_runs = [repo.next_run_at_of(f"target-{i}") for i in range(100)]
-    distinct_seconds = {dt.replace(microsecond=0) for dt in next_runs}
-    assert len(distinct_seconds) >= 85, f"next_run_at 분산 부족(storm 위험): {len(distinct_seconds)}"
+    assert set(next_runs) == {_NOW + timedelta(minutes=_INTERVAL_MIN)}
 
 
-def test_5_10_hundred_targets_second_cycle_also_spread_no_storm() -> None:
-    """AC1(2.3): 첫 tick 후 같은 due 윈도가 닫히고(전진), T+interval 재-tick 에서도 결정적 jitter
-    가 분산을 유지해 두 번째 주기에도 storm 이 없다(결정적 jitter 특성). 첫 tick 직후 재-tick 은
-    next_run_at 전진으로 due 아님(중복 0)도 함께 잠근다.
+def test_5_10_hundred_targets_second_cycle_keeps_configured_interval() -> None:
+    """AC1(2.3): 첫 tick 후 같은 due 윈도가 닫히고(전진), T+interval 재-tick 에서도 설정 주기
+    그대로 다음 주기로 전진한다. 첫 tick 직후 재-tick 은 next_run_at 전진으로 due 아님(중복 0)도
+    함께 잠근다.
     """
 
     targets = [_target(f"target-{i}", interval=_INTERVAL_MIN) for i in range(100)]
@@ -806,15 +805,12 @@ def test_5_10_hundred_targets_second_cycle_also_spread_no_storm() -> None:
     immediate = asyncio.run(svc.run_tick(repo, backend, now=_NOW))
     assert immediate.enqueued_count == 0
 
-    # 두 번째 주기: 전진된 next_run_at 의 최댓값(now + interval + jitter, jitter≤interval)을 지나
-    # 전부 다시 due 가 되는 시점(now + 2·interval + 여유)에서 재-tick. 결정적 jitter 가 같은
-    # 분산을 유지해 두 번째 주기에도 storm 이 없다.
-    next_cycle = _NOW + timedelta(minutes=2 * _INTERVAL_MIN, seconds=1)
+    # 두 번째 주기: now + interval 이후에는 전부 다시 due 이고, 다음 예약도 설정 주기만큼 전진한다.
+    next_cycle = _NOW + timedelta(minutes=_INTERVAL_MIN, seconds=1)
     second = asyncio.run(svc.run_tick(repo, backend, now=next_cycle))
     assert second.enqueued_count == 100
     next_runs = [repo.next_run_at_of(f"target-{i}") for i in range(100)]
-    distinct_seconds = {dt.replace(microsecond=0) for dt in next_runs}
-    assert len(distinct_seconds) >= 85, f"두 번째 주기 분산 부족: {len(distinct_seconds)}"
+    assert set(next_runs) == {next_cycle + timedelta(minutes=_INTERVAL_MIN)}
 
 
 # ══════════════════════════════════════════════════════════════════════════

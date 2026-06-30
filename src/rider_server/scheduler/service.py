@@ -11,7 +11,7 @@ tick 1회 흐름(architecture-contract.md:58-66 Scheduler Rules 정본):
   ③ 플랫폼별 circuit breaker 평가(최근 15분 실패율) → open 플랫폼 skip
   ④ capacity/affinity throttle(capable+affine Agent & aggregate capacity 여유)
   ⑤ **멱등 enqueue**(활성 CrawlJob 없고 conditional advance 가 race 를 이겼을 때만)
-  ⑥ ``next_run_at = now + interval + jitter`` 전진 + ``last_enqueued_at`` 기록
+  ⑥ ``next_run_at = now + interval`` 전진 + ``last_enqueued_at`` 기록
 
 **enqueue 는 5.3 ``QueueBackend.enqueue`` 그대로 호출**(시그니처 변경 금지). scheduler 는 별도
 process 라 ``create_app`` 라우트로 노출하지 않는다(architecture-contract.md:54) — 본 모듈은 호출

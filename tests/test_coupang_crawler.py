@@ -1019,17 +1019,21 @@ def test_log_recovery_failure_masks_email_and_omits_secrets(tmp_path):
         verification_email_app_password="super-secret-app-pass",
     )
 
-    crawler._log_recovery_failure(
-        config,
-        RuntimeError(
-            "인증 메일 미도착 "
-            "rider1234@naver.com super-secret-app-pass OTP=123456 token=abc query=secret"
-        ),
+    exc = RuntimeError(
+        "인증 메일 미도착 "
+        "rider1234@naver.com super-secret-app-pass OTP=123456 token=abc query=secret"
     )
+    exc.recovery_step = "fetch_otp"
+    exc.recovery_reason = "otp_not_found"
+
+    crawler._log_recovery_failure(config, exc)
 
     log_text = (config.log_dir / "run_errors.log").read_text(encoding="utf-8")
     assert "provider=naver" in log_text
     assert "r***@naver.com" in log_text
+    assert "exception_class=RuntimeError" in log_text
+    assert "step=fetch_otp" in log_text
+    assert "reason=otp_not_found" in log_text
     assert "rider1234@naver.com" not in log_text
     assert "super-secret-app-pass" not in log_text
     assert "123456" not in log_text

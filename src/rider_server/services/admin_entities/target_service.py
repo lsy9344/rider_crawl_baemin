@@ -321,7 +321,7 @@ class TargetAdminEntityService:
                 "to_status": updated.status.value,
                 "reason": reason,
                 "schedule_reset": True,
-                "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                "next_run_at_policy": "NEXT_INTERVAL",
             },
             source=source,
             reason=reason,

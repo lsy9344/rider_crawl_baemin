@@ -1011,6 +1011,17 @@ def test_record_profile_diagnostic_partial_update_preserves_existing(tmp_path):
     assert profile["last_error_code"] == "CRAWL_TIMEOUT"  # 추가
 
 
+def test_record_profile_diagnostic_can_clear_last_error_code(tmp_path):
+    manager = _manager(tmp_path)
+    manager.ensure_profile("t1", "alpha", build_config=make_build_config())
+    manager.record_profile_diagnostic("t1", "alpha", last_error_code="AUTH_REQUIRED")
+
+    manager.record_profile_diagnostic("t1", "alpha", clear_last_error_code=True)
+
+    profile = manager.browser_profiles()[0]
+    assert "last_error_code" not in profile
+
+
 class _FakeTransport:
     """최소 fake transport — post_json 은 빈 응답(실 네트워크 0)."""
 

@@ -22,7 +22,7 @@
 밀린 `next_run_at` 이 즉시 due 가 돼 **따라잡기 수집**이 바로 돌았고, 이 즉시 수집이 Chrome/쿠팡
 로딩 지연과 만나 `CRAWL_TIMEOUT` 을 잠깐 노출했다.
 
-수정 후에는 재활성화 시 `monitoring_targets.next_run_at` 이 **다음 주기(`now + interval + jitter`)**
+수정 후에는 재활성화 시 `monitoring_targets.next_run_at` 이 **다음 주기(`now + interval`)**
 로 밀려, 활성화 직후 즉시 수집이 생기지 않는다. 즉시 확인이 필요하면 `지금 수집`(test-crawl)
 버튼을 쓴다(이 수동 액션은 정책과 무관하게 즉시 enqueue 된다).
 
@@ -45,7 +45,7 @@ WHERE tenant_id = '<tenant_id>'
 ORDER BY name;
 ```
 
-기대: ACTIVE 대상의 `next_run_at` 이 미래(`now + interval + jitter`)다. 즉시 새 `CRAWL_*` job 이
+기대: ACTIVE 대상의 `next_run_at` 이 미래(`now + interval`)다. 즉시 새 `CRAWL_*` job 이
 생기지 않는다.
 
 ## 일반 scheduled crawl 에서 timeout 이 반복될 때 (단계별 증거)

@@ -74,9 +74,13 @@ def compute_jitter(target_id: str, interval_seconds: int) -> int:
 
 
 def next_run_at(now: datetime, interval_seconds: int, jitter_seconds: int) -> datetime:
-    """다음 실행 시각 = ``now + interval + jitter``(결정적). 같은 due 가 재진입하지 않게 전진."""
+    """다음 실행 시각 = ``now + interval``. 반복 수집 주기는 고객 설정값 그대로 지킨다.
 
-    return now + timedelta(seconds=interval_seconds + jitter_seconds)
+    ``jitter_seconds`` 는 기존 호출부와 정책 테스트 호환을 위해 받지만, 반복 주기에 더하지 않는다.
+    jitter 를 매 주기마다 더하면 10분 설정 대상이 16~17분 주기로 밀릴 수 있다.
+    """
+
+    return now + timedelta(seconds=interval_seconds)
 
 
 def is_due(next_run_at_value: datetime | None, now: datetime) -> bool:
@@ -99,11 +103,10 @@ def reactivation_next_run_at(
     """비활성→활성 복귀 시 다음 수집 시각(결정적, **항상 ``> now``**).
 
     inactive/paused 동안 밀린 스케줄을 즉시 due 로 만들어 따라잡기(catch-up) 수집이 돌지 않게,
-    재활성화 시 ``next_run_at`` 을 미래로 민다. **scheduler 와 같은 계산식**(:func:`compute_jitter`
-    + :func:`next_run_at`)을 재사용해 평행 정책을 만들지 않는다 — 같은 ``target_id`` 는 scheduler
-    전진과 동일한 결정적 jitter 를 받는다.
+    재활성화 시 ``next_run_at`` 을 미래로 민다. **scheduler 와 같은 계산식**(:func:`next_run_at`)을
+    재사용해 평행 정책을 만들지 않는다. 반복 주기는 고객 설정값 그대로 유지한다.
 
-    ``interval_minutes`` 가 0/음수면 ``now + interval + jitter == now`` 가 돼 즉시 due(``<= now``)가
+    ``interval_minutes`` 가 0/음수면 ``now + interval`` 이 ``now`` 이하가 돼 즉시 due(``<= now``)가
     되므로, :data:`REACTIVATION_MIN_DEFER_SECONDS` 하한으로 strict-future 를 보장한다(이 경로의
     유일한 목적이 "즉시 catch-up 금지" 이므로 0-interval 도 예외 없이 미래로 민다).
     """
@@ -121,7 +124,7 @@ def reactivation_schedule_resets(
     """``(target_id, interval_minutes)`` 들에 대한 no-catchup ``next_run_at`` 맵(결정적).
 
     고객/구독 단위 재활성화에서 여러 ACTIVE 대상의 schedule 을 한 번에 reset 할 때 쓴다 —
-    :func:`reactivation_next_run_at` 를 대상별로 호출한다(같은 ``target_id`` 는 같은 jitter).
+    :func:`reactivation_next_run_at` 를 대상별로 호출한다.
     ACTIVE 필터는 호출부 책임이다(이 함수는 받은 대상만 계산한다).
     """
 

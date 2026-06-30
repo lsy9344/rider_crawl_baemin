@@ -58,7 +58,7 @@
 ## scale smoke commands
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/server/test_scheduler_tick.py::test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_jitter_spread -q
+.venv\Scripts\python.exe -m pytest tests/server/test_scheduler_tick.py::test_5_10_hundred_targets_single_tick_all_enqueued_pending_and_interval_preserved -q
 .venv\Scripts\python.exe -m pytest tests/server/test_scale_readiness.py -q
 ```
 

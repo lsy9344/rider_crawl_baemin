@@ -894,7 +894,11 @@ def _try_recover_coupang_session(
         _log_recovery_failure(config, exc)
         return False
     if not succeeded:
-        _log_recovery_failure(config, RuntimeError("자동복구 불가 화면(로그인 제출 실패 또는 비대상 화면)"))
+        exc = RuntimeError("자동복구 불가 화면(로그인 제출 실패 또는 비대상 화면)")
+        exc.recovery_step = "page_selection"
+        exc.recovery_reason = "non_target_or_submit_failed"
+        exc.recovery_diagnostics = _recovery_page_diagnostics(page)
+        _log_recovery_failure(config, exc)
     return succeeded
 
 
@@ -919,6 +923,45 @@ _EMAIL_PROVIDER_BY_DOMAIN = {
     "gmail.com": "gmail",
     "googlemail.com": "gmail",
 }
+_SAFE_RECOVERY_STEPS = frozenset(
+    {
+        "primary_login",
+        "select_email_auth",
+        "click_send_code",
+        "fetch_otp",
+        "fill_code",
+        "submit",
+        "reopen_target",
+        "page_selection",
+    }
+)
+_SAFE_RECOVERY_REASONS = frozenset(
+    {
+        "otp_not_found",
+        "non_target_or_submit_failed",
+        "verification_mail_delayed",
+        "repeated_recovery_failure",
+        "browser_unavailable",
+        "captcha_or_abnormal_login",
+        "email_auth_required",
+        "mail_app_password_invalid",
+        "imap_access_disabled",
+        "unsupported_email_domain",
+        "mailbox_auth_blocked",
+        "mailbox_login_failed",
+    }
+)
+_SAFE_DIAGNOSTIC_KEYS = (
+    "code_found",
+    "msgs_found",
+    "latest_code_age_s",
+    "within_poll_window",
+    "email_2fa_poll_seconds",
+    "email_2fa_poll_interval_seconds",
+    "page_host",
+    "page_path",
+    "login_page",
+)
 
 
 def _email_domain(address: str) -> str:
@@ -944,15 +987,85 @@ def _log_recovery_failure(config: AppConfig, exc: Exception) -> None:
         provider = _EMAIL_PROVIDER_BY_DOMAIN.get(_email_domain(address), "unknown")
         masked = _mask_email_address(address)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        details = _safe_recovery_failure_details(exc)
+        detail_text = _format_recovery_details(details)
         line = (
             f"[{ts}] 쿠팡 이메일 2FA 자동복구 실패 "
-            f"(provider={provider}, email={masked}): 인증 이메일 설정 또는 메일 수신 상태 확인 필요\n"
+            f"(provider={provider}, email={masked}{detail_text}): "
+            "인증 이메일 설정 또는 메일 수신 상태 확인 필요\n"
             "----------------------------------------\n"
         )
         with (log_dir / "run_errors.log").open("a", encoding="utf-8") as file:
             file.write(line)
     except Exception:
         pass
+
+
+def _safe_recovery_failure_details(exc: Exception) -> dict[str, object]:
+    details: dict[str, object] = {"exception_class": _safe_exception_class(exc)}
+    step = str(getattr(exc, "recovery_step", "") or "").strip()
+    if step in _SAFE_RECOVERY_STEPS:
+        details["step"] = step
+    reason = str(getattr(exc, "recovery_reason", "") or "").strip()
+    if reason in _SAFE_RECOVERY_REASONS:
+        details["reason"] = reason
+    details.update(_safe_recovery_diagnostics(getattr(exc, "recovery_diagnostics", None)))
+    return details
+
+
+def _safe_exception_class(exc: Exception) -> str:
+    name = type(exc).__name__
+    return name if name.isidentifier() and len(name) <= 80 else "Exception"
+
+
+def _safe_recovery_diagnostics(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, object] = {}
+    for key in _SAFE_DIAGNOSTIC_KEYS:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if key in {"code_found", "within_poll_window", "login_page"}:
+            if isinstance(item, bool):
+                safe[key] = item
+        elif key in {
+            "msgs_found",
+            "latest_code_age_s",
+            "email_2fa_poll_seconds",
+            "email_2fa_poll_interval_seconds",
+        }:
+            if item is None and key == "latest_code_age_s":
+                safe[key] = None
+            elif isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+                safe[key] = item
+        elif key == "page_host" and isinstance(item, str):
+            host = (urlsplit(item).hostname or item).strip().split("/", 1)[0]
+            if host and len(host) <= 120:
+                safe[key] = host
+        elif key == "page_path" and isinstance(item, str):
+            path = urlsplit(item).path or item.split("?", 1)[0]
+            path = path.strip()
+            if path and len(path) <= 200:
+                safe[key] = path
+    return safe
+
+
+def _format_recovery_details(details: dict[str, object]) -> str:
+    keys = ("exception_class", "step", "reason", *_SAFE_DIAGNOSTIC_KEYS)
+    parts = [f"{key}={details[key]}" for key in keys if key in details]
+    return ", " + ", ".join(parts) if parts else ""
+
+
+def _recovery_page_diagnostics(page: Any) -> dict[str, object]:
+    diagnostics: dict[str, object] = {}
+    parsed = urlsplit(str(getattr(page, "url", "") or ""))
+    if parsed.hostname:
+        diagnostics["page_host"] = parsed.hostname
+    if parsed.path:
+        diagnostics["page_path"] = parsed.path
+    diagnostics["login_page"] = _page_looks_like_coupang_login_required(page)
+    return diagnostics
 
 
 def _url_host_path(url: str) -> str:

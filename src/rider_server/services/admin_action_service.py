@@ -655,7 +655,7 @@ class AdminActionService:
                 **(
                     {
                         "schedule_reset": True,
-                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                        "next_run_at_policy": "NEXT_INTERVAL",
                     }
                     if schedule_reset_to is not None
                     else {}
@@ -1125,7 +1125,7 @@ class AdminActionService:
                 **(
                     {
                         "schedule_reset_targets": len(schedule_resets),
-                        "next_run_at_policy": "NEXT_INTERVAL_WITH_JITTER",
+                        "next_run_at_policy": "NEXT_INTERVAL",
                     }
                     if schedule_resets
                     else {}

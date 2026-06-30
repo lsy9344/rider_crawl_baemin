@@ -47,6 +47,8 @@ REASON_EMAIL_AUTH = "email_auth_required"
 REASON_MAIL_DELAY = "verification_mail_delayed"
 REASON_REPEATED_FAILURE = "repeated_recovery_failure"
 REASON_BROWSER_UNAVAILABLE = "browser_unavailable"
+REASON_OTP_NOT_FOUND = "otp_not_found"
+REASON_NON_TARGET_OR_SUBMIT_FAILED = "non_target_or_submit_failed"
 
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
 DEFAULT_RECOVERY_BACKOFF_SECONDS = 1.0
@@ -74,6 +76,54 @@ _SAFE_EMAIL_AUTH_REASONS = frozenset(
         "mailbox_auth_blocked",
         "mailbox_login_failed",
     }
+)
+_SAFE_RECOVERY_REASONS = _SAFE_EMAIL_AUTH_REASONS | frozenset(
+    {
+        REASON_CAPTCHA_OR_ABNORMAL,
+        REASON_MAIL_DELAY,
+        REASON_REPEATED_FAILURE,
+        REASON_BROWSER_UNAVAILABLE,
+        REASON_OTP_NOT_FOUND,
+        REASON_NON_TARGET_OR_SUBMIT_FAILED,
+    }
+)
+_SAFE_RECOVERY_STEPS = frozenset(
+    {
+        "primary_login",
+        "select_email_auth",
+        "click_send_code",
+        "fetch_otp",
+        "fill_code",
+        "submit",
+        "reopen_target",
+        "page_selection",
+    }
+)
+_SAFE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "code_found",
+        "msgs_found",
+        "latest_code_age_s",
+        "within_poll_window",
+        "email_2fa_poll_seconds",
+        "email_2fa_poll_interval_seconds",
+        "page_host",
+        "page_path",
+        "login_page",
+    }
+)
+_RESULT_DIAGNOSTIC_KEYS = (
+    "step",
+    "exception_class",
+    "code_found",
+    "msgs_found",
+    "latest_code_age_s",
+    "within_poll_window",
+    "email_2fa_poll_seconds",
+    "email_2fa_poll_interval_seconds",
+    "page_host",
+    "page_path",
+    "login_page",
 )
 
 # 세부 복구 상태 → 계정 coarse gate 상태(Decision 3: account=coarse gate, job=detailed state).
@@ -297,16 +347,95 @@ def _failure_result(
     reason: str,
     attempts: int,
     log: Callable[[str], None] | None,
+    *,
+    exc: BaseException | None = None,
+    step: str | None = None,
 ) -> JobResult:
     error_code = _STATE_TO_ERROR.get(state, ERROR_RECOVERY_FAILED)
+    details = _failure_details(exc=exc, step=step)
     if log is not None:
-        log(redact(f"coupang email 2fa recovery stopped: {state} (mailbox {mailbox_ref})"))
+        detail_text = _format_failure_details(details)
+        log(
+            redact(
+                "coupang email 2fa recovery stopped: "
+                f"{state} reason={reason}{detail_text} (mailbox {mailbox_ref})"
+            )
+        )
+    result_json = {"mailbox_credential_ref": mailbox_ref, "state": state, "reason": reason}
+    result_json.update(details)
+    metrics = {"reason": reason, "attempts": attempts}
+    metrics.update(details)
     return make_failure_result(
         error_code,
         "coupang email 2fa recovery stopped at bounded limit",
-        result_json={"mailbox_credential_ref": mailbox_ref, "state": state, "reason": reason},
-        metrics={"reason": reason, "attempts": attempts},
+        result_json=result_json,
+        metrics=metrics,
     )
+
+
+def _failure_details(
+    *,
+    exc: BaseException | None,
+    step: str | None = None,
+) -> dict[str, object]:
+    details: dict[str, object] = {}
+    safe_step = _safe_step(getattr(exc, "recovery_step", None)) or _safe_step(step)
+    if safe_step is not None:
+        details["step"] = safe_step
+    if exc is not None:
+        details["exception_class"] = _safe_exception_class(exc)
+        details.update(_safe_diagnostics(getattr(exc, "recovery_diagnostics", None)))
+    return details
+
+
+def _safe_step(value: object) -> str | None:
+    step = str(value or "").strip()
+    return step if step in _SAFE_RECOVERY_STEPS else None
+
+
+def _safe_reason(value: object) -> str | None:
+    reason = str(value or "").strip()
+    return reason if reason in _SAFE_RECOVERY_REASONS else None
+
+
+def _safe_exception_class(exc: BaseException) -> str:
+    name = type(exc).__name__
+    return name if name.isidentifier() and len(name) <= 80 else "Exception"
+
+
+def _safe_diagnostics(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, object] = {}
+    for key in _SAFE_DIAGNOSTIC_KEYS:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if key in {"code_found", "within_poll_window", "login_page"}:
+            if isinstance(item, bool):
+                safe[key] = item
+        elif key in {
+            "msgs_found",
+            "latest_code_age_s",
+            "email_2fa_poll_seconds",
+            "email_2fa_poll_interval_seconds",
+        }:
+            if item is None and key == "latest_code_age_s":
+                safe[key] = None
+            elif isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+                safe[key] = item
+        elif key in {"page_host", "page_path"} and isinstance(item, str):
+            clean = item.strip()
+            if clean and len(clean) <= 200:
+                safe[key] = clean
+    return safe
+
+
+def _format_failure_details(details: dict[str, object]) -> str:
+    if not details:
+        return ""
+    parts = [f"{key}={details[key]}" for key in _RESULT_DIAGNOSTIC_KEYS if key in details]
+    return " " + " ".join(parts) if parts else ""
 
 
 def recover_coupang_mailbox(
@@ -342,7 +471,13 @@ def recover_coupang_mailbox(
                 if state == STATE_USER_ACTION_REQUIRED:
                     # 실제 캡차/이상 로그인 — 사람 조치 필요, 재시도하지 않는다.
                     return _failure_result(
-                        state, mailbox_ref, REASON_CAPTCHA_OR_ABNORMAL, attempts, log
+                        state,
+                        mailbox_ref,
+                        REASON_CAPTCHA_OR_ABNORMAL,
+                        attempts,
+                        log,
+                        exc=exc,
+                        step="page_selection",
                     )
                 if state == STATE_EMAIL_AUTH_REQUIRED:
                     return _failure_result(
@@ -351,6 +486,8 @@ def recover_coupang_mailbox(
                         default_email_auth_reason(exc),
                         attempts,
                         log,
+                        exc=exc,
+                        step="fetch_otp",
                     )
                 if _email_auth_flag(is_browser_unavailable, exc) is True:
                     return _failure_result(
@@ -359,10 +496,23 @@ def recover_coupang_mailbox(
                         REASON_BROWSER_UNAVAILABLE,
                         attempts,
                         log,
+                        exc=exc,
+                        step="page_selection",
                     )
                 if attempts >= max_attempts:
-                    reason = REASON_REPEATED_FAILURE if attempts > 1 else REASON_MAIL_DELAY
-                    return _failure_result(STATE_RECOVERY_FAILED, mailbox_ref, reason, attempts, log)
+                    reason = (
+                        _safe_reason(getattr(exc, "recovery_reason", None))
+                        or (REASON_REPEATED_FAILURE if attempts > 1 else REASON_MAIL_DELAY)
+                    )
+                    return _failure_result(
+                        STATE_RECOVERY_FAILED,
+                        mailbox_ref,
+                        reason,
+                        attempts,
+                        log,
+                        exc=exc,
+                        step="page_selection",
+                    )
                 sleep(backoff_seconds)
                 continue
 
@@ -373,8 +523,19 @@ def recover_coupang_mailbox(
             # 실패로 다룬다. 캡차로 단정하지 않으므로 RECOVERY_FAILED 로 닫혀 AUTH_REQUIRED 로
             # 매핑되고(데드 USER_ACTION_PENDING 아님) cooldown 뒤 다시 자동 복구 대상이 된다.
             if attempts >= max_attempts:
-                reason = REASON_REPEATED_FAILURE if attempts > 1 else REASON_MAIL_DELAY
-                return _failure_result(STATE_RECOVERY_FAILED, mailbox_ref, reason, attempts, log)
+                reason = (
+                    REASON_REPEATED_FAILURE
+                    if attempts > 1
+                    else REASON_NON_TARGET_OR_SUBMIT_FAILED
+                )
+                return _failure_result(
+                    STATE_RECOVERY_FAILED,
+                    mailbox_ref,
+                    reason,
+                    attempts,
+                    log,
+                    step="page_selection",
+                )
             sleep(backoff_seconds)
             continue
 
@@ -682,6 +843,9 @@ def execute_auth_coupang_2fa_job(
     reason = (inner.result_json or {}).get("reason")
     if reason:
         result_json["reason"] = reason
+    for key in _RESULT_DIAGNOSTIC_KEYS:
+        if (inner.result_json or {}).get(key) is not None:
+            result_json[key] = (inner.result_json or {})[key]
 
     if inner.status == JOB_STATUS_SUCCESS:
         return make_success_result(result_json=result_json, metrics=inner.metrics)
