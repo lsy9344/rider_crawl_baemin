@@ -1,0 +1,260 @@
+"""Tests for the Kakao inbound event decision core (Phase 3, pure logic).
+
+These lock the server's mapping/gate/dedupe contract without FastAPI, the DB, or
+the queue. The async orchestration + HTTP route are tested separately once wired.
+"""
+
+import pytest
+
+from rider_server.queue.states import JOB_TYPE_RIDER_LOOKUP
+from rider_server.services.kakao_inbound_event_service import (
+    ACTION_DUPLICATE,
+    ACTION_ENQUEUE_LOOKUP,
+    ACTION_REJECT,
+    ACTION_REPLY,
+    COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP,
+    LOOKUP_JOB_TYPE,
+    REASON_CHANNEL_INACTIVE,
+    REASON_COMMAND_DISABLED,
+    REASON_INVALID_EVENT,
+    REASON_LOOKUP_IN_FLIGHT,
+    REASON_RATE_LIMITED,
+    REASON_SENDING_DISABLED,
+    REASON_TARGET_UNMAPPED,
+    REASON_TENANT_DISABLED,
+    REASON_UNKNOWN_ROOM,
+    REASON_UNSUPPORTED_PLATFORM,
+    ChannelView,
+    InboundCommandInput,
+    InboundContext,
+    InboundEventInput,
+    TargetView,
+    decide_inbound_event,
+    origin_event_key,
+)
+
+
+def _channel(channel_id="ch1", tenant_id="t1", room="운영방", chat_id=None, state="ACTIVE", enabled=True):
+    return ChannelView(
+        channel_id=channel_id,
+        tenant_id=tenant_id,
+        messenger="KAKAO",
+        kakao_room_name=room,
+        kakao_chat_id=chat_id,
+        state=state,
+        command_trigger_enabled=enabled,
+    )
+
+
+def _target(target_id="tg1", tenant_id="t1", platform="baemin", status="ACTIVE"):
+    return TargetView(
+        target_id=target_id,
+        tenant_id=tenant_id,
+        platform=platform,
+        platform_account_id="acc1",
+        primary_url="https://deliverycenter.baemin.com/delivery/history",
+        expected_display_name="남구센터",
+        status=status,
+        external_id="ext1",
+    )
+
+
+def _event(chat_id="111", room="운영방", name="강민기", phone="1234", log_id="1002",
+           type=COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP, source="pc_kakao_db", digest="sha256:abc"):
+    return InboundEventInput(
+        source=source,
+        kakao_user_hash_digest=digest,
+        chat_id=chat_id,
+        room_name=room,
+        last_log_id=log_id,
+        command=InboundCommandInput(type=type, name=name, phone_last4=phone),
+    )
+
+
+def _ctx(channels, targets_by_channel=None, **kw):
+    return InboundContext(
+        channels=tuple(channels),
+        targets_by_channel=targets_by_channel if targets_by_channel is not None else {"ch1": (_target(),)},
+        sending_enabled=kw.get("sending_enabled", True),
+        existing_event_keys=frozenset(kw.get("existing_event_keys", ())),
+        in_flight_target_ids=frozenset(kw.get("in_flight_target_ids", ())),
+        inactive_tenant_ids=frozenset(kw.get("inactive_tenant_ids", ())),
+        rate_limited_channel_ids=frozenset(kw.get("rate_limited_channel_ids", ())),
+    )
+
+
+# --- command validation ---------------------------------------------------
+
+@pytest.mark.parametrize("command", [
+    InboundCommandInput("WRONG_TYPE", "강민기", "1234"),
+    InboundCommandInput(COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP, "", "1234"),
+    InboundCommandInput(COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP, "강민기", "12"),
+    InboundCommandInput(COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP, "강민기", "abcd"),
+])
+def test_invalid_command_rejected(command):
+    event = InboundEventInput("pc_kakao_db", "sha256:abc", "111", "운영방", "1002", command)
+    decision = decide_inbound_event(event, _ctx([_channel(chat_id="111")]))
+
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_INVALID_EVENT
+
+
+# --- room / channel mapping ----------------------------------------------
+
+def test_unknown_room_rejected():
+    decision = decide_inbound_event(_event(room="없는방", chat_id=""), _ctx([_channel(room="운영방")]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_UNKNOWN_ROOM
+
+
+def test_inactive_channel_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel(state="PENDING")]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_CHANNEL_INACTIVE
+
+
+def test_command_disabled_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel(enabled=False)]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_COMMAND_DISABLED
+
+
+def test_chat_id_conflict_fails_closed():
+    # Stored chat_id differs from inbound chat_id; same room name must NOT match.
+    channel = _channel(chat_id="999")
+    decision = decide_inbound_event(_event(chat_id="111", room="운영방"), _ctx([channel]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_UNKNOWN_ROOM
+
+
+def test_ambiguous_room_across_channels_rejected():
+    channels = [_channel(channel_id="ch1", tenant_id="t1"), _channel(channel_id="ch2", tenant_id="t2")]
+    targets = {"ch1": (_target(),), "ch2": (_target(target_id="tg2", tenant_id="t2"),)}
+    decision = decide_inbound_event(_event(chat_id=""), _ctx(channels, targets))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_UNKNOWN_ROOM
+
+
+def test_matches_bound_channel_by_chat_id_regardless_of_room():
+    # Bound channel matches by chat_id even when the inbound room name differs.
+    channel = _channel(chat_id="111", room="저장된방")
+    decision = decide_inbound_event(_event(chat_id="111", room="다른표시명"), _ctx([channel]))
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+
+
+# --- target mapping -------------------------------------------------------
+
+def test_zero_targets_unmapped():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], {"ch1": ()}))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_TARGET_UNMAPPED
+
+
+def test_multiple_targets_unmapped():
+    targets = {"ch1": (_target(target_id="a"), _target(target_id="b"))}
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], targets))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_TARGET_UNMAPPED
+
+
+def test_only_active_target_counts():
+    targets = {"ch1": (_target(target_id="a", status="INACTIVE"), _target(target_id="b"))}
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], targets))
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+    assert decision.target_id == "b"
+
+
+# --- gates ----------------------------------------------------------------
+
+def test_unsupported_platform_enqueues_scoped_reply():
+    targets = {"ch1": (_target(platform="coupang"),)}
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], targets))
+    assert decision.action == ACTION_REPLY
+    assert decision.reason == REASON_UNSUPPORTED_PLATFORM
+    assert decision.accepted is False
+    assert decision.reply_text == "라이더 조회 명령은 배민 탭에서만 지원합니다."
+    assert decision.reply_kakao_room_name == "운영방"
+
+
+def test_tenant_disabled_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], inactive_tenant_ids=["t1"]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_TENANT_DISABLED
+
+
+def test_sending_disabled_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], sending_enabled=False))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_SENDING_DISABLED
+
+
+def test_rate_limited_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], rate_limited_channel_ids=["ch1"]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_RATE_LIMITED
+
+
+def test_lookup_in_flight_rejected():
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], in_flight_target_ids=["tg1"]))
+    assert decision.action == ACTION_REJECT
+    assert decision.reason == REASON_LOOKUP_IN_FLIGHT
+
+
+# --- dedupe + enqueue -----------------------------------------------------
+
+def test_duplicate_event_is_idempotent_accept():
+    event = _event(chat_id="")
+    key = origin_event_key(event)
+    decision = decide_inbound_event(event, _ctx([_channel()], existing_event_keys=[key]))
+    assert decision.action == ACTION_DUPLICATE
+    assert decision.accepted is True
+    assert decision.duplicate is True
+
+
+def test_enqueue_lookup_builds_payload_and_binds_chat_id():
+    event = _event(chat_id="111", room="운영방")  # channel unbound -> should bind
+    decision = decide_inbound_event(event, _ctx([_channel(chat_id=None)]))
+
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+    assert decision.accepted is True
+    assert decision.duplicate is False
+    assert decision.bind_chat_id == "111"
+    assert LOOKUP_JOB_TYPE == JOB_TYPE_RIDER_LOOKUP
+
+    payload = decision.job_payload
+    assert payload["tenant_id"] == "t1"
+    assert payload["target_id"] == "tg1"
+    assert payload["platform"] == "baemin"
+    assert payload["platform_account_id"] == "acc1"
+    assert payload["primary_url"].endswith("/delivery/history")
+    assert payload["expected_display_name"] == "남구센터"
+    assert payload["reply_channel_id"] == "ch1"
+    assert payload["reply_messenger"] == "KAKAO"
+    assert payload["reply_kakao_room_name"] == "운영방"
+    assert payload["origin"] == "kakao_inbound"
+    assert payload["origin_event_key"] == decision.origin_event_key
+    assert payload["command"] == {"type": COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP, "name": "강민기", "phone_last4": "1234"}
+    assert payload["external_id"] == "ext1"
+
+
+def test_enqueue_does_not_bind_when_channel_already_bound():
+    decision = decide_inbound_event(_event(chat_id="111"), _ctx([_channel(chat_id="111")]))
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+    assert decision.bind_chat_id == ""
+
+
+# --- origin_event_key -----------------------------------------------------
+
+def test_origin_event_key_is_deterministic_and_prefixed():
+    event = _event(chat_id="111")
+    assert origin_event_key(event) == origin_event_key(event)
+    assert origin_event_key(event).startswith("sha256:")
+
+
+def test_origin_event_key_uses_room_name_when_chat_id_absent():
+    by_chat = origin_event_key(_event(chat_id="111", room="운영방"))
+    by_room = origin_event_key(_event(chat_id="", room="운영방"))
+    # Different scope inputs (chat_id vs room) yield different keys.
+    assert by_chat != by_room
+    # Same room with empty chat_id is stable.
+    assert by_room == origin_event_key(_event(chat_id="", room="운영방"))
