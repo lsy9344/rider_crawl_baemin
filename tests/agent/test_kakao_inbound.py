@@ -34,12 +34,14 @@ from rider_agent.kakao_inbound import (
     KakaoInboundConfig,
     KakaoInboundSubmitError,
     KakaoInboundWatcher,
+    RefreshingKakaoInboundWatcher,
     KakaoRoomConfig,
     KAKAO_DB_KEY_REF,
     KAKAO_USER_HASH_REF,
     KakaoWatchlist,
     KakaoWatchlistClient,
     LocalKakaoInboundSettings,
+    ScanReport,
     _parse_watchlist,
     build_kakao_inbound_watcher,
     build_kakao_inbound_watcher_from_sources,
@@ -616,11 +618,15 @@ def test_rooms_prefer_server_watchlist_over_local_fallback():
     assert rooms == (KakaoRoomConfig(room_name="서버방", chat_id="1"),)
 
 
-def test_rooms_fall_back_to_local_when_watchlist_unavailable_or_empty():
+def test_rooms_fall_back_to_local_when_watchlist_unavailable():
     local = (KakaoRoomConfig(room_name="로컬방"),)
     assert resolve_kakao_inbound_rooms(watchlist=None, fallback_rooms=local) == local
+
+
+def test_rooms_do_not_fall_back_when_server_watchlist_is_empty():
+    local = (KakaoRoomConfig(room_name="local-room"),)
     empty = KakaoWatchlist(enabled=True, config_version="v", rooms=())
-    assert resolve_kakao_inbound_rooms(watchlist=empty, fallback_rooms=local) == local
+    assert resolve_kakao_inbound_rooms(watchlist=empty, fallback_rooms=local) == ()
 
 
 # --- local settings loader + reader factory -------------------------------
@@ -730,10 +736,119 @@ def test_from_sources_uses_local_fallback_when_no_server_watchlist():
     assert watcher._config.rooms == (KakaoRoomConfig("카나리방", "9"),)
 
 
+def test_from_sources_disabled_when_server_watchlist_empty_even_with_local_fallback():
+    watcher, reason = _from_sources(
+        settings=LocalKakaoInboundSettings(
+            enabled=True,
+            chat_list_db_path="a.edb",
+            fallback_rooms=(KakaoRoomConfig("local-room", "9"),),
+        ),
+        watchlist=KakaoWatchlist(enabled=True, config_version="v", rooms=()),
+    )
+    assert watcher is None
+    assert reason == REASON_EMPTY_WATCHLIST
+
+
 def test_from_sources_disabled_when_no_rooms_anywhere():
     watcher, reason = _from_sources(watchlist=None)  # no server rooms, no fallback
     assert watcher is None
     assert reason == REASON_EMPTY_WATCHLIST
+
+
+class _FakeWatchlistClient:
+    def __init__(self, values):
+        self._values = list(values)
+        self.fetches = 0
+
+    def fetch(self):
+        self.fetches += 1
+        if self._values:
+            return self._values.pop(0)
+        return None
+
+
+class _ScanOnlyWatcher:
+    def __init__(self):
+        self.scans = 0
+
+    def scan_once(self):
+        self.scans += 1
+        return ScanReport(health=HEALTH_ACTIVE, reason=REASON_OK, rooms_scanned=1)
+
+    def health(self):
+        return {"state": HEALTH_ACTIVE, "reason": REASON_OK}
+
+
+def _refreshing_watcher(client, builder):
+    return RefreshingKakaoInboundWatcher(
+        identity=_identity(),
+        transport=FakeTransport(),
+        base_url="https://s",
+        settings=LocalKakaoInboundSettings(enabled=True, chat_list_db_path="a.edb"),
+        secret_resolver=lambda ref: {
+            KAKAO_DB_KEY_REF: "KEY",
+            KAKAO_USER_HASH_REF: "rawhash",
+        }.get(ref),
+        session_probe=lambda: True,
+        state_path="s.json",
+        watchlist_client=client,
+        builder=builder,
+        refresh_interval_seconds=0,
+    )
+
+
+def test_refreshing_watcher_rebuilds_when_config_version_changes():
+    active = _ScanOnlyWatcher()
+    seen_versions = []
+
+    def builder(**kwargs):
+        watchlist = kwargs["watchlist"]
+        seen_versions.append(watchlist.config_version if watchlist is not None else None)
+        if watchlist is not None and watchlist.rooms:
+            return active, REASON_OK
+        return None, REASON_EMPTY_WATCHLIST
+
+    client = _FakeWatchlistClient([
+        KakaoWatchlist(enabled=True, config_version="v1", rooms=()),
+        KakaoWatchlist(
+            enabled=True,
+            config_version="v2",
+            rooms=(KakaoRoomConfig("server-room", "1"),),
+        ),
+    ])
+    watcher = _refreshing_watcher(client, builder)
+
+    assert watcher.scan_once() == ScanReport(
+        health=HEALTH_DISABLED, reason=REASON_EMPTY_WATCHLIST
+    )
+    assert watcher.scan_once().rooms_scanned == 1
+    assert seen_versions == ["v1", "v2"]
+    assert active.scans == 1
+
+
+def test_refreshing_watcher_reuses_inner_when_config_version_unchanged():
+    active = _ScanOnlyWatcher()
+    builds = 0
+
+    def builder(**kwargs):
+        nonlocal builds
+        builds += 1
+        return active, REASON_OK
+
+    watchlist = KakaoWatchlist(
+        enabled=True,
+        config_version="same",
+        rooms=(KakaoRoomConfig("server-room", "1"),),
+    )
+    watcher = _refreshing_watcher(
+        _FakeWatchlistClient([watchlist, watchlist]),
+        builder,
+    )
+
+    assert watcher.scan_once().rooms_scanned == 1
+    assert watcher.scan_once().rooms_scanned == 1
+    assert builds == 1
+    assert active.scans == 2
 
 
 def test_from_sources_never_logs_secrets():

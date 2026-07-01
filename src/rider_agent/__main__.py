@@ -159,6 +159,14 @@ def _append_agent_log(message: str, *, log_path: object | None = None) -> None:
         fh.write(f"{timestamp} {safe_message}\n")
 
 
+def _kakao_inbound_refresh_interval_seconds() -> float:
+    raw = os.getenv("RIDER_AGENT_KAKAO_INBOUND_REFRESH_SECONDS", "30")
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def _build_kakao_inbound_watcher(
     *,
     store: object,
@@ -178,7 +186,7 @@ def _build_kakao_inbound_watcher(
 
     from rider_agent.kakao_inbound import (
         KakaoWatchlistClient,
-        build_kakao_inbound_watcher_from_sources,
+        RefreshingKakaoInboundWatcher,
         load_local_kakao_inbound_settings,
     )
     from rider_agent.secure_store import load_local_agent_identity
@@ -191,23 +199,22 @@ def _build_kakao_inbound_watcher(
         settings = load_local_kakao_inbound_settings(config_path)
         if not settings.enabled:
             return None
-        watchlist = KakaoWatchlistClient(
+        watchlist_client = KakaoWatchlistClient(
             identity, transport=transport, base_url=base_url, log=_append_agent_log
-        ).fetch()
+        )
         state_path = app_state_root() / "runtime" / "state" / "kakao-inbound.json"
-        session_interactive = bool(session_probe()) if callable(session_probe) else True
-        watcher, _reason = build_kakao_inbound_watcher_from_sources(
+        return RefreshingKakaoInboundWatcher(
             identity=identity,
             transport=transport,
             base_url=base_url,
             settings=settings,
             secret_resolver=getattr(store, "resolve", None),
-            session_interactive=session_interactive,
+            session_probe=session_probe if callable(session_probe) else None,
             state_path=state_path,
-            watchlist=watchlist,
+            watchlist_client=watchlist_client,
+            refresh_interval_seconds=_kakao_inbound_refresh_interval_seconds(),
             log=_append_agent_log,
         )
-        return watcher
     except Exception as exc:  # noqa: BLE001 — inbound setup must never break the loop
         _append_agent_log(redact(f"kakao inbound setup skipped: {exc}"))
         return None

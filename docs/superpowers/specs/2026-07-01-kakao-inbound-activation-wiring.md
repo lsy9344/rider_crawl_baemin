@@ -46,6 +46,8 @@
     }
   }
   ```
+- Agent runtime 은 `RefreshingKakaoInboundWatcher` 로 watchlist 를 주기적으로 다시 가져와
+  `config_version`/room fingerprint 변경 시 내부 watcher 를 재조립한다.
 - `config_version` 으로 변경 감지(Agent 는 폴링 캐시; 버전 동일이면 재적용 생략).
 - **범위를 줄여야 하면** heartbeat 응답 확장(`commands`/`config_version` 옆
   `kakao_inbound` 필드)을 fallback 경로로 쓴다. 별도 endpoint 를 1차 선호.
@@ -67,6 +69,7 @@ effective_enabled =
     && session_interactive           # KakaoTalk 실행 세션 필요(kakao_sender 와 동일)
     && server_watchlist.enabled
     && server_watchlist.rooms non-empty
+    # if the server explicitly returns rooms: [], local fallback rooms are not used
 ```
 - 어느 하나라도 실패 → watcher 미기동, disabled/degraded health + 고정 사유.
 

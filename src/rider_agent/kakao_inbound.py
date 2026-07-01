@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -667,10 +668,10 @@ def resolve_kakao_inbound_rooms(
 
     The server watchlist is the source of truth; local ``fallback_rooms`` are
     only bootstrap/fallback/canary, used solely when the server list is
-    unavailable or empty. They are never the long-term source of truth.
+    unavailable. A server-provided empty list is an explicit empty scope.
     """
 
-    if watchlist is not None and watchlist.rooms:
+    if watchlist is not None:
         return tuple(watchlist.rooms)
     return tuple(fallback_rooms)
 
@@ -792,10 +793,11 @@ def build_kakao_inbound_watcher_from_sources(
     effective_rooms = resolve_kakao_inbound_rooms(
         watchlist=watchlist, fallback_rooms=settings.fallback_rooms
     )
-    # Server watchlist is SoT; local fallback rooms act as canary/bootstrap so the
-    # gate treats "server enabled OR local fallback present" as a non-empty source.
-    watchlist_enabled = bool(
-        (watchlist is not None and watchlist.enabled) or settings.fallback_rooms
+    # Server watchlist is SoT. Local fallback rooms are only a canary/bootstrap
+    # source when the server watchlist is unavailable, not when it is explicitly
+    # empty or disabled.
+    watchlist_enabled = (
+        bool(settings.fallback_rooms) if watchlist is None else bool(watchlist.enabled)
     )
 
     enabled, reason = resolve_kakao_inbound_enabled(
@@ -832,3 +834,102 @@ def build_kakao_inbound_watcher_from_sources(
         log=log,
     )
     return watcher, reason
+
+
+class RefreshingKakaoInboundWatcher:
+    """Runtime wrapper that reapplies the server watchlist when it changes.
+
+    The job loop only needs a ``scan_once`` object. This wrapper keeps that
+    contract while polling the non-secret server watchlist on scan boundaries and
+    rebuilding the inner watcher when the watchlist fingerprint changes.
+    """
+
+    def __init__(
+        self,
+        *,
+        identity: AgentIdentity,
+        transport: Transport,
+        base_url: str | None,
+        settings: LocalKakaoInboundSettings,
+        secret_resolver: Callable[[str], str | None] | None,
+        session_probe: Callable[[], bool] | None,
+        state_path: Path | str,
+        watchlist_client: KakaoWatchlistClient,
+        refresh_interval_seconds: float = 30.0,
+        builder: Callable[..., tuple[Any | None, str]] | None = None,
+        log: Callable[[str], None] | None = None,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        self._identity = identity
+        self._transport = transport
+        self._base_url = base_url
+        self._settings = settings
+        self._secret_resolver = secret_resolver
+        self._session_probe = session_probe
+        self._state_path = state_path
+        self._watchlist_client = watchlist_client
+        self._refresh_interval_seconds = max(0.0, float(refresh_interval_seconds))
+        self._builder = builder or build_kakao_inbound_watcher_from_sources
+        self._log = log
+        self._now = now or time.monotonic
+        self._last_refresh_at: float | None = None
+        self._watchlist_fingerprint: tuple[Any, ...] | None = None
+        self._has_applied_watchlist = False
+        self._watcher: Any | None = None
+        self._reason = REASON_EMPTY_WATCHLIST
+
+    def health(self) -> dict[str, Any]:
+        if self._watcher is not None and hasattr(self._watcher, "health"):
+            return self._watcher.health()
+        return {"state": HEALTH_DISABLED, "reason": self._reason}
+
+    def scan_once(self) -> ScanReport:
+        self._refresh_if_due()
+        if self._watcher is None:
+            return ScanReport(health=HEALTH_DISABLED, reason=self._reason)
+        return self._watcher.scan_once()
+
+    def _refresh_if_due(self) -> None:
+        now = self._now()
+        if (
+            self._last_refresh_at is not None
+            and now - self._last_refresh_at < self._refresh_interval_seconds
+        ):
+            return
+        self._last_refresh_at = now
+
+        try:
+            watchlist = self._watchlist_client.fetch()
+        except Exception:  # noqa: BLE001 - config refresh must not kill scanning.
+            if self._log is not None:
+                self._log(redact(f"{INBOUND_CONFIG_OP_LABEL} refresh failed"))
+            watchlist = None
+
+        fingerprint = self._fingerprint(watchlist)
+        if self._has_applied_watchlist and fingerprint == self._watchlist_fingerprint:
+            return
+
+        session_interactive = (
+            bool(self._session_probe()) if callable(self._session_probe) else True
+        )
+        watcher, reason = self._builder(
+            identity=self._identity,
+            transport=self._transport,
+            base_url=self._base_url,
+            settings=self._settings,
+            secret_resolver=self._secret_resolver,
+            session_interactive=session_interactive,
+            state_path=self._state_path,
+            watchlist=watchlist,
+            log=self._log,
+        )
+        self._watcher = watcher
+        self._reason = reason
+        self._watchlist_fingerprint = fingerprint
+        self._has_applied_watchlist = True
+
+    @staticmethod
+    def _fingerprint(watchlist: KakaoWatchlist | None) -> tuple[Any, ...] | None:
+        if watchlist is None:
+            return None
+        return (watchlist.enabled, watchlist.config_version, tuple(watchlist.rooms))

@@ -1552,6 +1552,44 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert FAKE_TOKEN not in out
 
 
+def test_run_agent_loop_cli_wires_refreshing_kakao_inbound_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    from rider_agent import __main__ as agent_main
+    from rider_agent.kakao_inbound import RefreshingKakaoInboundWatcher
+    import rider_crawl.config as crawl_config
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    state_root = tmp_path / "state-root"
+    config_dir = state_root / "runtime" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kakao-inbound.json").write_text(
+        json.dumps({"enabled": True, "chat_list_db_path": "a.edb"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(crawl_config, "app_state_root", lambda: state_root)
+    identity_path = tmp_path / "agent_config.json"
+    store = FakeStore()
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    rc = agent_main._run_agent_loop(
+        ["--server-url", "https://srv.test"],
+        transport=object(),
+        store=store,
+        identity_path=identity_path,
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert isinstance(captured["kakao_inbound_watcher"], RefreshingKakaoInboundWatcher)
+    assert FAKE_TOKEN not in capsys.readouterr().out
+
+
 def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypatch, capsys):
     from rider_agent import __main__ as agent_main
     import rider_crawl.config as crawl_config

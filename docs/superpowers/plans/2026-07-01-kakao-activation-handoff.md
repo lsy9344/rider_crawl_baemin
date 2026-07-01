@@ -39,7 +39,10 @@ only non-protected `job_loop.py` / `__main__.py` were edited).
 - **Agent = SoT for local prerequisites + secrets** (DB path, SQLCipher db_key,
   user_hash, per-room chatlogs key, local kill switch, scan defaults).
 - **effective_enabled = local kill switch && local prereq OK && session interactive
-  && server watchlist non-empty** (local fallback rooms count as canary).
+  && server watchlist non-empty**. Local fallback rooms count only when the server
+  watchlist is unavailable; an explicit server `rooms: []` remains empty.
+- The Agent runtime refreshes the non-secret watchlist and reapplies changed
+  `config_version`/room fingerprints.
 - **Never** send/receive DB key/user_hash/path to/from the server. Only the digest
   + sanitized events leave the Agent. No raw Kakao text / name / phone suffix /
   secret in logs/heartbeat/status/exceptions. Rejection reasons are fixed codes.
