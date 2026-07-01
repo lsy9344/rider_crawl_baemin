@@ -1428,6 +1428,30 @@ def test_kakao_inbound_loop_survives_scan_error():
     assert logs  # error surfaced (redacted) to the log
 
 
+def test_kakao_inbound_loop_logs_non_empty_scan_report():
+    from rider_agent.kakao_inbound import ScanReport
+
+    stop = threading.Event()
+    logs: list[str] = []
+
+    class _Watcher:
+        def scan_once(self):
+            stop.set()
+            return ScanReport(
+                health="warning",
+                reason="configured_room_not_found",
+                missing_rooms=1,
+            )
+
+    _run_kakao_inbound_loop(_Watcher(), stop_event=stop, interval=0.0, log=logs.append)
+
+    joined = " ".join(logs)
+    assert "kakao inbound scan" in joined
+    assert "configured_room_not_found" in joined
+    assert "missing_rooms" not in joined
+    assert "configured_missing_count" in joined
+
+
 def test_run_agent_spawns_and_joins_kakao_inbound_thread(tmp_path):
     store = FakeStore()
     identity_path = tmp_path / "agent_config.json"
@@ -1457,6 +1481,45 @@ def test_run_agent_spawns_and_joins_kakao_inbound_thread(tmp_path):
     assert summary.kakao_inbound_thread is not None
     # run_agent 의 finally 가 stop_event.set()+join 으로 정리 → thread 종료.
     assert not summary.kakao_inbound_thread.is_alive()
+
+
+def test_run_agent_heartbeat_includes_kakao_inbound_health(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+
+    class _Watcher:
+        def scan_once(self):
+            stop.set()
+
+        def health(self):
+            return {
+                "state": "active",
+                "reason": "ok",
+                "latest_window_size": 20,
+            }
+
+    summary = run_agent(
+        transport=FakeTransport(claim_script=[{"jobs": []}]),
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        kakao_inbound_watcher=_Watcher(),
+        kakao_inbound_interval_seconds=0.0,
+    )
+
+    status = summary.reporter._kakao_status_provider()
+    assert status["inbound"] == {
+        "state": "active",
+        "reason": "ok",
+        "latest_window_size": 20,
+    }
 
 
 def test_run_agent_without_watcher_has_no_inbound_thread(tmp_path):

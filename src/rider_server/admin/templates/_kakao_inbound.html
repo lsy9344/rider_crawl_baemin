@@ -1,0 +1,38 @@
+{# Sanitized Kakao inbound command decisions. Raw room/chat/message/name/phone are intentionally absent. #}
+{% set rows = (kakao_inbound | default([])) | list %}
+<div class="table-wrap" data-kakao-inbound-total="{{ rows | length }}">
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Decision</th>
+      <th>Reason</th>
+      <th>Agent</th>
+      <th>Scope</th>
+      <th>Event</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.created_at | relative_time }}</td>
+      <td>
+        {% if row.accepted %}<span class="sev-normal">{{ row.action }}</span>{% else %}<span class="sev-warning">{{ row.action }}</span>{% endif %}
+        {% if row.duplicate %}<span class="muted">duplicate</span>{% endif %}
+      </td>
+      <td>{% if row.reason %}{{ row.reason }}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if row.agent_id %}{{ row.agent_id }}{% else %}<span class="muted">unknown</span>{% endif %}</td>
+      <td>
+        {% if row.tenant_id %}<span class="muted">tenant {{ row.tenant_id }}</span>{% endif %}
+        {% if row.channel_id %}<span class="muted">channel {{ row.channel_id }}</span>{% endif %}
+        {% if row.target_id %}<span class="muted">target {{ row.target_id }}</span>{% endif %}
+        {% if row.job_id %}<span class="muted">job {{ row.job_id }}</span>{% endif %}
+      </td>
+      <td><span class="muted">{{ row.command_type }}</span><br><code>{{ row.event_fingerprint }}</code></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No Kakao inbound decisions in the recent window.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

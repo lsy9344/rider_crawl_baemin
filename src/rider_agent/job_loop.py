@@ -48,6 +48,7 @@ from rider_crawl.redaction import redact, redact_mapping, redacted_error_event
 
 from rider_agent.heartbeat import (
     DEFAULT_CAPABILITIES,
+    DEFAULT_KAKAO_STATUS,
     MIN_HEARTBEAT_INTERVAL_SECONDS,
     HeartbeatReporter,
     default_metrics,
@@ -1070,6 +1071,88 @@ def start_heartbeat_thread(reporter: HeartbeatReporter) -> threading.Thread:
 DEFAULT_KAKAO_INBOUND_INTERVAL_SECONDS = 2.0
 
 
+def _kakao_inbound_scan_summary(report: Any) -> dict[str, Any]:
+    if report is None:
+        return {}
+    summary: dict[str, Any] = {}
+    state = getattr(report, "health", None)
+    reason = getattr(report, "reason", None)
+    if state:
+        summary["state"] = str(state)
+    if reason:
+        summary["reason"] = str(reason)
+    fields = {
+        "rooms_scanned": "scanned_count",
+        "missing_rooms": "configured_missing_count",
+        "primed": "primed_count",
+        "submitted": "submitted_count",
+        "duplicates": "duplicate_count",
+        "rejected": "rejected_count",
+        "parser_misses": "parser_miss_count",
+        "submit_errors": "submit_error_count",
+        "gap_possible": "gap_possible_count",
+    }
+    for source, target in fields.items():
+        value = getattr(report, source, 0)
+        if isinstance(value, bool):
+            value = int(value)
+        if isinstance(value, int) and value:
+            summary[target] = value
+    if summary.get("state") == "active" and summary.get("reason") == "ok" and len(summary) <= 2:
+        return {}
+    return summary
+
+
+def _safe_kakao_inbound_health(watcher: Any) -> dict[str, Any]:
+    health = watcher.health() if hasattr(watcher, "health") else None
+    if not isinstance(health, dict):
+        return {}
+    allowed = {
+        "state",
+        "reason",
+        "latest_window_size",
+        "configured_missing_count",
+        "scanned_count",
+        "submitted_count",
+        "duplicate_count",
+        "rejected_count",
+        "parser_miss_count",
+        "submit_error_count",
+        "gap_possible_count",
+    }
+    cleaned: dict[str, Any] = {}
+    for key, value in health.items():
+        if key not in allowed:
+            continue
+        if isinstance(value, str):
+            cleaned[key] = redact(value)
+        elif isinstance(value, (int, bool)) or value is None:
+            cleaned[key] = value
+    return cleaned
+
+
+def _merge_kakao_status_provider(kakao_status_provider: Any, inbound_watcher: Any) -> Any:
+    if inbound_watcher is None:
+        return kakao_status_provider
+
+    def _provider() -> dict[str, Any]:
+        raw = kakao_status_provider() if callable(kakao_status_provider) else kakao_status_provider
+        if isinstance(raw, dict):
+            status = dict(raw)
+        elif raw is None:
+            status = dict(DEFAULT_KAKAO_STATUS)
+        elif isinstance(raw, str):
+            status = {"state": raw}
+        else:
+            status = {"state": str(raw)}
+        inbound = _safe_kakao_inbound_health(inbound_watcher)
+        if inbound:
+            status["inbound"] = inbound
+        return status
+
+    return _provider
+
+
 def _run_kakao_inbound_loop(
     watcher: Any,
     *,
@@ -1086,7 +1169,9 @@ def _run_kakao_inbound_loop(
 
     while not stop_event.is_set():
         try:
-            watcher.scan_once()
+            summary = _kakao_inbound_scan_summary(watcher.scan_once())
+            if summary and log is not None:
+                log(redact(f"kakao inbound scan {summary}"))
         except Exception as exc:  # noqa: BLE001 — never crash the host process
             if log is not None:
                 log(redact(f"kakao inbound scan failed: {exc}"))
@@ -1343,6 +1428,11 @@ def run_agent(
         session_probe=session_probe,
     )
 
+    effective_kakao_status_provider = _merge_kakao_status_provider(
+        composition.kakao_status_provider,
+        kakao_inbound_watcher,
+    )
+
     runner, reporter = build_agent_components(
         identity,
         transport=transport,
@@ -1360,7 +1450,7 @@ def run_agent(
         on_status=on_status,
         log=log,
         browser_profiles_provider=composition.browser_profiles_provider,
-        kakao_status_provider=composition.kakao_status_provider,
+        kakao_status_provider=effective_kakao_status_provider,
         complete_outbox_path=complete_outbox_path,
     )
 

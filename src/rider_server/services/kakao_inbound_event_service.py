@@ -345,6 +345,7 @@ LOOKUP_JOB_TYPE = JOB_TYPE_RIDER_LOOKUP
 ChannelLoader = Callable[[], Awaitable[Sequence[ChannelView]] | Sequence[ChannelView]]
 TargetLoader = Callable[[str], Awaitable[Sequence[TargetView]] | Sequence[TargetView]]
 Enqueue = Callable[..., Awaitable[str] | str]
+DecisionObserver = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -384,6 +385,7 @@ class KakaoInboundEventService:
         tenant_active: Callable[[str], Awaitable[bool] | bool] | None = None,
         rate_limited: Callable[[str], Awaitable[bool] | bool] | None = None,
         already_replied: Callable[[str], Awaitable[bool] | bool] | None = None,
+        observe_decision: DecisionObserver | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._load_channels = load_channels
@@ -396,9 +398,10 @@ class KakaoInboundEventService:
         self._tenant_active = tenant_active
         self._rate_limited = rate_limited
         self._already_replied = already_replied
+        self._observe_decision = observe_decision
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    async def handle(self, event: InboundEventInput) -> dict:
+    async def handle(self, event: InboundEventInput, *, agent_id: str | None = None) -> dict:
         """Process one inbound event and return the API response dict."""
 
         context = await self._build_context(event)
@@ -420,10 +423,14 @@ class KakaoInboundEventService:
                     payload_json=payload,
                 )
             )
-            return {"accepted": True, "duplicate": False, "job_id": job_id}
+            response = {"accepted": True, "duplicate": False, "job_id": job_id}
+            await self._observe(event, decision, response, agent_id=agent_id, job_id=job_id)
+            return response
 
         if decision.action == ACTION_DUPLICATE:
-            return {"accepted": True, "duplicate": True}
+            response = {"accepted": True, "duplicate": True}
+            await self._observe(event, decision, response, agent_id=agent_id)
+            return response
 
         if decision.action == ACTION_REPLY:
             await self._maybe_bind(decision)
@@ -436,23 +443,35 @@ class KakaoInboundEventService:
                 and self._already_replied is not None
                 and await _maybe_await(self._already_replied(key))
             ):
-                return {"accepted": False, "duplicate": True, "reason": decision.reason}
+                response = {"accepted": False, "duplicate": True, "reason": decision.reason}
+                await self._observe(event, decision, response, agent_id=agent_id)
+                return response
             reply_payload = {
                 "kakao_room_name": decision.reply_kakao_room_name,
                 "message": decision.reply_text,
                 "origin": ORIGIN_KAKAO_INBOUND,
                 "origin_event_key": decision.origin_event_key,
             }
-            await _maybe_await(
+            reply_job_id = await _maybe_await(
                 self._enqueue(
                     job_type=JOB_TYPE_KAKAO_SEND,
                     target_id=None,
                     payload_json=reply_payload,
                 )
             )
-            return {"accepted": False, "duplicate": False, "reason": decision.reason}
+            response = {"accepted": False, "duplicate": False, "reason": decision.reason}
+            await self._observe(
+                event,
+                decision,
+                response,
+                agent_id=agent_id,
+                reply_job_id=reply_job_id,
+            )
+            return response
 
-        return {"accepted": False, "duplicate": False, "reason": decision.reason}
+        response = {"accepted": False, "duplicate": False, "reason": decision.reason}
+        await self._observe(event, decision, response, agent_id=agent_id)
+        return response
 
     async def _build_context(self, event: InboundEventInput) -> InboundContext:
         sending_enabled = bool(await _maybe_await(self._sending_enabled()))
@@ -500,3 +519,43 @@ class KakaoInboundEventService:
     async def _maybe_bind(self, decision: InboundDecision) -> None:
         if self._bind_chat_id is not None and decision.bind_chat_id and decision.channel_id:
             await _maybe_await(self._bind_chat_id(decision.channel_id, decision.bind_chat_id))
+
+    async def _observe(
+        self,
+        event: InboundEventInput,
+        decision: InboundDecision,
+        response: Mapping[str, Any],
+        *,
+        agent_id: str | None = None,
+        job_id: str | None = None,
+        reply_job_id: str | None = None,
+    ) -> None:
+        if self._observe_decision is None:
+            return
+        record: dict[str, Any] = {
+            "action": decision.action,
+            "accepted": bool(response.get("accepted")),
+            "duplicate": bool(response.get("duplicate")),
+            "source": event.source,
+            "event_fingerprint": decision.origin_event_key or origin_event_key(event),
+            "command_type": event.command.type,
+            "chat_id_present": bool((event.chat_id or "").strip()),
+            "last_log_id": event.last_log_id,
+        }
+        if agent_id:
+            record["agent_id"] = agent_id
+        if decision.reason:
+            record["reason"] = decision.reason
+        if decision.channel_id:
+            record["channel_id"] = decision.channel_id
+        if decision.tenant_id:
+            record["tenant_id"] = decision.tenant_id
+        if decision.target_id:
+            record["target_id"] = decision.target_id
+        if decision.origin_event_key:
+            record["origin_event_key"] = decision.origin_event_key
+        if job_id:
+            record["job_id"] = job_id
+        if reply_job_id:
+            record["reply_job_id"] = reply_job_id
+        await _maybe_await(self._observe_decision(record))

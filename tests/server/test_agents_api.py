@@ -236,6 +236,43 @@ def test_heartbeat_preserves_kakao_worker_operational_status() -> None:
     assert saved.capacity_json["kakao_status"]["interactive_session_available"] is False
 
 
+def test_heartbeat_preserves_nested_kakao_inbound_status() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["KAKAO_SEND"],
+            "kakao_status": {
+                "state": "idle",
+                "queue_depth": 0,
+                "inbound": {
+                    "state": "warning",
+                    "reason": "configured_room_not_found",
+                    "latest_window_size": 20,
+                    "configured_missing_count": 1,
+                    "room_name": "운영방",
+                },
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    saved = registry.agent(_AGENT_ID)
+    assert saved is not None
+    inbound = saved.capacity_json["kakao_status"]["inbound"]
+    assert inbound["state"] == "warning"
+    assert inbound["reason"] == "configured_room_not_found"
+    assert inbound["configured_missing_count"] == 1
+    assert "room_name" not in inbound
+
+
 def test_heartbeat_updates_agent_version() -> None:
     registry = InMemoryAgentRegistry()
     registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)

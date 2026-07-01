@@ -71,4 +71,4 @@ async def receive_inbound_event(
             phone_last4=body.command.phone_last4,
         ),
     )
-    return await service.handle(event)
+    return await service.handle(event, agent_id=agent_id)

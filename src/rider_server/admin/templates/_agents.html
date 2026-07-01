@@ -45,7 +45,7 @@
         {% endif %}
       </td>
       <td>
-        {% if a.kakao_enabled is not none or a.kakao_state or a.kakao_queue_depth is not none or a.kakao_queue_lag_seconds is not none or a.kakao_sent is not none or a.kakao_failed is not none or a.kakao_last_success_at or a.kakao_last_error_code or a.kakao_interactive_session_available is not none %}
+        {% if a.kakao_enabled is not none or a.kakao_state or a.kakao_queue_depth is not none or a.kakao_queue_lag_seconds is not none or a.kakao_sent is not none or a.kakao_failed is not none or a.kakao_last_success_at or a.kakao_last_error_code or a.kakao_interactive_session_available is not none or a.kakao_inbound_state or a.kakao_inbound_reason %}
           {% if a.kakao_enabled is not none %}{% if a.kakao_enabled %}{% if a.online and a.kakao_interactive_session_available is false %}<span class="sev-critical">enabled · 로그인 필요</span>{% else %}<span class="sev-normal">enabled</span>{% endif %}{% else %}<span class="sev-stopped">disabled</span>{% endif %}{% endif %}
           {% if a.kakao_state %}<span class="muted">{{ a.kakao_state }}</span>{% endif %}
           {% if a.kakao_queue_depth is not none %}<span class="muted">대기 {{ a.kakao_queue_depth }}건</span>{% endif %}
@@ -55,6 +55,10 @@
           {% if a.kakao_last_success_at %}<span class="muted">마지막 성공 {{ a.kakao_last_success_at }}</span>{% endif %}
           {% if a.kakao_interactive_session_available is not none %}{% if a.kakao_interactive_session_available %}<span class="sev-normal">세션 OK</span>{% else %}<span class="sev-stopped">세션 없음</span>{% endif %}{% endif %}
           {% if a.kakao_last_error_code %}<span class="sev-warning">{{ a.kakao_last_error_code }}</span>{% endif %}
+          {% if a.kakao_inbound_state %}<span class="muted">inbound {{ a.kakao_inbound_state }}</span>{% endif %}
+          {% if a.kakao_inbound_reason %}<span class="{% if a.kakao_inbound_state == 'active' %}muted{% else %}sev-warning{% endif %}">{{ a.kakao_inbound_reason }}</span>{% endif %}
+          {% if a.kakao_inbound_latest_window_size is not none %}<span class="muted">window {{ a.kakao_inbound_latest_window_size }}</span>{% endif %}
+          {% if a.kakao_inbound_configured_missing_count is not none %}<span class="sev-warning">missing {{ a.kakao_inbound_configured_missing_count }}</span>{% endif %}
         {% else %}
           <span class="muted">없음</span>
         {% endif %}

@@ -16,20 +16,24 @@ fail-closed empty loaders: every event is rejected as ``unknown_room``.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
+
+from rider_crawl.redaction import redact
 
 from ..db.models.account import MonitoringTarget as MonitoringTargetRow
 from ..db.models.account import PlatformAccount as PlatformAccountRow
 from ..db.models.agent import Job
+from ..db.models.audit import AuditLog as AuditLogRow
 from ..db.models.messaging import DeliveryRule as DeliveryRuleRow
 from ..db.models.messaging import MessengerChannel as MessengerChannelRow
 from ..db.models.tenancy import Subscription as SubscriptionRow
 from ..db.models.tenancy import Tenant as TenantRow
-from ..domain import CustomerLifecycleState, SubscriptionStatus
+from ..domain import AuditResult, CustomerLifecycleState, SubscriptionStatus
 from ..queue.states import (
     JOB_STATUS_CLAIMED,
     JOB_STATUS_PENDING,
@@ -45,6 +49,10 @@ from .kakao_inbound_event_service import (
     KakaoInboundEventService,
     TargetView,
 )
+
+_LOG = logging.getLogger(__name__)
+KAKAO_INBOUND_DECISION_ACTION = "KAKAO_INBOUND_DECISION"
+KAKAO_INBOUND_DECISION_TARGET_TYPE = "kakao_inbound_event"
 
 # A RIDER_LOOKUP occupying any non-terminal state counts as in-flight for a
 # target (mirrors the ix_jobs_active_crawl_target_type partial-index states).
@@ -87,6 +95,7 @@ def build_kakao_inbound_event_service(
     """Assemble a ``KakaoInboundEventService`` bound to the real DB/queue seams."""
 
     enqueue = _make_enqueue(queue_backend)
+    observe_decision = _make_decision_observer(db_session_factory)
 
     if db_session_factory is None:
         async def _no_channels() -> tuple[ChannelView, ...]:
@@ -100,6 +109,7 @@ def build_kakao_inbound_event_service(
             load_targets=_no_targets,
             enqueue=enqueue,
             sending_enabled=sending_enabled_getter,
+            observe_decision=observe_decision,
         )
 
     async def load_channels() -> list[ChannelView]:
@@ -256,7 +266,65 @@ def build_kakao_inbound_event_service(
         tenant_active=tenant_active,
         rate_limited=rate_limited,
         already_replied=already_replied,
+        observe_decision=observe_decision,
     )
+
+
+def _make_decision_observer(db_session_factory: Any):
+    async def observe(event: dict[str, Any]) -> None:
+        safe = _safe_decision_event(event)
+        _LOG.info("kakao inbound decision %s", redact(str(safe)))
+        if db_session_factory is None:
+            return
+        values = {
+            "action": KAKAO_INBOUND_DECISION_ACTION,
+            "target_type": KAKAO_INBOUND_DECISION_TARGET_TYPE,
+            "target_id": None,
+            "diff_redacted": safe,
+            "created_at": datetime.now(timezone.utc),
+            "source": str(safe.get("source") or "") or None,
+            "reason": str(safe.get("reason") or "") or None,
+            "result": (
+                AuditResult.SUCCESS.value
+                if bool(safe.get("accepted"))
+                else AuditResult.FAILURE.value
+            ),
+        }
+        async with db_session_factory() as session:
+            await session.execute(insert(AuditLogRow).values(**values))
+            await session.commit()
+
+    return observe
+
+
+def _safe_decision_event(event: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "action",
+        "accepted",
+        "duplicate",
+        "reason",
+        "source",
+        "agent_id",
+        "event_fingerprint",
+        "command_type",
+        "chat_id_present",
+        "last_log_id",
+        "tenant_id",
+        "channel_id",
+        "target_id",
+        "origin_event_key",
+        "job_id",
+        "reply_job_id",
+    }
+    safe: dict[str, Any] = {}
+    for key, value in event.items():
+        if key not in allowed:
+            continue
+        if isinstance(value, str):
+            safe[key] = redact(value)
+        elif isinstance(value, (bool, int)) or value is None:
+            safe[key] = value
+    return safe
 
 
 def build_kakao_lookup_reply_service(

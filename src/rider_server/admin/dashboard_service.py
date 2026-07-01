@@ -135,6 +135,10 @@ class AgentRow:
     kakao_last_success_at: str | None = None
     kakao_last_error_code: str | None = None
     kakao_interactive_session_available: bool | None = None
+    kakao_inbound_state: str | None = None
+    kakao_inbound_reason: str | None = None
+    kakao_inbound_latest_window_size: int | None = None
+    kakao_inbound_configured_missing_count: int | None = None
     browser_profiles: tuple[AgentBrowserProfileRow, ...] = ()
 
 
@@ -188,6 +192,25 @@ class JobQueueRow:
     error_code: str | None = None  # 최근 실패 job 의 실패 코드(active job 은 None)
     recently_failed: bool = False  # 짧은 윈도 안에 terminal FAILED 된 job(사라지기 전 사유 표시)
     auth_recovery_detail: str | None = None  # AUTH_COUPANG_2FA result detail label
+
+
+@dataclass(frozen=True)
+class KakaoInboundDecisionRow:
+    """Sanitized Kakao inbound command decision for operator tracing."""
+
+    created_at: datetime
+    agent_id: str | None
+    source: str
+    event_fingerprint: str
+    command_type: str
+    action: str
+    reason: str | None
+    accepted: bool
+    duplicate: bool
+    tenant_id: str | None = None
+    channel_id: str | None = None
+    target_id: str | None = None
+    job_id: str | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -264,6 +287,13 @@ class DashboardRepository(abc.ABC):
         ``tenant_id == ALL_TENANTS`` 면 전 tenant 를 합친다. target 미연결 job(fleet job)은
         ``tenant_id`` scope 밖이라 ALL_TENANTS 일 때만 보인다. 읽기 전용(상태 변경 0).
         """
+
+
+    @abc.abstractmethod
+    async def kakao_inbound_decisions(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[KakaoInboundDecisionRow]:
+        """Latest sanitized Kakao inbound decisions for operator tracing."""
 
 
 def _optional_int(value: Any) -> int | None:
@@ -359,6 +389,7 @@ class DashboardService:
     @staticmethod
     def agent_row(facts: AgentHealthFacts, now: datetime) -> AgentRow:
         kakao = facts.kakao_status if isinstance(facts.kakao_status, dict) else {}
+        inbound = kakao.get("inbound") if isinstance(kakao.get("inbound"), dict) else {}
         state = _optional_str(kakao.get("current_state") or kakao.get("state"))
         enabled = (
             kakao.get("enabled") if "enabled" in kakao else kakao.get("worker_enabled")
@@ -384,6 +415,14 @@ class DashboardService:
             ),
             # browser_profiles 는 repository 에서 이미 정제된 AgentBrowserProfileRow 다.
             # service 는 정책 합성만 하고 런타임 상태는 그대로 통과시킨다(raw capacity 미접근).
+            kakao_inbound_state=_optional_str(inbound.get("state")),
+            kakao_inbound_reason=_optional_str(inbound.get("reason")),
+            kakao_inbound_latest_window_size=_optional_int(
+                inbound.get("latest_window_size")
+            ),
+            kakao_inbound_configured_missing_count=_optional_int(
+                inbound.get("configured_missing_count")
+            ),
             browser_profiles=facts.browser_profiles,
         )
 
@@ -498,6 +537,16 @@ class DashboardService:
             ),
         )
 
+    async def kakao_inbound_rows(
+        self, repo: DashboardRepository, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[KakaoInboundDecisionRow]:
+        rows = await repo.kakao_inbound_decisions(
+            tenant_id=tenant_id,
+            now=now,
+            limit=limit,
+        )
+        return sorted(rows, key=lambda row: row.created_at, reverse=True)[: max(0, limit)]
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # in-memory 구현(무-DB 기본값 + 테스트 fake — InMemoryQueueBackend 선례)
@@ -516,6 +565,7 @@ class InMemoryDashboardRepository(DashboardRepository):
         self._channels: dict[str, ChannelHealthRow] = {}
         self._auth_required: dict[str, list[AuthRequiredRow]] = {}
         self._active_jobs: list[JobQueueRow] = []
+        self._kakao_inbound_decisions: list[KakaoInboundDecisionRow] = []
 
     # ── seed(테스트 전용 — 런타임 read 경로 아님) ──────────────────────────────
     def seed_target(self, facts: TargetHealthFacts) -> None:
@@ -532,6 +582,9 @@ class InMemoryDashboardRepository(DashboardRepository):
 
     def seed_active_job(self, row: JobQueueRow) -> None:
         self._active_jobs.append(row)
+
+    def seed_kakao_inbound_decision(self, row: KakaoInboundDecisionRow) -> None:
+        self._kakao_inbound_decisions.append(row)
 
     # ── read 포트(런타임 경로) ────────────────────────────────────────────────
     async def target_health(
@@ -604,4 +657,18 @@ class InMemoryDashboardRepository(DashboardRepository):
             rows = list(self._active_jobs)
         else:
             rows = [row for row in self._active_jobs if row.tenant_id == tenant_id]
+        return rows[: max(0, limit)]
+
+    async def kakao_inbound_decisions(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[KakaoInboundDecisionRow]:
+        if tenant_id == ALL_TENANTS:
+            rows = list(self._kakao_inbound_decisions)
+        else:
+            rows = [
+                row
+                for row in self._kakao_inbound_decisions
+                if row.tenant_id in (tenant_id, None)
+            ]
+        rows.sort(key=lambda row: row.created_at, reverse=True)
         return rows[: max(0, limit)]

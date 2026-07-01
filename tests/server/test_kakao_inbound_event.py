@@ -277,7 +277,8 @@ def test_origin_event_key_uses_room_name_when_chat_id_absent():
 # --- async orchestration (KakaoInboundEventService.handle) -----------------
 
 def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight=False,
-             tenant_active=True, rate_limited=False, already_replied=None, calls=None):
+             tenant_active=True, rate_limited=False, already_replied=None, calls=None,
+             observe_decision=None):
     calls = calls if calls is not None else {"enqueued": [], "bound": []}
 
     async def load_channels():
@@ -304,6 +305,7 @@ def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight
         tenant_active=lambda tenant_id: tenant_active,
         rate_limited=lambda channel_id: rate_limited,
         already_replied=already_replied,
+        observe_decision=observe_decision,
     )
     return service, calls
 
@@ -398,11 +400,65 @@ def test_handle_unsupported_reply_deduped_when_already_replied():
 
 def test_handle_reject_does_not_enqueue_or_bind():
     service, calls = _service([_channel(room="운영방")], {"ch1": (_target(),)})
-    result = asyncio.run(service.handle(_event(room="없는방", chat_id="")))
+    result = asyncio.run(
+        service.handle(_event(room="없는방", chat_id=""), agent_id="agent-pc-1")
+    )
 
     assert result == {"accepted": False, "duplicate": False, "reason": REASON_UNKNOWN_ROOM}
     assert calls["enqueued"] == []
     assert calls["bound"] == []
+
+
+def test_handle_reject_observes_fixed_reason_without_command_payload():
+    observed = []
+    service, calls = _service(
+        [_channel(room="운영방")],
+        {"ch1": (_target(),)},
+        observe_decision=observed.append,
+    )
+
+    result = asyncio.run(
+        service.handle(_event(room="없는방", chat_id=""), agent_id="agent-pc-1")
+    )
+
+    assert result == {"accepted": False, "duplicate": False, "reason": REASON_UNKNOWN_ROOM}
+    assert calls["enqueued"] == []
+    assert observed[0]["action"] == ACTION_REJECT
+    assert observed[0]["accepted"] is False
+    assert observed[0]["duplicate"] is False
+    assert observed[0]["reason"] == REASON_UNKNOWN_ROOM
+    assert observed[0]["agent_id"] == "agent-pc-1"
+    assert observed[0]["source"] == "pc_kakao_db"
+    assert observed[0]["command_type"] == COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP
+    assert observed[0]["chat_id_present"] is False
+    assert observed[0]["last_log_id"] == "1002"
+    assert observed[0]["event_fingerprint"].startswith("sha256:")
+    for forbidden in ("command", "room_name", "chat_id", "name", "phone", "message"):
+        assert forbidden not in observed[0]
+
+
+def test_handle_enqueue_observes_job_id_and_target_scope():
+    observed = []
+    service, _calls = _service(
+        [_channel(chat_id="111")],
+        {"ch1": (_target(),)},
+        observe_decision=observed.append,
+    )
+
+    result = asyncio.run(service.handle(_event(chat_id="111"), agent_id="agent-pc-1"))
+
+    assert result == {"accepted": True, "duplicate": False, "job_id": "job-123"}
+    assert observed[0]["action"] == ACTION_ENQUEUE_LOOKUP
+    assert observed[0]["accepted"] is True
+    assert observed[0]["agent_id"] == "agent-pc-1"
+    assert observed[0]["job_id"] == "job-123"
+    assert observed[0]["channel_id"] == "ch1"
+    assert observed[0]["tenant_id"] == "t1"
+    assert observed[0]["target_id"] == "tg1"
+    assert observed[0]["origin_event_key"].startswith("sha256:")
+    assert observed[0]["event_fingerprint"] == observed[0]["origin_event_key"]
+    for forbidden in ("command", "room_name", "chat_id", "name", "phone", "message"):
+        assert forbidden not in observed[0]
 
 
 def test_handle_sending_disabled_rejects_without_enqueue():

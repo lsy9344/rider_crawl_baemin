@@ -608,6 +608,47 @@ def test_create_kakao_messenger_channel_with_room_is_active() -> None:
     assert repo.audits[-1].diff_redacted["to_state"] == "ACTIVE"
 
 
+def test_create_kakao_messenger_channel_command_trigger_enabled() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    channel = _run(
+        svc.create_messenger_channel(
+            entity_id="ch-kakao",
+            tenant_id=_TENANT,
+            messenger=Messenger.KAKAO,
+            kakao_room_name="ops-room",
+            command_trigger_enabled=True,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert channel.command_trigger_enabled is True
+    assert _run(repo.get_messenger_channel("ch-kakao")).command_trigger_enabled is True
+    assert repo.audits[-1].diff_redacted["command_trigger_enabled"] is True
+
+
+def test_create_non_kakao_messenger_channel_rejects_command_trigger_enabled() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_messenger_channel(
+                entity_id="ch-telegram",
+                tenant_id=_TENANT,
+                messenger=Messenger.TELEGRAM,
+                telegram_chat_id="-100999",
+                command_trigger_enabled=True,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+
 def test_create_kakao_messenger_channel_rejects_duplicate_active_room() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_tenant(_tenant())
@@ -1174,9 +1215,13 @@ def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
     assert 'onchange="syncChannelCreateFields()"' in channel_form
     assert 'data-channel-messenger="TELEGRAM"' in channel_form
     assert 'data-channel-messenger="KAKAO"' in channel_form
+    assert 'name="command_trigger_enabled"' in channel_form
+    assert 'id="ch-edit-command-trigger"' in template
     assert "function syncChannelCreateFields()" in template
     assert "field.disabled = field.dataset.channelMessenger !== messenger;" in template
     assert "document.addEventListener('DOMContentLoaded', syncChannelCreateFields);" in template
+    assert "function cbool" in template
+    assert "command_trigger_enabled: cbool('ch-edit-command-trigger')" in template
 
 
 def test_route_platform_account_plaintext_password_stored() -> None:
@@ -1352,6 +1397,7 @@ def test_messenger_channel_options_expose_state_for_quick_connect() -> None:
             messenger=Messenger.KAKAO,
             kakao_room_name="활성방",
             state=MessengerChannelState.ACTIVE,
+            command_trigger_enabled=True,
         )
     )
     repo.seed_messenger_channel(
@@ -1369,6 +1415,8 @@ def test_messenger_channel_options_expose_state_for_quick_connect() -> None:
 
     assert 'data-state="ACTIVE"' in body
     assert 'data-state="PENDING"' in body
+    assert 'data-command-trigger-enabled="true"' in body
+    assert 'data-command-trigger-enabled="false"' in body
 
 
 def test_route_list_targets_summary_includes_active_send_window() -> None:
@@ -1852,6 +1900,35 @@ def test_update_messenger_channel_routing_fields_no_transition() -> None:
     assert repo.audits[-1].action == "MESSENGER_CHANNEL_UPDATE"
 
 
+def test_update_kakao_messenger_channel_command_trigger_toggle() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(
+        MessengerChannel(
+            id="ch-kakao",
+            tenant_id=_TENANT,
+            messenger=Messenger.KAKAO,
+            kakao_room_name="ops-room",
+            state=MessengerChannelState.ACTIVE,
+            command_trigger_enabled=True,
+        )
+    )
+    svc = _svc(repo)
+
+    updated = _run(
+        svc.update_messenger_channel(
+            "ch-kakao",
+            tenant_id=_TENANT,
+            command_trigger_enabled=False,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.command_trigger_enabled is False
+    assert _run(repo.get_messenger_channel("ch-kakao")).command_trigger_enabled is False
+    assert repo.audits[-1].diff_redacted["command_trigger_enabled"] is False
+
+
 def test_update_pending_kakao_messenger_channel_with_room_activates() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_messenger_channel(
@@ -2313,6 +2390,60 @@ def test_route_create_kakao_messenger_channel_with_room_active() -> None:
     assert channels[0].kakao_room_name == "실적공유방"
 
 
+def test_route_create_kakao_messenger_channel_default_command_trigger_disabled() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={"messenger": "KAKAO", "kakao_room_name": "ops-room"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    channels = _run(repo.list_messenger_channels("tn-1"))
+    assert len(channels) == 1
+    assert channels[0].command_trigger_enabled is False
+
+
+def test_route_create_kakao_messenger_channel_command_trigger_checked() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={
+            "messenger": "KAKAO",
+            "kakao_room_name": "ops-room",
+            "command_trigger_enabled": "true",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    channels = _run(repo.list_messenger_channels("tn-1"))
+    assert len(channels) == 1
+    assert channels[0].command_trigger_enabled is True
+
+
+def test_route_create_telegram_messenger_channel_rejects_command_trigger() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={
+            "messenger": "TELEGRAM",
+            "telegram_chat_id": "-100777",
+            "command_trigger_enabled": "true",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_messenger_channels("tn-1")) == []
+
+
 def test_route_update_pending_kakao_messenger_channel_with_room_active() -> None:
     repo = InMemoryAdminEntityRepository()
     repo.seed_messenger_channel(
@@ -2335,6 +2466,29 @@ def test_route_update_pending_kakao_messenger_channel_with_room_active() -> None
     channel = _run(repo.get_messenger_channel("ch-kakao"))
     assert channel.state is MessengerChannelState.ACTIVE
     assert channel.kakao_room_name == "실적공유방"
+
+
+def test_route_update_kakao_messenger_channel_command_trigger_false() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(
+        MessengerChannel(
+            id="ch-kakao",
+            tenant_id=_TENANT,
+            messenger=Messenger.KAKAO,
+            kakao_room_name="ops-room",
+            state=MessengerChannelState.ACTIVE,
+            command_trigger_enabled=True,
+        )
+    )
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels/ch-kakao?tenant=tn-1",
+        data={"command_trigger_enabled": "false"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_messenger_channel("ch-kakao")).command_trigger_enabled is False
 
 
 def test_route_activate_messenger_channel_manual_returns_fragment_and_persists() -> None:
@@ -3017,6 +3171,7 @@ def test_entity_admin_channel_autofill_contract_stays_in_place() -> None:
     assert "option.dataset.chat" in template
     assert "option.dataset.thread" in template
     assert "option.dataset.kakao" in template
+    assert "option.dataset.commandTriggerEnabled" in template
 
 
 def test_entity_admin_edit_state_failure_uses_inline_status() -> None:

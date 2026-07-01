@@ -476,6 +476,9 @@ async def messenger_channel_options(
                 "thread": c.thread_id or "",
                 "kakao": c.kakao_room_name or "",
                 "messenger": c.messenger.value,
+                "command-trigger-enabled": "true"
+                if c.command_trigger_enabled
+                else "false",
                 # 빠른 연결 CTA 가 '활성 채널 1개' 조건을 정확히 보게 채널 상태를 같이 싣는다(전체 채널은
                 # 드롭다운에 그대로 두되, ACTIVE 만 자동 선택/CTA 대상으로 센다 — 실 dispatch 와 같은 기준).
                 "state": c.state.value,
@@ -993,6 +996,7 @@ async def create_messenger_channel(
             telegram_chat_id=form.get("telegram_chat_id", "").strip() or None,
             thread_id=form.get("thread_id", "").strip() or None,
             kakao_room_name=form.get("kakao_room_name", "").strip() or None,
+            command_trigger_enabled=_bool(form, "command_trigger_enabled"),
             registration_code=form.get("registration_code", "").strip() or None,
             at=_now(),
             actor_id=_resolve_actor(request),
@@ -1020,6 +1024,11 @@ async def update_messenger_channel(
             telegram_chat_id=form.get("telegram_chat_id", "").strip() or None,
             thread_id=form.get("thread_id", "").strip() or None,
             kakao_room_name=form.get("kakao_room_name", "").strip() or None,
+            command_trigger_enabled=(
+                _bool(form, "command_trigger_enabled")
+                if "command_trigger_enabled" in form
+                else None
+            ),
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),

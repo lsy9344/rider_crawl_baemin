@@ -337,6 +337,25 @@ def test_server_rejection_is_terminal_and_advances(tmp_path):
     assert len(rejecting.events) == 1
 
 
+def test_server_rejection_logs_safe_verdict_without_command_text(tmp_path):
+    logs: list[str] = []
+    rejecting = FakeClient(InboundEventResult(accepted=False, reason="unknown_room"))
+    by_id = {"111": [_msg(log_id="1001")]}
+    watcher = _watcher(tmp_path, by_id=by_id, client=rejecting, log=logs.append)
+
+    watcher.scan_once()  # prime
+    by_id["111"] = [_msg(log_id="1002", text="!!강민기1234")]
+    report = watcher.scan_once()
+
+    joined = " ".join(logs)
+    assert report.rejected == 1
+    assert "AGENT_KAKAO_INBOUND_VERDICT" in joined
+    assert "unknown_room" in joined
+    assert "1002" in joined
+    assert "!!강민기1234" not in joined
+    assert "강민기1234" not in joined
+
+
 # --- watcher: privacy & health -------------------------------------------
 
 def test_does_not_log_raw_text_name_or_phone(tmp_path):

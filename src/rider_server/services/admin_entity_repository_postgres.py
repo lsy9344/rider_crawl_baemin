@@ -110,6 +110,8 @@ def _channel_to_domain(row: MessengerChannelRow) -> MessengerChannel:
         thread_id=row.thread_id,
         kakao_room_name=row.kakao_room_name,
         state=MessengerChannelState(row.state),
+        kakao_chat_id=row.kakao_chat_id,
+        command_trigger_enabled=bool(row.command_trigger_enabled),
     )
 
 
@@ -329,6 +331,8 @@ class PostgresAdminEntityRepository:
             "telegram_chat_id": channel.telegram_chat_id,
             "thread_id": channel.thread_id,
             "kakao_room_name": channel.kakao_room_name,
+            "kakao_chat_id": channel.kakao_chat_id,
+            "command_trigger_enabled": bool(channel.command_trigger_enabled),
             "state": channel.state.value,
             "registration_code": registration_code,  # 라우팅 코드(비domain, secret 아님)
         }
@@ -486,6 +490,8 @@ class PostgresAdminEntityRepository:
                 "telegram_chat_id": channel.telegram_chat_id,
                 "thread_id": channel.thread_id,
                 "kakao_room_name": channel.kakao_room_name,
+                "kakao_chat_id": channel.kakao_chat_id,
+                "command_trigger_enabled": bool(channel.command_trigger_enabled),
                 "state": channel.state.value,  # soft delete = INACTIVE 포함
             },
             audit,

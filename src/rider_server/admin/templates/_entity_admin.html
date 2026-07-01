@@ -186,6 +186,7 @@
         <label>텔레그램 채팅 ID <input type="text" name="telegram_chat_id" data-channel-messenger="TELEGRAM"></label>
         <label>텔레그램 토픽 ID <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
         <label>카카오톡 방 이름 <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
+        <label>Inbound command <input type="checkbox" name="command_trigger_enabled" value="true" data-channel-messenger="KAKAO"></label>
         <label>등록 코드 <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
         <button type="submit" class="create">채널 생성</button><span class="inline-action-status" aria-live="polite"></span>
       </form>
@@ -199,8 +200,9 @@
         <label>텔레그램 채팅 ID <input type="text" id="ch-edit-chat"></label>
         <label>텔레그램 토픽 ID <input type="text" id="ch-edit-thread"></label>
         <label>카카오톡 방 이름 <input type="text" id="ch-edit-kakao"></label>
+        <label>Inbound command <input type="checkbox" id="ch-edit-command-trigger"></label>
         <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
-          <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao'), command_trigger_enabled: cbool('ch-edit-command-trigger')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/activate', {}, '선택한 채널을 수동 활성화할까요? 라우팅 정보를 확인했나요?')">수동 활성화</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" class="danger" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
@@ -395,6 +397,7 @@
   var CRUD_TENANT = "{{ tenant_id | urlencode }}";
   function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
   function cchecked(id) { var el = document.getElementById(id); return el && el.checked ? "true" : ""; }
+  function cbool(id) { var el = document.getElementById(id); return el && el.checked ? "true" : "false"; }
   function filledValues(values) {
     var out = {};
     Object.keys(values).forEach(function(key) {
@@ -448,6 +451,7 @@
     document.getElementById('ch-edit-chat').value = option.dataset.chat || '';
     document.getElementById('ch-edit-thread').value = option.dataset.thread || '';
     document.getElementById('ch-edit-kakao').value = option.dataset.kakao || '';
+    document.getElementById('ch-edit-command-trigger').checked = option.dataset.commandTriggerEnabled === 'true';
     var row = select.closest('.edit-row');
     if (row) {
       row.querySelectorAll('.inline-action-status').forEach(function(s) {

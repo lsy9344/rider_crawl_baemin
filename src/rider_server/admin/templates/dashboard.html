@@ -551,6 +551,12 @@
         <div id="jobs-queue" hx-get="/admin/jobs?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% with jobs = jobs | default([]) %}{% include "_jobs_queue.html" %}{% endwith %}</div>
       </div>
     </details>
+    <details class="aux">
+      <summary>Kakao inbound <span class="tag">{{ (kakao_inbound | default([])) | list | length }} events - 5s</span></summary>
+      <div class="aux-body">
+        <div id="kakao-inbound" hx-get="/admin/kakao-inbound?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% include "_kakao_inbound.html" %}</div>
+      </div>
+    </details>
     {% include "_auth_required_section.html" %}
     <details class="aux">
       <summary>Agent fleet <span class="tag" id="agent-summary-tag">{{ ag_online }}/{{ ag_total }} 온라인 · 30s</span></summary>

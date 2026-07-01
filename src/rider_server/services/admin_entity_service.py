@@ -770,6 +770,7 @@ class AdminEntityService:
         telegram_chat_id: str | None = None,
         thread_id: str | None = None,
         kakao_room_name: str | None = None,
+        command_trigger_enabled: bool = False,
         registration_code: str | None = None,
         at: datetime,
         actor_id: str | None,
@@ -784,6 +785,8 @@ class AdminEntityService:
         """
 
         await self._scoped_tenant(tenant_id)
+        if command_trigger_enabled and messenger is not Messenger.KAKAO:
+            raise ValueError("Kakao command trigger is only supported for Kakao channels")
         initial_state = (
             MessengerChannelState.ACTIVE
             if messenger is Messenger.KAKAO and (kakao_room_name or "").strip()
@@ -797,6 +800,9 @@ class AdminEntityService:
             thread_id=thread_id or None,
             kakao_room_name=kakao_room_name or None,
             state=initial_state,
+            command_trigger_enabled=bool(command_trigger_enabled)
+            if messenger is Messenger.KAKAO
+            else False,
         )
         if channel.state is MessengerChannelState.ACTIVE and channel.messenger is Messenger.KAKAO:
             active_channels = [
@@ -818,6 +824,7 @@ class AdminEntityService:
                 # chat_id/방명은 redact/build_diff_redacted 가 운영 식별자로 마스킹.
                 "telegram_chat_id": channel.telegram_chat_id,
                 "kakao_room_name": channel.kakao_room_name,
+                "command_trigger_enabled": channel.command_trigger_enabled,
                 "reason": reason,
             },
             source=source,
@@ -836,6 +843,7 @@ class AdminEntityService:
         telegram_chat_id: str | None = None,
         thread_id: str | None = None,
         kakao_room_name: str | None = None,
+        command_trigger_enabled: bool | None = None,
         at: datetime,
         actor_id: str | None,
         source: str | None = None,
@@ -847,8 +855,15 @@ class AdminEntityService:
         """
 
         existing = await self._scoped_channel(channel_id, tenant_id=tenant_id)
+        if command_trigger_enabled and existing.messenger is not Messenger.KAKAO:
+            raise ValueError("Kakao command trigger is only supported for Kakao channels")
         next_kakao_room_name = (
             kakao_room_name if kakao_room_name is not None else existing.kakao_room_name
+        )
+        next_command_trigger_enabled = (
+            existing.command_trigger_enabled
+            if command_trigger_enabled is None
+            else bool(command_trigger_enabled)
         )
         next_state = (
             MessengerChannelState.ACTIVE
@@ -866,6 +881,9 @@ class AdminEntityService:
             ),
             thread_id=thread_id if thread_id is not None else existing.thread_id,
             kakao_room_name=next_kakao_room_name,
+            command_trigger_enabled=next_command_trigger_enabled
+            if existing.messenger is Messenger.KAKAO
+            else False,
             state=next_state,
         )
         if updated.state is MessengerChannelState.ACTIVE and updated.messenger is Messenger.KAKAO:
@@ -886,6 +904,7 @@ class AdminEntityService:
                 "telegram_chat_id": updated.telegram_chat_id,
                 "thread_id": updated.thread_id,
                 "kakao_room_name": updated.kakao_room_name,
+                "command_trigger_enabled": updated.command_trigger_enabled,
                 "from_state": existing.state.value,
                 "to_state": updated.state.value,
                 "reason": reason,

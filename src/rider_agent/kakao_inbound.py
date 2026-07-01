@@ -240,6 +240,7 @@ class KakaoInboundWatcher:
             else (HEALTH_ACTIVE, REASON_OK)
         )
         self.last_error_event: dict[str, Any] | None = None
+        self.last_verdict_event: dict[str, Any] | None = None
 
     # -- public ------------------------------------------------------------
 
@@ -406,6 +407,7 @@ class KakaoInboundWatcher:
 
         # The server returned a verdict (accept or reject); both are terminal, so
         # advance the high-water mark to keep one message → at most one job.
+        self._record_verdict(message, result)
         self._high_water[scope] = log_id
         if result.accepted:
             counters["submitted"] += 1
@@ -483,6 +485,21 @@ class KakaoInboundWatcher:
     def _record_error(self, code: str, message: str, error: BaseException | None) -> None:
         event = redacted_error_event(code, message, error)
         self.last_error_event = event
+        if self._log is not None:
+            self._log(redact(str(event)))
+
+    def _record_verdict(self, message: Any, result: InboundEventResult) -> None:
+        event: dict[str, Any] = {
+            "code": "AGENT_KAKAO_INBOUND_VERDICT",
+            "accepted": bool(result.accepted),
+            "duplicate": bool(result.duplicate),
+            "last_log_id": str(getattr(message, "log_id", "")),
+        }
+        if result.reason:
+            event["reason"] = result.reason
+        if result.job_id:
+            event["job_id"] = result.job_id
+        self.last_verdict_event = event
         if self._log is not None:
             self._log(redact(str(event)))
 

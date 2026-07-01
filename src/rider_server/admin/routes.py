@@ -596,6 +596,9 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
         channels = await _service.channel_health(repo, tenant_id=tenant_id, now=now)
         auth_required = await _service.auth_required_rows(repo, tenant_id=tenant_id, now=now)
         jobs = await _service.job_queue_rows(repo, tenant_id=tenant_id, now=now, limit=100)
+        kakao_inbound = await _service.kakao_inbound_rows(
+            repo, tenant_id=tenant_id, now=now, limit=100
+        )
         settings_rows = await _settings_rows_for_display(
             request, tenant_id=tenant_id, now=now
         )
@@ -617,6 +620,7 @@ async def _dashboard_response(request: Request, *, initial_target_id: str) -> HT
             "channels": channels,
             "auth_required": auth_required,
             "jobs": jobs,
+            "kakao_inbound": kakao_inbound,
             "settings_rows": settings_rows,
             "initial_target_id": initial_target_id,
             "show_debug_actions": False,
@@ -758,4 +762,24 @@ async def jobs_queue_fragment(
         request,
         "_jobs_queue.html",
         {"jobs": rows, "tenant_id": _tenant_id(request)},
+    )
+
+
+@router.get("/kakao-inbound", response_class=HTMLResponse)
+async def kakao_inbound_fragment(
+    request: Request,
+    _auth: None = Depends(require_admin_session),
+) -> HTMLResponse:
+    """``GET /admin/kakao-inbound`` — latest sanitized Kakao inbound decisions."""
+
+    try:
+        rows = await _service.kakao_inbound_rows(
+            _repo(request), tenant_id=_tenant_id(request), now=_now(), limit=100
+        )
+    except Exception:  # noqa: BLE001 - fragment must remain operator-safe HTML.
+        return _db_failure_fragment(request)
+    return templates.TemplateResponse(
+        request,
+        "_kakao_inbound.html",
+        {"kakao_inbound": rows, "tenant_id": _tenant_id(request)},
     )

@@ -166,6 +166,7 @@ _KAKAO_STATUS_KEYS = frozenset(
         "failed",
         "worker_enabled",
         "interactive_session_available",
+        "inbound",
     }
 )
 _SENSITIVE_KEY_PARTS = frozenset(

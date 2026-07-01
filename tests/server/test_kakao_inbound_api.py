@@ -29,8 +29,8 @@ class _FakeService:
         self.response = response
         self.calls = []
 
-    async def handle(self, event):
-        self.calls.append(event)
+    async def handle(self, event, *, agent_id=None):
+        self.calls.append((event, agent_id))
         return self.response
 
 
@@ -73,7 +73,8 @@ def test_delegates_to_service_and_returns_response():
     assert resp.status_code == 200
     assert resp.json() == {"accepted": True, "duplicate": False, "job_id": "job-9"}
     assert len(service.calls) == 1
-    event = service.calls[0]
+    event, agent_id = service.calls[0]
+    assert agent_id == "agent-1"
     assert event.command.name == "강민기"
     assert event.command.phone_last4 == "1234"
     assert event.chat_id == "111"
@@ -87,6 +88,16 @@ def test_reject_response_passthrough():
         resp = client.post("/v1/kakao/inbound-events", json=_BODY, headers=_BEARER)
     assert resp.status_code == 200
     assert resp.json() == {"accepted": False, "duplicate": False, "reason": "unknown_room"}
+
+
+def test_route_passes_agent_id_to_inbound_service():
+    service = _FakeService({"accepted": True, "duplicate": False, "job_id": "job-9"})
+    app = _app(service, resolved_agent_id="agent-pc-7")
+    with TestClient(app) as client:
+        resp = client.post("/v1/kakao/inbound-events", json=_BODY, headers=_BEARER)
+
+    assert resp.status_code == 200
+    assert service.calls[0][1] == "agent-pc-7"
 
 
 def test_validation_rejects_bad_phone_last4():

@@ -30,6 +30,7 @@ from rider_server.db.models.account import (
     PlatformAccount,
 )
 from rider_server.db.models.agent import Agent, BrowserProfile, Job
+from rider_server.db.models.audit import AuditLog
 from rider_server.db.models.messaging import (
     DeliveryLog,
     DeliveryRule,
@@ -66,6 +67,7 @@ from .dashboard_service import (
     ChannelHealthRow,
     DashboardRepository,
     JobQueueRow,
+    KakaoInboundDecisionRow,
     TargetHealthFacts,
     _optional_bool,
     _optional_str,
@@ -117,6 +119,7 @@ _CDP_PORT_MAX = 65535
 
 #: 화면 표시 전용 코드 — DB error_code 는 CRAWL_TIMEOUT 그대로 보존한다.
 _DISPLAY_CODE_STALE_CRAWL_SKIPPED = "STALE_CRAWL_SKIPPED"
+_KAKAO_INBOUND_DECISION_ACTION = "KAKAO_INBOUND_DECISION"
 
 
 def _optional_cdp_port(value: object) -> int | None:
@@ -194,6 +197,35 @@ def _agent_reports_kakao_runtime_unavailable(
     )
     session_available = _optional_bool(kakao_status.get("interactive_session_available"))
     return enabled is True and session_available is False
+
+
+def _kakao_inbound_decision_row(
+    *,
+    created_at: datetime,
+    diff_redacted: object,
+) -> KakaoInboundDecisionRow | None:
+    if not isinstance(diff_redacted, dict):
+        return None
+    event_fingerprint = _optional_str(diff_redacted.get("event_fingerprint"))
+    action = _optional_str(diff_redacted.get("action"))
+    command_type = _optional_str(diff_redacted.get("command_type"))
+    if not event_fingerprint or not action or not command_type:
+        return None
+    return KakaoInboundDecisionRow(
+        created_at=created_at,
+        agent_id=_optional_str(diff_redacted.get("agent_id")),
+        source=_optional_str(diff_redacted.get("source")) or "",
+        event_fingerprint=event_fingerprint,
+        command_type=command_type,
+        action=action,
+        reason=_optional_str(diff_redacted.get("reason")),
+        accepted=bool(diff_redacted.get("accepted")),
+        duplicate=bool(diff_redacted.get("duplicate")),
+        tenant_id=_optional_str(diff_redacted.get("tenant_id")),
+        channel_id=_optional_str(diff_redacted.get("channel_id")),
+        target_id=_optional_str(diff_redacted.get("target_id")),
+        job_id=_optional_str(diff_redacted.get("job_id")),
+    )
 
 
 class PostgresDashboardRepository(DashboardRepository):
@@ -952,6 +984,33 @@ class PostgresDashboardRepository(DashboardRepository):
                     )
                 )
         return result
+
+    async def kakao_inbound_decisions(
+        self, *, tenant_id: str, now: datetime, limit: int = 100
+    ) -> list[KakaoInboundDecisionRow]:
+        if not tenant_id.strip() or limit <= 0:
+            return []
+        stmt = (
+            select(AuditLog.created_at, AuditLog.diff_redacted)
+            .where(AuditLog.action == _KAKAO_INBOUND_DECISION_ACTION)
+            .order_by(AuditLog.created_at.desc())
+            .limit(max(0, limit) * 3)
+        )
+        rows: list[KakaoInboundDecisionRow] = []
+        async with self._session_factory() as session:
+            for created_at, diff_redacted in (await session.execute(stmt)).all():
+                row = _kakao_inbound_decision_row(
+                    created_at=created_at,
+                    diff_redacted=diff_redacted,
+                )
+                if row is None:
+                    continue
+                if tenant_id != ALL_TENANTS and row.tenant_id not in (tenant_id, None):
+                    continue
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+        return rows
 
 
 def _display_failure_code(error_code: object, result_json: object) -> str | None:

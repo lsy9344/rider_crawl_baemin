@@ -38,6 +38,7 @@ from rider_server.admin.dashboard_service import (
     DashboardService,
     InMemoryDashboardRepository,
     JobQueueRow,
+    KakaoInboundDecisionRow,
     TargetHealthFacts,
     TargetRow,
 )
@@ -154,6 +155,12 @@ def _seeded_repo() -> InMemoryDashboardRepository:
                 "last_success_at": "2026-06-14T11:59:00Z",
                 "last_error_code": "KAKAO_FAILURE",
                 "interactive_session_available": True,
+                "inbound": {
+                    "state": "warning",
+                    "reason": "configured_room_not_found",
+                    "latest_window_size": 20,
+                    "configured_missing_count": 1,
+                },
             },
         )
     )
@@ -213,6 +220,10 @@ def test_agent_rows_online_offline() -> None:
     assert by_id["a-online"].kakao_last_success_at == "2026-06-14T11:59:00Z"
     assert by_id["a-online"].kakao_last_error_code == "KAKAO_FAILURE"
     assert by_id["a-online"].kakao_interactive_session_available is True
+    assert by_id["a-online"].kakao_inbound_state == "warning"
+    assert by_id["a-online"].kakao_inbound_reason == "configured_room_not_found"
+    assert by_id["a-online"].kakao_inbound_latest_window_size == 20
+    assert by_id["a-online"].kakao_inbound_configured_missing_count == 1
     assert by_id["a-offline"].online is False
 
 
@@ -229,6 +240,7 @@ def test_agents_fragment_renders_kakao_worker_status() -> None:
     assert "마지막 성공 2026-06-14T11:59:00Z" in html
     assert "세션 OK" in html
     assert "KAKAO_FAILURE" in html
+    assert "configured_room_not_found" in html
 
 
 def _kakao_agent_row(*, session_available, online=True) -> AgentRow:
@@ -547,6 +559,92 @@ def _job(
     )
 
 
+def _decision(
+    *,
+    event_fingerprint: str,
+    tenant_id: str | None = _TENANT,
+    created_at: datetime = _NOW,
+    action: str = "reject",
+    reason: str | None = "unknown_room",
+    accepted: bool = False,
+    duplicate: bool = False,
+    agent_id: str | None = "agent-pc-1",
+    channel_id: str | None = None,
+    target_id: str | None = None,
+    job_id: str | None = None,
+) -> KakaoInboundDecisionRow:
+    return KakaoInboundDecisionRow(
+        created_at=created_at,
+        agent_id=agent_id,
+        source="pc_kakao_db",
+        event_fingerprint=event_fingerprint,
+        command_type="RIDER_CANCEL_RATE_LOOKUP",
+        action=action,
+        reason=reason,
+        accepted=accepted,
+        duplicate=duplicate,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        target_id=target_id,
+        job_id=job_id,
+    )
+
+
+def test_kakao_inbound_rows_are_tenant_scoped_and_recent_first() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_kakao_inbound_decision(
+        _decision(event_fingerprint="sha256:old", created_at=_NOW - timedelta(minutes=2))
+    )
+    repo.seed_kakao_inbound_decision(
+        _decision(
+            event_fingerprint="sha256:new",
+            created_at=_NOW - timedelta(seconds=10),
+            action="enqueue_lookup",
+            reason=None,
+            accepted=True,
+            channel_id="ch-1",
+            target_id="tg-1",
+            job_id="job-1",
+        )
+    )
+    repo.seed_kakao_inbound_decision(
+        _decision(event_fingerprint="sha256:other", tenant_id=_OTHER_TENANT)
+    )
+
+    rows = asyncio.run(
+        DashboardService().kakao_inbound_rows(repo, tenant_id=_TENANT, now=_NOW)
+    )
+
+    assert [row.event_fingerprint for row in rows] == ["sha256:new", "sha256:old"]
+    assert {row.tenant_id for row in rows} == {_TENANT}
+
+
+def test_kakao_inbound_fragment_renders_pre_enqueue_rejections() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_kakao_inbound_decision(
+        _decision(event_fingerprint="sha256:reject", reason="unknown_room")
+    )
+
+    body = _client(repo).get(f"/admin/kakao-inbound?tenant={_TENANT}").text
+
+    assert "unknown_room" in body
+    assert "sha256:reject" in body
+    assert "agent-pc-1" in body
+
+
+def test_kakao_inbound_fragment_does_not_render_raw_room_or_command() -> None:
+    repo = InMemoryDashboardRepository()
+    repo.seed_kakao_inbound_decision(
+        _decision(event_fingerprint="sha256:safe", reason="target_unmapped")
+    )
+
+    body = _client(repo).get(f"/admin/kakao-inbound?tenant={_TENANT}").text
+
+    assert "target_unmapped" in body
+    for raw in ("raw-room", "!!hong1234", "Hong", "1234"):
+        assert raw not in body
+
+
 def test_job_queue_rows_put_stuck_first_then_run_after() -> None:
     repo = InMemoryDashboardRepository()
     repo.seed_active_job(_job(job_id="wait-late", run_after=_NOW + timedelta(minutes=10)))
@@ -783,6 +881,19 @@ def test_dashboard_full_page_includes_realtime_queue_section() -> None:
     assert "실시간 큐" in body
     assert "/admin/jobs?tenant=" in body
     assert "every 5s" in body
+
+
+def test_dashboard_full_page_includes_kakao_inbound_observability_card() -> None:
+    repo = _seeded_repo()
+    repo.seed_kakao_inbound_decision(
+        _decision(event_fingerprint="sha256:reject", reason="unknown_room")
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert "/admin/kakao-inbound?tenant=" in body
+    assert "kakao-inbound" in body
+    assert "unknown_room" in body
 
 
 # ── 시스템 전체 판정 배너 + "지금 조치" 묶음(레이아웃 개선) ─────────────────
@@ -1148,11 +1259,19 @@ def test_readmodel_dtos_have_no_secret_shaped_fields() -> None:
         AgentBrowserProfileRow,
         ChannelHealthRow,
         AuthRequiredRow,
+        KakaoInboundDecisionRow,
         admin_routes.SettingsRow,
     ):
         for field in fields(dto):
             lowered = field.name.lower()
             assert not any(bad in lowered for bad in forbidden), f"{dto.__name__}.{field.name}"
+
+    raw_inbound_fields = ("room_name", "chat_id", "message", "name", "phone")
+    for field in fields(KakaoInboundDecisionRow):
+        lowered = field.name.lower()
+        assert not any(raw in lowered for raw in raw_inbound_fields), (
+            f"KakaoInboundDecisionRow.{field.name}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1197,6 +1316,7 @@ def test_all_fragments_also_require_admin_session() -> None:
         f"/admin/channels?tenant={_TENANT}",
         f"/admin/registered-settings?tenant={_TENANT}",
         f"/admin/auth-required?tenant={_TENANT}",
+        f"/admin/kakao-inbound?tenant={_TENANT}",
     ):
         assert c.get(path).status_code == 401, path
 
@@ -2214,6 +2334,10 @@ class _RecordingRepo(InMemoryDashboardRepository):
         self.calls.append("auth_required")
         return await super().auth_required(**kw)
 
+    async def kakao_inbound_decisions(self, **kw):  # type: ignore[override]
+        self.calls.append("kakao_inbound_decisions")
+        return await super().kakao_inbound_decisions(**kw)
+
 
 def test_full_page_invokes_only_read_methods() -> None:
     repo = _RecordingRepo()
@@ -2226,6 +2350,7 @@ def test_full_page_invokes_only_read_methods() -> None:
         "agent_health",
         "channel_health",
         "auth_required",
+        "kakao_inbound_decisions",
     }
 
 
@@ -2282,6 +2407,7 @@ def test_dashboard_repository_port_exposes_only_read_methods() -> None:
         "agent_health",
         "channel_health",
         "auth_required",
+        "kakao_inbound_decisions",
         "active_jobs",  # 실시간 큐 뷰(select 전용 읽기 — write/전이 아님)
     }
 
