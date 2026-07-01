@@ -64,6 +64,7 @@ QUALITY_OK = "OK"
 SCHEMA_VERSION = 1
 _MAX_DIAGNOSTIC_MESSAGE_LENGTH = 800
 _BAEMIN_PAGE_TIMEOUT_GRACE_SECONDS = 5.0
+CHILD_WORKER_TIMEOUT_DISABLED_KEY = "_rider_child_worker_timeout_disabled"
 
 
 class SecretRefUnresolved(RuntimeError):
@@ -81,6 +82,7 @@ class CrawlJobPayload:
     browser_profile_ref: str
     timeout_seconds: float
     parser_version: str
+    child_worker_timeout_disabled: bool = False
     login_id_ref: str = ""
     login_password_ref: str = ""
     coupang_login_id_ref: str = ""
@@ -201,12 +203,13 @@ class CrawlWorker:
                 if not timeout_cleanup_ran:
                     self._cleanup_profiles()
                 return result
-            return _run_with_timeout(
-                lambda: self._execute_payload(job, raw_payload, payload),
-                timeout_seconds=float(payload.timeout_seconds),
-                payload=payload,
-                cleanup=lambda: self._cleanup_after_timeout(payload),
-            )
+            if not payload.child_worker_timeout_disabled:
+                return _run_with_timeout(
+                    lambda: self._execute_payload(job, raw_payload, payload),
+                    timeout_seconds=float(payload.timeout_seconds),
+                    payload=payload,
+                    cleanup=lambda: self._cleanup_after_timeout(payload),
+                )
         return self._execute_payload(job, raw_payload, payload)
 
     def _record_crawl_diagnostic_from_result(
@@ -493,6 +496,9 @@ def payload_from_job(job: ClaimedJob) -> CrawlJobPayload:
         expected_display_name=str(raw.get("expected_display_name") or "").strip(),
         browser_profile_ref=str(raw.get("browser_profile_ref") or "").strip(),
         timeout_seconds=timeout_seconds,
+        child_worker_timeout_disabled=_truthy(
+            raw.get(CHILD_WORKER_TIMEOUT_DISABLED_KEY)
+        ),
         parser_version=str(raw.get("parser_version") or f"{platform}-v1").strip(),
         login_id_ref=_text(raw, "login_id_ref", "baemin_login_id_ref"),
         login_password_ref=_text(raw, "login_password_ref", "baemin_login_password_ref"),

@@ -93,7 +93,7 @@ def run_crawl_in_subprocess(
         stdout_path = root / "stdout.log"
         stderr_path = root / "stderr.log"
         payload = dict(job.payload)
-        payload["timeout_seconds"] = 0
+        payload["_rider_child_worker_timeout_disabled"] = True
         input_path.write_text(
             json.dumps(
                 {

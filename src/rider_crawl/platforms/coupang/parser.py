@@ -105,7 +105,9 @@ def parse_current_screen_text(text: str) -> CurrentScreenSnapshot:
 
 
 def _parse_record_table_current_screen_text(text: str) -> CurrentScreenSnapshot | None:
-    if "라이더 현황" not in text or "이름 / 연락처" not in text:
+    if "라이더 현황" not in text or not any(
+        label in text for label in ("이름 / 연락처", "이름 / 전화번호")
+    ):
         return None
 
     update_match = re.search(r"(?P<time>\d{1,2}:\d{2})\s*업데이트", text)
@@ -113,14 +115,26 @@ def _parse_record_table_current_screen_text(text: str) -> CurrentScreenSnapshot 
         return None
 
     try:
-        online_riders = int(parse_count(_required_number_after("온라인", text)))
-        rejected_ignored_count = parse_count(_required_number_after("거절/무시", text))
-        cancelled_count = parse_count(_required_number_after("취소", text))
-        completed_count = parse_count(_required_number_after("완료", text))
-        sequence_violation_count = parse_count(_required_number_after("순서 미준수", text))
-        lunch_peak_count = parse_count(_required_number_after("점심피크", text))
-        dinner_peak_count = parse_count(_required_number_after("저녁피크", text))
-        non_peak_count = parse_count(_required_number_after("논피크", text))
+        raw_values = {
+            "online": _required_number_after("온라인", text),
+            "rejected_ignored": _required_number_after("거절/무시", text),
+            "cancelled": _required_number_after("취소", text),
+            "completed": _required_number_after("완료", text),
+            "sequence_violation": _required_number_after("순서 미준수", text),
+            "lunch_peak": _required_number_after("점심피크", text),
+            "dinner_peak": _required_number_after("저녁피크", text),
+            "non_peak": _required_number_after("논피크", text),
+        }
+        if _record_table_values_are_placeholder(raw_values):
+            return None
+        online_riders = int(parse_count(raw_values["online"]))
+        rejected_ignored_count = parse_count(raw_values["rejected_ignored"])
+        cancelled_count = parse_count(raw_values["cancelled"])
+        completed_count = parse_count(raw_values["completed"])
+        sequence_violation_count = parse_count(raw_values["sequence_violation"])
+        lunch_peak_count = parse_count(raw_values["lunch_peak"])
+        dinner_peak_count = parse_count(raw_values["dinner_peak"])
+        non_peak_count = parse_count(raw_values["non_peak"])
     except (MissingPerformanceDataError, ValueError):
         return None
 
@@ -144,6 +158,10 @@ def _parse_record_table_current_screen_text(text: str) -> CurrentScreenSnapshot 
         non_peak_count=non_peak_count,
         active_riders=online_riders,
     )
+
+
+def _record_table_values_are_placeholder(raw_values: dict[str, str]) -> bool:
+    return bool(raw_values) and all(value.strip() == "-" for value in raw_values.values())
 
 
 def _record_table_center_name(text: str) -> str:

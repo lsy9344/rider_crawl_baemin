@@ -733,6 +733,27 @@ def _content_with_post_load_recovery(
     """
 
     content = page.content()
+    if _html_looks_like_chrome_error_page(content):
+        _recover_chrome_error_page_once(
+            page,
+            config,
+            target_url=target_url,
+            load_timeout_errors=load_timeout_errors,
+        )
+        _wait_for_target_page_ready(
+            page,
+            config,
+            target_url=target_url,
+            timeout_errors=load_timeout_errors,
+        )
+        if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+            _wait_for_target_page_ready(
+                page,
+                config,
+                target_url=target_url,
+                timeout_errors=load_timeout_errors,
+            )
+        content = page.content()
     if post_load_validate is None:
         return content
     try:
@@ -1229,11 +1250,36 @@ def _wait_for_target_page_ready(
     else:
         return
 
+    _recover_chrome_error_page_once(
+        page,
+        config,
+        target_url=target_url,
+        load_timeout_errors=timeout_errors,
+    )
+
     try:
         page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
     except timeout_errors as exc:
         if _page_looks_like_coupang_login_required(page):
             raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
+        retried_chrome_error = False
+        try:
+            retried_chrome_error = _recover_chrome_error_page_once(
+                page,
+                config,
+                target_url=target_url,
+                load_timeout_errors=timeout_errors,
+            )
+        except RuntimeError as chrome_exc:
+            raise chrome_exc from exc
+        if retried_chrome_error:
+            try:
+                page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
+                return
+            except timeout_errors as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from retry_exc
+                exc = retry_exc
         if path == "/page/peak-dashboard":
             try:
                 _reload_target_page(
@@ -1253,6 +1299,71 @@ def _wait_for_target_page_ready(
             f"{label}가 {seconds}초 안에 준비되지 않았습니다. "
             "Chrome에서 쿠팡이츠 로그인과 화면 로딩을 확인하세요."
         ) from exc
+
+
+def _recover_chrome_error_page_once(
+    page: Any,
+    config: AppConfig,
+    *,
+    target_url: str,
+    load_timeout_errors: tuple[type[BaseException], ...],
+) -> bool:
+    if not _page_looks_like_chrome_error_page(page):
+        return False
+
+    _reload_target_page(page, config, target_url=target_url, load_timeout_errors=load_timeout_errors)
+    if _page_looks_like_chrome_error_page(page):
+        raise RuntimeError(_chrome_error_page_message(page, target_url))
+    return True
+
+
+def _page_looks_like_chrome_error_page(page: Any) -> bool:
+    url = str(getattr(page, "url", "")).casefold()
+    if url.startswith("chrome-error://"):
+        return True
+
+    try:
+        html = str(page.content())
+    except Exception:
+        return False
+    return _html_looks_like_chrome_error_page(html)
+
+
+def _html_looks_like_chrome_error_page(html: str) -> bool:
+    text = re.sub(r"\s+", " ", html or "")
+    lower = text.casefold()
+    if "chrome-error://chromewebdata" in lower:
+        return True
+    if "이 웹페이지를 표시하는 도중 문제가 발생" in text:
+        return True
+    if "aw, snap" in lower and "error code" in lower:
+        return True
+    return "this page isn't working" in lower and "error code" in lower
+
+
+def _chrome_error_page_message(page: Any, target_url: str) -> str:
+    html = ""
+    try:
+        html = str(page.content())
+    except Exception:
+        pass
+    code = _chrome_error_code_from_html(html)
+    code_text = f" 오류코드: {code}." if code else ""
+    return (
+        f"Chrome 오류 페이지가 표시되어 쿠팡이츠 대상 페이지를 읽을 수 없습니다.{code_text}\n"
+        "Chrome 탭 또는 프로필이 비정상 상태일 수 있습니다. 대상 탭을 닫고 다시 연 뒤 재시도하세요.\n"
+        f"대상 URL: {target_url}"
+    )
+
+
+def _chrome_error_code_from_html(html: str) -> str:
+    text = re.sub(r"\s+", " ", html or "")
+    match = re.search(
+        r"(?:오류\s*코드|오류코드|error\s*code)\s*[:：]?\s*([A-Za-z0-9_-]+)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def _page_looks_like_coupang_login_required(page: Any) -> bool:

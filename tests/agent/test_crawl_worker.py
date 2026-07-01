@@ -249,6 +249,51 @@ def test_coupang_page_timeout_preserves_full_job_timeout() -> None:
     assert captured["config"].page_timeout_seconds == 60_000
 
 
+def test_child_process_can_disable_nested_worker_timeout_while_preserving_page_timeout(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fail_thread_timeout(*args, **kwargs):
+        raise AssertionError("child process should rely on parent process timeout")
+
+    def fake_crawl(config, *, platform_name=None):
+        captured["platform_name"] = platform_name
+        captured["config"] = config
+        return _coupang_snapshot()
+
+    monkeypatch.setattr(
+        "rider_agent.workers.crawl_worker._run_with_timeout",
+        fail_thread_timeout,
+    )
+
+    job = _crawl_job(
+        CAPABILITY_CRAWL_COUPANG,
+        platform="coupang",
+        expected="",
+    )
+    job = ClaimedJob(
+        job_id=job.job_id,
+        type=job.type,
+        target_id=job.target_id,
+        lease_expires_at=job.lease_expires_at,
+        payload={
+            **job.payload,
+            "timeout_seconds": 180,
+            "_rider_child_worker_timeout_disabled": True,
+        },
+    )
+
+    result = CrawlWorker(
+        crawl_snapshot=fake_crawl,
+        process_boundary_enabled=False,
+    ).execute(job)
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert captured["platform_name"] == "coupang"
+    assert captured["config"].page_timeout_seconds == 180_000
+
+
 def test_crawl_worker_rejects_expired_payload_before_profile_prepare() -> None:
     """crawl_worker checks expires_at before ensure_profile."""
 
@@ -1414,6 +1459,53 @@ def test_subprocess_timeout_kills_process_tree(monkeypatch) -> None:
     assert cleanup_called == [True]
     assert result.status == JOB_STATUS_FAILED
     assert result.error_code == ERROR_CRAWL_TIMEOUT
+
+
+def test_subprocess_payload_preserves_child_timeout(monkeypatch) -> None:
+    import rider_agent.workers.crawl_process as cp
+
+    captured: dict[str, object] = {}
+
+    class _OkProc:
+        pid = 4323
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    def _fake_popen(argv, **kwargs):
+        input_path = Path(argv[-2])
+        output_path = Path(argv[-1])
+        captured["child_job"] = json.loads(input_path.read_text(encoding="utf-8"))
+        output_path.write_text(
+            json.dumps(make_success_result(result_json={"ok": True}).__dict__),
+            encoding="utf-8",
+        )
+        return _OkProc()
+
+    monkeypatch.setattr(cp.subprocess, "Popen", _fake_popen)
+
+    job = ClaimedJob(
+        job_id="job-1",
+        type="CRAWL_COUPANG",
+        target_id="target-1",
+        lease_expires_at=None,
+        payload={"timeout_seconds": 180, "platform": "coupang"},
+    )
+    result = cp.run_crawl_in_subprocess(
+        job,
+        timeout_seconds=180,
+        target_id="target-1",
+        platform="coupang",
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    child_job = captured["child_job"]
+    assert isinstance(child_job, dict)
+    assert child_job["payload"]["timeout_seconds"] == 180
 
 
 def test_subprocess_failure_reports_redacted_stderr(monkeypatch) -> None:

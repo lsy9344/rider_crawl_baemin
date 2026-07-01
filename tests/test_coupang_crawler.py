@@ -985,6 +985,39 @@ def test_coupang_fetch_target_page_content_refreshes_peak_dashboard_once_and_suc
     assert page.goto_calls == [config.peak_dashboard_url]
 
 
+def test_coupang_fetch_target_page_content_reopens_chrome_error_page_once(tmp_path):
+    config = _config(tmp_path)
+    page = _ChromeErrorThenReadyPage(
+        config.coupang_eats_url,
+        ready_html="<html><body>라이더 현황</body></html>",
+    )
+    browser = _FakeBrowser([page])
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        load_timeout_errors=(FakeTimeout,),
+    )
+
+    assert html == "<html><body>라이더 현황</body></html>"
+    assert page.goto_calls == [config.coupang_eats_url]
+
+
+def test_coupang_fetch_target_page_content_reports_persistent_chrome_error_page(tmp_path):
+    config = _config(tmp_path)
+    page = _PersistentChromeErrorPage(config.coupang_eats_url)
+    browser = _FakeBrowser([page])
+
+    with pytest.raises(RuntimeError, match="Chrome 오류 페이지.*오류코드: 15"):
+        crawler._fetch_target_page_content(
+            browser,
+            config,
+            load_timeout_errors=(FakeTimeout,),
+        )
+
+    assert page.goto_calls == [config.coupang_eats_url]
+
+
 def test_coupang_login_required_stops_tab_when_auto_2fa_disabled(tmp_path):
     # 자동 2FA를 명시적으로 끄면 로그인 만료 시 기존처럼 탭을 중지한다.
     config = _config(tmp_path, coupang_auto_email_2fa_enabled=False)
@@ -1389,6 +1422,44 @@ def test_coupang_missing_data_on_authed_page_does_not_recover_or_escalate(tmp_pa
     assert recover_calls == []
 
 
+def test_coupang_current_screen_rejects_placeholder_record_table_shell():
+    html = """
+    <main>
+      <h1>해운대플러스 수영중앙</h1>
+      <section>
+        <h2>아침논피크(06:00~10:55)</h2>
+        <p>할당량 소진 중</p>
+        <h2>라이더 현황</h2>
+        <p>21:32 업데이트</p>
+      </section>
+      <section>
+        <h3>라이더 정보</h3>
+        <h3>종합기록</h3>
+        <h3>피크별 상세 완료 건수</h3>
+      </section>
+      <table>
+        <thead>
+          <tr>
+            <th>이름 / 연락처</th>
+            <th>상태 온라인 -</th>
+            <th>권한 -</th>
+            <th>거절/무시 -</th>
+            <th>취소 -</th>
+            <th>완료 -</th>
+            <th>순서 미준수 -</th>
+            <th>점심피크 -</th>
+            <th>저녁피크 -</th>
+            <th>논피크 -</th>
+          </tr>
+        </thead>
+      </table>
+    </main>
+    """
+
+    with pytest.raises(crawler.MissingPerformanceDataError):
+        crawler.parse_current_screen_html(html)
+
+
 def test_coupang_missing_data_recovery_disabled_propagates_missing_data(tmp_path):
     # post_load_validate 가 None(자동 2FA off)이면 검증 자체를 안 한다 → content 를 그대로
     # 반환하고 회복도 호출하지 않는다(기능 off = 무변화). 누락 판정은 상위 파서가 한다.
@@ -1590,6 +1661,45 @@ class _RefreshablePeakPage(_FakePage):
         self._wait_attempts += 1
         if self._wait_attempts == 1:
             raise FakeTimeout("locator timeout")
+        return None
+
+
+_CHROME_ERROR_15_HTML = """
+<html>
+  <body>
+    <h1>이 웹페이지를 표시하는 도중 문제가 발생했습니다.</h1>
+    <p>오류코드: 15</p>
+  </body>
+</html>
+"""
+
+
+class _ChromeErrorThenReadyPage(_FakePage):
+    def __init__(self, url: str, *, ready_html: str) -> None:
+        super().__init__(
+            url,
+            html=_CHROME_ERROR_15_HTML,
+            wait_error=FakeTimeout("locator timeout"),
+        )
+        self._ready_html = ready_html
+
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        self.html = self._ready_html
+        self.wait_error = None
+        return None
+
+
+class _PersistentChromeErrorPage(_FakePage):
+    def __init__(self, url: str) -> None:
+        super().__init__(
+            url,
+            html=_CHROME_ERROR_15_HTML,
+            wait_error=FakeTimeout("locator timeout"),
+        )
+
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
         return None
 
 
