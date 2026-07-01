@@ -19,7 +19,17 @@ from rider_server.queue.backend import (
     ClaimedJobRecord,
     CompleteOutcome,
 )
-from rider_server.queue.states import InvalidJobTransition, JOB_STATUS_SUCCEEDED
+from rider_server.queue.states import (
+    InvalidJobTransition,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SUCCEEDED,
+)
+
+# The on_completed hook only fires on a real terminal transition. A failure that
+# the queue re-queued for retry returns COMPLETE_ACCEPTED with final_status
+# PENDING — not a completion — so firing then would send a premature/duplicate
+# reply. Fire once, on the terminal attempt.
+_TERMINAL_COMPLETION_STATUSES = frozenset({JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED})
 from rider_server.services.job_result_ingest_service import (
     JobResultIngestError,
     SnapshotIngestRecord,
@@ -197,9 +207,11 @@ class JobCompletionService:
                 agent_id=agent_id,
                 now=now,
             )
-        await self._fire_on_completed(
-            job_id=job_id, status=status, result_json=ingest_result_json, now=now
-        )
+        final_status = outcome.final_status or status
+        if final_status in _TERMINAL_COMPLETION_STATUSES:
+            await self._fire_on_completed(
+                job_id=job_id, status=final_status, result_json=ingest_result_json, now=now
+            )
         return result
 
     async def _fire_on_completed(

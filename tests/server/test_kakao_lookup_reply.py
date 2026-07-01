@@ -174,6 +174,23 @@ def test_dispatcher_ignores_non_lookup_result():
     assert queue.enqueued == []
 
 
+def test_dispatcher_skips_when_already_replied():
+    queue = _FakeQueue()
+    service = KakaoLookupReplyService(
+        queue_backend=queue,
+        sending_enabled=lambda: True,
+        channel_active=lambda _cid: True,
+        already_replied=lambda _key: True,  # a KAKAO_SEND for this key already exists
+    )
+    result = asyncio.run(
+        service.on_job_completed(
+            job_id="j1", status=JOB_STATUS_SUCCEEDED, result_json=_success_result(), now=_NOW
+        )
+    )
+    assert result is None
+    assert queue.enqueued == []
+
+
 # --- end-to-end: completion fires the hook --------------------------------
 
 def test_job_completion_fires_reply_hook_and_enqueues():
@@ -213,3 +230,25 @@ def test_reply_hook_failure_does_not_break_completion():
         )
     )
     assert result.job_id == "j1"
+
+
+def test_retry_outcome_does_not_fire_reply():
+    # A failure the queue re-queued for retry returns COMPLETE_ACCEPTED with
+    # final_status=PENDING; the hook must NOT fire a premature failure reply.
+    class _RetryQueue(_FakeQueue):
+        async def complete(self, **kwargs):
+            return CompleteOutcome(COMPLETE_ACCEPTED, kwargs["job_id"], final_status="PENDING")
+
+    queue = _RetryQueue()
+    reply_service = _service(queue)
+    completion = JobCompletionService(
+        queue_backend=queue, on_completed=reply_service.on_job_completed
+    )
+    asyncio.run(
+        completion.complete(
+            job_id="j1", agent_id="agent-1", status=JOB_STATUS_FAILED,
+            result_json=_failed_result(), ingest_result_json=_failed_result(),
+            error_code="CDP_UNREACHABLE", duration_ms=None, result_schema_version=None, now=_NOW,
+        )
+    )
+    assert queue.enqueued == []  # retrying, not terminal -> no reply yet

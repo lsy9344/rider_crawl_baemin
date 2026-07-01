@@ -18,6 +18,7 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -36,6 +37,9 @@ PLATFORM_BAEMIN = "baemin"
 
 ORIGIN_KAKAO_INBOUND = "kakao_inbound"
 DEFAULT_LOOKUP_TIMEOUT_SECONDS = 60
+# Extra slack beyond timeout_seconds for claim/browser-prep latency before the
+# worker's stale-payload defense (expires_at) engages.
+LOOKUP_TTL_GRACE_SECONDS = 60
 
 # Decision actions (what the orchestrator should do).
 ACTION_ENQUEUE_LOOKUP = "enqueue_lookup"  # accepted: enqueue one RIDER_LOOKUP
@@ -347,6 +351,15 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _iso_utc(moment: datetime) -> str:
+    return (
+        moment.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 class KakaoInboundEventService:
     """Async orchestration over the pure decision core.
 
@@ -368,6 +381,7 @@ class KakaoInboundEventService:
         in_flight: Callable[[str], Awaitable[bool] | bool] | None = None,
         tenant_active: Callable[[str], Awaitable[bool] | bool] | None = None,
         rate_limited: Callable[[str], Awaitable[bool] | bool] | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._load_channels = load_channels
         self._load_targets = load_targets
@@ -378,6 +392,7 @@ class KakaoInboundEventService:
         self._in_flight = in_flight
         self._tenant_active = tenant_active
         self._rate_limited = rate_limited
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def handle(self, event: InboundEventInput) -> dict:
         """Process one inbound event and return the API response dict."""
@@ -387,11 +402,18 @@ class KakaoInboundEventService:
 
         if decision.action == ACTION_ENQUEUE_LOOKUP:
             await self._maybe_bind(decision)
+            payload = dict(decision.job_payload or {})
+            # Stamp expires_at so the worker's stale-payload defense engages if the
+            # job is claimed/run long after detection (kept out of the pure decision
+            # because it is time-dependent).
+            timeout = payload.get("timeout_seconds", DEFAULT_LOOKUP_TIMEOUT_SECONDS)
+            expires = self._now() + timedelta(seconds=float(timeout) + LOOKUP_TTL_GRACE_SECONDS)
+            payload["expires_at"] = _iso_utc(expires)
             job_id = await _maybe_await(
                 self._enqueue(
                     job_type=LOOKUP_JOB_TYPE,
                     target_id=decision.target_id,
-                    payload_json=decision.job_payload,
+                    payload_json=payload,
                 )
             )
             return {"accepted": True, "duplicate": False, "job_id": job_id}

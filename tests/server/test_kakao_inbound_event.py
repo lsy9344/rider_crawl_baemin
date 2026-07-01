@@ -5,6 +5,7 @@ the queue. The async orchestration + HTTP route are tested separately once wired
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -304,6 +305,34 @@ def test_handle_enqueues_lookup_and_binds_chat_id():
     assert target_id == "tg1"
     assert payload["command"]["name"] == "강민기"
     assert calls["bound"] == [("ch1", "111")]
+
+
+def test_handle_stamps_expires_at_on_lookup_payload():
+    fixed = datetime(2026, 7, 1, 0, 0, 0, tzinfo=timezone.utc)
+    calls = {"enqueued": [], "bound": []}
+
+    async def load_channels():
+        return [_channel(chat_id="111")]
+
+    async def load_targets(channel_id):
+        return (_target(),)
+
+    async def enqueue(*, job_type, target_id, payload_json):
+        calls["enqueued"].append(payload_json)
+        return "job-1"
+
+    service = KakaoInboundEventService(
+        load_channels=load_channels,
+        load_targets=load_targets,
+        enqueue=enqueue,
+        sending_enabled=lambda: True,
+        now=lambda: fixed,
+    )
+    asyncio.run(service.handle(_event(chat_id="111")))
+
+    payload = calls["enqueued"][0]
+    # timeout_seconds (60) + LOOKUP_TTL_GRACE_SECONDS (60) = +120s
+    assert payload["expires_at"] == "2026-07-01T00:02:00Z"
 
 
 def test_handle_duplicate_does_not_enqueue():

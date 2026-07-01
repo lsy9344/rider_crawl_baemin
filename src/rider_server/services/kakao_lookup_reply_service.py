@@ -101,10 +101,12 @@ class KakaoLookupReplyService:
         queue_backend: Any,
         sending_enabled: Callable[[], Awaitable[bool] | bool],
         channel_active: Callable[[str], Awaitable[bool] | bool],
+        already_replied: Callable[[str], Awaitable[bool] | bool] | None = None,
     ) -> None:
         self._queue_backend = queue_backend
         self._sending_enabled = sending_enabled
         self._channel_active = channel_active
+        self._already_replied = already_replied
 
     async def on_job_completed(
         self,
@@ -118,6 +120,18 @@ class KakaoLookupReplyService:
             return None
         assert isinstance(result_json, dict)
         channel_id = str(result_json.get("reply_channel_id") or "").strip()
+        origin_event_key = str(result_json.get("origin_event_key") or "").strip()
+
+        # Dedupe against idempotent completion replay: if a KAKAO_SEND for this
+        # origin_event_key already exists, do not enqueue a second reply. (This is
+        # best-effort — the terminal-status gate covers the retry case; this
+        # covers a re-POSTed /complete after a lost response.)
+        if (
+            origin_event_key
+            and self._already_replied is not None
+            and bool(await _maybe_await(self._already_replied(origin_event_key)))
+        ):
+            return None
 
         sending = bool(await _maybe_await(self._sending_enabled()))
         active = bool(await _maybe_await(self._channel_active(channel_id))) if channel_id else False

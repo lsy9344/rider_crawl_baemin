@@ -32,6 +32,7 @@ from ..queue.states import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
+    JOB_TYPE_KAKAO_SEND,
     JOB_TYPE_RIDER_LOOKUP,
 )
 from .kakao_inbound_event_service import (
@@ -185,6 +186,51 @@ def build_kakao_inbound_event_service(
         bind_chat_id=bind_chat_id,
         is_duplicate=is_duplicate,
         in_flight=in_flight,
+    )
+
+
+def build_kakao_lookup_reply_service(
+    *,
+    db_session_factory: Any,
+    queue_backend: Any,
+    channel_repository: Any,
+    sending_enabled_getter: Callable[[], bool],
+) -> Any:
+    """Assemble the RIDER_LOOKUP completion -> KAKAO_SEND reply service.
+
+    Wires the send gate, channel ACTIVE re-check, and an origin_event_key dedupe
+    over existing KAKAO_SEND jobs (idempotent-replay guard) — again without
+    touching the protected postgres_queue module.
+    """
+
+    from ..domain import MessengerChannelState
+    from .kakao_lookup_reply_service import KakaoLookupReplyService
+
+    async def channel_active(channel_id: str) -> bool:
+        if not channel_id:
+            return False
+        channel = await channel_repository.get(channel_id)
+        return channel is not None and channel.state == MessengerChannelState.ACTIVE
+
+    async def already_replied(origin_event_key: str) -> bool:
+        if not origin_event_key or db_session_factory is None:
+            return False
+        stmt = (
+            select(Job.id)
+            .where(
+                Job.type == JOB_TYPE_KAKAO_SEND,
+                Job.payload_json["origin_event_key"].as_string() == origin_event_key,
+            )
+            .limit(1)
+        )
+        async with db_session_factory() as session:
+            return (await session.execute(stmt)).first() is not None
+
+    return KakaoLookupReplyService(
+        queue_backend=queue_backend,
+        sending_enabled=sending_enabled_getter,
+        channel_active=channel_active,
+        already_replied=already_replied,
     )
 
 

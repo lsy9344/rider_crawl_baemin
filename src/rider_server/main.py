@@ -43,7 +43,7 @@ from .api import (
     telegram_webhook_router,
 )
 from .db.base import create_engine, create_session_factory
-from .domain import Messenger, MessengerChannel, MessengerChannelState
+from .domain import Messenger, MessengerChannel
 from .metrics.policy import evaluate_alerts
 from .metrics.repository_postgres import PostgresMetricsRepository
 from .metrics.service import (
@@ -83,8 +83,10 @@ from .services.channel_repository_postgres import PostgresChannelRepository
 from .services.dispatch_fanout_service import DispatchJob
 from .services.dispatch_worker import TelegramDispatchWorker
 from .services.job_completion_service import JobCompletionService
-from .services.kakao_inbound_wiring import build_kakao_inbound_event_service
-from .services.kakao_lookup_reply_service import KakaoLookupReplyService
+from .services.kakao_inbound_wiring import (
+    build_kakao_inbound_event_service,
+    build_kakao_lookup_reply_service,
+)
 from .services.job_result_ingest_service import JobResultIngestService
 from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .services.telegram_central_dispatch import CentralTelegramSender
@@ -678,16 +680,11 @@ def create_app(
     # Phase 4: RIDER_LOOKUP 완료 → 요청 방으로 스코프드 KAKAO_SEND 답장 1개(성공=렌더 결과,
     # 실패=고정 실패문). 완료 workflow 는 Kakao 를 모르게 on_completed 훅으로 붙인다. 전송 전
     # 전역 send gate + 채널 ACTIVE 상태를 재확인한다(RIDER_LOOKUP 은 snapshot ingest/fanout 우회).
-    _reply_channel_repository = app.state.channel_repository
-
-    async def _reply_channel_active(channel_id: str) -> bool:
-        channel = await _reply_channel_repository.get(channel_id)
-        return channel is not None and channel.state == MessengerChannelState.ACTIVE
-
-    app.state.kakao_lookup_reply_service = KakaoLookupReplyService(
+    app.state.kakao_lookup_reply_service = build_kakao_lookup_reply_service(
+        db_session_factory=db_session_factory,
         queue_backend=app.state.queue_backend,
-        sending_enabled=lambda: app.state.sending_enabled,
-        channel_active=_reply_channel_active,
+        channel_repository=app.state.channel_repository,
+        sending_enabled_getter=lambda: app.state.sending_enabled,
     )
     app.state.job_completion_service = JobCompletionService(
         queue_backend=app.state.queue_backend,
