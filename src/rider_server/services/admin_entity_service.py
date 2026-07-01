@@ -770,6 +770,7 @@ class AdminEntityService:
         telegram_chat_id: str | None = None,
         thread_id: str | None = None,
         kakao_room_name: str | None = None,
+        command_trigger_enabled: bool = False,
         registration_code: str | None = None,
         at: datetime,
         actor_id: str | None,
@@ -781,9 +782,12 @@ class AdminEntityService:
         Telegram 은 register/verify/activate 흐름을 거치므로 ``PENDING`` 으로 만들고, Kakao 는 방명이
         있으면 추가 등록 handshake 가 없어 바로 ``ACTIVE`` 로 만든다.
         ``telegram_chat_id``/``thread_id``/``kakao_room_name`` 은 라우팅 식별자라 secret 아님(ref화 0).
+        ``command_trigger_enabled`` 는 카카오 인바운드 라이더 조회(유료) opt-in 플래그로 기본 False
+        (fail-closed)이며, 카카오 채널에서만 켤 수 있다.
         """
 
         await self._scoped_tenant(tenant_id)
+        self._assert_command_trigger_messenger(messenger, command_trigger_enabled)
         initial_state = (
             MessengerChannelState.ACTIVE
             if messenger is Messenger.KAKAO and (kakao_room_name or "").strip()
@@ -797,6 +801,7 @@ class AdminEntityService:
             thread_id=thread_id or None,
             kakao_room_name=kakao_room_name or None,
             state=initial_state,
+            command_trigger_enabled=command_trigger_enabled,
         )
         if channel.state is MessengerChannelState.ACTIVE and channel.messenger is Messenger.KAKAO:
             active_channels = [
@@ -818,6 +823,7 @@ class AdminEntityService:
                 # chat_id/방명은 redact/build_diff_redacted 가 운영 식별자로 마스킹.
                 "telegram_chat_id": channel.telegram_chat_id,
                 "kakao_room_name": channel.kakao_room_name,
+                "command_trigger_enabled": channel.command_trigger_enabled,
                 "reason": reason,
             },
             source=source,
@@ -836,17 +842,28 @@ class AdminEntityService:
         telegram_chat_id: str | None = None,
         thread_id: str | None = None,
         kakao_room_name: str | None = None,
+        command_trigger_enabled: bool | None = None,
         at: datetime,
         actor_id: str | None,
         source: str | None = None,
         reason: str | None = None,
     ) -> MessengerChannel:
-        """채널 라우팅 필드(chat_id/thread_id/방명)를 편집한다.
+        """채널 라우팅 필드(chat_id/thread_id/방명)와 라이더 조회(유료) 활성 여부를 편집한다.
 
         PENDING Kakao 채널은 방명이 채워지면 별도 handshake 없이 ACTIVE 로 전환한다.
+        ``command_trigger_enabled`` 는 3-state 다 — ``None`` 이면 기존값 유지, True/False 면 명시 토글.
+        카카오 채널에서만 켤 수 있다(Telegram 은 True 로 못 켬).
         """
 
         existing = await self._scoped_channel(channel_id, tenant_id=tenant_id)
+        next_command_trigger_enabled = (
+            command_trigger_enabled
+            if command_trigger_enabled is not None
+            else existing.command_trigger_enabled
+        )
+        self._assert_command_trigger_messenger(
+            existing.messenger, next_command_trigger_enabled
+        )
         next_kakao_room_name = (
             kakao_room_name if kakao_room_name is not None else existing.kakao_room_name
         )
@@ -867,6 +884,7 @@ class AdminEntityService:
             thread_id=thread_id if thread_id is not None else existing.thread_id,
             kakao_room_name=next_kakao_room_name,
             state=next_state,
+            command_trigger_enabled=next_command_trigger_enabled,
         )
         if updated.state is MessengerChannelState.ACTIVE and updated.messenger is Messenger.KAKAO:
             active_channels = [
@@ -888,6 +906,8 @@ class AdminEntityService:
                 "kakao_room_name": updated.kakao_room_name,
                 "from_state": existing.state.value,
                 "to_state": updated.state.value,
+                "from_command_trigger_enabled": existing.command_trigger_enabled,
+                "to_command_trigger_enabled": updated.command_trigger_enabled,
                 "reason": reason,
             },
             source=source,
@@ -895,6 +915,19 @@ class AdminEntityService:
         )
         await self._repo.save_messenger_channel(updated, audit)
         return updated
+
+    @staticmethod
+    def _assert_command_trigger_messenger(
+        messenger: Messenger, command_trigger_enabled: bool
+    ) -> None:
+        """라이더 조회(유료) 활성은 카카오 채널에서만 허용한다(Telegram 등은 True 로 못 켬).
+
+        런타임 watchlist(``active_kakao_command_channels``)가 이미 ``messenger=KAKAO`` 로 거르지만,
+        비카카오 채널에 켜진 무의미한 상태가 저장되지 않도록 write 경계에서 fail-closed 로 막는다.
+        """
+
+        if command_trigger_enabled and messenger is not Messenger.KAKAO:
+            raise ValueError("카카오 채널만 라이더 조회를 활성화할 수 있습니다")
 
     async def activate_messenger_channel_manual(
         self,

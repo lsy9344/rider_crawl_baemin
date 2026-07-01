@@ -110,6 +110,10 @@ def _channel_to_domain(row: MessengerChannelRow) -> MessengerChannel:
         thread_id=row.thread_id,
         kakao_room_name=row.kakao_room_name,
         state=MessengerChannelState(row.state),
+        # 카카오 인바운드 라이더 조회(유료) 활성 플래그 — Admin UI 가 읽고/토글한다. 이 컬럼을
+        # 누락하면 DB 값과 무관하게 항상 기본 False 로 읽혀 활성 상태가 화면에 안 보인다.
+        kakao_chat_id=row.kakao_chat_id,
+        command_trigger_enabled=bool(row.command_trigger_enabled),
     )
 
 
@@ -330,6 +334,9 @@ class PostgresAdminEntityRepository:
             "thread_id": channel.thread_id,
             "kakao_room_name": channel.kakao_room_name,
             "state": channel.state.value,
+            # 카카오 인바운드 라이더 조회(유료) 활성 플래그(기본 False=fail-closed). kakao_chat_id
+            # 는 서버가 첫 인바운드 매칭 때 바인딩하므로 여기서 INSERT 하지 않는다(server_default).
+            "command_trigger_enabled": channel.command_trigger_enabled,
             "registration_code": registration_code,  # 라우팅 코드(비domain, secret 아님)
         }
         await self._insert_with_audit(MessengerChannelRow, values, audit)
@@ -487,6 +494,9 @@ class PostgresAdminEntityRepository:
                 "thread_id": channel.thread_id,
                 "kakao_room_name": channel.kakao_room_name,
                 "state": channel.state.value,  # soft delete = INACTIVE 포함
+                # 카카오 인바운드 라이더 조회(유료) 활성 토글. kakao_chat_id 는 서버가 인바운드
+                # 매칭 때 바인딩하는 값이라 Admin UPDATE 로 덮어쓰지 않는다(여기 미포함).
+                "command_trigger_enabled": channel.command_trigger_enabled,
             },
             audit,
         )
