@@ -266,7 +266,8 @@ def test_origin_event_key_uses_room_name_when_chat_id_absent():
 
 # --- async orchestration (KakaoInboundEventService.handle) -----------------
 
-def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight=False, calls=None):
+def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight=False,
+             already_replied=None, calls=None):
     calls = calls if calls is not None else {"enqueued": [], "bound": []}
 
     async def load_channels():
@@ -290,6 +291,7 @@ def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight
         bind_chat_id=bind_chat_id,
         is_duplicate=lambda key: dup,
         in_flight=lambda target_id: in_flight,
+        already_replied=already_replied,
     )
     return service, calls
 
@@ -355,6 +357,19 @@ def test_handle_unsupported_platform_enqueues_kakao_send_reply():
     assert target_id is None
     assert payload["message"] == "라이더 조회 명령은 배민 탭에서만 지원합니다."
     assert payload["kakao_room_name"] == "운영방"
+
+
+def test_handle_unsupported_reply_deduped_when_already_replied():
+    # A resubmitted event (lost submit response) must not enqueue a second reply.
+    service, calls = _service(
+        [_channel(chat_id="111")],
+        {"ch1": (_target(platform="coupang"),)},
+        already_replied=lambda key: True,
+    )
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result == {"accepted": False, "duplicate": True, "reason": REASON_UNSUPPORTED_PLATFORM}
+    assert calls["enqueued"] == []  # no second KAKAO_SEND reply
 
 
 def test_handle_reject_does_not_enqueue_or_bind():

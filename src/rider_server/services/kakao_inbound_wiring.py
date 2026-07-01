@@ -163,6 +163,23 @@ def build_kakao_inbound_event_service(
         async with db_session_factory() as session:
             return (await session.execute(stmt)).first() is not None
 
+    async def already_replied(origin_event_key: str) -> bool:
+        # Guards the unsupported-platform rejection reply against a duplicate
+        # KAKAO_SEND on a resubmitted event (symmetric with is_duplicate for the
+        # lookup path). Read-only over existing KAKAO_SEND jobs by origin_event_key.
+        if not origin_event_key:
+            return False
+        stmt = (
+            select(Job.id)
+            .where(
+                Job.type == JOB_TYPE_KAKAO_SEND,
+                Job.payload_json["origin_event_key"].as_string() == origin_event_key,
+            )
+            .limit(1)
+        )
+        async with db_session_factory() as session:
+            return (await session.execute(stmt)).first() is not None
+
     async def bind_chat_id(channel_id: str, chat_id: str) -> None:
         # Conditional on kakao_chat_id IS NULL: first accepted event wins, later
         # races are no-ops (never overwrite an already-bound chat_id).
@@ -186,6 +203,7 @@ def build_kakao_inbound_event_service(
         bind_chat_id=bind_chat_id,
         is_duplicate=is_duplicate,
         in_flight=in_flight,
+        already_replied=already_replied,
     )
 
 

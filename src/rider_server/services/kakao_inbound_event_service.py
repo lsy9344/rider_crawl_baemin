@@ -381,6 +381,7 @@ class KakaoInboundEventService:
         in_flight: Callable[[str], Awaitable[bool] | bool] | None = None,
         tenant_active: Callable[[str], Awaitable[bool] | bool] | None = None,
         rate_limited: Callable[[str], Awaitable[bool] | bool] | None = None,
+        already_replied: Callable[[str], Awaitable[bool] | bool] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._load_channels = load_channels
@@ -392,6 +393,7 @@ class KakaoInboundEventService:
         self._in_flight = in_flight
         self._tenant_active = tenant_active
         self._rate_limited = rate_limited
+        self._already_replied = already_replied
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def handle(self, event: InboundEventInput) -> dict:
@@ -423,6 +425,16 @@ class KakaoInboundEventService:
 
         if decision.action == ACTION_REPLY:
             await self._maybe_bind(decision)
+            key = decision.origin_event_key
+            # Dedupe the rejection reply the same way the lookup path dedupes: a
+            # resubmitted event (e.g. a lost submit response) must not enqueue a
+            # second KAKAO_SEND for the same origin_event_key.
+            if (
+                key
+                and self._already_replied is not None
+                and await _maybe_await(self._already_replied(key))
+            ):
+                return {"accepted": False, "duplicate": True, "reason": decision.reason}
             reply_payload = {
                 "kakao_room_name": decision.reply_kakao_room_name,
                 "message": decision.reply_text,
