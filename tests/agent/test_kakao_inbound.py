@@ -140,6 +140,28 @@ def test_first_scan_primes_high_water_without_processing(tmp_path):
     assert (tmp_path / "kakao_inbound_state.json").exists()
 
 
+def test_first_latest_n_scan_primes_to_newest_without_processing(tmp_path):
+    client = FakeClient()
+    watcher = _watcher(
+        tmp_path,
+        by_id={
+            "111": [
+                _msg(log_id="1001", text="!!강민기1234"),
+                _msg(log_id="1002", text="!!이순신5678"),
+            ]
+        },
+        client=client,
+        window=20,
+    )
+
+    report = watcher.scan_once()
+
+    assert report.primed == 1
+    assert report.submitted == 0
+    assert client.events == []
+    assert watcher._high_water["111"] == 1002
+
+
 def test_processes_new_command_after_prime(tmp_path):
     client = FakeClient(InboundEventResult(accepted=True, job_id="job-1"))
     by_id = {"111": [_msg(log_id="1001")]}
@@ -163,6 +185,41 @@ def test_processes_new_command_after_prime(tmp_path):
         "name": "강민기",
         "phone_last4": "1234",
     }
+
+
+def test_latest_n_processes_new_messages_oldest_to_newest(tmp_path):
+    client = FakeClient(InboundEventResult(accepted=True))
+    by_id = {"111": [_msg(log_id="1001")]}
+    watcher = _watcher(tmp_path, by_id=by_id, client=client, window=20)
+
+    watcher.scan_once()  # prime at 1001
+    by_id["111"] = [
+        _msg(log_id="1002", text="!!강민기1234"),
+        _msg(log_id="1003", text="!!이순신5678"),
+    ]
+    report = watcher.scan_once()
+
+    assert report.submitted == 2
+    assert [event["last_log_id"] for event in client.events] == ["1002", "1003"]
+    assert watcher._high_water["111"] == 1003
+
+
+def test_latest_n_gap_primes_to_newest_without_flooding(tmp_path):
+    client = FakeClient(InboundEventResult(accepted=True))
+    by_id = {"111": [_msg(log_id="1001")]}
+    watcher = _watcher(tmp_path, by_id=by_id, client=client, window=20)
+
+    watcher.scan_once()  # prime at 1001
+    by_id["111"] = [
+        _msg(log_id=str(log_id), text="!!강민기1234")
+        for log_id in range(1025, 1045)
+    ]
+    report = watcher.scan_once()
+
+    assert report.gap_possible == 1
+    assert report.submitted == 0
+    assert client.events == []
+    assert watcher._high_water["111"] == 1044
 
 
 def test_dedupes_same_log_id(tmp_path):

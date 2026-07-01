@@ -98,7 +98,7 @@ class KakaoInboundConfig:
     accepted_chat_types: tuple[str, ...] = DEFAULT_ACCEPTED_CHAT_TYPES
     # Digest sent to the server (use :func:`user_hash_digest` to derive it).
     user_hash_digest: str = ""
-    latest_messages_limit: int = 1
+    latest_messages_limit: int = 20
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,7 @@ class ScanReport:
     rejected: int = 0
     parser_misses: int = 0
     submit_errors: int = 0
+    gap_possible: int = 0
 
 
 def _result_from_response(response: dict[str, Any]) -> InboundEventResult:
@@ -282,6 +283,7 @@ class KakaoInboundWatcher:
             "rejected": 0,
             "parser_misses": 0,
             "submit_errors": 0,
+            "gap_possible": 0,
         }
         changed = False
         for room_config in self._config.rooms:
@@ -297,22 +299,75 @@ class KakaoInboundWatcher:
             except Exception as exc:  # noqa: BLE001 — one bad room must not kill the scan
                 self._record_error("AGENT_KAKAO_INBOUND_READ_ERROR", "room read failed", exc)
                 continue
-            for message in messages:
-                if self._handle_message(message, room, counters):
-                    changed = True
+            if self._handle_room_messages(messages, room, counters):
+                changed = True
 
         if changed:
             self._save_state()
 
+        self._window_size = int(getattr(reader, "latest_window_size", self._window_size))
         health, reason = self._resolve_health(counters)
         self._health = (health, reason)
         return ScanReport(health=health, reason=reason, **counters)
+
+    def _handle_room_messages(
+        self, messages: list[Any], room: Any, counters: dict[str, int]
+    ) -> bool:
+        valid_messages = [
+            message
+            for message in messages
+            if _as_int(getattr(message, "log_id", None)) is not None
+        ]
+        if not valid_messages:
+            return False
+
+        scope = _message_scope(valid_messages[-1], room)
+        log_ids = [
+            parsed
+            for parsed in (_as_int(message.log_id) for message in valid_messages)
+            if parsed is not None
+        ]
+        if not log_ids:
+            return False
+
+        newest = max(log_ids)
+        high_water = self._high_water.get(scope)
+        if high_water is None:
+            self._high_water[scope] = newest
+            counters["primed"] += 1
+            return True
+
+        if self._gap_possible(high_water, log_ids):
+            self._high_water[scope] = newest
+            counters["gap_possible"] += 1
+            counters["primed"] += 1
+            return True
+
+        changed = False
+        for message in sorted(valid_messages, key=lambda item: _as_int(item.log_id) or 0):
+            before_submit_errors = counters["submit_errors"]
+            if self._handle_message(message, room, counters):
+                changed = True
+            if counters["submit_errors"] > before_submit_errors:
+                break
+        return changed
+
+    def _gap_possible(self, high_water: int, log_ids: list[int]) -> bool:
+        if getattr(self, "_window_size", self._config.latest_messages_limit) <= 1:
+            return False
+        effective_limit = min(
+            int(self._config.latest_messages_limit),
+            int(getattr(self, "_window_size", self._config.latest_messages_limit)),
+        )
+        if len(log_ids) < effective_limit:
+            return False
+        return high_water < min(log_ids)
 
     def _handle_message(self, message: Any, room: Any, counters: dict[str, int]) -> bool:
         log_id = _as_int(message.log_id)
         if log_id is None:
             return False
-        scope = message.chat_id or _normalize_room_name(room.room_name)
+        scope = _message_scope(message, room)
         high_water = self._high_water.get(scope)
         if high_water is None:
             # First sighting of this scope: prime the baseline; do not process a
@@ -356,7 +411,7 @@ class KakaoInboundWatcher:
         return {
             "source": SOURCE_PC_KAKAO_DB,
             "kakao_user_hash_digest": self._config.user_hash_digest,
-            "chat_id": message.chat_id,
+            "chat_id": message.chat_id or getattr(room, "chat_id", ""),
             "room_name": room.room_name,
             "last_log_id": message.log_id,
             "message_timestamp": message.timestamp,
@@ -428,6 +483,14 @@ class KakaoInboundWatcher:
 
 def _normalize_room_name(value: str) -> str:
     return unicodedata.normalize("NFC", value or "").strip()
+
+
+def _message_scope(message: Any, room: Any) -> str:
+    return (
+        str(getattr(message, "chat_id", "") or "")
+        or str(getattr(room, "chat_id", "") or "")
+        or _normalize_room_name(getattr(room, "room_name", ""))
+    )
 
 
 def _as_int(value: Any) -> int | None:

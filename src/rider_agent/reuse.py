@@ -63,6 +63,7 @@ from rider_crawl.sender import (
 # lazy import 하므로 이 seam 을 eager import 해도 import-safe 하다(sqlcipher3 미설치여도 무탈).
 from rider_crawl.kakao_db import (
     DEFAULT_ACCEPTED_CHAT_TYPES,
+    ChatLogsReader,
     ChatRoomListReader,
     KakaoDbDependencyMissing,
     KakaoDbError,
@@ -119,6 +120,7 @@ __all__ = [
     "KakaoMessenger",
     "dispatch_text_message",
     # Kakao 로컬 DB 리더(Phase 2)
+    "ChatLogsReader",
     "ChatRoomListReader",
     "KakaoRoomRef",
     "KakaoMessageRef",

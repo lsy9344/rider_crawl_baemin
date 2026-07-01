@@ -28,7 +28,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 # Default KakaoTalk chat types the watcher accepts. PlusChat/OM/unknown are
 # ignored unless a later design explicitly enables them per room.
@@ -42,6 +42,7 @@ CANDIDATE_LIKE = "%!!%"
 
 # The fallback reader sees only the single latest message per room.
 LATEST_ONE_WINDOW_SIZE = 1
+LATEST_TWENTY_WINDOW_SIZE = 20
 
 
 class KakaoDbError(RuntimeError):
@@ -83,6 +84,8 @@ class KakaoDbReader(Protocol):
 # returns a seeded in-memory SQLite connection.
 ConnectFactory = Callable[[], Any]
 CopyLockedDb = Callable[[Path], Path]
+ChatLogsConnectFactory = Callable[[KakaoRoomRef], Any]
+ChatLogsKeyResolver = Callable[[KakaoRoomRef], str | None]
 
 
 def sqlcipher_available() -> bool:
@@ -210,6 +213,155 @@ class ChatRoomListReader:
         return [_message_ref(row) for row in rows[:capped]]
 
 
+class ChatLogsReader:
+    """Latest-N reader over per-room ``chatLogs_<chat_id>.edb`` files.
+
+    Room discovery remains delegated to ``chatListInfo.edb`` because each log DB
+    is per-room and does not carry a room title. Message reads use the confirmed
+    PC KakaoTalk schema:
+
+    ``chatLogs(logId, sendAt, message, type, deleted, ...)``.
+
+    If a room log DB is unavailable, has an unexpected schema, or cannot be
+    opened with its configured key, this reader falls back to the room-list
+    latest-one reader and reports ``latest_window_size == 1`` for degraded
+    health. Keys are supplied by config/secure-store seams and are never logged.
+    """
+
+    def __init__(
+        self,
+        *,
+        rooms_reader: KakaoDbReader | None = None,
+        chat_list_db_path: Path | str | None = None,
+        chat_list_db_key: str | None = None,
+        chat_logs_dir: Path | str | None = None,
+        chat_logs_db_key: str | None = None,
+        chat_logs_db_keys_by_chat_id: Mapping[str, str] | None = None,
+        chat_logs_key_resolver: ChatLogsKeyResolver | None = None,
+        chat_logs_connect: ChatLogsConnectFactory | None = None,
+        copy_locked_db: CopyLockedDb | None = None,
+    ) -> None:
+        if rooms_reader is None:
+            rooms_reader = ChatRoomListReader(
+                db_path=chat_list_db_path,
+                db_key=chat_list_db_key,
+                copy_locked_db=copy_locked_db,
+            )
+        self._rooms_reader = rooms_reader
+        self._fallback_reader = rooms_reader
+        self._chat_logs_dir = (
+            Path(chat_logs_dir)
+            if chat_logs_dir is not None
+            else (
+                Path(chat_list_db_path).parent
+                if chat_list_db_path is not None
+                else None
+            )
+        )
+        self._chat_logs_db_key = chat_logs_db_key
+        self._chat_logs_db_keys_by_chat_id = {
+            str(key): value
+            for key, value in (chat_logs_db_keys_by_chat_id or {}).items()
+        }
+        self._chat_logs_key_resolver = chat_logs_key_resolver
+        self._chat_logs_connect = chat_logs_connect
+        self._copy_locked_db = copy_locked_db or _copy_locked_db
+        self._degraded = False
+        self._temp_copies: list[Path] = []
+
+    @property
+    def latest_window_size(self) -> int:
+        if self._degraded:
+            return LATEST_ONE_WINDOW_SIZE
+        return LATEST_TWENTY_WINDOW_SIZE
+
+    def list_rooms(self) -> list[KakaoRoomRef]:
+        return self._rooms_reader.list_rooms()
+
+    def latest_messages(self, room: KakaoRoomRef, limit: int) -> list[KakaoMessageRef]:
+        if limit <= 0:
+            return []
+        try:
+            return self._latest_chatlog_messages(room, min(limit, LATEST_TWENTY_WINDOW_SIZE))
+        except Exception:  # noqa: BLE001 - one room log failure degrades to fallback.
+            self._degraded = True
+            return self._fallback_reader.latest_messages(room, limit)
+
+    def close(self) -> None:
+        close = getattr(self._rooms_reader, "close", None)
+        if callable(close):
+            close()
+        for path in self._temp_copies:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+        self._temp_copies = []
+
+    def __enter__(self) -> "ChatLogsReader":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def _latest_chatlog_messages(
+        self, room: KakaoRoomRef, limit: int
+    ) -> list[KakaoMessageRef]:
+        conn = self._open_chatlogs(room)
+        try:
+            cursor = conn.execute(
+                "SELECT logId, sendAt, message, type "
+                "FROM chatLogs "
+                "WHERE message IS NOT NULL "
+                "  AND message LIKE ? "
+                "  AND COALESCE(deleted, 0) = 0 "
+                "ORDER BY logId DESC "
+                "LIMIT ?",
+                (CANDIDATE_LIKE, int(limit)),
+            )
+            rows = list(reversed(cursor.fetchall()))
+            return [_chatlog_message_ref(room, row) for row in rows]
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _open_chatlogs(self, room: KakaoRoomRef) -> Any:
+        if self._chat_logs_connect is not None:
+            return self._chat_logs_connect(room)
+        if self._chat_logs_dir is None:
+            raise KakaoDbError("kakao chatlogs dir is not configured")
+        if not room.chat_id:
+            raise KakaoDbError("kakao chat_id is not configured")
+        key = self._key_for_room(room)
+        if not key:
+            raise KakaoDbError("kakao chatlogs key is not configured")
+        db_path = self._chat_logs_dir / f"chatLogs_{room.chat_id}.edb"
+        if not db_path.exists():
+            raise KakaoDbError("kakao chatlogs db is not available")
+        try:
+            import sqlcipher3
+        except Exception as exc:  # noqa: BLE001
+            raise KakaoDbDependencyMissing("sqlcipher3 is not installed") from exc
+
+        copy_path = self._copy_locked_db(db_path)
+        self._temp_copies.append(copy_path)
+        conn = sqlcipher3.connect(str(copy_path))
+        conn.execute("PRAGMA cipher_compatibility = 4")
+        conn.execute("PRAGMA key = \"x'" + key + "'\"")
+        return conn
+
+    def _key_for_room(self, room: KakaoRoomRef) -> str | None:
+        if self._chat_logs_key_resolver is not None:
+            value = self._chat_logs_key_resolver(room)
+            if value:
+                return value
+        if room.chat_id in self._chat_logs_db_keys_by_chat_id:
+            return self._chat_logs_db_keys_by_chat_id[room.chat_id]
+        return self._chat_logs_db_key
+
+
 def _room_ref(row: Any) -> KakaoRoomRef:
     chat_id, title, chat_type = row[0], row[1], row[2]
     return KakaoRoomRef(
@@ -228,6 +380,17 @@ def _message_ref(row: Any) -> KakaoMessageRef:
         room_name=(title or "").strip(),
         log_id=str(log_id) if log_id is not None else "",
         timestamp=_as_int(updated_at),
+        text=message or "",
+    )
+
+
+def _chatlog_message_ref(room: KakaoRoomRef, row: Any) -> KakaoMessageRef:
+    log_id, send_at, message, _chat_type = row[0], row[1], row[2], row[3]
+    return KakaoMessageRef(
+        chat_id=room.chat_id,
+        room_name=room.room_name,
+        log_id=str(log_id) if log_id is not None else "",
+        timestamp=_as_int(send_at),
         text=message or "",
     )
 

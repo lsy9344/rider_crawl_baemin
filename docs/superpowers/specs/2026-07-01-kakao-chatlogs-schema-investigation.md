@@ -176,3 +176,36 @@ finally:
 
 조사 결과(위 기록 템플릿을 채운 스키마)를 공유해 주시면, 그에 맞춰
 `ChatLogsReader` + latest-20 승격 + fallback/health 강등을 구현한다.
+
+## Confirmed Result - 2026-07-01
+
+No secret values, chat IDs, room names, account identifiers, or message bodies
+were recorded. The schema was checked from copied local DB files only.
+
+```
+message_table = "chatLogs"
+columns:
+  log_id    -> "logId" (UNSIGNED BIG INT, primary key, monotonic)
+  chat_id   -> derived from file name chatLogs_<chat_id>.edb
+  text      -> "message" (TEXT, plaintext after SQLCipher open)
+  timestamp -> "sendAt" (INTEGER epoch seconds)
+  type      -> "type" (INTEGER)
+  deleted   -> "deleted" (INTEGER, filter with COALESCE(deleted, 0) = 0)
+latest_20_query verified: yes
+notes:
+  - SQLCipher open uses PRAGMA cipher_compatibility = 4 and raw hex key.
+  - chatListInfo.edb and chatLogs_<id>.edb can use different keys.
+  - latest-N reader returns oldest-to-newest after selecting newest rows so the
+    watcher can process new messages in high-water order.
+```
+
+Implemented follow-up:
+
+- `ChatLogsReader` reads `chatLogs_<chat_id>.edb` latest candidates with
+  `latest_window_size = 20`.
+- Room discovery still uses `chatListInfo.edb` / `chatRoomList`.
+- If chatLogs open/schema/key lookup fails, the reader falls back to
+  `ChatRoomListReader` and reports `latest_window_size = 1` for degraded health.
+- The watcher primes latest-N startup to the newest visible message and reports
+  `gap_possible` instead of flooding old visible messages when the previous
+  high-water mark falls outside the latest-N window.
