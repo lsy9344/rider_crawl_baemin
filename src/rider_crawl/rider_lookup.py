@@ -46,7 +46,7 @@ COMMAND_TOKEN_RE = re.compile(
 # Fixed, redaction-safe reply strings. These never contain raw message text.
 NO_MATCH_REPLY = "해당 라이더를 찾지 못했습니다."
 AMBIGUOUS_REPLY_PREFIX = "동명이인 또는 중복 후보가 있어 조회할 수 없습니다: "
-UNSUPPORTED_PLATFORM_REPLY = "라이더 조회 명령은 배민 탭에서만 지원합니다."
+UNSUPPORTED_PLATFORM_REPLY = "라이더 조회 명령은 배민/쿠팡 탭에서만 지원합니다."
 RISK_REPLY = "위험합니다."
 NORMAL_REPLY = "정상 범위입니다."
 

@@ -105,14 +105,35 @@ def test_no_match_still_succeeds_with_no_match_reply():
     assert result.result_json["reply_text"] == "강민기1234\n해당 라이더를 찾지 못했습니다."
 
 
-def test_unsupported_platform_fails_closed_without_fetch():
+def test_coupang_platform_uses_fetcher_and_builds_reply():
+    calls = []
+
+    def fetch(job, payload):
+        calls.append(payload)
+        return _rows_with_match()
+
+    result = _worker(fetch).execute(
+        _job(
+            _payload(
+                platform="coupang",
+                primary_url="https://partner.coupangeats.com/page/rider-performance",
+            )
+        )
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert calls and calls[0].platform == "coupang"
+    assert result.result_json["reply_text"] == "강민기1234\n취소율 4%, 취소 2개\n위험합니다."
+
+
+def test_unknown_platform_fails_closed_without_fetch():
     calls = []
 
     def fetch(job, payload):
         calls.append(payload)
         return []
 
-    result = _worker(fetch).execute(_job(_payload(platform="coupang")))
+    result = _worker(fetch).execute(_job(_payload(platform="naver")))
 
     assert result.status == JOB_STATUS_FAILED
     assert result.error_code == ERROR_UNSUPPORTED_PLATFORM
@@ -245,3 +266,79 @@ def test_fetcher_composes_profile_prep_and_shared_fetch():
     assert config.coupang_eats_url.endswith("/delivery/history")
     assert config.baemin_center_name == "남구센터"
     assert str(config.cdp_url) == "http://127.0.0.1:9333"
+
+
+def test_fetcher_composes_profile_prep_for_coupang_lookup():
+    import types
+    from pathlib import Path
+
+    captured = {}
+
+    def fake_fetch(config):
+        captured["config"] = config
+        return _rows_with_match()
+
+    class _FakeProfileManager:
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            return types.SimpleNamespace(cdp_url="http://127.0.0.1:9444", profile_dir=Path("prof-dir"))
+
+    fetcher = make_baemin_rider_rows_fetcher(
+        profile_manager=_FakeProfileManager(),
+        fetch_rows=fake_fetch,
+    )
+
+    payload = _payload(
+        platform="coupang",
+        primary_url="https://partner.coupangeats.com/page/rider-performance",
+    )
+    job = _job(payload)
+    rows = fetcher(job, rider_lookup_payload_from_job(job))
+
+    assert rows == _rows_with_match()
+    config = captured["config"]
+    assert config.platform_name == "coupang"
+    assert config.coupang_eats_url == "https://partner.coupangeats.com/page/rider-performance"
+    assert config.baemin_center_name == "남구센터"
+    assert str(config.cdp_url) == "http://127.0.0.1:9444"
+
+
+def test_fetcher_default_dispatches_to_coupang_row_fetch(monkeypatch):
+    import types
+    from pathlib import Path
+
+    import rider_agent.reuse as reuse
+    import rider_agent.workers.rider_lookup as rider_lookup_worker
+
+    def baemin_fetch_should_not_run(config):
+        raise AssertionError("must not fetch Coupang with Baemin row fetcher")
+
+    calls = []
+
+    def fake_coupang_fetch(config):
+        calls.append(config)
+        return _rows_with_match()
+
+    class _FakeProfileManager:
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            return types.SimpleNamespace(cdp_url="http://127.0.0.1:9555", profile_dir=Path("prof-dir"))
+
+    monkeypatch.setattr(reuse, "fetch_baemin_delivery_history_rows", baemin_fetch_should_not_run)
+    monkeypatch.setattr(
+        rider_lookup_worker,
+        "_fetch_coupang_rider_performance_rows",
+        fake_coupang_fetch,
+        raising=False,
+    )
+
+    fetcher = make_baemin_rider_rows_fetcher(profile_manager=_FakeProfileManager())
+    job = _job(
+        _payload(
+            platform="coupang",
+            primary_url="https://partner.coupangeats.com/page/rider-performance",
+        )
+    )
+
+    rows = fetcher(job, rider_lookup_payload_from_job(job))
+
+    assert rows == _rows_with_match()
+    assert calls and calls[0].platform_name == "coupang"

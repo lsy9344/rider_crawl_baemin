@@ -1,8 +1,8 @@
-"""RIDER_LOOKUP executor — Baemin rider cancel-rate lookup for Kakao commands.
+"""RIDER_LOOKUP executor — rider cancel-rate lookup for Kakao commands.
 
-The worker parses a ``RIDER_LOOKUP`` job, fetches Baemin delivery-history rows
-(row-level, via the shared ``rider_crawl`` accessor — never aggregate snapshot
-JSON), runs the shared matcher/renderer, and completes with
+The worker parses a ``RIDER_LOOKUP`` job, fetches platform row-level rider
+performance rows (never aggregate snapshot JSON), runs the shared
+matcher/renderer, and completes with
 ``result_type="rider_lookup"`` and a ``reply_text``. The server turns that into
 one scoped ``KAKAO_SEND`` reply; this worker never sends Kakao itself and never
 enters snapshot ingest/fanout.
@@ -62,9 +62,10 @@ ERROR_LOOKUP_FAILURE = "LOOKUP_FAILURE"
 REASON_PAYLOAD_EXPIRED = "payload_expired"
 
 DEFAULT_SOURCE_LABEL = "배민"
+SUPPORTED_LOOKUP_PLATFORMS = {"baemin", "coupang"}
 
 # (job, payload) -> rider rows. The wiring layer composes crawl-worker browser
-# profile/config prep + the shared Baemin row fetch behind this seam.
+# profile/config prep + the shared platform row fetch behind this seam.
 FetchRiderRows = Callable[["ClaimedJob", "RiderLookupJobPayload"], list[dict[str, str]]]
 
 
@@ -136,10 +137,9 @@ class RiderLookupWorker:
                 payload,
                 reason=REASON_PAYLOAD_EXPIRED,
             )
-        # The server already gates non-Baemin as unsupported; fail closed here too.
-        if payload.platform != "baemin":
+        if payload.platform not in SUPPORTED_LOOKUP_PLATFORMS:
             return _failure(
-                ERROR_UNSUPPORTED_PLATFORM, "rider lookup platform is not baemin", payload
+                ERROR_UNSUPPORTED_PLATFORM, "rider lookup platform is unsupported", payload
             )
 
         command = RiderLookupCommand(
@@ -193,22 +193,20 @@ def make_baemin_rider_rows_fetcher(
     secret_resolver: Callable[[str], str | None] | None = None,
     fetch_rows: Callable[[Any], list[dict[str, str]]] | None = None,
 ) -> FetchRiderRows:
-    """Compose crawl-worker browser-profile prep with the shared Baemin row fetch.
+    """Compose crawl-worker browser-profile prep with the shared row fetch.
 
     Reuses the crawl worker's ``payload_from_job``/``_build_config`` and the same
     ``profile_manager.ensure_profile`` assignment so a RIDER_LOOKUP job opens the
     exact CDP profile crawl jobs use (no second copy of profile/config logic),
-    then fetches rider rows through the shared accessor. ``fetch_rows`` is an
-    injectable seam so wiring/tests can substitute a fake without a browser. This
-    is the production ``fetch_rider_rows`` the worker composition injects.
+    then fetches rider rows through the platform accessor. ``fetch_rows`` is an
+    injectable seam so wiring/tests can substitute a fake without a browser.
     """
 
     from pathlib import Path
 
-    from rider_agent.reuse import fetch_baemin_delivery_history_rows
     from rider_agent.workers.crawl_worker import _build_config, payload_from_job
 
-    fetch = fetch_rows or fetch_baemin_delivery_history_rows
+    fetch = fetch_rows or _fetch_platform_rider_rows
 
     def fetch_rider_rows(job: ClaimedJob, payload: RiderLookupJobPayload) -> list[dict[str, str]]:
         crawl_payload = payload_from_job(job)
@@ -237,6 +235,29 @@ def make_baemin_rider_rows_fetcher(
         return fetch(config)
 
     return fetch_rider_rows
+
+
+def _fetch_platform_rider_rows(config: Any) -> list[dict[str, str]]:
+    platform = str(getattr(config, "platform_name", "") or "baemin").strip().casefold()
+    if platform == "coupang":
+        return _fetch_coupang_rider_performance_rows(config)
+
+    from rider_agent.reuse import fetch_baemin_delivery_history_rows
+
+    return fetch_baemin_delivery_history_rows(config)
+
+
+def _fetch_coupang_rider_performance_rows(config: Any) -> list[dict[str, str]]:
+    from rider_crawl.platforms.coupang.crawler import fetch_page_html
+    from rider_crawl.platforms.coupang.parser import parse_coupang_rider_performance_rows
+
+    target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+    html = (
+        fetch_page_html(config, target_url=target_url)
+        if target_url
+        else fetch_page_html(config)
+    )
+    return parse_coupang_rider_performance_rows(html)
 
 
 def _reply_scope(payload: RiderLookupJobPayload) -> dict[str, Any]:

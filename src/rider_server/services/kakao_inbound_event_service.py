@@ -34,6 +34,8 @@ MESSENGER_KAKAO = "KAKAO"
 CHANNEL_STATE_ACTIVE = "ACTIVE"
 TARGET_STATE_ACTIVE = "ACTIVE"
 PLATFORM_BAEMIN = "baemin"
+PLATFORM_COUPANG = "coupang"
+SUPPORTED_LOOKUP_PLATFORMS = {PLATFORM_BAEMIN, PLATFORM_COUPANG}
 
 ORIGIN_KAKAO_INBOUND = "kakao_inbound"
 DEFAULT_LOOKUP_TIMEOUT_SECONDS = 60
@@ -257,7 +259,7 @@ def decide_inbound_event(
         )
 
     # Unsupported platform: send a scoped fixed reply (sending is enabled here).
-    if target.platform.strip().lower() != PLATFORM_BAEMIN:
+    if target.platform.strip().lower() not in SUPPORTED_LOOKUP_PLATFORMS:
         return InboundDecision(
             action=ACTION_REPLY,
             reason=REASON_UNSUPPORTED_PLATFORM,

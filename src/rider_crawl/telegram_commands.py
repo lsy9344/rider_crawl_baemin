@@ -169,9 +169,8 @@ class TelegramCommandProcessor:
             self.log_event(f"텔레그램 대상 미매칭: {_target_label(target)}")
             return False
 
-        # The rider lookup parses Baemin delivery-history tables, so it cannot run
-        # against Coupang tabs. Reply predictably instead of fetching Coupang HTML.
-        if getattr(config, "platform_name", "baemin") != "baemin":
+        platform = str(getattr(config, "platform_name", "baemin") or "baemin").strip().casefold()
+        if platform not in {"baemin", "coupang"}:
             self.send_text(
                 config,
                 render_unsupported_platform_reply(),
@@ -265,10 +264,17 @@ class TelegramCommandProcessor:
         if not config.coupang_eats_url.strip():
             return []
         html = self.fetch_html(config)
-        table = parse_baemin_delivery_history_html(html)
+        platform = str(getattr(config, "platform_name", "baemin") or "baemin").strip().casefold()
+        if platform == "coupang":
+            from .platforms.coupang.parser import parse_coupang_rider_performance_rows
+
+            rows = parse_coupang_rider_performance_rows(html)
+        else:
+            table = parse_baemin_delivery_history_html(html)
+            rows = table.riders
         index = configs.index(config)
         return find_rider_cancel_matches(
-            table.riders,
+            rows,
             command=command,
             source_label=_source_label(config, index),
         )

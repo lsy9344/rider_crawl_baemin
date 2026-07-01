@@ -221,7 +221,7 @@ def test_render_single_match_via_lookup_reply():
 
 
 def test_render_unsupported_platform_reply():
-    assert render_unsupported_platform_reply() == "라이더 조회 명령은 배민 탭에서만 지원합니다."
+    assert render_unsupported_platform_reply() == "라이더 조회 명령은 배민/쿠팡 탭에서만 지원합니다."
 
 
 # --- Service facade -------------------------------------------------------

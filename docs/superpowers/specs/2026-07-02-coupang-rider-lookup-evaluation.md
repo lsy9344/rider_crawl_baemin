@@ -1,8 +1,9 @@
 # Coupang Rider Lookup — Feasibility Evaluation (Phase 7)
 
 Date: 2026-07-02
-Status: Evaluation only — no code change. Static-code analysis; a live headed
-crawl is still required to reach a final go/no-go.
+Status: Evaluation plus implementation follow-up. The original static-code review
+found Coupang rider lookup unknown; a later branch adds parser/worker support
+behind focused tests without changing protected Coupang crawler or 2FA files.
 
 ## Question
 
@@ -12,12 +13,31 @@ per-rider rows carry `이름` (name), `휴대폰번호` (phone), `완료` (compl
 `거절` (rejected), `배차취소` (dispatch cancel), `배달취소(라이더귀책)`
 (rider-fault cancel)? Only then is a Coupang `!!name####` lookup feasible.
 
-## Verdict: (C) UNKNOWN — needs a live headed crawl. Current evidence leans "aggregate-only".
+## Original Verdict: (C) UNKNOWN — needed a live headed crawl. Static evidence leaned "aggregate-only".
 
 The committed Coupang code proves the rider-record page carries a **per-rider
 name/contact table**, but shows cancellation **only as a center-level aggregate**.
 No per-rider cancellation breakdown is evidenced in code, fixtures, or tests. A
 final decision needs one headed capture of the real page HTML.
+
+## Implementation Follow-up
+
+The follow-up implementation lifts the Baemin-only lookup gate for Coupang targets
+only after adding a non-protected parser path for the rider-performance table:
+
+- `parse_coupang_rider_performance_rows(html)` reads the rider-performance table
+  and maps rows into the shared rider lookup shape.
+- Coupang `취소` is mapped to `배차취소`; `배달취소(라이더귀책)` is set to `0` because the
+  Coupang table exposes a single cancel count in this contract.
+- `RIDER_LOOKUP` now accepts `platform="coupang"` and dispatches through the
+  existing protected `fetch_page_html` function without editing the protected
+  Coupang crawler or login/email 2FA files.
+- Kakao inbound and Telegram command routing now treat Baemin and Coupang as
+  supported lookup platforms; other platforms still receive the fixed
+  unsupported-platform reply.
+
+This does not change the protected Coupang login/email 2FA selector, timeout,
+routing, or recovery contract.
 
 ## Evidence (file:line)
 
@@ -103,7 +123,7 @@ verification. To resolve the unknowns:
    dispatch-vs-rider-fault split, and a phone number / stable last-4.
 4. Record whether the layout is stable across ≥2 centers and ≥2 time windows.
 
-## Conditional design sketch (only if step 3 confirms per-rider cancellation)
+## Conditional design sketch (kept as historical context)
 
 If confirmed:
 - Add a `parse_coupang_rider_performance_html(html) -> list[dict[str,str]]` to the

@@ -649,7 +649,41 @@ def test_default_offset_store_path_honors_state_root_override(tmp_path, monkeypa
     assert path.parent == app_state_root() / "runtime" / "state" / "telegram_offsets"
 
 
-def test_telegram_command_processor_replies_that_lookup_is_baemin_only_for_coupang(tmp_path):
+def test_telegram_command_processor_routes_lookup_for_coupang(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>우선순위</th>
+        <th>이름 / 연락처 총 1명</th>
+        <th>우선순위변경</th>
+        <th>상태 온라인 1명</th>
+        <th>거절/무시 1건</th>
+        <th>취소 2건</th>
+        <th>완료 50건</th>
+        <th>순서 미준수 0건</th>
+        <th>점심피크 10건</th>
+        <th>저녁피크 20건</th>
+        <th>논피크 20건</th>
+        <th>활성상태</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td>홍길동<br>010-1111-1234</td>
+          <td>교체</td>
+          <td>배달중</td>
+          <td>1건</td>
+          <td>2건</td>
+          <td>50건</td>
+          <td>0건</td>
+          <td>10건</td>
+          <td>20건</td>
+          <td>20건</td>
+          <td>활성</td>
+        </tr>
+      </tbody>
+    </table>
+    """
     sent: list[str] = []
     config = AppConfig(
         **{
@@ -661,14 +695,14 @@ def test_telegram_command_processor_replies_that_lookup_is_baemin_only_for_coupa
     )
     processor = TelegramCommandProcessor(
         [config],
-        fetch_html=lambda _config: (_ for _ in ()).throw(AssertionError("must not fetch Coupang as Baemin")),
+        fetch_html=lambda _config: html,
         send_text=lambda _config, message, **_kwargs: sent.append(message),
     )
 
     handled = processor.handle_text("-100123", "!!홍길동1234")
 
     assert handled is True
-    assert sent == ["라이더 조회 명령은 배민 탭에서만 지원합니다."]
+    assert sent == ["조회 중입니다.", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."]
 
 
 def _config(

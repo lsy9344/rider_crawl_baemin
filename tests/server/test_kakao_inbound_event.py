@@ -170,13 +170,22 @@ def test_only_active_target_counts():
 
 # --- gates ----------------------------------------------------------------
 
-def test_unsupported_platform_enqueues_scoped_reply():
+def test_coupang_platform_enqueues_lookup():
     targets = {"ch1": (_target(platform="coupang"),)}
+    decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], targets))
+
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+    assert decision.accepted is True
+    assert decision.job_payload["platform"] == "coupang"
+
+
+def test_unsupported_platform_enqueues_scoped_reply():
+    targets = {"ch1": (_target(platform="naver"),)}
     decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], targets))
     assert decision.action == ACTION_REPLY
     assert decision.reason == REASON_UNSUPPORTED_PLATFORM
     assert decision.accepted is False
-    assert decision.reply_text == "라이더 조회 명령은 배민 탭에서만 지원합니다."
+    assert decision.reply_text == "라이더 조회 명령은 배민/쿠팡 탭에서만 지원합니다."
     assert decision.reply_kakao_room_name == "운영방"
 
 
@@ -345,8 +354,20 @@ def test_handle_duplicate_does_not_enqueue():
     assert calls["enqueued"] == []
 
 
-def test_handle_unsupported_platform_enqueues_kakao_send_reply():
+def test_handle_coupang_platform_enqueues_lookup():
     service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(platform="coupang"),)})
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result == {"accepted": True, "duplicate": False, "job_id": "job-123"}
+    assert len(calls["enqueued"]) == 1
+    job_type, target_id, payload = calls["enqueued"][0]
+    assert job_type == JOB_TYPE_RIDER_LOOKUP
+    assert target_id == "tg1"
+    assert payload["platform"] == "coupang"
+
+
+def test_handle_unsupported_platform_enqueues_kakao_send_reply():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(platform="naver"),)})
     result = asyncio.run(service.handle(_event(chat_id="111")))
 
     assert result["accepted"] is False
@@ -355,7 +376,7 @@ def test_handle_unsupported_platform_enqueues_kakao_send_reply():
     job_type, target_id, payload = calls["enqueued"][0]
     assert job_type == JOB_TYPE_KAKAO_SEND
     assert target_id is None
-    assert payload["message"] == "라이더 조회 명령은 배민 탭에서만 지원합니다."
+    assert payload["message"] == "라이더 조회 명령은 배민/쿠팡 탭에서만 지원합니다."
     assert payload["kakao_room_name"] == "운영방"
 
 
@@ -363,7 +384,7 @@ def test_handle_unsupported_reply_deduped_when_already_replied():
     # A resubmitted event (lost submit response) must not enqueue a second reply.
     service, calls = _service(
         [_channel(chat_id="111")],
-        {"ch1": (_target(platform="coupang"),)},
+        {"ch1": (_target(platform="naver"),)},
         already_replied=lambda key: True,
     )
     result = asyncio.run(service.handle(_event(chat_id="111")))
