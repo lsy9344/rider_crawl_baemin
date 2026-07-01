@@ -174,7 +174,9 @@ def compose_execute_job(
     effective_kakao_status = kakao_status_provider
     close_callbacks: list[Callable[[], None]] = []
     should_start_crawl_worker = start_crawl_worker and (
-        "CRAWL_BAEMIN" in capabilities or "CRAWL_COUPANG" in capabilities
+        "CRAWL_BAEMIN" in capabilities
+        or "CRAWL_COUPANG" in capabilities
+        or "RIDER_LOOKUP" in capabilities
     )
 
     if should_start_crawl_worker and crawl_profile_manager is None and crawl_snapshot is None:
@@ -328,6 +330,33 @@ def compose_execute_job(
         close_all_profiles = getattr(crawl_profile_manager, "close_all", None)
         if callable(close_all_profiles):
             close_callbacks.append(close_all_profiles)
+
+    if (
+        should_start_crawl_worker
+        and "RIDER_LOOKUP" in capabilities
+        and crawl_profile_manager is not None
+    ):
+        # RIDER_LOOKUP(카카오 인바운드 라이더 조회)을 전용 worker 로 라우팅한다. 배민 crawl 과
+        # 같은 CDP profile 을 재사용(fetcher 가 crawl-worker config 준비를 조립)하되 결과는
+        # snapshot 이 아니라 command reply 다. 이 worker 는 RIDER_LOOKUP 만 잡고 나머지는 fallback
+        # 으로 흘리므로 AUTH_COUPANG_2FA/CRAWL_COUPANG/KAKAO_SEND 라우팅 순서는 바뀌지 않는다.
+        from rider_agent.workers.rider_lookup import (
+            RiderLookupWorker,
+            build_execute_job as build_rider_lookup_execute_job,
+            make_baemin_rider_rows_fetcher,
+        )
+
+        rider_lookup_worker = RiderLookupWorker(
+            fetch_rider_rows=make_baemin_rider_rows_fetcher(
+                profile_manager=crawl_profile_manager,
+                secret_resolver=secret_resolver,
+            ),
+            log=log,
+        )
+        effective_execute_job = build_rider_lookup_execute_job(
+            rider_lookup_worker=rider_lookup_worker,
+            fallback=effective_execute_job,
+        )
 
     kakao_worker = None
     if start_kakao_sender:

@@ -370,6 +370,127 @@ def test_compose_routes_auth_coupang_2fa_to_dedicated_worker(tmp_path):
     assert result.result_json["auth_state"] == "ACTIVE"
 
 
+def _rider_lookup_composition(tmp_path, monkeypatch, *, fetched):
+    from types import SimpleNamespace
+
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN, CAPABILITY_RIDER_LOOKUP
+    from rider_agent.worker_composition import compose_execute_job
+    import rider_agent.reuse as reuse
+
+    def fake_fetch(config):
+        fetched.append(config)
+        return [
+            {
+                "이름": "강민기",
+                "휴대폰번호": "010-9999-1234",
+                "완료": "48",
+                "거절": "0",
+                "배차취소": "1",
+                "배달취소(라이더귀책)": "1",
+            }
+        ]
+
+    # Block the real browser fetch; the production fetcher imports this lazily at
+    # compose time, so patching the reuse symbol substitutes the fake.
+    monkeypatch.setattr(reuse, "fetch_baemin_delivery_history_rows", fake_fetch)
+
+    class Profiles:
+        def __init__(self):
+            self.calls = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            self.calls.append((tenant_id, target_id))
+            profile_dir = tmp_path / "profiles" / tenant_id / target_id
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9450",
+                user_data_dir=profile_dir,
+            )
+            return SimpleNamespace(cdp_url=config.cdp_url, profile_dir=config.browser_user_data_dir)
+
+        def browser_profiles(self):
+            return []
+
+    profiles = Profiles()
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[CAPABILITY_RIDER_LOOKUP, CAPABILITY_CRAWL_BAEMIN],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_crawl_worker=True,
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+    )
+    return composition, profiles
+
+
+def _rider_lookup_payload(**overrides):
+    payload = {
+        "target_id": "tg1",
+        "tenant_id": "t1",
+        "platform": "baemin",
+        "platform_account_id": "acc1",
+        "primary_url": "https://deliverycenter.baemin.com/delivery/history",
+        "expected_display_name": "남구센터",
+        "reply_channel_id": "ch1",
+        "reply_kakao_room_name": "운영방",
+        "origin_event_key": "sha256:abc",
+        "command": {"type": "RIDER_CANCEL_RATE_LOOKUP", "name": "강민기", "phone_last4": "1234"},
+        "timeout_seconds": 60,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_compose_routes_rider_lookup_to_worker(tmp_path, monkeypatch):
+    from rider_agent.heartbeat import CAPABILITY_RIDER_LOOKUP
+
+    fetched = []
+    composition, profiles = _rider_lookup_composition(tmp_path, monkeypatch, fetched=fetched)
+
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="rl-1",
+            type=CAPABILITY_RIDER_LOOKUP,
+            target_id="tg1",
+            lease_expires_at=FUTURE_LEASE,
+            payload=_rider_lookup_payload(),
+        )
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["result_type"] == "rider_lookup"
+    assert result.result_json["reply_text"].startswith("강민기1234")
+    assert result.result_json["reply_channel_id"] == "ch1"
+    assert profiles.calls == [("t1", "tg1")]  # same profile identity as crawl
+    assert len(fetched) == 1
+
+
+def test_rider_lookup_routing_preserves_crawl_baemin(tmp_path, monkeypatch):
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN
+
+    fetched = []
+    composition, _ = _rider_lookup_composition(tmp_path, monkeypatch, fetched=fetched)
+
+    # Adding RIDER_LOOKUP must not change CRAWL_BAEMIN routing: a crawl job still
+    # goes to the crawl worker (snapshot result), never the lookup worker.
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="cb-1",
+            type=CAPABILITY_CRAWL_BAEMIN,
+            target_id="tg1",
+            lease_expires_at=FUTURE_LEASE,
+            payload=_rider_lookup_payload(),
+        )
+    )
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["result_type"] == "snapshot"
+    assert fetched == []  # lookup fetch never runs for a crawl job
+
+
 class _DiagnosticProfiles:
     """compose-level fake — auth wrapper 가 record_profile_diagnostic 을 호출하는지 캡처."""
 
