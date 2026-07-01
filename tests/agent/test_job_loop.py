@@ -1546,6 +1546,8 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert captured["start_auth_worker"] is True
     assert captured["start_crawl_worker"] is True
     assert captured["start_kakao_sender"] is True
+    # inbound watcher assembly is fail-safe: bad store / no config -> None wired through.
+    assert captured["kakao_inbound_watcher"] is None
     # token 평문 미출력.
     assert FAKE_TOKEN not in out
 

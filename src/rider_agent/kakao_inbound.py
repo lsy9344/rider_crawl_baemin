@@ -758,3 +758,77 @@ def make_kakao_reader_factory(
         return ChatRoomListReader(db_path=chat_list_db_path, db_key=chat_list_db_key)
 
     return factory
+
+
+# Secure-store refs for Agent-local Kakao secrets (never sent to/from the server).
+KAKAO_DB_KEY_REF = "kakao_inbound:db_key"
+KAKAO_USER_HASH_REF = "kakao_inbound:user_hash"
+
+
+def build_kakao_inbound_watcher_from_sources(
+    *,
+    identity: AgentIdentity,
+    transport: Transport,
+    base_url: str | None,
+    settings: LocalKakaoInboundSettings,
+    secret_resolver: Callable[[str], str | None] | None,
+    session_interactive: bool,
+    state_path: Path | str,
+    watchlist: KakaoWatchlist | None = None,
+    log: Callable[[str], None] | None = None,
+) -> tuple[Any | None, str]:
+    """Resolve the Hybrid gate and, if enabled, build the watcher → ``(watcher, reason)``.
+
+    Secrets (db_key/user_hash) are read from the injected ``secret_resolver`` and
+    kept as locals — only the digest reaches ``config`` and only the reason (never
+    a secret) is logged. Returns ``(None, reason)`` when the gate is closed so the
+    caller can surface the reason and leave the watcher unstarted.
+    """
+
+    db_key = secret_resolver(KAKAO_DB_KEY_REF) if secret_resolver is not None else None
+    user_hash = secret_resolver(KAKAO_USER_HASH_REF) if secret_resolver is not None else None
+    prerequisites_ok = bool(db_key and user_hash and settings.chat_list_db_path)
+
+    effective_rooms = resolve_kakao_inbound_rooms(
+        watchlist=watchlist, fallback_rooms=settings.fallback_rooms
+    )
+    # Server watchlist is SoT; local fallback rooms act as canary/bootstrap so the
+    # gate treats "server enabled OR local fallback present" as a non-empty source.
+    watchlist_enabled = bool(
+        (watchlist is not None and watchlist.enabled) or settings.fallback_rooms
+    )
+
+    enabled, reason = resolve_kakao_inbound_enabled(
+        local_enabled=settings.enabled,
+        prerequisites_ok=prerequisites_ok,
+        session_interactive=session_interactive,
+        watchlist_enabled=watchlist_enabled,
+        watchlist_has_rooms=bool(effective_rooms),
+    )
+    if not enabled:
+        if log is not None:
+            log(redact(f"kakao inbound disabled: {reason}"))
+        return None, reason
+
+    config = KakaoInboundConfig(
+        enabled=True,
+        rooms=effective_rooms,
+        user_hash_digest=user_hash_digest(user_hash or ""),
+        latest_messages_limit=settings.latest_messages_limit,
+    )
+    reader_factory = make_kakao_reader_factory(
+        chat_list_db_path=settings.chat_list_db_path,
+        chat_list_db_key=db_key or "",
+        chat_logs_dir=settings.chat_logs_dir or None,
+        use_chat_logs=settings.use_chat_logs,
+    )
+    watcher = build_kakao_inbound_watcher(
+        identity=identity,
+        transport=transport,
+        base_url=base_url,
+        config=config,
+        reader_factory=reader_factory,
+        state_path=state_path,
+        log=log,
+    )
+    return watcher, reason

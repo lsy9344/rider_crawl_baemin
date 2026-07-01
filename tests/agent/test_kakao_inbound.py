@@ -35,11 +35,14 @@ from rider_agent.kakao_inbound import (
     KakaoInboundSubmitError,
     KakaoInboundWatcher,
     KakaoRoomConfig,
+    KAKAO_DB_KEY_REF,
+    KAKAO_USER_HASH_REF,
     KakaoWatchlist,
     KakaoWatchlistClient,
     LocalKakaoInboundSettings,
     _parse_watchlist,
     build_kakao_inbound_watcher,
+    build_kakao_inbound_watcher_from_sources,
     load_local_kakao_inbound_settings,
     make_kakao_reader_factory,
     user_hash_digest,
@@ -664,3 +667,83 @@ def test_make_reader_factory_selects_chatlogs_or_latest_one():
         chat_list_db_path="a.edb", chat_list_db_key="KEY", use_chat_logs=False
     )()
     assert latest_one.latest_window_size == 1  # ChatRoomListReader (latest-one)
+
+
+# --- gate + build integration (build_kakao_inbound_watcher_from_sources) ---
+
+def _from_sources(**overrides):
+    secrets = {KAKAO_DB_KEY_REF: "KEY", KAKAO_USER_HASH_REF: "rawhash"}
+    kwargs = dict(
+        identity=_identity(),
+        transport=FakeTransport(),
+        base_url="https://s",
+        settings=LocalKakaoInboundSettings(enabled=True, chat_list_db_path="a.edb"),
+        secret_resolver=lambda ref: secrets.get(ref),
+        session_interactive=True,
+        state_path="s.json",
+        watchlist=KakaoWatchlist(
+            enabled=True, config_version="v", rooms=(KakaoRoomConfig("서버방", "1"),)
+        ),
+    )
+    kwargs.update(overrides)
+    return build_kakao_inbound_watcher_from_sources(**kwargs)
+
+
+def test_from_sources_disabled_by_local_kill_switch():
+    watcher, reason = _from_sources(
+        settings=LocalKakaoInboundSettings(enabled=False, chat_list_db_path="a.edb")
+    )
+    assert watcher is None
+    assert reason == REASON_FEATURE_DISABLED
+
+
+def test_from_sources_disabled_when_secrets_missing():
+    watcher, reason = _from_sources(secret_resolver=lambda ref: None)
+    assert watcher is None
+    assert reason == REASON_PREREQUISITES_MISSING
+
+
+def test_from_sources_disabled_when_non_interactive():
+    watcher, reason = _from_sources(session_interactive=False)
+    assert watcher is None
+    assert reason == REASON_NON_INTERACTIVE
+
+
+def test_from_sources_builds_watcher_with_digest_and_server_rooms():
+    watcher, reason = _from_sources()
+    assert reason == REASON_OK
+    assert isinstance(watcher, KakaoInboundWatcher)
+    # only the digest of the raw user hash reaches config
+    assert watcher._config.user_hash_digest == user_hash_digest("rawhash")
+    assert watcher._config.rooms == (KakaoRoomConfig("서버방", "1"),)
+
+
+def test_from_sources_uses_local_fallback_when_no_server_watchlist():
+    watcher, reason = _from_sources(
+        settings=LocalKakaoInboundSettings(
+            enabled=True, chat_list_db_path="a.edb",
+            fallback_rooms=(KakaoRoomConfig("카나리방", "9"),),
+        ),
+        watchlist=None,  # server unreachable -> canary fallback rooms
+    )
+    assert reason == REASON_OK
+    assert watcher._config.rooms == (KakaoRoomConfig("카나리방", "9"),)
+
+
+def test_from_sources_disabled_when_no_rooms_anywhere():
+    watcher, reason = _from_sources(watchlist=None)  # no server rooms, no fallback
+    assert watcher is None
+    assert reason == REASON_EMPTY_WATCHLIST
+
+
+def test_from_sources_never_logs_secrets():
+    logs: list[str] = []
+    _from_sources(
+        secret_resolver=lambda ref: {
+            KAKAO_DB_KEY_REF: "SUPERSECRETKEY", KAKAO_USER_HASH_REF: "rawuserhash"
+        }.get(ref),
+        log=logs.append,
+    )
+    blob = " ".join(logs)
+    assert "SUPERSECRETKEY" not in blob
+    assert "rawuserhash" not in blob
