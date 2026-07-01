@@ -34,6 +34,8 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
     start_heartbeat_thread,
+    start_kakao_inbound_thread,
+    _run_kakao_inbound_loop,
 )
 from rider_agent.registration import (
     DEFAULT_SERVER_BASE_URL,
@@ -1383,6 +1385,100 @@ def test_run_agent_spawns_and_joins_heartbeat_thread(tmp_path):
     assert summary.heartbeat_thread is not None
     # run_agent 의 finally 가 reporter.stop()+join 으로 정리 → thread 종료.
     assert not summary.heartbeat_thread.is_alive()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Kakao inbound watcher thread (Phase 2/5 activation wiring)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_kakao_inbound_loop_scans_until_stop():
+    stop = threading.Event()
+
+    class _Watcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def scan_once(self):
+            self.calls += 1
+            stop.set()  # stop right after the first scan
+
+    watcher = _Watcher()
+    _run_kakao_inbound_loop(watcher, stop_event=stop, interval=0.0, log=None)
+    assert watcher.calls == 1
+
+
+def test_kakao_inbound_loop_survives_scan_error():
+    stop = threading.Event()
+    logs: list[str] = []
+
+    class _Watcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def scan_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("boom")
+            stop.set()
+
+    watcher = _Watcher()
+    _run_kakao_inbound_loop(watcher, stop_event=stop, interval=0.0, log=logs.append)
+    assert watcher.calls == 2  # survived the first error and scanned again
+    assert logs  # error surfaced (redacted) to the log
+
+
+def test_run_agent_spawns_and_joins_kakao_inbound_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=3)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    class _Watcher:
+        def scan_once(self):
+            return None
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        kakao_inbound_watcher=_Watcher(),
+        kakao_inbound_interval_seconds=0.0,
+    )
+
+    assert summary.started is True
+    assert summary.kakao_inbound_thread is not None
+    # run_agent 의 finally 가 stop_event.set()+join 으로 정리 → thread 종료.
+    assert not summary.kakao_inbound_thread.is_alive()
+
+
+def test_run_agent_without_watcher_has_no_inbound_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+    )
+
+    assert summary.kakao_inbound_thread is None
 
 
 # ══════════════════════════════════════════════════════════════════════════
