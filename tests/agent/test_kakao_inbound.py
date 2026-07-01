@@ -19,9 +19,15 @@ from rider_agent.kakao_inbound import (
     HEALTH_DEGRADED,
     HEALTH_DISABLED,
     HEALTH_WARNING,
+    REASON_EMPTY_WATCHLIST,
     REASON_FEATURE_DISABLED,
     REASON_LATEST_WINDOW_1,
+    REASON_NON_INTERACTIVE,
+    REASON_OK,
+    REASON_PREREQUISITES_MISSING,
     REASON_ROOM_NOT_FOUND,
+    resolve_kakao_inbound_enabled,
+    resolve_kakao_inbound_rooms,
     InboundEventResult,
     KakaoInboundClient,
     KakaoInboundConfig,
@@ -555,3 +561,56 @@ def test_parse_watchlist_tolerates_missing_and_bad_shapes():
         {"kakao_inbound": {"enabled": True, "rooms": [{"chat_id": "9"}, {"room_name": "방"}]}}
     )
     assert watchlist.rooms == (KakaoRoomConfig(room_name="방", chat_id=""),)
+
+
+# --- Hybrid effective-enabled gate + rooms merge --------------------------
+
+def _gate(**overrides):
+    kwargs = dict(
+        local_enabled=True,
+        prerequisites_ok=True,
+        session_interactive=True,
+        watchlist_enabled=True,
+        watchlist_has_rooms=True,
+    )
+    kwargs.update(overrides)
+    return resolve_kakao_inbound_enabled(**kwargs)
+
+
+def test_gate_enabled_when_all_conditions_met():
+    assert _gate() == (True, REASON_OK)
+
+
+def test_gate_local_kill_switch_wins():
+    assert _gate(local_enabled=False) == (False, REASON_FEATURE_DISABLED)
+
+
+def test_gate_requires_interactive_session():
+    assert _gate(session_interactive=False) == (False, REASON_NON_INTERACTIVE)
+
+
+def test_gate_requires_local_prerequisites():
+    assert _gate(prerequisites_ok=False) == (False, REASON_PREREQUISITES_MISSING)
+
+
+def test_gate_requires_non_empty_server_watchlist():
+    assert _gate(watchlist_enabled=False) == (False, REASON_EMPTY_WATCHLIST)
+    assert _gate(watchlist_has_rooms=False) == (False, REASON_EMPTY_WATCHLIST)
+
+
+def test_rooms_prefer_server_watchlist_over_local_fallback():
+    watchlist = KakaoWatchlist(
+        enabled=True, config_version="v",
+        rooms=(KakaoRoomConfig(room_name="서버방", chat_id="1"),),
+    )
+    rooms = resolve_kakao_inbound_rooms(
+        watchlist=watchlist, fallback_rooms=(KakaoRoomConfig(room_name="로컬방"),)
+    )
+    assert rooms == (KakaoRoomConfig(room_name="서버방", chat_id="1"),)
+
+
+def test_rooms_fall_back_to_local_when_watchlist_unavailable_or_empty():
+    local = (KakaoRoomConfig(room_name="로컬방"),)
+    assert resolve_kakao_inbound_rooms(watchlist=None, fallback_rooms=local) == local
+    empty = KakaoWatchlist(enabled=True, config_version="v", rooms=())
+    assert resolve_kakao_inbound_rooms(watchlist=empty, fallback_rooms=local) == local

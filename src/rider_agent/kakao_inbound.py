@@ -65,6 +65,9 @@ REASON_DB_UNAVAILABLE = "db_unavailable"
 REASON_LATEST_WINDOW_1 = "latest_window_size_1"
 REASON_ROOM_NOT_FOUND = "configured_room_not_found"
 REASON_OK = "ok"
+REASON_NON_INTERACTIVE = "non_interactive_session"
+REASON_PREREQUISITES_MISSING = "prerequisites_missing"
+REASON_EMPTY_WATCHLIST = "empty_watchlist"
 
 INBOUND_OP_LABEL = "kakao inbound event"
 INBOUND_CONFIG_OP_LABEL = "kakao inbound config"
@@ -624,3 +627,47 @@ class KakaoWatchlistClient:
                 return None
             return _parse_watchlist(response)
         return None
+
+
+def resolve_kakao_inbound_enabled(
+    *,
+    local_enabled: bool,
+    prerequisites_ok: bool,
+    session_interactive: bool,
+    watchlist_enabled: bool,
+    watchlist_has_rooms: bool,
+) -> tuple[bool, str]:
+    """Hybrid effective-enabled gate → ``(enabled, reason)``.
+
+    effective_enabled = local kill switch && local prerequisites OK && session
+    interactive && server watchlist enabled with rooms. Any failure disables the
+    watcher with a fixed non-PII reason (order matters: cheapest/most-explanatory
+    first).
+    """
+
+    if not local_enabled:
+        return False, REASON_FEATURE_DISABLED
+    if not session_interactive:
+        return False, REASON_NON_INTERACTIVE
+    if not prerequisites_ok:
+        return False, REASON_PREREQUISITES_MISSING
+    if not (watchlist_enabled and watchlist_has_rooms):
+        return False, REASON_EMPTY_WATCHLIST
+    return True, REASON_OK
+
+
+def resolve_kakao_inbound_rooms(
+    *,
+    watchlist: KakaoWatchlist | None,
+    fallback_rooms: tuple[KakaoRoomConfig, ...] = (),
+) -> tuple[KakaoRoomConfig, ...]:
+    """Effective scan rooms.
+
+    The server watchlist is the source of truth; local ``fallback_rooms`` are
+    only bootstrap/fallback/canary, used solely when the server list is
+    unavailable or empty. They are never the long-term source of truth.
+    """
+
+    if watchlist is not None and watchlist.rooms:
+        return tuple(watchlist.rooms)
+    return tuple(fallback_rooms)
