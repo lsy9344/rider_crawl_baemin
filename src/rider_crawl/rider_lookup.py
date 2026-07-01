@@ -14,9 +14,10 @@ SQLAlchemy, or queue dependency. Transports provide only adapters (fetch rows,
 send text) around this core. See
 ``docs/superpowers/specs/2026-07-01-kakao-inbound-rider-lookup-design.md``.
 
-The legacy ``rider_crawl.telegram_commands`` path keeps its own (looser) parser
-until Telegram is converged onto this contract in a separate change; do not wire
-this module into Telegram here.
+Both ``rider_agent`` (Kakao inbound) and ``rider_crawl.telegram_commands``
+(Telegram) parse, match, and render through this core, so the ``!!`` + Hangul
+command contract is shared across every transport. Telegram was converged onto
+this contract in phase 6, dropping its legacy single-``!`` grammar.
 """
 
 from __future__ import annotations
