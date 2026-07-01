@@ -507,6 +507,25 @@ def test_verify_and_deactivate_on_missing_channel_raise_not_found():
         asyncio.run(svc.deactivate("nope"))
 
 
+def test_active_kakao_command_channels_filters_to_kakao_active_command_on():
+    # Agent watchlist source: only ACTIVE, command_trigger_enabled, KAKAO channels.
+    repo = InMemoryChannelRepository()
+    repo.seed(MessengerChannel(
+        id="k-on", tenant_id="tn-1", messenger=Messenger.KAKAO,
+        kakao_room_name="운영방", state=S.ACTIVE, command_trigger_enabled=True))
+    repo.seed(MessengerChannel(  # command trigger off (opt-in) -> excluded
+        id="k-off", tenant_id="tn-1", messenger=Messenger.KAKAO,
+        kakao_room_name="상담방", state=S.ACTIVE, command_trigger_enabled=False))
+    repo.seed(MessengerChannel(  # not ACTIVE -> excluded
+        id="k-inactive", tenant_id="tn-1", messenger=Messenger.KAKAO,
+        kakao_room_name="구방", state=S.INACTIVE, command_trigger_enabled=True))
+    repo.seed(_tg("t-on", state=S.ACTIVE))  # telegram -> excluded
+
+    result = asyncio.run(repo.active_kakao_command_channels())
+
+    assert [c.id for c in result] == ["k-on"]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # (2b) PG repository 순수 converter — always-run(DB 불필요, pg-gated 가 가린 helper 추출)
 # ══════════════════════════════════════════════════════════════════════════

@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from rider_server.api.jobs import (
     DEFAULT_LEASE_SECONDS,
     MAX_CAPABILITIES,
     CapabilityName,
+    resolve_agent,
 )
 from rider_server.queue.backend import QueueBackend
 from rider_server.services.agent_registry import (
@@ -207,3 +210,42 @@ async def heartbeat(request: Request, body: HeartbeatRequest) -> dict:
         "commands": result.commands,
         "lease_extension": lease_extension,
     }
+
+
+@router.get("/kakao-inbound-config")
+async def kakao_inbound_config(
+    request: Request, _agent_id: str = Depends(resolve_agent)
+) -> dict:
+    """Agent 가 스캔할 non-secret Kakao inbound watchlist (Hybrid config source).
+
+    ACTIVE 이고 command 트리거가 opt-in 된 Kakao 채널의 ``room_name``/optional
+    ``chat_id`` 만 돌려준다. DB key/user_hash/경로 등 secret 은 **절대 싣지 않는다**
+    (Agent 로컬 전용). Agent 는 이 방들만 스캔하며, 최종 허용/매핑/게이트는 인바운드
+    이벤트 수신 시 서버가 ``decide_inbound_event`` 로 다시 판단한다 — 이 목록은 스캔
+    범위 제한일 뿐 최종 권한이 아니다.
+    """
+
+    repo = getattr(request.app.state, "channel_repository", None)
+    channels = await repo.active_kakao_command_channels() if repo is not None else []
+    rooms = [
+        {"room_name": channel.kakao_room_name, "chat_id": channel.kakao_chat_id or ""}
+        for channel in channels
+        if channel.kakao_room_name
+    ]
+    return {
+        "kakao_inbound": {
+            "enabled": bool(rooms),
+            "config_version": _kakao_watchlist_version(rooms),
+            "rooms": rooms,
+        }
+    }
+
+
+def _kakao_watchlist_version(rooms: list[dict[str, str]]) -> str:
+    """watchlist 내용의 결정적 버전 — Agent 는 변경만 감지하면 되므로 안정 해시."""
+
+    canonical = json.dumps(
+        sorted((r["room_name"], r["chat_id"]) for r in rooms),
+        ensure_ascii=False,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
