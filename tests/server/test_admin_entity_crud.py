@@ -3362,3 +3362,279 @@ def test_entity_admin_exposes_monitoring_target_delete_button() -> None:
     assert "선택한 업체를 삭제할까요?" in template
     assert "연결된 전송 규칙이나 수집 기록이 있으면 삭제되지 않습니다." in template
     assert "crudButton(this, '/admin/monitoring-targets/', 'tgt-edit-id', '/delete'" in template
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 카카오 인바운드 라이더 조회(유료 기능) 활성화 — command_trigger_enabled CRUD/UI
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _kakao_channel(
+    channel_id="ch-k",
+    *,
+    tenant=_TENANT,
+    room="실적공유방",
+    state=MessengerChannelState.ACTIVE,
+    command_trigger_enabled=False,
+) -> MessengerChannel:
+    return MessengerChannel(
+        id=channel_id,
+        tenant_id=tenant,
+        messenger=Messenger.KAKAO,
+        kakao_room_name=room,
+        state=state,
+        command_trigger_enabled=command_trigger_enabled,
+    )
+
+
+def test_create_kakao_channel_with_command_trigger_enabled_persists_and_audits() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    channel = _run(
+        svc.create_messenger_channel(
+            entity_id="ch-kakao",
+            tenant_id=_TENANT,
+            messenger=Messenger.KAKAO,
+            kakao_room_name="실적공유방",
+            command_trigger_enabled=True,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert channel.command_trigger_enabled is True
+    assert channel.state is MessengerChannelState.ACTIVE
+    assert _run(repo.get_messenger_channel("ch-kakao")).command_trigger_enabled is True
+    assert repo.audits[-1].diff_redacted["command_trigger_enabled"] is True
+
+
+def test_create_channel_command_trigger_on_non_kakao_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.create_messenger_channel(
+                entity_id="ch-tg",
+                tenant_id=_TENANT,
+                messenger=Messenger.TELEGRAM,
+                telegram_chat_id="-100999",
+                command_trigger_enabled=True,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_messenger_channel("ch-tg")) is None
+
+
+def test_update_channel_enables_command_trigger_and_audits_before_after() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(_kakao_channel(command_trigger_enabled=False))
+    svc = _svc(repo)
+
+    updated = _run(
+        svc.update_messenger_channel(
+            "ch-k",
+            tenant_id=_TENANT,
+            command_trigger_enabled=True,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.command_trigger_enabled is True
+    assert updated.state is MessengerChannelState.ACTIVE  # 활성 토글은 상태 전이가 아님
+    assert repo.audits[-1].diff_redacted["from_command_trigger_enabled"] is False
+    assert repo.audits[-1].diff_redacted["to_command_trigger_enabled"] is True
+
+
+def test_update_channel_command_trigger_none_keeps_existing_value() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(_kakao_channel(command_trigger_enabled=True))
+    svc = _svc(repo)
+
+    # 라우팅만 편집(command_trigger_enabled 미지정=None) → 기존 활성값 유지.
+    updated = _run(
+        svc.update_messenger_channel(
+            "ch-k",
+            tenant_id=_TENANT,
+            kakao_room_name="다른방",
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.command_trigger_enabled is True
+
+
+def test_update_channel_disable_command_trigger() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(_kakao_channel(command_trigger_enabled=True))
+    svc = _svc(repo)
+
+    updated = _run(
+        svc.update_messenger_channel(
+            "ch-k",
+            tenant_id=_TENANT,
+            command_trigger_enabled=False,
+            at=_NOW,
+            actor_id=_ACTOR,
+        )
+    )
+
+    assert updated.command_trigger_enabled is False
+
+
+def test_update_channel_command_trigger_on_non_kakao_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(_channel(state=MessengerChannelState.ACTIVE))  # TELEGRAM
+    svc = _svc(repo)
+
+    with pytest.raises(ValueError):
+        _run(
+            svc.update_messenger_channel(
+                "ch-1",
+                tenant_id=_TENANT,
+                command_trigger_enabled=True,
+                at=_NOW,
+                actor_id=_ACTOR,
+            )
+        )
+
+    assert _run(repo.get_messenger_channel("ch-1")).command_trigger_enabled is False
+
+
+def test_route_create_kakao_channel_command_trigger_enabled() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={
+            "messenger": "KAKAO",
+            "kakao_room_name": "실적공유방",
+            "command_trigger_enabled": "true",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    channels = _run(repo.list_messenger_channels("tn-1"))
+    assert len(channels) == 1 and channels[0].command_trigger_enabled is True
+
+
+def test_route_create_telegram_channel_command_trigger_rejected() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_tenant(_tenant())
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels?tenant=tn-1",
+        data={
+            "messenger": "TELEGRAM",
+            "telegram_chat_id": "-100999",
+            "command_trigger_enabled": "true",
+        },
+    )
+
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert _run(repo.list_messenger_channels("tn-1")) == []
+
+
+def test_route_update_channel_command_trigger_toggle_off() -> None:
+    repo = InMemoryAdminEntityRepository()
+    repo.seed_messenger_channel(_kakao_channel(command_trigger_enabled=True))
+    client = TestClient(_app_with(repo))
+
+    resp = client.post(
+        "/admin/messenger-channels/ch-k?tenant=tn-1",
+        data={"command_trigger_enabled": "false"},
+    )
+
+    assert resp.status_code == HTTPStatus.OK
+    assert _run(repo.get_messenger_channel("ch-k")).command_trigger_enabled is False
+
+
+def test_messenger_channel_options_include_command_trigger_and_messenger_filter() -> None:
+    repo = _seeded_repo()
+    repo.seed_messenger_channel(
+        _kakao_channel("ch-kakao", room="활성방", command_trigger_enabled=True)
+    )
+    repo.seed_messenger_channel(
+        _channel("ch-tg", state=MessengerChannelState.ACTIVE)  # TELEGRAM
+    )
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    # 필터 없음: 두 메신저 모두 포함, 카카오 옵션에 data-cmd="1".
+    all_body = client.get("/admin/messenger-channels/options?tenant=tn-1").text
+    assert 'data-cmd="1"' in all_body
+    assert 'data-messenger="KAKAO"' in all_body
+    assert 'data-messenger="TELEGRAM"' in all_body
+
+    # messenger=KAKAO 필터: 카카오만 남고 텔레그램 옵션은 빠진다.
+    kakao_body = client.get(
+        "/admin/messenger-channels/options?tenant=tn-1&messenger=KAKAO"
+    ).text
+    assert 'data-messenger="KAKAO"' in kakao_body
+    assert 'data-messenger="TELEGRAM"' not in kakao_body
+
+
+def test_route_list_channels_summary_shows_rider_lookup_state() -> None:
+    repo = _seeded_repo()
+    repo.seed_messenger_channel(
+        _kakao_channel("ch-on", room="켠방", command_trigger_enabled=True)
+    )
+    repo.seed_messenger_channel(
+        _kakao_channel("ch-off", room="끈방", command_trigger_enabled=False)
+    )
+    client = TestClient(_app_with(repo, principal=_VIEWER))
+
+    body = client.get("/admin/messenger-channels?tenant=tn-1").text
+
+    assert "라이더조회 ON" in body
+    assert "라이더조회 OFF" in body
+
+
+def test_channel_to_domain_reads_command_trigger_enabled() -> None:
+    # PostgreSQL 행 → domain 변환이 command_trigger_enabled/kakao_chat_id 를 읽는지(누락 시 항상
+    # 기본 False 로 읽혀 활성 상태가 Admin UI 에 안 보인다). DB 없이 순수 변환 함수만 검증한다.
+    from types import SimpleNamespace
+
+    from rider_server.services.admin_entity_repository_postgres import _channel_to_domain
+
+    row = SimpleNamespace(
+        id="11111111-1111-1111-1111-111111111111",
+        tenant_id="22222222-2222-2222-2222-222222222222",
+        messenger="KAKAO",
+        telegram_chat_id=None,
+        thread_id=None,
+        kakao_room_name="실적공유방",
+        state="ACTIVE",
+        kakao_chat_id="bound-chat-id",
+        command_trigger_enabled=True,
+    )
+
+    channel = _channel_to_domain(row)
+
+    assert channel.command_trigger_enabled is True
+    assert channel.kakao_chat_id == "bound-chat-id"
+
+
+def test_entity_admin_exposes_kakao_rider_lookup_activation_card() -> None:
+    template = _entity_admin_template()
+
+    # 전용 활성화 카드 + 카카오 전용 채널 드롭다운(messenger=KAKAO 필터) + 3-state 토글 + 저장 핸들러.
+    assert 'id="entity-kakao-lookup"' in template
+    assert "카카오 인바운드 라이더 조회 (유료 기능)" in template
+    assert 'id="kakao-lookup-ch-id"' in template
+    assert "messenger=KAKAO" in template
+    assert 'id="kakao-lookup-enabled"' in template
+    assert "function saveKakaoLookup(" in template
+    assert "function populateKakaoLookupState(" in template
+    assert "crudButton(button, '/admin/messenger-channels/', 'kakao-lookup-ch-id'" in template
+    # 채널 생성 폼의 카카오 전용 활성화 체크박스(생성 시점 활성화).
+    assert 'name="command_trigger_enabled" value="true" data-channel-messenger="KAKAO"' in template

@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from rider_server.domain import CustomerLifecycleState, SubscriptionStatus
+from rider_server.domain import CustomerLifecycleState, Messenger, SubscriptionStatus
 from rider_server.security import AdminRole, require_role
 from rider_server.services.admin_action_service import (
     UNAUTHENTICATED_ACTOR,
@@ -224,6 +224,18 @@ def _channel_label(channel) -> str:
     return f"{label}{state_str}"
 
 
+def _channel_summary(channel) -> str:
+    """메시지 채널 목록 요약 — 카카오 채널은 라이더 조회(유료) 활성 여부를 함께 보여준다.
+
+    운영자가 목록만 보고도 어떤 카카오 채널에서 유료 라이더 조회가 켜져 있는지 한눈에 판단하게 한다.
+    """
+    label = channel.messenger.value
+    if channel.messenger is Messenger.KAKAO:
+        state = "ON" if getattr(channel, "command_trigger_enabled", False) else "OFF"
+        return f"{label} · 라이더조회 {state}"
+    return label
+
+
 def _rule_label(rule) -> str:
     flags = "변경시만" if rule.send_only_on_change else "항상"
     template = rule.template_id or "기본"
@@ -364,7 +376,7 @@ async def list_messenger_channels(
     return _entities(
         request,
         "메시지 채널",
-        [{"id": c.id, "summary": c.messenger.value, "state": c.state.value} for c in rows],
+        [{"id": c.id, "summary": _channel_summary(c), "state": c.state.value} for c in rows],
     )
 
 
@@ -466,6 +478,11 @@ async def messenger_channel_options(
     request: Request, _principal=Depends(require_viewer)
 ) -> HTMLResponse:
     rows = await _service(request).list_messenger_channels(_tenant_id(request))
+    # ``?messenger=KAKAO`` 로 특정 메신저만 거를 수 있다(카카오 라이더 조회 활성 카드 전용 —
+    # 값이 없으면 기존처럼 전체 반환). 알 수 없는 값은 매칭 0 으로 안전하게 빈 목록이 된다.
+    messenger_filter = request.query_params.get("messenger", "").strip().upper()
+    if messenger_filter:
+        rows = [c for c in rows if c.messenger.value == messenger_filter]
     return _options(
         request,
         [{
@@ -482,6 +499,8 @@ async def messenger_channel_options(
                 # 빠른 연결 CTA 가 '활성 채널 1개' 조건을 정확히 보게 채널 상태를 같이 싣는다(전체 채널은
                 # 드롭다운에 그대로 두되, ACTIVE 만 자동 선택/CTA 대상으로 센다 — 실 dispatch 와 같은 기준).
                 "state": c.state.value,
+                # 카카오 라이더 조회(유료) 현재 활성 여부 — 활성화 카드가 선택 시 현재값을 표시/토글한다.
+                "cmd": "1" if c.command_trigger_enabled else "",
             },
         } for c in rows],
         placeholder="채널 선택…",
@@ -1024,11 +1043,8 @@ async def update_messenger_channel(
             telegram_chat_id=form.get("telegram_chat_id", "").strip() or None,
             thread_id=form.get("thread_id", "").strip() or None,
             kakao_room_name=form.get("kakao_room_name", "").strip() or None,
-            command_trigger_enabled=(
-                _bool(form, "command_trigger_enabled")
-                if "command_trigger_enabled" in form
-                else None
-            ),
+            # 3-state 토글: 폼에 키가 없으면 None(유지), "true"/"false" 면 명시 활성/비활성.
+            command_trigger_enabled=_optional_select_bool(form.get("command_trigger_enabled")),
             at=_now(),
             actor_id=_resolve_actor(request),
             source=_resolve_source(request),
@@ -1038,7 +1054,7 @@ async def update_messenger_channel(
         _raise_for(exc)
     return _fragment(
         request,
-        f"메시지 채널 라우팅 편집됨 ({channel.messenger.value})",
+        f"메시지 채널 편집됨 ({channel.messenger.value})",
         trigger=ENTITY_OPTIONS_CHANGED,
     )
 
