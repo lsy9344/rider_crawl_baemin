@@ -72,8 +72,20 @@ from rider_crawl.kakao_db import (
     sqlcipher_available,
 )
 
-# 공유 라이더 조회 명령 코어(Kakao/Telegram 공용 계약) — 파서는 transport-neutral.
-from rider_crawl.rider_lookup import RiderLookupCommand, parse_rider_lookup_command
+# 공유 라이더 조회 명령 코어(Kakao/Telegram 공용 계약) — 파서/매처/렌더는 transport-neutral.
+from rider_crawl.rider_lookup import (
+    COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP,
+    RiderCancelMatch,
+    RiderCancelStats,
+    RiderLookupCommand,
+    find_rider_cancel_matches,
+    parse_rider_lookup_command,
+    render_lookup_reply,
+)
+
+# 배민 delivery-history row-level 접근(Phase 4 RIDER_LOOKUP 워커) — import 만 하고 실행하지
+# 않으므로(내부 playwright 는 함수 호출 시 lazy) 이 seam 을 eager import 해도 import-safe 하다.
+from rider_crawl.crawler import fetch_baemin_delivery_history_rows
 
 __all__ = [
     # 수집
@@ -117,5 +129,12 @@ __all__ = [
     "DEFAULT_ACCEPTED_CHAT_TYPES",
     # 공유 명령 코어
     "RiderLookupCommand",
+    "RiderCancelMatch",
+    "RiderCancelStats",
+    "COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP",
     "parse_rider_lookup_command",
+    "find_rider_cancel_matches",
+    "render_lookup_reply",
+    # 배민 row-level 조회(Phase 4)
+    "fetch_baemin_delivery_history_rows",
 ]
