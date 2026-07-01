@@ -18,11 +18,12 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from inspect import isawaitable
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from rider_crawl.rider_lookup import UNSUPPORTED_PLATFORM_REPLY
 
-from ..queue.states import JOB_TYPE_RIDER_LOOKUP
+from ..queue.states import JOB_TYPE_KAKAO_SEND, JOB_TYPE_RIDER_LOOKUP
 
 # The only inbound command type implemented in phase 1 (mirrors
 # rider_crawl.rider_lookup.COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP by value).
@@ -331,3 +332,135 @@ def _lookup_payload(
 
 # Convenience for the job type the orchestrator enqueues.
 LOOKUP_JOB_TYPE = JOB_TYPE_RIDER_LOOKUP
+
+
+# ── async orchestration (load views → pure decide → enqueue/reply/bind) ───────
+
+ChannelLoader = Callable[[], Awaitable[Sequence[ChannelView]] | Sequence[ChannelView]]
+TargetLoader = Callable[[str], Awaitable[Sequence[TargetView]] | Sequence[TargetView]]
+Enqueue = Callable[..., Awaitable[str] | str]
+
+
+async def _maybe_await(value: Any) -> Any:
+    if isawaitable(value):
+        return await value
+    return value
+
+
+class KakaoInboundEventService:
+    """Async orchestration over the pure decision core.
+
+    Data access is injected as callables (seams), so this is unit-testable with
+    fakes and wired to the real channel repository / queue backend / jobs reader
+    in ``create_app``. Only matched channel's targets and the single event's
+    dedupe/in-flight state are loaded (no full-table fan-out).
+    """
+
+    def __init__(
+        self,
+        *,
+        load_channels: ChannelLoader,
+        load_targets: TargetLoader,
+        enqueue: Enqueue,
+        sending_enabled: Callable[[], Awaitable[bool] | bool],
+        bind_chat_id: Callable[[str, str], Awaitable[None] | None] | None = None,
+        is_duplicate: Callable[[str], Awaitable[bool] | bool] | None = None,
+        in_flight: Callable[[str], Awaitable[bool] | bool] | None = None,
+        tenant_active: Callable[[str], Awaitable[bool] | bool] | None = None,
+        rate_limited: Callable[[str], Awaitable[bool] | bool] | None = None,
+    ) -> None:
+        self._load_channels = load_channels
+        self._load_targets = load_targets
+        self._enqueue = enqueue
+        self._sending_enabled = sending_enabled
+        self._bind_chat_id = bind_chat_id
+        self._is_duplicate = is_duplicate
+        self._in_flight = in_flight
+        self._tenant_active = tenant_active
+        self._rate_limited = rate_limited
+
+    async def handle(self, event: InboundEventInput) -> dict:
+        """Process one inbound event and return the API response dict."""
+
+        context = await self._build_context(event)
+        decision = decide_inbound_event(event, context)
+
+        if decision.action == ACTION_ENQUEUE_LOOKUP:
+            await self._maybe_bind(decision)
+            job_id = await _maybe_await(
+                self._enqueue(
+                    job_type=LOOKUP_JOB_TYPE,
+                    target_id=decision.target_id,
+                    payload_json=decision.job_payload,
+                )
+            )
+            return {"accepted": True, "duplicate": False, "job_id": job_id}
+
+        if decision.action == ACTION_DUPLICATE:
+            return {"accepted": True, "duplicate": True}
+
+        if decision.action == ACTION_REPLY:
+            await self._maybe_bind(decision)
+            reply_payload = {
+                "kakao_room_name": decision.reply_kakao_room_name,
+                "message": decision.reply_text,
+                "origin": ORIGIN_KAKAO_INBOUND,
+                "origin_event_key": decision.origin_event_key,
+            }
+            await _maybe_await(
+                self._enqueue(
+                    job_type=JOB_TYPE_KAKAO_SEND,
+                    target_id=None,
+                    payload_json=reply_payload,
+                )
+            )
+            return {"accepted": False, "duplicate": False, "reason": decision.reason}
+
+        return {"accepted": False, "duplicate": False, "reason": decision.reason}
+
+    async def _build_context(self, event: InboundEventInput) -> InboundContext:
+        sending_enabled = bool(await _maybe_await(self._sending_enabled()))
+        if not _command_is_valid(event.command):
+            # Skip data loads on an invalid command (the decision rejects anyway).
+            return InboundContext(channels=(), targets_by_channel={}, sending_enabled=sending_enabled)
+
+        channels = tuple(await _maybe_await(self._load_channels()))
+        targets_by_channel: dict[str, tuple[TargetView, ...]] = {}
+        existing_keys: set[str] = set()
+        in_flight_ids: set[str] = set()
+        inactive_tenants: set[str] = set()
+        rate_limited_ids: set[str] = set()
+
+        # Resolve the single matched active channel (if any) and load only its
+        # targets + this event's dedupe/in-flight/tenant state.
+        active_matched = [c for c in _match_channels(event, channels) if c.state == CHANNEL_STATE_ACTIVE]
+        if len(active_matched) == 1:
+            channel = active_matched[0]
+            targets = tuple(await _maybe_await(self._load_targets(channel.channel_id)))
+            targets_by_channel[channel.channel_id] = targets
+            if self._rate_limited is not None and await _maybe_await(self._rate_limited(channel.channel_id)):
+                rate_limited_ids.add(channel.channel_id)
+            if self._tenant_active is not None and not await _maybe_await(self._tenant_active(channel.tenant_id)):
+                inactive_tenants.add(channel.tenant_id)
+            active_targets = [t for t in targets if t.status == TARGET_STATE_ACTIVE]
+            if len(active_targets) == 1:
+                target = active_targets[0]
+                key = origin_event_key(event)
+                if self._is_duplicate is not None and await _maybe_await(self._is_duplicate(key)):
+                    existing_keys.add(key)
+                if self._in_flight is not None and await _maybe_await(self._in_flight(target.target_id)):
+                    in_flight_ids.add(target.target_id)
+
+        return InboundContext(
+            channels=channels,
+            targets_by_channel=targets_by_channel,
+            sending_enabled=sending_enabled,
+            existing_event_keys=frozenset(existing_keys),
+            in_flight_target_ids=frozenset(in_flight_ids),
+            inactive_tenant_ids=frozenset(inactive_tenants),
+            rate_limited_channel_ids=frozenset(rate_limited_ids),
+        )
+
+    async def _maybe_bind(self, decision: InboundDecision) -> None:
+        if self._bind_chat_id is not None and decision.bind_chat_id and decision.channel_id:
+            await _maybe_await(self._bind_chat_id(decision.channel_id, decision.bind_chat_id))

@@ -4,15 +4,18 @@ These lock the server's mapping/gate/dedupe contract without FastAPI, the DB, or
 the queue. The async orchestration + HTTP route are tested separately once wired.
 """
 
+import asyncio
+
 import pytest
 
-from rider_server.queue.states import JOB_TYPE_RIDER_LOOKUP
+from rider_server.queue.states import JOB_TYPE_KAKAO_SEND, JOB_TYPE_RIDER_LOOKUP
 from rider_server.services.kakao_inbound_event_service import (
     ACTION_DUPLICATE,
     ACTION_ENQUEUE_LOOKUP,
     ACTION_REJECT,
     ACTION_REPLY,
     COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP,
+    KakaoInboundEventService,
     LOOKUP_JOB_TYPE,
     REASON_CHANNEL_INACTIVE,
     REASON_COMMAND_DISABLED,
@@ -258,3 +261,123 @@ def test_origin_event_key_uses_room_name_when_chat_id_absent():
     assert by_chat != by_room
     # Same room with empty chat_id is stable.
     assert by_room == origin_event_key(_event(chat_id="", room="운영방"))
+
+
+# --- async orchestration (KakaoInboundEventService.handle) -----------------
+
+def _service(channels, targets_by_channel, *, sending=True, dup=False, in_flight=False, calls=None):
+    calls = calls if calls is not None else {"enqueued": [], "bound": []}
+
+    async def load_channels():
+        return channels
+
+    async def load_targets(channel_id):
+        return targets_by_channel.get(channel_id, ())
+
+    async def enqueue(*, job_type, target_id, payload_json):
+        calls["enqueued"].append((job_type, target_id, payload_json))
+        return "job-123"
+
+    async def bind_chat_id(channel_id, chat_id):
+        calls["bound"].append((channel_id, chat_id))
+
+    service = KakaoInboundEventService(
+        load_channels=load_channels,
+        load_targets=load_targets,
+        enqueue=enqueue,
+        sending_enabled=lambda: sending,
+        bind_chat_id=bind_chat_id,
+        is_duplicate=lambda key: dup,
+        in_flight=lambda target_id: in_flight,
+    )
+    return service, calls
+
+
+def test_handle_enqueues_lookup_and_binds_chat_id():
+    service, calls = _service([_channel(chat_id=None)], {"ch1": (_target(),)})
+    result = asyncio.run(service.handle(_event(chat_id="111", room="운영방")))
+
+    assert result == {"accepted": True, "duplicate": False, "job_id": "job-123"}
+    assert len(calls["enqueued"]) == 1
+    job_type, target_id, payload = calls["enqueued"][0]
+    assert job_type == JOB_TYPE_RIDER_LOOKUP
+    assert target_id == "tg1"
+    assert payload["command"]["name"] == "강민기"
+    assert calls["bound"] == [("ch1", "111")]
+
+
+def test_handle_duplicate_does_not_enqueue():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(),)}, dup=True)
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result == {"accepted": True, "duplicate": True}
+    assert calls["enqueued"] == []
+
+
+def test_handle_unsupported_platform_enqueues_kakao_send_reply():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(platform="coupang"),)})
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result["accepted"] is False
+    assert result["reason"] == REASON_UNSUPPORTED_PLATFORM
+    assert len(calls["enqueued"]) == 1
+    job_type, target_id, payload = calls["enqueued"][0]
+    assert job_type == JOB_TYPE_KAKAO_SEND
+    assert target_id is None
+    assert payload["message"] == "라이더 조회 명령은 배민 탭에서만 지원합니다."
+    assert payload["kakao_room_name"] == "운영방"
+
+
+def test_handle_reject_does_not_enqueue_or_bind():
+    service, calls = _service([_channel(room="운영방")], {"ch1": (_target(),)})
+    result = asyncio.run(service.handle(_event(room="없는방", chat_id="")))
+
+    assert result == {"accepted": False, "duplicate": False, "reason": REASON_UNKNOWN_ROOM}
+    assert calls["enqueued"] == []
+    assert calls["bound"] == []
+
+
+def test_handle_sending_disabled_rejects_without_enqueue():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(),)}, sending=False)
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result == {"accepted": False, "duplicate": False, "reason": REASON_SENDING_DISABLED}
+    assert calls["enqueued"] == []
+
+
+def test_handle_in_flight_rejects():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(),)}, in_flight=True)
+    result = asyncio.run(service.handle(_event(chat_id="111")))
+
+    assert result["reason"] == REASON_LOOKUP_IN_FLIGHT
+    assert calls["enqueued"] == []
+
+
+def test_handle_invalid_command_skips_channel_load():
+    loaded = {"count": 0}
+
+    async def load_channels():
+        loaded["count"] += 1
+        return []
+
+    async def load_targets(channel_id):
+        return ()
+
+    async def enqueue(*, job_type, target_id, payload_json):
+        return "job-x"
+
+    service = KakaoInboundEventService(
+        load_channels=load_channels,
+        load_targets=load_targets,
+        enqueue=enqueue,
+        sending_enabled=lambda: True,
+    )
+    bad = InboundEventInput(
+        source="pc_kakao_db", kakao_user_hash_digest="sha256:abc",
+        chat_id="111", room_name="운영방", last_log_id="1",
+        command=InboundCommandInput(type="WRONG", name="강민기", phone_last4="1234"),
+    )
+    result = asyncio.run(service.handle(bad))
+
+    assert result == {"accepted": False, "duplicate": False, "reason": REASON_INVALID_EVENT}
+    assert loaded["count"] == 0  # invalid command short-circuits before loading channels

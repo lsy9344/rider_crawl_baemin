@@ -22,3 +22,8 @@ class MessengerChannel:
     thread_id: str | None = None  # 라우팅 식별자 (secret 아님)
     kakao_room_name: str | None = None
     state: MessengerChannelState = MessengerChannelState.PENDING
+    # Phase 3 카카오 인바운드 명령 트리거(additive, default 보수적):
+    # ``kakao_chat_id`` 는 라우팅 식별자(secret 아님)로 룸명만 설정된 채널은 첫 인바운드 매칭 시
+    # 서버가 바인딩한다. ``command_trigger_enabled`` 가 False(기본)면 명령 트리거를 받지 않는다.
+    kakao_chat_id: str | None = None
+    command_trigger_enabled: bool = False
