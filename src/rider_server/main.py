@@ -43,7 +43,7 @@ from .api import (
     telegram_webhook_router,
 )
 from .db.base import create_engine, create_session_factory
-from .domain import Messenger, MessengerChannel
+from .domain import Messenger, MessengerChannel, MessengerChannelState
 from .metrics.policy import evaluate_alerts
 from .metrics.repository_postgres import PostgresMetricsRepository
 from .metrics.service import (
@@ -84,6 +84,7 @@ from .services.dispatch_fanout_service import DispatchJob
 from .services.dispatch_worker import TelegramDispatchWorker
 from .services.job_completion_service import JobCompletionService
 from .services.kakao_inbound_wiring import build_kakao_inbound_event_service
+from .services.kakao_lookup_reply_service import KakaoLookupReplyService
 from .services.job_result_ingest_service import JobResultIngestService
 from .services.snapshot_repository_postgres import PostgresSnapshotIngestRepository
 from .services.telegram_central_dispatch import CentralTelegramSender
@@ -674,9 +675,24 @@ def create_app(
             app.state.tenant_telegram_provider,
         )
     )
+    # Phase 4: RIDER_LOOKUP 완료 → 요청 방으로 스코프드 KAKAO_SEND 답장 1개(성공=렌더 결과,
+    # 실패=고정 실패문). 완료 workflow 는 Kakao 를 모르게 on_completed 훅으로 붙인다. 전송 전
+    # 전역 send gate + 채널 ACTIVE 상태를 재확인한다(RIDER_LOOKUP 은 snapshot ingest/fanout 우회).
+    _reply_channel_repository = app.state.channel_repository
+
+    async def _reply_channel_active(channel_id: str) -> bool:
+        channel = await _reply_channel_repository.get(channel_id)
+        return channel is not None and channel.state == MessengerChannelState.ACTIVE
+
+    app.state.kakao_lookup_reply_service = KakaoLookupReplyService(
+        queue_backend=app.state.queue_backend,
+        sending_enabled=lambda: app.state.sending_enabled,
+        channel_active=_reply_channel_active,
+    )
     app.state.job_completion_service = JobCompletionService(
         queue_backend=app.state.queue_backend,
         ingest_service=app.state.job_result_ingest_service,
+        on_completed=app.state.kakao_lookup_reply_service.on_job_completed,
     )
     # Phase 3: 카카오 인바운드 라이더 조회 명령 수신 service(매핑/게이트/dedupe/enqueue).
     # 테스트 주입 가능; 미주입 시 db_session_factory/queue 기반 실 seam 으로 조립(무-DB 는

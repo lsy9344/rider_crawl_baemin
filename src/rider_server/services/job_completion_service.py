@@ -124,6 +124,7 @@ class JobCompletionService:
         queue_backend: JobCompletionQueue,
         ingest_service: SnapshotIngestService | None = None,
         lease_seconds: float = DEFAULT_COMPLETION_LEASE_SECONDS,
+        on_completed: Any = None,
     ) -> None:
         self._queue_backend = queue_backend
         self._ingest_service = ingest_service
@@ -131,6 +132,11 @@ class JobCompletionService:
             ingest_service if isinstance(ingest_service, AtomicSnapshotIngestService) else None
         )
         self._lease_seconds = lease_seconds
+        # Optional best-effort hook fired after a non-snapshot job completes
+        # (RIDER_LOOKUP → scoped KAKAO_SEND reply). Snapshot jobs take the atomic
+        # path and do not fire it. Signature:
+        #   on_completed(*, job_id, status, result_json, now) -> awaitable | None
+        self._on_completed = on_completed
 
     async def complete(
         self,
@@ -191,7 +197,32 @@ class JobCompletionService:
                 agent_id=agent_id,
                 now=now,
             )
+        await self._fire_on_completed(
+            job_id=job_id, status=status, result_json=ingest_result_json, now=now
+        )
         return result
+
+    async def _fire_on_completed(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        result_json: dict[str, Any] | None,
+        now: datetime,
+    ) -> None:
+        # Best-effort: the job is already durably completed, so a reply-dispatch
+        # failure must not fail completion (that would trigger an agent retry and
+        # risk a double reply). Swallow hook errors.
+        if self._on_completed is None:
+            return
+        try:
+            outcome = self._on_completed(
+                job_id=job_id, status=status, result_json=result_json, now=now
+            )
+            if isawaitable(outcome):
+                await outcome
+        except Exception:  # noqa: BLE001 - reply dispatch is best-effort, never fails completion.
+            return
 
     async def _prepare_ingest(
         self,
