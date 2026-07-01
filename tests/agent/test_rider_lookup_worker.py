@@ -25,6 +25,8 @@ from rider_agent.workers.rider_lookup import (
     RESULT_TYPE_FAILED,
     RiderLookupWorker,
     build_execute_job,
+    make_baemin_rider_rows_fetcher,
+    rider_lookup_payload_from_job,
 )
 
 
@@ -208,3 +210,38 @@ def test_build_execute_job_routes_by_type():
     other_result = execute(_job(type="KAKAO_SEND"))
     assert other_result.error_code == "OTHER"
     assert fallback_calls == ["KAKAO_SEND"]
+
+
+# --- production fetcher (profile prep + shared fetch) ----------------------
+
+def test_fetcher_composes_profile_prep_and_shared_fetch():
+    import types
+    from pathlib import Path
+
+    captured = {}
+
+    def fake_fetch(config):
+        captured["config"] = config
+        return _rows_with_match()
+
+    class _FakeProfileManager:
+        def __init__(self):
+            self.calls = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            self.calls.append((tenant_id, target_id))
+            return types.SimpleNamespace(cdp_url="http://127.0.0.1:9333", profile_dir=Path("prof-dir"))
+
+    pm = _FakeProfileManager()
+    fetcher = make_baemin_rider_rows_fetcher(profile_manager=pm, fetch_rows=fake_fetch)
+
+    job = _job()
+    rows = fetcher(job, rider_lookup_payload_from_job(job))
+
+    assert rows == _rows_with_match()
+    assert pm.calls == [("t1", "tg1")]  # same profile identity as crawl jobs
+    config = captured["config"]
+    assert config.platform_name == "baemin"
+    assert config.coupang_eats_url.endswith("/delivery/history")
+    assert config.baemin_center_name == "남구센터"
+    assert str(config.cdp_url) == "http://127.0.0.1:9333"

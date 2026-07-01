@@ -187,6 +187,58 @@ def build_execute_job(
     return _execute
 
 
+def make_baemin_rider_rows_fetcher(
+    *,
+    profile_manager: Any,
+    secret_resolver: Callable[[str], str | None] | None = None,
+    fetch_rows: Callable[[Any], list[dict[str, str]]] | None = None,
+) -> FetchRiderRows:
+    """Compose crawl-worker browser-profile prep with the shared Baemin row fetch.
+
+    Reuses the crawl worker's ``payload_from_job``/``_build_config`` and the same
+    ``profile_manager.ensure_profile`` assignment so a RIDER_LOOKUP job opens the
+    exact CDP profile crawl jobs use (no second copy of profile/config logic),
+    then fetches rider rows through the shared accessor. ``fetch_rows`` is an
+    injectable seam so wiring/tests can substitute a fake without a browser. This
+    is the production ``fetch_rider_rows`` the worker composition injects.
+    """
+
+    from pathlib import Path
+
+    from rider_agent.reuse import fetch_baemin_delivery_history_rows
+    from rider_agent.workers.crawl_worker import _build_config, payload_from_job
+
+    fetch = fetch_rows or fetch_baemin_delivery_history_rows
+
+    def fetch_rider_rows(job: ClaimedJob, payload: RiderLookupJobPayload) -> list[dict[str, str]]:
+        crawl_payload = payload_from_job(job)
+
+        def build_config(*, tenant_id: str, target_id: str, cdp_url: str, user_data_dir: Path) -> Any:
+            return _build_config(
+                crawl_payload,
+                cdp_url=cdp_url,
+                user_data_dir=user_data_dir,
+                secret_resolver=secret_resolver,
+            )
+
+        assignment = profile_manager.ensure_profile(
+            crawl_payload.tenant_id, crawl_payload.target_id, build_config=build_config
+        )
+        config = build_config(
+            tenant_id=crawl_payload.tenant_id,
+            target_id=crawl_payload.target_id,
+            cdp_url=getattr(assignment, "cdp_url", "http://127.0.0.1:9222"),
+            user_data_dir=getattr(
+                assignment,
+                "profile_dir",
+                Path("runtime") / "agent-browser-profiles" / crawl_payload.target_id,
+            ),
+        )
+        return fetch(config)
+
+    return fetch_rider_rows
+
+
 def _reply_scope(payload: RiderLookupJobPayload) -> dict[str, Any]:
     # The scope the server needs to enqueue a KAKAO_SEND reply to the right room.
     return {
