@@ -222,6 +222,8 @@ class ChannelRepository(Protocol):
 
     async def active_channels(self) -> list[MessengerChannel]: ...
 
+    async def active_kakao_command_channels(self) -> list[MessengerChannel]: ...
+
 
 class InMemoryChannelRepository:
     """프로세스-내 채널 repository(무-DB 기본값 + 테스트 fake — ``InMemoryQueueBackend`` 선례)."""
@@ -254,6 +256,15 @@ class InMemoryChannelRepository:
             channel
             for channel in self._by_id.values()
             if channel.state is MessengerChannelState.ACTIVE
+        ]
+
+    async def active_kakao_command_channels(self) -> list[MessengerChannel]:
+        return [
+            channel
+            for channel in self._by_id.values()
+            if channel.messenger is Messenger.KAKAO
+            and channel.state is MessengerChannelState.ACTIVE
+            and channel.command_trigger_enabled
         ]
 
 

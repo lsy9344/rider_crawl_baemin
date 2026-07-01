@@ -34,6 +34,8 @@ from rider_agent.job_loop import (
     make_success_result,
     run_agent,
     start_heartbeat_thread,
+    start_kakao_inbound_thread,
+    _run_kakao_inbound_loop,
 )
 from rider_agent.registration import (
     DEFAULT_SERVER_BASE_URL,
@@ -368,6 +370,127 @@ def test_compose_routes_auth_coupang_2fa_to_dedicated_worker(tmp_path):
     assert result.status == JOB_STATUS_SUCCESS
     assert result.result_json["auth_recovery_state"] == "ACTIVE"
     assert result.result_json["auth_state"] == "ACTIVE"
+
+
+def _rider_lookup_composition(tmp_path, monkeypatch, *, fetched):
+    from types import SimpleNamespace
+
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN, CAPABILITY_RIDER_LOOKUP
+    from rider_agent.worker_composition import compose_execute_job
+    import rider_agent.reuse as reuse
+
+    def fake_fetch(config):
+        fetched.append(config)
+        return [
+            {
+                "이름": "강민기",
+                "휴대폰번호": "010-9999-1234",
+                "완료": "48",
+                "거절": "0",
+                "배차취소": "1",
+                "배달취소(라이더귀책)": "1",
+            }
+        ]
+
+    # Block the real browser fetch; the production fetcher imports this lazily at
+    # compose time, so patching the reuse symbol substitutes the fake.
+    monkeypatch.setattr(reuse, "fetch_baemin_delivery_history_rows", fake_fetch)
+
+    class Profiles:
+        def __init__(self):
+            self.calls = []
+
+        def ensure_profile(self, tenant_id, target_id, *, build_config):
+            self.calls.append((tenant_id, target_id))
+            profile_dir = tmp_path / "profiles" / tenant_id / target_id
+            config = build_config(
+                tenant_id=tenant_id,
+                target_id=target_id,
+                cdp_url="http://127.0.0.1:9450",
+                user_data_dir=profile_dir,
+            )
+            return SimpleNamespace(cdp_url=config.cdp_url, profile_dir=config.browser_user_data_dir)
+
+        def browser_profiles(self):
+            return []
+
+    profiles = Profiles()
+    composition = compose_execute_job(
+        identity=_identity(),
+        capabilities=[CAPABILITY_RIDER_LOOKUP, CAPABILITY_CRAWL_BAEMIN],
+        fallback=default_execute_job,
+        log=None,
+        now=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        start_crawl_worker=True,
+        crawl_profile_manager=profiles,
+        crawl_snapshot=lambda config, *, platform_name=None: None,
+    )
+    return composition, profiles
+
+
+def _rider_lookup_payload(**overrides):
+    payload = {
+        "target_id": "tg1",
+        "tenant_id": "t1",
+        "platform": "baemin",
+        "platform_account_id": "acc1",
+        "primary_url": "https://deliverycenter.baemin.com/delivery/history",
+        "expected_display_name": "남구센터",
+        "reply_channel_id": "ch1",
+        "reply_kakao_room_name": "운영방",
+        "origin_event_key": "sha256:abc",
+        "command": {"type": "RIDER_CANCEL_RATE_LOOKUP", "name": "강민기", "phone_last4": "1234"},
+        "timeout_seconds": 60,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_compose_routes_rider_lookup_to_worker(tmp_path, monkeypatch):
+    from rider_agent.heartbeat import CAPABILITY_RIDER_LOOKUP
+
+    fetched = []
+    composition, profiles = _rider_lookup_composition(tmp_path, monkeypatch, fetched=fetched)
+
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="rl-1",
+            type=CAPABILITY_RIDER_LOOKUP,
+            target_id="tg1",
+            lease_expires_at=FUTURE_LEASE,
+            payload=_rider_lookup_payload(),
+        )
+    )
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["result_type"] == "rider_lookup"
+    assert result.result_json["reply_text"].startswith("강민기1234")
+    assert result.result_json["reply_channel_id"] == "ch1"
+    assert profiles.calls == [("t1", "tg1")]  # same profile identity as crawl
+    assert len(fetched) == 1
+
+
+def test_rider_lookup_routing_preserves_crawl_baemin(tmp_path, monkeypatch):
+    from rider_agent.heartbeat import CAPABILITY_CRAWL_BAEMIN
+
+    fetched = []
+    composition, _ = _rider_lookup_composition(tmp_path, monkeypatch, fetched=fetched)
+
+    # Adding RIDER_LOOKUP must not change CRAWL_BAEMIN routing: a crawl job still
+    # goes to the crawl worker (snapshot result), never the lookup worker.
+    result = composition.execute_job(
+        ClaimedJob(
+            job_id="cb-1",
+            type=CAPABILITY_CRAWL_BAEMIN,
+            target_id="tg1",
+            lease_expires_at=FUTURE_LEASE,
+            payload=_rider_lookup_payload(),
+        )
+    )
+    assert result.status == JOB_STATUS_SUCCESS
+    assert result.result_json["result_type"] == "snapshot"
+    assert fetched == []  # lookup fetch never runs for a crawl job
 
 
 class _DiagnosticProfiles:
@@ -1265,6 +1388,100 @@ def test_run_agent_spawns_and_joins_heartbeat_thread(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Kakao inbound watcher thread (Phase 2/5 activation wiring)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_kakao_inbound_loop_scans_until_stop():
+    stop = threading.Event()
+
+    class _Watcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def scan_once(self):
+            self.calls += 1
+            stop.set()  # stop right after the first scan
+
+    watcher = _Watcher()
+    _run_kakao_inbound_loop(watcher, stop_event=stop, interval=0.0, log=None)
+    assert watcher.calls == 1
+
+
+def test_kakao_inbound_loop_survives_scan_error():
+    stop = threading.Event()
+    logs: list[str] = []
+
+    class _Watcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def scan_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("boom")
+            stop.set()
+
+    watcher = _Watcher()
+    _run_kakao_inbound_loop(watcher, stop_event=stop, interval=0.0, log=logs.append)
+    assert watcher.calls == 2  # survived the first error and scanned again
+    assert logs  # error surfaced (redacted) to the log
+
+
+def test_run_agent_spawns_and_joins_kakao_inbound_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=3)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    class _Watcher:
+        def scan_once(self):
+            return None
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        kakao_inbound_watcher=_Watcher(),
+        kakao_inbound_interval_seconds=0.0,
+    )
+
+    assert summary.started is True
+    assert summary.kakao_inbound_thread is not None
+    # run_agent 의 finally 가 stop_event.set()+join 으로 정리 → thread 종료.
+    assert not summary.kakao_inbound_thread.is_alive()
+
+
+def test_run_agent_without_watcher_has_no_inbound_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+    transport = FakeTransport(claim_script=[{"jobs": []}])
+
+    summary = run_agent(
+        transport=transport,
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+    )
+
+    assert summary.kakao_inbound_thread is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # token-auth 헤더 + 평문 비노출(핵심 가드)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1329,8 +1546,48 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert captured["start_auth_worker"] is True
     assert captured["start_crawl_worker"] is True
     assert captured["start_kakao_sender"] is True
+    # inbound watcher assembly is fail-safe: bad store / no config -> None wired through.
+    assert captured["kakao_inbound_watcher"] is None
     # token 평문 미출력.
     assert FAKE_TOKEN not in out
+
+
+def test_run_agent_loop_cli_wires_refreshing_kakao_inbound_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    from rider_agent import __main__ as agent_main
+    from rider_agent.kakao_inbound import RefreshingKakaoInboundWatcher
+    import rider_crawl.config as crawl_config
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    state_root = tmp_path / "state-root"
+    config_dir = state_root / "runtime" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kakao-inbound.json").write_text(
+        json.dumps({"enabled": True, "chat_list_db_path": "a.edb"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(crawl_config, "app_state_root", lambda: state_root)
+    identity_path = tmp_path / "agent_config.json"
+    store = FakeStore()
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    rc = agent_main._run_agent_loop(
+        ["--server-url", "https://srv.test"],
+        transport=object(),
+        store=store,
+        identity_path=identity_path,
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert isinstance(captured["kakao_inbound_watcher"], RefreshingKakaoInboundWatcher)
+    assert FAKE_TOKEN not in capsys.readouterr().out
 
 
 def test_run_agent_loop_cli_wires_local_log_and_session_probe(tmp_path, monkeypatch, capsys):

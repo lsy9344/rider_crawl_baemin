@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from .agents import router as agents_router
 from .jobs import default_resolve_agent_id, router as jobs_router
+from .kakao_inbound import router as kakao_inbound_router
 from .telegram_webhook import router as telegram_webhook_router
 
 __all__ = [
     "agents_router",
     "jobs_router",
     "default_resolve_agent_id",
+    "kakao_inbound_router",
     "telegram_webhook_router",
 ]

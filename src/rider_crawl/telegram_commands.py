@@ -3,44 +3,32 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 from .config import AppConfig, app_state_root
 from .keyword_responder import KeywordResponder
 from .lock import RunLock
-from .parser import parse_baemin_delivery_history_html, parse_count
+from .parser import parse_baemin_delivery_history_html
+from .rider_lookup import (
+    RiderCancelMatch,
+    RiderLookupCommand,
+    find_rider_cancel_matches,
+    parse_rider_lookup_command,
+    render_lookup_reply,
+    render_unsupported_platform_reply,
+)
 
 
-RISK_CANCEL_RATE_PERCENT = 4.0
-
-
-@dataclass(frozen=True)
-class RiderLookupCommand:
-    name: str
-    phone_last4: str
-
-
-@dataclass(frozen=True)
-class RiderCancelStats:
-    name: str
-    phone_last4: str
-    completed_count: float | int
-    rejected_count: float | int
-    dispatch_cancel_count: float | int
-    rider_fault_cancel_count: float | int
-    total_cancel_count: float | int
-    cancel_rate: float
-
-
-@dataclass(frozen=True)
-class RiderCancelMatch:
-    source_label: str
-    stats: RiderCancelStats
+# The command grammar, rider matching, cancel-rate calculation, and reply
+# rendering now live in the transport-neutral ``rider_crawl.rider_lookup`` core
+# shared with Kakao. This module keeps only Telegram transport concerns: update
+# polling, per-target routing/locks, the ``조회 중입니다.`` progress reply, and
+# keyword auto-reply. Telegram therefore uses the shared ``!!`` + Hangul contract;
+# the legacy single-``!`` grammar was migrated onto this core in phase 6.
 
 
 @dataclass(frozen=True)
@@ -63,76 +51,6 @@ HandleText = Callable[..., object]
 GetUpdates = Callable[..., list[dict]]
 LogEvent = Callable[[str], None]
 TelegramTarget = tuple[str, str]
-
-
-def parse_rider_lookup_command(text: str) -> RiderLookupCommand | None:
-    match = re.fullmatch(r"\s*!\s*(?P<name>.+?)(?P<phone_last4>\d{4})\s*", text)
-    if not match:
-        return None
-
-    name = match.group("name").strip()
-    phone_last4 = match.group("phone_last4")
-    if not name:
-        return None
-    return RiderLookupCommand(name=name, phone_last4=phone_last4)
-
-
-def find_rider_cancel_stats(
-    rows: Iterable[dict[str, str]],
-    *,
-    name: str,
-    phone_last4: str,
-) -> list[RiderCancelStats]:
-    matches = []
-    for row in rows:
-        row_name = _cell(row, "이름")
-        phone = _cell(row, "휴대폰번호", "휴대폰 번호")
-        if row_name.strip() != name or _phone_last4(phone) != phone_last4:
-            continue
-
-        completed = _number(row, "완료")
-        rejected = _number(row, "거절")
-        dispatch_cancelled = _number(row, "배차취소")
-        rider_fault_cancelled = _number(row, "배달취소(라이더귀책)")
-        total_cancelled = dispatch_cancelled + rider_fault_cancelled
-        matches.append(
-            RiderCancelStats(
-                name=row_name.strip(),
-                phone_last4=phone_last4,
-                completed_count=completed,
-                rejected_count=rejected,
-                dispatch_cancel_count=dispatch_cancelled,
-                rider_fault_cancel_count=rider_fault_cancelled,
-                total_cancel_count=total_cancelled,
-                cancel_rate=calculate_cancel_rate(
-                    completed=completed,
-                    rejected=rejected,
-                    total_cancelled=total_cancelled,
-                ),
-            )
-        )
-    return matches
-
-
-def calculate_cancel_rate(
-    *,
-    completed: float | int,
-    rejected: float | int,
-    total_cancelled: float | int,
-) -> float:
-    denominator = completed + rejected + total_cancelled
-    if denominator == 0:
-        return 0
-    return round((total_cancelled / denominator) * 100, 1)
-
-
-def render_rider_cancel_reply(stats: RiderCancelStats) -> str:
-    risk_text = "위험합니다." if stats.cancel_rate >= RISK_CANCEL_RATE_PERCENT else "정상 범위입니다."
-    return (
-        f"{stats.name}{stats.phone_last4}\n"
-        f"취소율 {_format_number(stats.cancel_rate)}%, 취소 {_format_number(stats.total_cancel_count)}개\n"
-        f"{risk_text}"
-    )
 
 
 class TelegramCommandProcessor:
@@ -251,12 +169,11 @@ class TelegramCommandProcessor:
             self.log_event(f"텔레그램 대상 미매칭: {_target_label(target)}")
             return False
 
-        # The rider lookup parses Baemin delivery-history tables, so it cannot run
-        # against Coupang tabs. Reply predictably instead of fetching Coupang HTML.
-        if getattr(config, "platform_name", "baemin") != "baemin":
+        platform = str(getattr(config, "platform_name", "baemin") or "baemin").strip().casefold()
+        if platform not in {"baemin", "coupang"}:
             self.send_text(
                 config,
-                "라이더 조회 명령은 배민 탭에서만 지원합니다.",
+                render_unsupported_platform_reply(),
                 message_thread_id=message_thread_id,
             )
             return True
@@ -280,7 +197,7 @@ class TelegramCommandProcessor:
             return True
 
         try:
-            self.send_text(config, _render_lookup_reply(command, matches), message_thread_id=message_thread_id)
+            self.send_text(config, render_lookup_reply(command, matches), message_thread_id=message_thread_id)
         except Exception as exc:
             self.log_event(f"{source} 최종 답장 전송 오류: {exc}")
             raise
@@ -344,19 +261,23 @@ class TelegramCommandProcessor:
         command: RiderLookupCommand,
         configs: tuple[AppConfig, ...],
     ) -> list[RiderCancelMatch]:
-        matches: list[RiderCancelMatch] = []
         if not config.coupang_eats_url.strip():
-            return matches
+            return []
         html = self.fetch_html(config)
-        table = parse_baemin_delivery_history_html(html)
+        platform = str(getattr(config, "platform_name", "baemin") or "baemin").strip().casefold()
+        if platform == "coupang":
+            from .platforms.coupang.parser import parse_coupang_rider_performance_rows
+
+            rows = parse_coupang_rider_performance_rows(html)
+        else:
+            table = parse_baemin_delivery_history_html(html)
+            rows = table.riders
         index = configs.index(config)
-        for stats in find_rider_cancel_stats(
-            table.riders,
-            name=command.name,
-            phone_last4=command.phone_last4,
-        ):
-            matches.append(RiderCancelMatch(source_label=_source_label(config, index), stats=stats))
-        return matches
+        return find_rider_cancel_matches(
+            rows,
+            command=command,
+            source_label=_source_label(config, index),
+        )
 
 
 class TelegramUpdatePoller:
@@ -508,17 +429,6 @@ class TelegramUpdatePoller:
         return update_id if isinstance(update_id, int) else None
 
 
-def _render_lookup_reply(command: RiderLookupCommand, matches: list[RiderCancelMatch]) -> str:
-    if not matches:
-        return f"{command.name}{command.phone_last4}\n해당 라이더를 찾지 못했습니다."
-
-    reply = render_rider_cancel_reply(matches[0].stats)
-    if len(matches) > 1:
-        labels = ", ".join(match.source_label for match in matches)
-        reply = f"{reply}\n중복 발견: {labels}"
-    return reply
-
-
 def _call_handle_text(
     handle_text: HandleText,
     chat_id: str,
@@ -539,37 +449,6 @@ def _call_handle_text(
     if accepts_progress:
         return handle_text(chat_id, text, message_thread_id, send_progress=send_progress)
     return handle_text(chat_id, text, message_thread_id)
-
-
-def _cell(row: dict[str, str], *names: str) -> str:
-    for name in names:
-        if name in row:
-            return row[name]
-    for name in names:
-        compact_name = _compact(name)
-        for key, value in row.items():
-            if _compact(key) == compact_name:
-                return value
-    return ""
-
-
-def _number(row: dict[str, str], *names: str) -> float | int:
-    return parse_count(_cell(row, *names) or "0")
-
-
-def _phone_last4(phone: str) -> str:
-    digits = "".join(re.findall(r"\d", phone))
-    return digits[-4:] if len(digits) >= 4 else ""
-
-
-def _compact(text: str) -> str:
-    return re.sub(r"\s+", "", text).strip()
-
-
-def _format_number(value: float | int) -> str:
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
 
 
 def _source_label(config: AppConfig, index: int) -> str:

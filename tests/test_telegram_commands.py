@@ -6,83 +6,42 @@ from pathlib import Path
 
 import pytest
 
+from rider_crawl import rider_lookup
 from rider_crawl.config import AppConfig, app_state_root
 from rider_crawl.keyword_responder import KeywordResponder
-from rider_crawl.parser import parse_baemin_delivery_history_html
 from rider_crawl.telegram_commands import (
     TelegramUpdatePoller,
     TelegramCommandProcessor,
     _default_offset_store_path,
-    calculate_cancel_rate,
-    find_rider_cancel_stats,
     parse_rider_lookup_command,
-    render_rider_cancel_reply,
 )
 
 
-def test_parse_rider_lookup_command_extracts_name_and_phone_last4():
-    command = parse_rider_lookup_command("!홍길동1234")
+def test_parse_rider_lookup_command_uses_shared_double_bang_contract():
+    # Phase 6: Telegram delegates to the shared `!!` + Hangul command core, so a
+    # valid command now needs the double-bang prefix.
+    command = parse_rider_lookup_command("!!홍길동1234")
 
     assert command is not None
+    assert command.type == rider_lookup.COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP
     assert command.name == "홍길동"
     assert command.phone_last4 == "1234"
 
 
-def test_parse_rider_lookup_command_ignores_non_lookup_text():
+def test_parse_rider_lookup_command_rejects_legacy_single_bang_and_non_hangul():
+    # Legacy single-`!` commands and non-Hangul names no longer trigger a lookup
+    # (breaking change locked by phase 6 convergence).
+    assert parse_rider_lookup_command("!홍길동1234") is None
     assert parse_rider_lookup_command("홍길동1234") is None
-    assert parse_rider_lookup_command("!1234") is None
-    assert parse_rider_lookup_command("!홍길동12") is None
+    assert parse_rider_lookup_command("!!1234") is None
+    assert parse_rider_lookup_command("!!홍길동12") is None
+    assert parse_rider_lookup_command("!!hong1234") is None
 
 
-def test_find_rider_cancel_stats_matches_name_and_phone_last4():
-    html = """
-    <table>
-      <thead><tr>
-        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
-        <th>배차취소</th><th>배달취소(라이더귀책)</th>
-        <th>오전피크</th><th>오후논피크</th><th>저녁피크</th><th>야간논피크</th>
-      </tr></thead>
-      <tbody>
-        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>100</td><td>5</td><td>3</td><td>2</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
-        <tr><td>홍길동</td><td>수행중</td><td>010-1111-9999</td><td>100</td><td>5</td><td>9</td><td>9</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
-      </tbody>
-    </table>
-    """
-    table = parse_baemin_delivery_history_html(html)
-
-    matches = find_rider_cancel_stats(table.riders, name="홍길동", phone_last4="1234")
-
-    assert len(matches) == 1
-    assert matches[0].name == "홍길동"
-    assert matches[0].phone_last4 == "1234"
-    assert matches[0].completed_count == 100
-    assert matches[0].rejected_count == 5
-    assert matches[0].dispatch_cancel_count == 3
-    assert matches[0].rider_fault_cancel_count == 2
-    assert matches[0].total_cancel_count == 5
-
-
-def test_calculate_cancel_rate_uses_completed_rejected_and_cancels():
-    assert calculate_cancel_rate(completed=100, rejected=20, total_cancelled=5) == 4.0
-    assert calculate_cancel_rate(completed=0, rejected=0, total_cancelled=0) == 0
-
-
-def test_render_rider_cancel_reply_marks_risky_rate():
-    html = """
-    <table>
-      <thead><tr>
-        <th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>
-        <th>배차취소</th><th>배달취소(라이더귀책)</th>
-        <th>오전피크</th><th>오후논피크</th><th>저녁피크</th><th>야간논피크</th>
-      </tr></thead>
-      <tbody>
-        <tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>100</td><td>20</td><td>3</td><td>2</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
-      </tbody>
-    </table>
-    """
-    stats = find_rider_cancel_stats(parse_baemin_delivery_history_html(html).riders, name="홍길동", phone_last4="1234")[0]
-
-    assert render_rider_cancel_reply(stats) == "홍길동1234\n취소율 4%, 취소 5개\n위험합니다."
+def test_telegram_parser_is_the_shared_core():
+    # Convergence guard: the Telegram entrypoint re-exports the shared parser
+    # instead of keeping a private copy.
+    assert parse_rider_lookup_command is rider_lookup.parse_rider_lookup_command
 
 
 def test_telegram_command_processor_routes_lookup_to_matching_chat_config(tmp_path):
@@ -114,7 +73,7 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_config(tmp_pa
         ),
     )
 
-    handled = processor.handle_text("-100222", "!홍길동1234")
+    handled = processor.handle_text("-100222", "!!홍길동1234")
 
     assert handled is True
     assert fetched == ["크롤링2"]
@@ -142,10 +101,10 @@ def test_telegram_command_logs_do_not_include_raw_text_for_rider_lookup(tmp_path
         log_event=logs.append,
     )
 
-    processor.handle_text("-100123", "!홍길동1234")
+    processor.handle_text("-100123", "!!홍길동1234")
 
     joined = "\n".join(logs)
-    assert "!홍길동1234" not in joined
+    assert "!!홍길동1234" not in joined
     assert "홍길동" not in joined
     assert "1234" not in joined
     assert "rider_lookup" in joined
@@ -178,7 +137,7 @@ def test_telegram_command_handler_uses_single_routing_snapshot_per_update(tmp_pa
         send_text=lambda config, message, **_kwargs: sent.append(f"{config.crawl_name}:{message}"),
     )
 
-    assert processor.handle_text("-100123", "!홍길동1234") is True
+    assert processor.handle_text("-100123", "!!홍길동1234") is True
     assert sent[-1].startswith("크롤링1:")
 
 
@@ -209,7 +168,7 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_thread(tmp_pa
         ),
     )
 
-    handled = processor.handle_text("-100123", "!홍길동1234", message_thread_id=88)
+    handled = processor.handle_text("-100123", "!!홍길동1234", message_thread_id=88)
 
     assert handled is True
     assert fetched == ["크롤링2"]
@@ -237,7 +196,7 @@ def test_telegram_command_processor_normalizes_configured_thread_id(tmp_path):
         send_text=lambda _config, message, *, message_thread_id=None: sent.append((message, message_thread_id)),
     )
 
-    handled = processor.handle_text("-100123", "!홍길동1234", message_thread_id=77)
+    handled = processor.handle_text("-100123", "!!홍길동1234", message_thread_id=77)
 
     assert handled is True
     assert sent[0] == ("조회 중입니다.", 77)
@@ -253,7 +212,7 @@ def test_telegram_command_processor_logs_unmatched_chat_without_replying(tmp_pat
         log_event=logs.append,
     )
 
-    handled = processor.handle_text("-100999", "!홍길동1234")
+    handled = processor.handle_text("-100999", "!!홍길동1234")
 
     assert handled is False
     assert sent == []
@@ -270,7 +229,7 @@ def test_telegram_command_processor_logs_unmatched_thread_without_replying(tmp_p
         log_event=logs.append,
     )
 
-    handled = processor.handle_text("-100111", "!홍길동1234", message_thread_id=88)
+    handled = processor.handle_text("-100111", "!!홍길동1234", message_thread_id=88)
 
     assert handled is False
     assert sent == []
@@ -298,9 +257,9 @@ def test_telegram_update_poller_routes_matching_chat_text_and_advances_offset(tm
         return [
             {
                 "update_id": 10,
-                "message": {"chat": {"id": "-100123"}, "message_thread_id": 77, "text": "!홍길동1234"},
+                "message": {"chat": {"id": "-100123"}, "message_thread_id": 77, "text": "!!홍길동1234"},
             },
-            {"update_id": 11, "message": {"chat": {"id": "-100999"}, "text": "!무시0000"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100999"}, "text": "!!무시0000"}},
         ]
 
     poller = TelegramUpdatePoller(
@@ -312,7 +271,7 @@ def test_telegram_update_poller_routes_matching_chat_text_and_advances_offset(tm
 
     poller.poll_once()
 
-    assert handled == [("-100123", "!홍길동1234", 77), ("-100999", "!무시0000", None)]
+    assert handled == [("-100123", "!!홍길동1234", 77), ("-100999", "!!무시0000", None)]
     assert requested_offsets == [None]
     assert poller.next_update_id == 12
 
@@ -330,7 +289,7 @@ def test_telegram_update_poller_does_not_advance_offset_when_handler_fails(tmp_p
         config,
         handle_text=failing_handle_text,
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!!홍길동1234"}}
         ],
         offset_store_path=tmp_path / "telegram.offset",
     )
@@ -355,8 +314,8 @@ def test_telegram_update_poller_skips_successful_higher_update_after_lower_updat
         assert received_config is config
         requested_offsets.append(offset)
         return [
-            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
-            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!!김철수5678"}},
         ]
 
     def handle_text(chat_id, text, message_thread_id=None):
@@ -398,8 +357,8 @@ def test_telegram_update_poller_persists_completed_higher_update_when_lower_upda
 
     def get_updates(*_args, **_kwargs):
         return [
-            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
-            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!!김철수5678"}},
         ]
 
     def handle_text(chat_id, text, message_thread_id=None):
@@ -438,7 +397,7 @@ def test_telegram_update_poller_persists_offset_after_successful_handler(tmp_pat
     def fake_get_updates(received_config, *, offset, timeout_seconds):
         assert received_config is config
         assert offset is None
-        return [{"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}]
+        return [{"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!!홍길동1234"}}]
 
     poller = TelegramUpdatePoller(
         config,
@@ -455,7 +414,7 @@ def test_telegram_update_poller_persists_offset_after_successful_handler(tmp_pat
         offset_store_path=offset_path,
     )
 
-    assert handled == [("-100123", "!홍길동1234", None)]
+    assert handled == [("-100123", "!!홍길동1234", None)]
     assert offset_path.read_text(encoding="utf-8") == "11"
     assert restarted.next_update_id == 11
 
@@ -487,14 +446,14 @@ def test_telegram_update_poller_completes_unhandled_lookup_command(tmp_path):
         config,
         handle_text=lambda chat_id, text, message_thread_id=None: handled.append((chat_id, text)) or False,
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100999"}, "text": "!홍길동1234"}}
+            {"update_id": 10, "message": {"chat": {"id": "-100999"}, "text": "!!홍길동1234"}}
         ],
         offset_store_path=offset_path,
     )
 
     poller.poll_once()
 
-    assert handled == [("-100999", "!홍길동1234")]
+    assert handled == [("-100999", "!!홍길동1234")]
     assert poller.next_update_id == 11
     assert offset_path.read_text(encoding="utf-8") == "11"
 
@@ -510,7 +469,7 @@ def test_telegram_update_poller_recovers_offset_when_completed_sidecar_exists(tm
         config,
         handle_text=lambda chat_id, text, message_thread_id=None: handled.append(chat_id),
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!!홍길동1234"}}
         ],
         offset_store_path=offset_path,
     )
@@ -554,7 +513,7 @@ def test_telegram_update_poller_does_not_advance_offset_when_final_reply_fails(t
         _config(tmp_path, crawl_name="크롤링1", chat_id="-100123"),
         handle_text=processor.handle_text,
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!!홍길동1234"}}
         ],
         offset_store_path=offset_path,
     )
@@ -597,7 +556,7 @@ def test_telegram_update_poller_does_not_repeat_progress_reply_after_final_reply
         _config(tmp_path, crawl_name="크롤링1", chat_id="-100123"),
         handle_text=processor.handle_text,
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!홍길동1234"}}
+            {"update_id": 10, "message": {"chat": {"id": "-100123"}, "text": "!!홍길동1234"}}
         ],
         offset_store_path=offset_path,
     )
@@ -623,8 +582,8 @@ def test_telegram_update_poller_handles_updates_in_same_batch_concurrently(tmp_p
         _config(tmp_path, crawl_name="크롤링1"),
         handle_text=handle_text,
         get_updates=lambda *_args, **_kwargs: [
-            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!홍길동1234"}},
-            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!김철수5678"}},
+            {"update_id": 10, "message": {"chat": {"id": "-100111"}, "text": "!!홍길동1234"}},
+            {"update_id": 11, "message": {"chat": {"id": "-100222"}, "text": "!!김철수5678"}},
         ],
         offset_store_path=tmp_path / "telegram.offset",
     )
@@ -690,7 +649,41 @@ def test_default_offset_store_path_honors_state_root_override(tmp_path, monkeypa
     assert path.parent == app_state_root() / "runtime" / "state" / "telegram_offsets"
 
 
-def test_telegram_command_processor_replies_that_lookup_is_baemin_only_for_coupang(tmp_path):
+def test_telegram_command_processor_routes_lookup_for_coupang(tmp_path):
+    html = """
+    <table>
+      <thead><tr>
+        <th>우선순위</th>
+        <th>이름 / 연락처 총 1명</th>
+        <th>우선순위변경</th>
+        <th>상태 온라인 1명</th>
+        <th>거절/무시 1건</th>
+        <th>취소 2건</th>
+        <th>완료 50건</th>
+        <th>순서 미준수 0건</th>
+        <th>점심피크 10건</th>
+        <th>저녁피크 20건</th>
+        <th>논피크 20건</th>
+        <th>활성상태</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td>홍길동<br>010-1111-1234</td>
+          <td>교체</td>
+          <td>배달중</td>
+          <td>1건</td>
+          <td>2건</td>
+          <td>50건</td>
+          <td>0건</td>
+          <td>10건</td>
+          <td>20건</td>
+          <td>20건</td>
+          <td>활성</td>
+        </tr>
+      </tbody>
+    </table>
+    """
     sent: list[str] = []
     config = AppConfig(
         **{
@@ -702,14 +695,14 @@ def test_telegram_command_processor_replies_that_lookup_is_baemin_only_for_coupa
     )
     processor = TelegramCommandProcessor(
         [config],
-        fetch_html=lambda _config: (_ for _ in ()).throw(AssertionError("must not fetch Coupang as Baemin")),
+        fetch_html=lambda _config: html,
         send_text=lambda _config, message, **_kwargs: sent.append(message),
     )
 
-    handled = processor.handle_text("-100123", "!홍길동1234")
+    handled = processor.handle_text("-100123", "!!홍길동1234")
 
     assert handled is True
-    assert sent == ["라이더 조회 명령은 배민 탭에서만 지원합니다."]
+    assert sent == ["조회 중입니다.", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."]
 
 
 def _config(
@@ -971,9 +964,54 @@ def test_lookup_command_still_takes_precedence_over_keyword(tmp_path):
     )
 
     # '!조회' 명령은 키워드 자동응답보다 우선한다(라이더 조회로 처리).
-    handled = processor.handle_text("-100123", "!홍길동1234")
+    handled = processor.handle_text("-100123", "!!홍길동1234")
 
     assert handled is True
     # 라이더 조회 경로를 탔으므로 키워드 자동 메시지는 나가지 않는다.
     assert "KW!" not in sent
     assert any("홍길동1234" in message for message in sent)
+
+
+def test_processor_ignores_legacy_single_bang_command(tmp_path):
+    # Phase 6 migration: a single-`!` command is no longer a rider lookup. With no
+    # keyword responder configured, the processor ignores it (no fetch, no send).
+    fetched: list[str] = []
+    sent: list[str] = []
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")],
+        fetch_html=lambda config: fetched.append(config.crawl_name) or "",
+        send_text=lambda _config, message, **_kwargs: sent.append(message),
+    )
+
+    handled = processor.handle_text("-100123", "!홍길동1234")
+
+    assert handled is False
+    assert fetched == []
+    assert sent == []
+
+
+def test_processor_uses_shared_ambiguous_reply_for_duplicate_rows(tmp_path):
+    # Two rows share the same name + phone last-4, so the shared renderer refuses
+    # to disambiguate instead of leaking one rider's stats (canonical `!!` reply).
+    html = (
+        "<table><thead><tr>"
+        "<th>이름</th><th>수행상태</th><th>휴대폰번호</th><th>완료</th><th>거절</th>"
+        "<th>배차취소</th><th>배달취소(라이더귀책)</th>"
+        "</tr></thead><tbody>"
+        "<tr><td>홍길동</td><td>수행중</td><td>010-1111-1234</td><td>50</td><td>0</td><td>1</td><td>1</td></tr>"
+        "<tr><td>홍길동</td><td>수행중</td><td>010-9999-1234</td><td>10</td><td>0</td><td>9</td><td>9</td></tr>"
+        "</tbody></table>"
+    )
+    sent: list[str] = []
+    processor = TelegramCommandProcessor(
+        [_config(tmp_path, crawl_name="크롤링1", chat_id="-100123")],
+        fetch_html=lambda _config: html,
+        send_text=lambda _config, message, *, message_thread_id=None: sent.append(message),
+    )
+
+    handled = processor.handle_text("-100123", "!!홍길동1234", send_progress=False)
+
+    assert handled is True
+    assert sent == ["홍길동1234\n동명이인 또는 중복 후보가 있어 조회할 수 없습니다: 크롤링1, 크롤링1"]
+    assert "취소율" not in sent[0]  # refuses instead of showing one rider's stats
+    assert "010" not in sent[0]  # no full phone number leaks

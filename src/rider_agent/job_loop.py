@@ -1065,6 +1065,64 @@ def start_heartbeat_thread(reporter: HeartbeatReporter) -> threading.Thread:
     return thread
 
 
+#: Kakao inbound 로컬 DB 폴링 기본 간격(초). ``chatListInfo``/``chatLogs`` 를 KakaoTalk 에
+#: 과부하 주지 않게 최소 몇 초 간격으로 스캔한다(원본 리서치 모니터는 2초 폴링).
+DEFAULT_KAKAO_INBOUND_INTERVAL_SECONDS = 2.0
+
+
+def _run_kakao_inbound_loop(
+    watcher: Any,
+    *,
+    stop_event: threading.Event,
+    interval: float,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """``stop_event`` 가 set 될 때까지 ``watcher.scan_once()`` 를 주기 실행한다.
+
+    한 스캔 실패가 Agent 프로세스를 죽여선 안 되므로 예외는 redact 로그 후 삼키고
+    루프를 계속한다(카톡 DB 잠금/스키마/키 실패는 워처가 degraded health 로 표면화).
+    스캔 간 대기는 ``stop_event.wait`` 로 인터럽터블하게 만들어 종료가 즉각적이다.
+    """
+
+    while not stop_event.is_set():
+        try:
+            watcher.scan_once()
+        except Exception as exc:  # noqa: BLE001 — never crash the host process
+            if log is not None:
+                log(redact(f"kakao inbound scan failed: {exc}"))
+        if stop_event.is_set():
+            break
+        stop_event.wait(max(0.0, float(interval)))
+
+
+def start_kakao_inbound_thread(
+    watcher: Any,
+    *,
+    stop_event: threading.Event,
+    interval: float = DEFAULT_KAKAO_INBOUND_INTERVAL_SECONDS,
+    log: Callable[[str], None] | None = None,
+) -> threading.Thread:
+    """Kakao inbound 워처 폴링 루프를 daemon thread 로 띄운다.
+
+    heartbeat thread 와 동일 규율: daemon=True 라 프로세스 종료를 막지 않고, 정지는
+    ``stop_event.set()`` + ``thread.join`` 으로 한다(:func:`run_agent` 가 배선).
+    """
+
+    thread = threading.Thread(
+        target=_run_kakao_inbound_loop,
+        kwargs={
+            "watcher": watcher,
+            "stop_event": stop_event,
+            "interval": interval,
+            "log": log,
+        },
+        name="rider-agent-kakao-inbound",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def build_agent_components(
     identity: AgentIdentity,
     *,
@@ -1155,6 +1213,8 @@ class AgentRunSummary:
     runner: JobRunner | None = None
     reporter: HeartbeatReporter | None = None
     heartbeat_thread: threading.Thread | None = None
+    #: 주입된 KakaoInboundWatcher 를 도는 poll thread(미주입이면 ``None``).
+    kakao_inbound_thread: threading.Thread | None = None
     #: 활성 노드에서 기동된 4.6 KakaoSenderWorker(미배선/비활성이면 ``None``).
     kakao_worker: Any = None
     #: 활성 노드에서 구성된 CRAWL_BAEMIN/CRAWL_COUPANG worker(미배선이면 ``None``).
@@ -1201,6 +1261,8 @@ def run_agent(
     start_heartbeat: bool = True,
     heartbeat_join_timeout: float = 5.0,
     complete_outbox_path: Any | None = None,
+    kakao_inbound_watcher: Any = None,
+    kakao_inbound_interval_seconds: float = DEFAULT_KAKAO_INBOUND_INTERVAL_SECONDS,
 ) -> AgentRunSummary:
     """architecture-contract startup 을 구현한다: identity 로드 → token 검증 → (활성 시) Kakao
     sender 워커 기동 → heartbeat thread 기동 → 메인 run 루프. 모든 주입점(transport/store/
@@ -1238,6 +1300,10 @@ def run_agent(
             on_status(validation.status)
         return AgentRunSummary(started=False, token_status=validation.status)
 
+    # inbound watcher thread 와 runner 가 같은 stop_event 를 공유해 종료가 함께 걸리도록
+    # 여기서 확보한다(미주입이면 새로 만들어 runner 에 주입 — RunnerLoop 이 None 일 때
+    # 자체 생성하던 것과 의미가 같아 무회귀).
+    inbound_stop = stop_event if stop_event is not None else threading.Event()
     effective_max_jobs = max(1, int(max_jobs))
     effective_max_profiles = max_profiles
     if (
@@ -1290,7 +1356,7 @@ def run_agent(
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         metrics_provider=metrics_provider,
         token_check=token_check,
-        stop_event=stop_event,
+        stop_event=inbound_stop,
         on_status=on_status,
         log=log,
         browser_profiles_provider=composition.browser_profiles_provider,
@@ -1299,6 +1365,16 @@ def run_agent(
     )
 
     hb_thread = start_heartbeat_thread(reporter) if start_heartbeat else None
+    inbound_thread = (
+        start_kakao_inbound_thread(
+            kakao_inbound_watcher,
+            stop_event=inbound_stop,
+            interval=kakao_inbound_interval_seconds,
+            log=log,
+        )
+        if kakao_inbound_watcher is not None
+        else None
+    )
     try:
         runner.run()
     finally:
@@ -1306,6 +1382,9 @@ def run_agent(
         runner.stop()
         for close in composition.close_callbacks:
             close()
+        if inbound_thread is not None:
+            inbound_stop.set()
+            inbound_thread.join(timeout=heartbeat_join_timeout)
         if hb_thread is not None:
             hb_thread.join(timeout=heartbeat_join_timeout)
 
@@ -1315,6 +1394,7 @@ def run_agent(
         runner=runner,
         reporter=reporter,
         heartbeat_thread=hb_thread,
+        kakao_inbound_thread=inbound_thread,
         kakao_worker=composition.kakao_worker,
         crawl_worker=composition.crawl_worker,
     )

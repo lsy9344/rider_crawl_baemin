@@ -34,6 +34,8 @@ def _to_domain(row: MessengerChannelRow) -> MessengerChannel:
         thread_id=row.thread_id,
         kakao_room_name=row.kakao_room_name,
         state=MessengerChannelState(row.state),
+        kakao_chat_id=row.kakao_chat_id,
+        command_trigger_enabled=bool(row.command_trigger_enabled),
     )
 
 
@@ -85,6 +87,23 @@ class PostgresChannelRepository(ChannelRepository):
     async def active_channels(self) -> list[MessengerChannel]:
         stmt = select(MessengerChannelRow).where(
             MessengerChannelRow.state == MessengerChannelState.ACTIVE.value
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return [_to_domain(row) for row in rows]
+
+    async def active_kakao_command_channels(self) -> list[MessengerChannel]:
+        """ACTIVE Kakao 채널 중 command 트리거가 opt-in 된 것만(Agent watchlist).
+
+        서버가 Agent 에 내려주는 non-secret watchlist 의 원천. 실제 허용/매핑/게이트는
+        인바운드 이벤트 수신 시 ``decide_inbound_event`` 가 재검증하므로, 이 목록은
+        Agent 의 스캔 범위 제한일 뿐이다.
+        """
+
+        stmt = select(MessengerChannelRow).where(
+            MessengerChannelRow.messenger == Messenger.KAKAO.value,
+            MessengerChannelRow.state == MessengerChannelState.ACTIVE.value,
+            MessengerChannelRow.command_trigger_enabled.is_(True),
         )
         async with self._session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()

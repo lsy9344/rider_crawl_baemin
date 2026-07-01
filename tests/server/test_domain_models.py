@@ -148,6 +148,9 @@ def test_model_field_sets_match_contract() -> None:
         "thread_id",
         "kakao_room_name",
         "state",
+        # Phase 3 카카오 인바운드 명령 트리거(additive).
+        "kakao_chat_id",
+        "command_trigger_enabled",
     }
     assert _fields(DeliveryRule) == {
         "id",

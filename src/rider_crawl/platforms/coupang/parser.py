@@ -24,6 +24,59 @@ class _VisibleTextParser(HTMLParser):
         return "\n".join(self._chunks)
 
 
+class _HtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: list[list[list[str]]] = []
+        self._table_depth = 0
+        self._current_table: list[list[tuple[str, int, int]]] | None = None
+        self._current_row: list[tuple[str, int, int]] | None = None
+        self._current_cell: list[str] | None = None
+        self._current_span: tuple[int, int] = (1, 1)
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag == "table":
+            self._table_depth += 1
+            if self._table_depth == 1:
+                self._current_table = []
+        elif self._table_depth and tag == "tr":
+            self._current_row = []
+        elif self._table_depth and tag in {"th", "td"}:
+            self._current_cell = []
+            attrs_dict = {name.lower(): (value or "") for name, value in attrs}
+            self._current_span = (_span_value(attrs_dict.get("colspan")), _span_value(attrs_dict.get("rowspan")))
+        elif self._current_cell is not None and tag in {"br", "p", "div"}:
+            self._current_cell.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell is not None:
+            self._current_cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"th", "td"} and self._current_cell is not None:
+            if self._current_row is not None:
+                text = _normalize_cell_text(" ".join(self._current_cell))
+                colspan, rowspan = self._current_span
+                self._current_row.append((text, colspan, rowspan))
+            self._current_cell = None
+        elif tag == "tr" and self._current_row is not None:
+            if self._current_table is not None:
+                self._current_table.append(self._current_row)
+            self._current_row = None
+        elif tag == "table" and self._table_depth:
+            if self._table_depth == 1 and self._current_table is not None:
+                self.tables.append(_expand_table_grid(self._current_table))
+                self._current_table = None
+            self._table_depth -= 1
+
+
+COUPANG_RIDER_REQUIRED_COLUMNS = ("이름 / 연락처", "거절/무시", "취소", "완료")
+_COUPANG_PHONE_RE = re.compile(r"01[016789][-\s]?\d{3,4}[-\s]?\d{4}")
+_COUPANG_EMPTY_CONTACT_MARKERS = ("비어있음", "온라인 시 자동 추가")
+
+
 def html_to_text(html: str) -> str:
     scrapling_text = _scrapling_text(html)
     if scrapling_text:
@@ -40,6 +93,20 @@ def parse_current_screen_html(html: str) -> CurrentScreenSnapshot:
 
 def parse_peak_dashboard_html(html: str) -> PeakDashboardSnapshot:
     return parse_peak_dashboard_text(html_to_text(html))
+
+
+def parse_coupang_rider_performance_rows(html: str) -> list[dict[str, str]]:
+    """Parse Coupang rider-performance table rows for shared cancel-rate lookup."""
+
+    parser = _HtmlTableParser()
+    parser.feed(html)
+
+    for table in parser.tables:
+        parsed = _parse_coupang_rider_table(table)
+        if parsed is not None:
+            return parsed
+
+    raise MissingPerformanceDataError("쿠팡 라이더 기록 테이블을 찾지 못했습니다")
 
 
 def parse_peak_dashboard_text(text: str) -> PeakDashboardSnapshot:
@@ -177,6 +244,129 @@ def _record_table_center_name(text: str) -> str:
             continue
         return value
     return ""
+
+
+def _parse_coupang_rider_table(table: list[list[str]]) -> list[dict[str, str]] | None:
+    for index, raw_header in enumerate(table):
+        headers = [_normalize_coupang_rider_header(cell) for cell in raw_header]
+        if "이름 / 연락처" not in headers:
+            continue
+
+        missing = [column for column in COUPANG_RIDER_REQUIRED_COLUMNS if column not in headers]
+        if missing:
+            raise MissingPerformanceDataError(
+                f"쿠팡 라이더 기록 필수 열 누락: {', '.join(missing)}"
+            )
+
+        riders: list[dict[str, str]] = []
+        for data_row in table[index + 1 :]:
+            mapped = _map_row_by_headers(headers, data_row)
+            contact = mapped.get("이름 / 연락처", "")
+            if _is_coupang_empty_contact(contact):
+                continue
+
+            name, phone = _split_coupang_name_phone(contact)
+            if not name or not phone:
+                continue
+
+            riders.append(
+                {
+                    "이름": name,
+                    "휴대폰번호": phone,
+                    "상태": mapped.get("상태", ""),
+                    "거절": mapped.get("거절/무시", ""),
+                    "배차취소": mapped.get("취소", ""),
+                    "배달취소(라이더귀책)": "0",
+                    "완료": mapped.get("완료", ""),
+                }
+            )
+        return riders
+    return None
+
+
+def _normalize_coupang_rider_header(raw: str) -> str:
+    text = _normalize_cell_text(raw)
+    text = re.sub(r"\s*/\s*", " / ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+총\s*\d+(?:,\d{3})*\s*명$", "", text)
+    text = re.sub(r"\s+-?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:명|건|%)$", "", text)
+    text = text.replace("거절 / 무시", "거절/무시")
+    if text.startswith("상태 "):
+        return "상태"
+    return text.strip()
+
+
+def _split_coupang_name_phone(value: str) -> tuple[str, str]:
+    normalized = _normalize_cell_text(value)
+    phone_match = _COUPANG_PHONE_RE.search(normalized)
+    if phone_match is None:
+        return "", ""
+    name = re.sub(r"\s+", "", normalized[: phone_match.start()])
+    phone = _normalize_phone(phone_match.group(0))
+    return name, phone
+
+
+def _normalize_phone(value: str) -> str:
+    digits = "".join(re.findall(r"\d", value))
+    if len(digits) == 11:
+        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+    if len(digits) == 10:
+        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+    return value.strip()
+
+
+def _is_coupang_empty_contact(value: str) -> bool:
+    compact = re.sub(r"\s+", "", value)
+    return any(marker.replace(" ", "") in compact for marker in _COUPANG_EMPTY_CONTACT_MARKERS)
+
+
+def _span_value(raw: str | None) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+def _expand_table_grid(raw_rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:
+    grid: list[list[str]] = []
+    active: dict[int, list] = {}
+    for raw in raw_rows:
+        out: list[str] = []
+        col = 0
+        i = 0
+        n = len(raw)
+        while i < n or any(remaining > 0 and c >= col for c, (_text, remaining) in active.items()):
+            if col in active and active[col][1] > 0:
+                text, remaining = active[col]
+                out.append(text)
+                remaining -= 1
+                if remaining > 0:
+                    active[col][1] = remaining
+                else:
+                    del active[col]
+                col += 1
+                continue
+            if i < n:
+                text, colspan, rowspan = raw[i]
+                i += 1
+                for _ in range(colspan):
+                    out.append(text)
+                    if rowspan > 1:
+                        active[col] = [text, rowspan - 1]
+                    col += 1
+            else:
+                col += 1
+        grid.append(out)
+    return [row for row in grid if any(cell for cell in row)]
+
+
+def _map_row_by_headers(headers: list[str], row: list[str]) -> dict[str, str]:
+    return {header: row[index] if index < len(row) else "" for index, header in enumerate(headers)}
+
+
+def _normalize_cell_text(raw: str) -> str:
+    return re.sub(r"\s+", " ", raw).strip()
 
 
 def parse_count(raw: str) -> float | int:

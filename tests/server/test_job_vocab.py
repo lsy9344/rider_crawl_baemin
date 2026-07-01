@@ -61,7 +61,21 @@ def test_canonical_job_types_exact_set():
         "AUTH_COUPANG_2FA",
         "KAKAO_SEND",
         "CAPTURE_DIAGNOSTIC",
+        "RIDER_LOOKUP",
     }
+
+
+def test_rider_lookup_vocabulary_is_mirrored_between_server_and_agent():
+    # 카카오 인바운드 명령 트리거 라이더 조회(Phase 4): 서버 job type 과 Agent capability 가 같은
+    # 문자열로 RIDER_LOOKUP 을 이해해야 claim 매칭이 된다(import 강결합 금지 — 값만 미러).
+    from rider_agent.heartbeat import CAPABILITY_RIDER_LOOKUP
+    from rider_server.queue.states import JOB_TYPE_RIDER_LOOKUP
+
+    assert JOB_TYPE_RIDER_LOOKUP == "RIDER_LOOKUP"
+    assert CAPABILITY_RIDER_LOOKUP == "RIDER_LOOKUP"
+    assert JOB_TYPE_RIDER_LOOKUP == CAPABILITY_RIDER_LOOKUP
+    assert "RIDER_LOOKUP" in JOB_TYPES
+    assert "RIDER_LOOKUP" in DEFAULT_CAPABILITIES
 
 
 def test_auth_coupang_2fa_vocabulary_is_mirrored_between_server_and_agent():

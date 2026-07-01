@@ -128,6 +128,39 @@ def _fetch_baemin_delivery_history_tables(
     raise ValueError("브라우저 연결 방식은 cdp 또는 persistent 중 하나여야 합니다")
 
 
+def flatten_baemin_history_rows(
+    tables: Iterable[BaeminDeliveryHistoryTable],
+) -> list[dict[str, str]]:
+    """Flatten delivery-history page tables into row-level rider mappings.
+
+    Returns each rider row as an independent ``column -> text`` dict, preserving
+    page/row order. This is the exact shape the shared rider-lookup matcher
+    (:func:`rider_crawl.rider_lookup.find_rider_cancel_matches`) consumes, so the
+    RIDER_LOOKUP worker never touches aggregate snapshot JSON (which lacks
+    rider-level phone/name rows). Empty input yields an empty list.
+    """
+
+    return [dict(rider) for table in tables for rider in table.riders]
+
+
+def fetch_baemin_delivery_history_rows(
+    config: AppConfig,
+    *,
+    fetch_tables: Callable[[AppConfig], list[BaeminDeliveryHistoryTable]] | None = None,
+) -> list[dict[str, str]]:
+    """Public row-level accessor for Baemin delivery-history rider rows.
+
+    Prefer this over the private table fetch: it wraps the existing paged fetch
+    and returns rider rows (이름/휴대폰번호/완료/거절/배차취소/배달취소(라이더귀책) …)
+    as a flat list of ``column -> text`` mappings for the shared lookup matcher.
+    ``fetch_tables`` is an injectable seam (default: the real paged fetch) so the
+    worker and tests can substitute a fake without opening a browser.
+    """
+
+    tables = (fetch_tables or _fetch_baemin_delivery_history_tables)(config)
+    return flatten_baemin_history_rows(tables)
+
+
 def _fetch_baemin_history_tables_via_cdp(
     config: AppConfig,
 ) -> list[BaeminDeliveryHistoryTable]:

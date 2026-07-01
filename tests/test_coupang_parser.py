@@ -7,8 +7,15 @@ from rider_crawl.platforms.coupang.parser import (
     parse_count,
     parse_current_screen_html,
     parse_current_screen_text,
+    parse_coupang_rider_performance_rows,
     parse_peak_dashboard_text,
     parse_pair,
+)
+from rider_crawl.rider_lookup import (
+    COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP,
+    RiderLookupCommand,
+    find_rider_cancel_matches,
+    render_lookup_reply,
 )
 
 
@@ -357,3 +364,117 @@ def test_coupang_parser_accepts_comma_and_unit_numbers_in_peak_pairs():
     assert snapshot.morning.done == 999
     assert snapshot.dinner_non_peak.total == 5000
     assert snapshot.dinner_non_peak.done == 4999
+
+
+def test_parse_coupang_rider_performance_rows_maps_live_table_to_lookup_rows():
+    rows = parse_coupang_rider_performance_rows(_COUPANG_RIDER_PERFORMANCE_HTML)
+
+    assert rows == [
+        {
+            "이름": "홍길동",
+            "휴대폰번호": "010-1111-1234",
+            "상태": "배달중",
+            "거절": "1건",
+            "배차취소": "2건",
+            "배달취소(라이더귀책)": "0",
+            "완료": "50건",
+        },
+        {
+            "이름": "이순신",
+            "휴대폰번호": "010-2222-5678",
+            "상태": "오프라인",
+            "거절": "-",
+            "배차취소": "-",
+            "배달취소(라이더귀책)": "0",
+            "완료": "3건",
+        },
+    ]
+
+
+def test_coupang_rider_performance_rows_feed_shared_cancel_rate_lookup():
+    command = RiderLookupCommand(
+        type=COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP,
+        name="홍길동",
+        phone_last4="1234",
+    )
+
+    matches = find_rider_cancel_matches(
+        parse_coupang_rider_performance_rows(_COUPANG_RIDER_PERFORMANCE_HTML),
+        command=command,
+        source_label="해운대플러스 수영중앙",
+    )
+
+    assert render_lookup_reply(command, matches) == "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+
+
+def test_parse_coupang_rider_performance_rows_raises_when_required_headers_are_missing():
+    html = "<table><thead><tr><th>이름 / 연락처</th><th>완료</th></tr></thead></table>"
+
+    with pytest.raises(MissingPerformanceDataError):
+        parse_coupang_rider_performance_rows(html)
+
+
+_COUPANG_RIDER_PERFORMANCE_HTML = """
+<table>
+  <thead>
+    <tr>
+      <th>우선순위</th>
+      <th>이름 / 연락처 총 2명</th>
+      <th>우선순위변경</th>
+      <th>상태 온라인 1명</th>
+      <th>거절/무시 3건</th>
+      <th>취소 2건</th>
+      <th>완료 50건</th>
+      <th>순서 미준수 0건</th>
+      <th>점심피크 10건</th>
+      <th>저녁피크 20건</th>
+      <th>논피크 20건</th>
+      <th>활성상태</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>홍길동<br>010-1111-1234</td>
+      <td>교체</td>
+      <td>배달중</td>
+      <td>1건</td>
+      <td>2건</td>
+      <td>50건</td>
+      <td>-</td>
+      <td>10건</td>
+      <td>20건</td>
+      <td>20건</td>
+      <td>활성</td>
+    </tr>
+    <tr>
+      <td>-</td>
+      <td>비어있음</td>
+      <td>교체</td>
+      <td>온라인 시 자동 추가</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>-</td>
+      <td>이순신<br>010-2222-5678</td>
+      <td></td>
+      <td>오프라인</td>
+      <td>-</td>
+      <td>-</td>
+      <td>3건</td>
+      <td>-</td>
+      <td>0건</td>
+      <td>0건</td>
+      <td>3건</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+"""
