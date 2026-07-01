@@ -28,6 +28,9 @@ from rider_agent.kakao_inbound import (
     KakaoInboundSubmitError,
     KakaoInboundWatcher,
     KakaoRoomConfig,
+    KakaoWatchlist,
+    KakaoWatchlistClient,
+    _parse_watchlist,
     build_kakao_inbound_watcher,
     user_hash_digest,
 )
@@ -83,6 +86,16 @@ class FakeTransport:
         if self._responses:
             return self._responses.pop(0)
         return {"accepted": True}
+
+    def get_json(self, url, *, headers=None):
+        self.calls.append({"url": url, "body": None, "headers": headers})
+        if self._errors:
+            err = self._errors.pop(0)
+            if err is not None:
+                raise err
+        if self._responses:
+            return self._responses.pop(0)
+        return {"kakao_inbound": {"enabled": False, "config_version": "", "rooms": []}}
 
 
 def _identity():
@@ -477,3 +490,68 @@ def test_build_kakao_inbound_watcher_respects_disabled_config(tmp_path):
 
     assert report.health == HEALTH_DISABLED
     assert transport.calls == []  # disabled → no server call
+
+
+# --- KakaoWatchlistClient: server watchlist fetch -------------------------
+
+def test_watchlist_client_fetches_and_parses_non_secret_rooms():
+    transport = FakeTransport(responses=[{
+        "kakao_inbound": {
+            "enabled": True,
+            "config_version": "sha256:xy",
+            "rooms": [
+                {"room_name": "운영방", "chat_id": "111"},
+                {"room_name": "상담방", "chat_id": ""},
+            ],
+        }
+    }])
+    client = KakaoWatchlistClient(_identity(), transport=transport, base_url="https://srv")
+
+    watchlist = client.fetch()
+
+    assert watchlist.enabled is True
+    assert watchlist.config_version == "sha256:xy"
+    assert watchlist.rooms == (
+        KakaoRoomConfig(room_name="운영방", chat_id="111"),
+        KakaoRoomConfig(room_name="상담방", chat_id=""),
+    )
+    call = transport.calls[0]
+    assert call["url"] == "https://srv/v1/agents/kakao-inbound-config"
+    assert call["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_watchlist_client_returns_none_on_auth_error():
+    transport = FakeTransport(errors=[TransportError("nope", status_code=401)])
+    logs: list[str] = []
+    client = KakaoWatchlistClient(
+        _identity(), transport=transport, base_url="https://srv", log=logs.append
+    )
+
+    assert client.fetch() is None
+    assert len(transport.calls) == 1  # auth failure is not retried
+
+
+def test_watchlist_client_retries_then_returns_none():
+    transport = FakeTransport(errors=[
+        TransportError("x", status_code=500),
+        TransportError("x", status_code=500),
+        TransportError("x", status_code=500),
+    ])
+    slept: list[float] = []
+    client = KakaoWatchlistClient(
+        _identity(), transport=transport, base_url="https://srv", sleep=slept.append
+    )
+
+    assert client.fetch() is None
+    assert len(transport.calls) == 3  # exhausted bounded retries
+    assert slept  # backed off between attempts
+
+
+def test_parse_watchlist_tolerates_missing_and_bad_shapes():
+    assert _parse_watchlist({}) == KakaoWatchlist(enabled=False, config_version="", rooms=())
+    assert _parse_watchlist({"kakao_inbound": {"rooms": "bad"}}).rooms == ()
+    # rooms without a room_name are dropped
+    watchlist = _parse_watchlist(
+        {"kakao_inbound": {"enabled": True, "rooms": [{"chat_id": "9"}, {"room_name": "방"}]}}
+    )
+    assert watchlist.rooms == (KakaoRoomConfig(room_name="방", chat_id=""),)

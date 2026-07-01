@@ -49,6 +49,7 @@ from rider_agent.reuse import (
 from rider_agent.secure_store import AgentIdentity
 
 INBOUND_EVENTS_PATH = "/v1/kakao/inbound-events"
+KAKAO_INBOUND_CONFIG_PATH = "/v1/agents/kakao-inbound-config"
 SOURCE_PC_KAKAO_DB = "pc_kakao_db"
 
 # Inbound watcher health states + fixed reasons (no PII; safe for status/logs).
@@ -66,6 +67,7 @@ REASON_ROOM_NOT_FOUND = "configured_room_not_found"
 REASON_OK = "ok"
 
 INBOUND_OP_LABEL = "kakao inbound event"
+INBOUND_CONFIG_OP_LABEL = "kakao inbound config"
 STATE_VERSION = 1
 
 
@@ -531,3 +533,94 @@ def build_kakao_inbound_watcher(
         now=now,
         log=log,
     )
+
+
+@dataclass(frozen=True)
+class KakaoWatchlist:
+    """Server-provided non-secret Kakao inbound watchlist (Hybrid source).
+
+    Only room identifiers arrive from the server; no secret is ever included.
+    """
+
+    enabled: bool
+    config_version: str
+    rooms: tuple[KakaoRoomConfig, ...]
+
+
+def _parse_watchlist(response: Any) -> KakaoWatchlist:
+    inbound = response.get("kakao_inbound") if isinstance(response, dict) else None
+    if not isinstance(inbound, dict):
+        return KakaoWatchlist(enabled=False, config_version="", rooms=())
+    rooms_raw = inbound.get("rooms")
+    rooms = tuple(
+        KakaoRoomConfig(
+            room_name=str(item.get("room_name") or ""),
+            chat_id=str(item.get("chat_id") or ""),
+        )
+        for item in (rooms_raw if isinstance(rooms_raw, list) else [])
+        if isinstance(item, dict) and item.get("room_name")
+    )
+    return KakaoWatchlist(
+        enabled=bool(inbound.get("enabled")),
+        config_version=str(inbound.get("config_version") or ""),
+        rooms=rooms,
+    )
+
+
+class KakaoWatchlistClient:
+    """Fetches the server's non-secret Kakao inbound watchlist.
+
+    ``GET /v1/agents/kakao-inbound-config`` with the Agent token. Transient
+    failures retry with bounded backoff; auth failures and exhausted retries
+    return ``None`` so the caller can fall back to local bootstrap rooms. The
+    server returns only non-secret room identifiers — DB key / user_hash / path
+    are never received here.
+    """
+
+    def __init__(
+        self,
+        identity: AgentIdentity,
+        *,
+        transport: Transport,
+        base_url: str | None = None,
+        max_attempts: int = 3,
+        backoff_seconds: float = 1.0,
+        sleep: Callable[[float], None] | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        self._identity = identity
+        self._transport = transport
+        self._base_url = base_url
+        self._max_attempts = max(1, int(max_attempts))
+        self._backoff_seconds = max(0.0, float(backoff_seconds))
+        if sleep is not None:
+            self._sleep = sleep
+        else:
+            import time
+
+            self._sleep = time.sleep
+        self._log = log
+
+    def _url(self) -> str:
+        base = self._base_url or os.getenv(SERVER_URL_ENV) or DEFAULT_SERVER_BASE_URL
+        return base.rstrip("/") + KAKAO_INBOUND_CONFIG_PATH
+
+    def fetch(self) -> KakaoWatchlist | None:
+        headers = {"Authorization": f"Bearer {self._identity.agent_token}"}
+        url = self._url()
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                response = self._transport.get_json(url, headers=headers)
+            except TransportError as exc:
+                if exc.status_code in (401, 403):
+                    if self._log is not None:
+                        self._log(redact(f"{INBOUND_CONFIG_OP_LABEL} auth rejected"))
+                    return None
+                if attempt < self._max_attempts:
+                    self._sleep(self._backoff_seconds * attempt)
+                    continue
+                if self._log is not None:
+                    self._log(redact(f"{INBOUND_CONFIG_OP_LABEL} fetch failed"))
+                return None
+            return _parse_watchlist(response)
+        return None

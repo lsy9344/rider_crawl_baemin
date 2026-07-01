@@ -81,6 +81,13 @@ class Transport(Protocol):
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]: ...
 
+    def get_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
+
 
 class HttpTransport:
     """stdlib ``urllib`` 기반 JSON POST(새 HTTP 의존 0). ``urlopen`` 주입 가능.
@@ -121,6 +128,37 @@ class HttpTransport:
             response = self._urlopen(request, timeout=self._timeout)
         except HTTPError as exc:
             # 4xx/5xx — 본문(에러 메시지)에 secret 이 섞일 수 있으니 읽지 않고 상태코드만 surfacing.
+            raise TransportError(
+                f"{self._op} HTTP error", status_code=exc.code
+            ) from exc
+        except (URLError, OSError) as exc:
+            raise TransportError(f"{self._op} request failed") from exc
+
+        try:
+            with response:
+                raw = response.read().decode("utf-8")
+        except Exception as exc:
+            raise TransportError(f"{self._op} response unreadable") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise TransportError(f"{self._op} response was not JSON") from exc
+        if not isinstance(data, dict):
+            raise TransportError(f"{self._op} response was not an object")
+        return data
+
+    def get_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        request = Request(url, headers=dict(headers or {}), method="GET")
+        try:
+            response = self._urlopen(request, timeout=self._timeout)
+        except HTTPError as exc:
+            # 4xx/5xx — 본문에 secret 이 섞일 수 있으니 읽지 않고 상태코드만 surfacing.
             raise TransportError(
                 f"{self._op} HTTP error", status_code=exc.code
             ) from exc
