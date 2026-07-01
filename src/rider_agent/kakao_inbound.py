@@ -498,3 +498,36 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def build_kakao_inbound_watcher(
+    *,
+    identity: AgentIdentity,
+    transport: Transport,
+    base_url: str | None = None,
+    config: KakaoInboundConfig,
+    reader_factory: ReaderFactory,
+    state_path: Path | str,
+    now: Callable[[], datetime] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> KakaoInboundWatcher:
+    """Assemble a :class:`KakaoInboundWatcher` over its transport client.
+
+    The reader is injected as ``reader_factory`` (built by the caller from the
+    ``reuse`` seam), so this module never imports rider_crawl reader classes
+    directly. Secrets (DB key / user hash / DB paths) live only in the caller-
+    built reader and ``config``; they are never handled or logged here, and only
+    ``config.user_hash_digest`` (a hash) ever leaves the Agent.
+    """
+
+    client = KakaoInboundClient(
+        identity, transport=transport, base_url=base_url, log=log
+    )
+    return KakaoInboundWatcher(
+        config=config,
+        reader_factory=reader_factory,
+        client=client,
+        state_path=state_path,
+        now=now,
+        log=log,
+    )

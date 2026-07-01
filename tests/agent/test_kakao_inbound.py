@@ -28,6 +28,7 @@ from rider_agent.kakao_inbound import (
     KakaoInboundSubmitError,
     KakaoInboundWatcher,
     KakaoRoomConfig,
+    build_kakao_inbound_watcher,
     user_hash_digest,
 )
 
@@ -422,3 +423,57 @@ def test_user_hash_digest_is_prefixed_sha256():
     assert digest.startswith("sha256:")
     assert len(digest) == len("sha256:") + 64
     assert "local-user-hash" not in digest
+
+
+# --- build_kakao_inbound_watcher: assembly --------------------------------
+
+def test_build_kakao_inbound_watcher_assembles_and_submits_via_transport(tmp_path):
+    transport = FakeTransport()
+    msgs = {"111": [_msg(log_id="1001")]}
+    config = KakaoInboundConfig(
+        enabled=True,
+        rooms=(KakaoRoomConfig(room_name="운영방", chat_id="111"),),
+        user_hash_digest="sha256:abc",
+    )
+    watcher = build_kakao_inbound_watcher(
+        identity=_identity(),
+        transport=transport,
+        base_url="https://srv",
+        config=config,
+        reader_factory=lambda: FakeReader([_room()], msgs, window=20),
+        state_path=tmp_path / "kakao_inbound_state.json",
+        now=lambda: FIXED_NOW,
+    )
+
+    assert isinstance(watcher, KakaoInboundWatcher)
+    # first scan primes the high-water without processing
+    assert watcher.scan_once().primed == 1
+    # a newer message flows through the assembled client's injected transport
+    msgs["111"] = [_msg(log_id="1001"), _msg(log_id="2000")]
+    report = watcher.scan_once()
+
+    assert report.submitted == 1
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["url"] == "https://srv/v1/kakao/inbound-events"
+    assert call["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_build_kakao_inbound_watcher_respects_disabled_config(tmp_path):
+    transport = FakeTransport()
+    config = KakaoInboundConfig(  # enabled defaults False
+        rooms=(KakaoRoomConfig(room_name="운영방", chat_id="111"),),
+        user_hash_digest="sha256:abc",
+    )
+    watcher = build_kakao_inbound_watcher(
+        identity=_identity(),
+        transport=transport,
+        config=config,
+        reader_factory=lambda: FakeReader([_room()], {"111": [_msg()]}, window=20),
+        state_path=tmp_path / "state.json",
+        now=lambda: FIXED_NOW,
+    )
+    report = watcher.scan_once()
+
+    assert report.health == HEALTH_DISABLED
+    assert transport.calls == []  # disabled → no server call
