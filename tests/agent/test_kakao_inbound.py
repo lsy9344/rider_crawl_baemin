@@ -7,6 +7,7 @@ dedup by scope+log_id, submit-only-after-server-verdict, and no raw text/secret
 leakage into logs.
 """
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -36,8 +37,11 @@ from rider_agent.kakao_inbound import (
     KakaoRoomConfig,
     KakaoWatchlist,
     KakaoWatchlistClient,
+    LocalKakaoInboundSettings,
     _parse_watchlist,
     build_kakao_inbound_watcher,
+    load_local_kakao_inbound_settings,
+    make_kakao_reader_factory,
     user_hash_digest,
 )
 
@@ -614,3 +618,49 @@ def test_rooms_fall_back_to_local_when_watchlist_unavailable_or_empty():
     assert resolve_kakao_inbound_rooms(watchlist=None, fallback_rooms=local) == local
     empty = KakaoWatchlist(enabled=True, config_version="v", rooms=())
     assert resolve_kakao_inbound_rooms(watchlist=empty, fallback_rooms=local) == local
+
+
+# --- local settings loader + reader factory -------------------------------
+
+def test_load_local_settings_missing_file_is_disabled(tmp_path):
+    settings = load_local_kakao_inbound_settings(tmp_path / "nope.json")
+    assert settings == LocalKakaoInboundSettings()
+    assert settings.enabled is False
+
+
+def test_load_local_settings_parses_json(tmp_path):
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps({
+        "enabled": True,
+        "chat_list_db_path": "C:/k/chatListInfo.edb",
+        "chat_logs_dir": "C:/k",
+        "use_chat_logs": True,
+        "latest_messages_limit": 20,
+        "rooms": [{"room_name": "운영방", "chat_id": "111"}, {"chat_id": "no-name"}],
+    }), encoding="utf-8")
+
+    settings = load_local_kakao_inbound_settings(path)
+
+    assert settings.enabled is True
+    assert settings.chat_list_db_path == "C:/k/chatListInfo.edb"
+    assert settings.use_chat_logs is True
+    # rooms without a room_name are dropped
+    assert settings.fallback_rooms == (KakaoRoomConfig(room_name="운영방", chat_id="111"),)
+
+
+def test_load_local_settings_bad_json_is_disabled(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    assert load_local_kakao_inbound_settings(path).enabled is False
+
+
+def test_make_reader_factory_selects_chatlogs_or_latest_one():
+    chatlogs = make_kakao_reader_factory(
+        chat_list_db_path="a.edb", chat_list_db_key="KEY", chat_logs_dir="d", use_chat_logs=True
+    )()
+    assert chatlogs.latest_window_size == 20  # ChatLogsReader (latest-N)
+
+    latest_one = make_kakao_reader_factory(
+        chat_list_db_path="a.edb", chat_list_db_key="KEY", use_chat_logs=False
+    )()
+    assert latest_one.latest_window_size == 1  # ChatRoomListReader (latest-one)

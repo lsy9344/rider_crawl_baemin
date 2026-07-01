@@ -41,6 +41,8 @@ from rider_agent.registration import (
 )
 from rider_agent.reuse import (
     DEFAULT_ACCEPTED_CHAT_TYPES,
+    ChatLogsReader,
+    ChatRoomListReader,
     KakaoDbDependencyMissing,
     KakaoDbError,
     chat_type_accepted,
@@ -671,3 +673,88 @@ def resolve_kakao_inbound_rooms(
     if watchlist is not None and watchlist.rooms:
         return tuple(watchlist.rooms)
     return tuple(fallback_rooms)
+
+
+@dataclass(frozen=True)
+class LocalKakaoInboundSettings:
+    """Agent-local, non-server-controlled inbound settings.
+
+    Secrets (db_key/user_hash) are NOT stored here — they come from the secure
+    store. This holds only local paths, the kill switch, scan defaults, and
+    optional bootstrap/fallback rooms.
+    """
+
+    enabled: bool = False
+    chat_list_db_path: str = ""
+    chat_logs_dir: str = ""
+    use_chat_logs: bool = True
+    latest_messages_limit: int = 20
+    fallback_rooms: tuple[KakaoRoomConfig, ...] = ()
+
+
+def load_local_kakao_inbound_settings(path: Path | str) -> LocalKakaoInboundSettings:
+    """Load Agent-local inbound settings from a JSON file (missing/bad → disabled).
+
+    Never raises: an unreadable/oddly-shaped file yields disabled defaults so the
+    Agent's existing paths are unaffected.
+    """
+
+    p = Path(path)
+    if not p.exists():
+        return LocalKakaoInboundSettings()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — bad local config must not crash startup
+        return LocalKakaoInboundSettings()
+    if not isinstance(data, dict):
+        return LocalKakaoInboundSettings()
+    rooms_raw = data.get("rooms")
+    fallback_rooms = tuple(
+        KakaoRoomConfig(
+            room_name=str(item.get("room_name") or ""),
+            chat_id=str(item.get("chat_id") or ""),
+        )
+        for item in (rooms_raw if isinstance(rooms_raw, list) else [])
+        if isinstance(item, dict) and item.get("room_name")
+    )
+    try:
+        limit = int(data.get("latest_messages_limit", 20) or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    return LocalKakaoInboundSettings(
+        enabled=bool(data.get("enabled")),
+        chat_list_db_path=str(data.get("chat_list_db_path") or ""),
+        chat_logs_dir=str(data.get("chat_logs_dir") or ""),
+        use_chat_logs=bool(data.get("use_chat_logs", True)),
+        latest_messages_limit=limit,
+        fallback_rooms=fallback_rooms,
+    )
+
+
+def make_kakao_reader_factory(
+    *,
+    chat_list_db_path: str,
+    chat_list_db_key: str,
+    chat_logs_dir: str | None = None,
+    chat_logs_key_resolver: Callable[[Any], str | None] | None = None,
+    use_chat_logs: bool = True,
+) -> ReaderFactory:
+    """Build a reader factory over the reuse seam (no direct rider_crawl import).
+
+    With ``use_chat_logs`` set, returns a latest-N ``ChatLogsReader`` (which itself
+    degrades to the latest-one ``ChatRoomListReader`` on open/schema/key failure);
+    otherwise the latest-one reader directly. Secrets are passed in, never logged.
+    """
+
+    def factory() -> Any:
+        if use_chat_logs:
+            return ChatLogsReader(
+                chat_list_db_path=chat_list_db_path,
+                chat_list_db_key=chat_list_db_key,
+                chat_logs_dir=chat_logs_dir,
+                chat_logs_db_key=chat_list_db_key,
+                chat_logs_key_resolver=chat_logs_key_resolver,
+            )
+        return ChatRoomListReader(db_path=chat_list_db_path, db_key=chat_list_db_key)
+
+    return factory
