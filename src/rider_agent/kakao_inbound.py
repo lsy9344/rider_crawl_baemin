@@ -134,6 +134,51 @@ class ScanReport:
     gap_possible: int = 0
 
 
+_SAFE_HEALTH_KEYS = frozenset(
+    {
+        "state",
+        "reason",
+        "latest_window_size",
+        "configured_missing_count",
+        "scanned_count",
+        "submitted_count",
+        "duplicate_count",
+        "rejected_count",
+        "parser_miss_count",
+        "submit_error_count",
+        "gap_possible_count",
+    }
+)
+
+
+@dataclass(frozen=True)
+class StaticKakaoInboundHealth:
+    """Heartbeat-only Kakao inbound health for setup states before a watcher exists."""
+
+    state: str
+    reason: str
+    metrics: dict[str, Any]
+
+    def health(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"state": self.state, "reason": self.reason}
+        for key, value in self.metrics.items():
+            if key not in _SAFE_HEALTH_KEYS:
+                continue
+            if isinstance(value, int) and not isinstance(value, bool):
+                payload[key] = value
+        return payload
+
+
+def static_kakao_inbound_health(
+    state: str, reason: str, **metrics: Any
+) -> StaticKakaoInboundHealth:
+    """Return a safe heartbeat source for Kakao inbound setup/gate failures."""
+
+    return StaticKakaoInboundHealth(
+        state=str(state), reason=str(reason), metrics=dict(metrics)
+    )
+
+
 def _result_from_response(response: dict[str, Any]) -> InboundEventResult:
     return InboundEventResult(
         accepted=bool(response.get("accepted")),

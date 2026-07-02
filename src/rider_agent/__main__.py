@@ -175,35 +175,42 @@ def _build_kakao_inbound_watcher(
     base_url: str | None,
     session_probe: object,
     app_state_root: object,
-) -> object | None:
+) -> tuple[object | None, object | None]:
     """Assemble the Kakao inbound watcher from local settings + secrets + server
-    watchlist, or return ``None`` when the Hybrid gate is closed.
+    watchlist, plus a heartbeat health source for pre-watcher disabled states.
 
-    Never raises: any setup failure logs a redacted reason and returns ``None`` so
-    the Agent's existing loop is unaffected. Secrets are handled only inside the
-    injected store/reader and are never logged here.
+    Never raises: any setup failure logs a redacted reason and returns
+    ``(None, health_source)`` so the Agent's existing loop is unaffected while
+    Admin can still see why inbound is not active. Secrets are handled only
+    inside the injected store/reader and are never logged here.
     """
 
     from rider_agent.kakao_inbound import (
+        HEALTH_DISABLED,
         KakaoWatchlistClient,
+        REASON_DB_UNAVAILABLE,
+        REASON_FEATURE_DISABLED,
         RefreshingKakaoInboundWatcher,
         load_local_kakao_inbound_settings,
+        static_kakao_inbound_health,
     )
     from rider_agent.secure_store import load_local_agent_identity
 
     try:
         identity = load_local_agent_identity(store=store, identity_path=identity_path)
         if identity is None:
-            return None
+            return None, None
         config_path = app_state_root() / "runtime" / "config" / "kakao-inbound.json"
         settings = load_local_kakao_inbound_settings(config_path)
         if not settings.enabled:
-            return None
+            return None, static_kakao_inbound_health(
+                HEALTH_DISABLED, REASON_FEATURE_DISABLED
+            )
         watchlist_client = KakaoWatchlistClient(
             identity, transport=transport, base_url=base_url, log=_append_agent_log
         )
         state_path = app_state_root() / "runtime" / "state" / "kakao-inbound.json"
-        return RefreshingKakaoInboundWatcher(
+        watcher = RefreshingKakaoInboundWatcher(
             identity=identity,
             transport=transport,
             base_url=base_url,
@@ -215,9 +222,10 @@ def _build_kakao_inbound_watcher(
             refresh_interval_seconds=_kakao_inbound_refresh_interval_seconds(),
             log=_append_agent_log,
         )
+        return watcher, watcher
     except Exception as exc:  # noqa: BLE001 — inbound setup must never break the loop
         _append_agent_log(redact(f"kakao inbound setup skipped: {exc}"))
-        return None
+        return None, static_kakao_inbound_health(HEALTH_DISABLED, REASON_DB_UNAVAILABLE)
 
 
 def _run_agent_loop(
@@ -264,7 +272,7 @@ def _run_agent_loop(
 
     # Assemble the Kakao inbound watcher (Hybrid). Disabled/misconfigured/non-
     # interactive => None, which run_agent treats as "no inbound thread" (no-op).
-    kakao_inbound_watcher = _build_kakao_inbound_watcher(
+    kakao_inbound_watcher, kakao_inbound_health_source = _build_kakao_inbound_watcher(
         store=store,
         identity_path=identity_path,
         transport=transport,
@@ -289,6 +297,7 @@ def _run_agent_loop(
                 start_kakao_sender=True,
                 session_probe=is_interactive_session,
                 kakao_inbound_watcher=kakao_inbound_watcher,
+                kakao_inbound_health_source=kakao_inbound_health_source,
                 log=_append_agent_log,
                 complete_outbox_path=app_state_root() / "runtime" / "agent-complete-outbox.json",
             )

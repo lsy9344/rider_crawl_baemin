@@ -423,9 +423,24 @@
   ) + (
     targets | selectattr('severity', 'equalto', 'OPERATOR_STOPPED') | list | length
   ) %}
-  {% set ag_total = agents | list | length %}
-  {% set ag_online = agents | selectattr('online') | list | length %}
+  {% set agent_list = agents | list %}
+  {% set ag_total = agent_list | length %}
+  {% set ag_online = agent_list | selectattr('online') | list | length %}
   {% set ag_offline = ag_total - ag_online %}
+  {% set inbound_critical_reasons = ['db_unavailable', 'sqlcipher_missing', 'db_key_missing', 'prerequisites_missing', 'non_interactive_session'] %}
+  {% set inbound_warning_reasons = ['configured_room_not_found', 'empty_watchlist', 'latest_window_size_1'] %}
+  {% set inbound = namespace(critical=0, warning=0) %}
+  {% for a in agent_list %}
+    {% if a.online and a.kakao_inbound_reason in inbound_critical_reasons %}
+      {% set inbound.critical = inbound.critical + 1 %}
+    {% elif a.online and a.kakao_inbound_reason in inbound_warning_reasons %}
+      {% set inbound.warning = inbound.warning + 1 %}
+    {% elif a.online and a.kakao_inbound_state and a.kakao_inbound_state not in ['active', 'disabled'] %}
+      {% set inbound.warning = inbound.warning + 1 %}
+    {% elif a.online and a.kakao_inbound_state == 'disabled' and a.kakao_inbound_reason and a.kakao_inbound_reason != 'feature_disabled' %}
+      {% set inbound.warning = inbound.warning + 1 %}
+    {% endif %}
+  {% endfor %}
   {% set auth_n = auth_required | list | length %}
   {% set auth_targetless = auth_required | selectattr('target_id', 'none') | list | length %}
   {% set queue_jobs = (jobs | default([])) | list %}
@@ -472,8 +487,8 @@
     {# ── 시스템 전체 판정 배너: 대상+Agent+채널 합산 → 채널 죽어도 '정상' 착시 차단(메모리: kakao-no-login-probe).
        crit: 위험 대상 / 인증필요 / 멈춘 큐 / Telegram 오류 중 하나라도 → 빨강.
        warn: 주의 대상 / Agent 오프라인 / Kakao 지연 → 노랑.  else: 초록. ── #}
-    {% set sb_crit = tg_critical + auth_n + jobs_stuck + (channels.telegram_error_count or 0) %}
-    {% set sb_warn = tg_warning + ag_offline + (1 if channels.kakao_queue_lag_seconds else 0) %}
+    {% set sb_crit = tg_critical + auth_n + jobs_stuck + (channels.telegram_error_count or 0) + inbound.critical %}
+    {% set sb_warn = tg_warning + ag_offline + (1 if channels.kakao_queue_lag_seconds else 0) + inbound.warning %}
     {% if sb_crit > 0 %}{% set sb_class, sb_icon, sb_verdict = 'sb-crit', '⛔', '위험 · 지금 조치 필요' %}
     {% elif sb_warn > 0 %}{% set sb_class, sb_icon, sb_verdict = 'sb-warn', '⚠', '주의 · 확인 권장' %}
     {% else %}{% set sb_class, sb_icon, sb_verdict = 'sb-ok', '✓', '모두 정상 운영 중' %}{% endif %}
@@ -484,6 +499,8 @@
     {% if auth_n %}{% set _ = sb_bits.append('인증필요 ' ~ auth_n) %}{% endif %}
     {% if jobs_stuck %}{% set _ = sb_bits.append('멈춘 큐 ' ~ jobs_stuck) %}{% endif %}
     {% if ag_offline %}{% set _ = sb_bits.append('Agent ' ~ ag_offline ~ '대 오프라인') %}{% endif %}
+    {% if inbound.critical %}{% set _ = sb_bits.append('Kakao inbound ' ~ inbound.critical ~ '대 장애') %}{% endif %}
+    {% if inbound.warning %}{% set _ = sb_bits.append('Kakao inbound ' ~ inbound.warning ~ '대 확인 필요') %}{% endif %}
     {% if channels.kakao_queue_lag_seconds %}{% set _ = sb_bits.append('Kakao ' ~ channels.kakao_queue_lag_seconds ~ '초 지연') %}{% endif %}
     {% if channels.telegram_error_count %}{% set _ = sb_bits.append('Telegram ' ~ channels.telegram_error_count ~ '건 오류') %}{% endif %}
     <div class="statusbanner {{ sb_class }}" role="status" aria-live="polite">

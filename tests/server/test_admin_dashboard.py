@@ -248,6 +248,38 @@ def test_agents_fragment_renders_kakao_worker_status() -> None:
     assert "configured_room_not_found" in html
 
 
+def test_agents_fragment_marks_inbound_reason_by_severity_class() -> None:
+    html = admin_routes.templates.env.get_template("_agents.html").render(
+        agents=[
+            AgentRow(
+                agent_id="a-critical",
+                name="agent-critical",
+                version="1.0.0",
+                last_heartbeat_at=_NOW,
+                online=True,
+                current_job_type=None,
+                capabilities=("KAKAO_SEND",),
+                kakao_inbound_state="disabled",
+                kakao_inbound_reason="db_unavailable",
+            ),
+            AgentRow(
+                agent_id="a-warning",
+                name="agent-warning",
+                version="1.0.0",
+                last_heartbeat_at=_NOW,
+                online=True,
+                current_job_type=None,
+                capabilities=("KAKAO_SEND",),
+                kakao_inbound_state="warning",
+                kakao_inbound_reason="configured_room_not_found",
+            ),
+        ]
+    )
+
+    assert '<span class="sev-critical">db_unavailable</span>' in html
+    assert '<span class="sev-warning">configured_room_not_found</span>' in html
+
+
 def _kakao_agent_row(*, session_available, online=True) -> AgentRow:
     return AgentRow(
         agent_id="a-kakao",
@@ -693,6 +725,16 @@ def test_kakao_inbound_fragment_does_not_render_raw_room_or_command() -> None:
         assert raw not in body
 
 
+def test_kakao_inbound_fragment_empty_state_points_to_agent_fleet() -> None:
+    body = _client(InMemoryDashboardRepository()).get(
+        f"/admin/kakao-inbound?tenant={_TENANT}"
+    ).text
+
+    assert "Agent fleet" in body
+    assert "DB" in body
+    assert "SQLCipher" in body
+
+
 def test_job_queue_rows_put_stuck_first_then_run_after() -> None:
     repo = InMemoryDashboardRepository()
     repo.seed_active_job(_job(job_id="wait-late", run_after=_NOW + timedelta(minutes=10)))
@@ -979,6 +1021,75 @@ def test_status_banner_red_when_only_channel_down() -> None:
     body = _client(repo).get(f"/admin?tenant={_TENANT}").text
     assert 'class="statusbanner sb-crit"' in body
     assert "Telegram 2건 오류" in body
+
+
+def test_status_banner_red_when_online_kakao_inbound_db_unavailable() -> None:
+    repo = _clean_repo()
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-inbound",
+            name="agent-inbound",
+            version="1.0.0",
+            last_heartbeat_at=datetime.now(timezone.utc),
+            current_job_type=None,
+            capabilities=("KAKAO_SEND",),
+            kakao_status={
+                "inbound": {"state": "disabled", "reason": "db_unavailable"}
+            },
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'class="statusbanner sb-crit"' in body
+    assert "Kakao inbound 1대 장애" in body
+
+
+def test_status_banner_warn_when_online_kakao_inbound_room_missing() -> None:
+    repo = _clean_repo()
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-inbound",
+            name="agent-inbound",
+            version="1.0.0",
+            last_heartbeat_at=datetime.now(timezone.utc),
+            current_job_type=None,
+            capabilities=("KAKAO_SEND",),
+            kakao_status={
+                "inbound": {
+                    "state": "warning",
+                    "reason": "configured_room_not_found",
+                }
+            },
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'class="statusbanner sb-warn"' in body
+    assert "Kakao inbound 1대 확인 필요" in body
+
+
+def test_status_banner_keeps_feature_disabled_neutral() -> None:
+    repo = _clean_repo()
+    repo.seed_agent(
+        AgentHealthFacts(
+            agent_id="a-inbound",
+            name="agent-inbound",
+            version="1.0.0",
+            last_heartbeat_at=datetime.now(timezone.utc),
+            current_job_type=None,
+            capabilities=("KAKAO_SEND",),
+            kakao_status={
+                "inbound": {"state": "disabled", "reason": "feature_disabled"}
+            },
+        )
+    )
+
+    body = _client(repo).get(f"/admin?tenant={_TENANT}").text
+
+    assert 'class="statusbanner sb-ok"' in body
+    assert "Kakao inbound 1대" not in body
 
 
 def test_act_now_block_shows_for_auth_required() -> None:

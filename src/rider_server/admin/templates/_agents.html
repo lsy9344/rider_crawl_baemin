@@ -2,6 +2,8 @@
 {% set agent_list = agents | list %}
 {% set agent_total = agent_list | length %}
 {% set agent_online = agent_list | selectattr('online') | list | length %}
+{% set inbound_critical_reasons = ['db_unavailable', 'sqlcipher_missing', 'db_key_missing', 'prerequisites_missing', 'non_interactive_session'] %}
+{% set inbound_warning_reasons = ['configured_room_not_found', 'empty_watchlist', 'latest_window_size_1'] %}
 <div class="table-wrap" data-agent-total="{{ agent_total }}" data-agent-online="{{ agent_online }}">
 <table>
   <thead>
@@ -56,7 +58,17 @@
           {% if a.kakao_interactive_session_available is not none %}{% if a.kakao_interactive_session_available %}<span class="sev-normal">세션 OK</span>{% else %}<span class="sev-stopped">세션 없음</span>{% endif %}{% endif %}
           {% if a.kakao_last_error_code %}<span class="sev-warning">{{ a.kakao_last_error_code }}</span>{% endif %}
           {% if a.kakao_inbound_state %}<span class="muted">inbound {{ a.kakao_inbound_state }}</span>{% endif %}
-          {% if a.kakao_inbound_reason %}<span class="{% if a.kakao_inbound_state == 'active' %}muted{% else %}sev-warning{% endif %}">{{ a.kakao_inbound_reason }}</span>{% endif %}
+          {% if a.kakao_inbound_reason %}
+            {% if a.kakao_inbound_reason in inbound_critical_reasons %}
+              <span class="sev-critical">{{ a.kakao_inbound_reason }}</span>
+            {% elif a.kakao_inbound_reason in inbound_warning_reasons %}
+              <span class="sev-warning">{{ a.kakao_inbound_reason }}</span>
+            {% elif a.kakao_inbound_state == 'active' or a.kakao_inbound_reason == 'feature_disabled' %}
+              <span class="muted">{{ a.kakao_inbound_reason }}</span>
+            {% else %}
+              <span class="sev-warning">{{ a.kakao_inbound_reason }}</span>
+            {% endif %}
+          {% endif %}
           {% if a.kakao_inbound_latest_window_size is not none %}<span class="muted">window {{ a.kakao_inbound_latest_window_size }}</span>{% endif %}
           {% if a.kakao_inbound_configured_missing_count is not none %}<span class="sev-warning">missing {{ a.kakao_inbound_configured_missing_count }}</span>{% endif %}
         {% else %}

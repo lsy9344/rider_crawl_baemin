@@ -68,7 +68,7 @@
       <td><span class="muted">{{ command_labels.get(row.command_type, row.command_type) }}</span><br><span class="muted">이벤트 지문 보관</span></td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">최근 표시할 카카오 조회 요청이 없습니다.</td></tr>
+    <tr><td colspan="6" class="muted">최근 Kakao inbound event가 없습니다. Agent fleet의 Kakao inbound 상태가 disabled/warning이면 DB 리더, SQLCipher, watchlist, interactive session을 먼저 확인하세요.</td></tr>
     {% endfor %}
   </tbody>
 </table>

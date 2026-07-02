@@ -21,6 +21,7 @@ from rider_agent.kakao_inbound import (
     HEALTH_DISABLED,
     HEALTH_WARNING,
     REASON_EMPTY_WATCHLIST,
+    REASON_DB_UNAVAILABLE,
     REASON_FEATURE_DISABLED,
     REASON_LATEST_WINDOW_1,
     REASON_NON_INTERACTIVE,
@@ -47,6 +48,7 @@ from rider_agent.kakao_inbound import (
     build_kakao_inbound_watcher_from_sources,
     load_local_kakao_inbound_settings,
     make_kakao_reader_factory,
+    static_kakao_inbound_health,
     user_hash_digest,
 )
 
@@ -470,6 +472,30 @@ def test_user_hash_digest_is_prefixed_sha256():
     assert digest.startswith("sha256:")
     assert len(digest) == len("sha256:") + 64
     assert "local-user-hash" not in digest
+
+
+def test_static_kakao_inbound_health_uses_fixed_safe_keys():
+    source = static_kakao_inbound_health(
+        HEALTH_DISABLED,
+        REASON_DB_UNAVAILABLE,
+        latest_window_size=20,
+        configured_missing_count=1,
+        room_name="raw-room",
+        message="!!raw1234",
+        db_path="C:/Users/raw/chatListInfo.edb",
+        db_key="secret",
+        user_hash="rawhash",
+        phone_last4="1234",
+    )
+
+    health = source.health()
+
+    assert health == {
+        "state": HEALTH_DISABLED,
+        "reason": REASON_DB_UNAVAILABLE,
+        "latest_window_size": 20,
+        "configured_missing_count": 1,
+    }
 
 
 # --- build_kakao_inbound_watcher: assembly --------------------------------

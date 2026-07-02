@@ -1133,8 +1133,8 @@ def _safe_kakao_inbound_health(watcher: Any) -> dict[str, Any]:
     return cleaned
 
 
-def _merge_kakao_status_provider(kakao_status_provider: Any, inbound_watcher: Any) -> Any:
-    if inbound_watcher is None:
+def _merge_kakao_status_provider(kakao_status_provider: Any, inbound_health_source: Any) -> Any:
+    if inbound_health_source is None and kakao_status_provider is not None:
         return kakao_status_provider
 
     def _provider() -> dict[str, Any]:
@@ -1147,7 +1147,11 @@ def _merge_kakao_status_provider(kakao_status_provider: Any, inbound_watcher: An
             status = {"state": raw}
         else:
             status = {"state": str(raw)}
-        inbound = _safe_kakao_inbound_health(inbound_watcher)
+        inbound = (
+            _safe_kakao_inbound_health(inbound_health_source)
+            if inbound_health_source is not None
+            else {}
+        )
         if inbound:
             status["inbound"] = inbound
         return status
@@ -1372,6 +1376,7 @@ def run_agent(
     heartbeat_join_timeout: float = 5.0,
     complete_outbox_path: Any | None = None,
     kakao_inbound_watcher: Any = None,
+    kakao_inbound_health_source: Any = None,
     kakao_inbound_interval_seconds: float = DEFAULT_KAKAO_INBOUND_INTERVAL_SECONDS,
 ) -> AgentRunSummary:
     """architecture-contract startup 을 구현한다: identity 로드 → token 검증 → (활성 시) Kakao
@@ -1453,9 +1458,14 @@ def run_agent(
         session_probe=session_probe,
     )
 
+    effective_inbound_health_source = (
+        kakao_inbound_health_source
+        if kakao_inbound_health_source is not None
+        else kakao_inbound_watcher
+    )
     effective_kakao_status_provider = _merge_kakao_status_provider(
         composition.kakao_status_provider,
-        kakao_inbound_watcher,
+        effective_inbound_health_source,
     )
     effective_browser_slots_provider = browser_slots_provider
     if (

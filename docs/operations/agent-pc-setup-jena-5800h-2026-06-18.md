@@ -51,7 +51,7 @@ git pull origin main
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\pip.exe install -e ".[dev,server]"
+.venv\Scripts\pip.exe install -e ".[dev,server,kakao]"
 ```
 
 `py -3.11`이 없으면 설치된 Python 경로로 바꿉니다.
@@ -59,7 +59,36 @@ py -3.11 -m venv .venv
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\pip.exe install -e ".[dev,server]"
+.venv\Scripts\pip.exe install -e ".[dev,server,kakao]"
+```
+
+`uv`를 사용하는 환경이라면 아래처럼 Kakao inbound 선택 의존성을 함께 동기화합니다.
+
+```powershell
+uv sync --extra kakao
+```
+
+Kakao inbound는 로컬 KakaoTalk SQLCipher DB를 읽기 위해 `sqlcipher3`가 필요합니다.
+설치 뒤 Agent PC에서 아래 smoke test를 실행해 top-level `sqlcipher3.connect` 또는
+`sqlcipher3._sqlite3.connect` fallback이 실제로 동작하는지 확인합니다.
+
+```powershell
+@'
+import importlib
+
+mod = importlib.import_module("sqlcipher3")
+connect = getattr(mod, "connect", None)
+if connect is None:
+    sub = importlib.import_module("sqlcipher3._sqlite3")
+    connect = getattr(sub, "connect", None)
+assert callable(connect), "sqlcipher3 DB-API connect is unavailable"
+conn = connect(":memory:")
+try:
+    assert conn.execute("select 1").fetchone()[0] == 1
+finally:
+    conn.close()
+print("sqlcipher3 ok")
+'@ | .\.venv\Scripts\python.exe -
 ```
 
 ## 3. 서버 URL 환경변수 설정

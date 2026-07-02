@@ -13,7 +13,11 @@ import threading
 
 import pytest
 
-from rider_agent.heartbeat import HeartbeatReporter, build_heartbeat_payload
+from rider_agent.heartbeat import (
+    DEFAULT_KAKAO_STATUS,
+    HeartbeatReporter,
+    build_heartbeat_payload,
+)
 from rider_agent.job_loop import (
     CLAIM_PATH,
     DEFAULT_SHORT_POLL_INTERVAL_SECONDS,
@@ -1650,6 +1654,57 @@ def test_run_agent_without_watcher_has_no_inbound_thread(tmp_path):
     assert summary.kakao_inbound_thread is None
 
 
+def test_run_agent_heartbeat_includes_kakao_inbound_health_source_without_thread(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+
+    class _HealthSource:
+        def health(self):
+            return {"state": "disabled", "reason": "db_unavailable"}
+
+    summary = run_agent(
+        transport=FakeTransport(claim_script=[{"jobs": []}]),
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+        kakao_inbound_health_source=_HealthSource(),
+    )
+
+    assert summary.kakao_inbound_thread is None
+    assert summary.reporter._kakao_status_provider()["inbound"] == {
+        "state": "disabled",
+        "reason": "db_unavailable",
+    }
+
+
+def test_run_agent_without_watcher_or_health_source_keeps_default_kakao_status(tmp_path):
+    store = FakeStore()
+    identity_path = tmp_path / "agent_config.json"
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    stop = threading.Event()
+    sleep = StoppingSleep(stop, stop_after=2)
+
+    summary = run_agent(
+        transport=FakeTransport(claim_script=[{"jobs": []}]),
+        store=store,
+        identity_path=identity_path,
+        sleep=sleep,
+        now=lambda: 0.0,
+        stop_event=stop,
+        start_heartbeat=False,
+    )
+
+    assert summary.reporter._kakao_status_provider() == DEFAULT_KAKAO_STATUS
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # token-auth 헤더 + 평문 비노출(핵심 가드)
 # ══════════════════════════════════════════════════════════════════════════
@@ -1717,8 +1772,80 @@ def test_run_agent_loop_cli_started_prints_redacted(capsys):
     assert captured["start_kakao_sender"] is True
     # inbound watcher assembly is fail-safe: bad store / no config -> None wired through.
     assert captured["kakao_inbound_watcher"] is None
+    assert captured["kakao_inbound_health_source"] is None
     # token 평문 미출력.
     assert FAKE_TOKEN not in out
+
+
+def test_run_agent_loop_cli_wires_static_inbound_health_when_local_config_missing(
+    tmp_path, monkeypatch
+):
+    from rider_agent import __main__ as agent_main
+    import rider_crawl.config as crawl_config
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    state_root = tmp_path / "state-root"
+    monkeypatch.setattr(crawl_config, "app_state_root", lambda: state_root)
+    identity_path = tmp_path / "agent_config.json"
+    store = FakeStore()
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    rc = agent_main._run_agent_loop(
+        [],
+        transport=object(),
+        store=store,
+        identity_path=identity_path,
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert captured["kakao_inbound_watcher"] is None
+    assert captured["kakao_inbound_health_source"].health() == {
+        "state": "disabled",
+        "reason": "feature_disabled",
+    }
+
+
+def test_run_agent_loop_cli_wires_static_inbound_health_when_local_config_disabled(
+    tmp_path, monkeypatch
+):
+    from rider_agent import __main__ as agent_main
+    import rider_crawl.config as crawl_config
+
+    captured: dict = {}
+
+    def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return AgentRunSummary(started=True, token_status=TOKEN_STATUS_VALID)
+
+    state_root = tmp_path / "state-root"
+    config_dir = state_root / "runtime" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "kakao-inbound.json").write_text(
+        json.dumps({"enabled": False}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(crawl_config, "app_state_root", lambda: state_root)
+    identity_path = tmp_path / "agent_config.json"
+    store = FakeStore()
+    save_agent_identity(_IDENTITY, store=store, identity_path=identity_path)
+
+    rc = agent_main._run_agent_loop(
+        [],
+        transport=object(),
+        store=store,
+        identity_path=identity_path,
+        runner=fake_run_agent,
+    )
+
+    assert rc == 0
+    assert captured["kakao_inbound_watcher"] is None
+    assert captured["kakao_inbound_health_source"].health()["reason"] == "feature_disabled"
 
 
 def test_run_agent_loop_cli_wires_refreshing_kakao_inbound_watcher(
@@ -1756,6 +1883,7 @@ def test_run_agent_loop_cli_wires_refreshing_kakao_inbound_watcher(
 
     assert rc == 0
     assert isinstance(captured["kakao_inbound_watcher"], RefreshingKakaoInboundWatcher)
+    assert captured["kakao_inbound_health_source"] is captured["kakao_inbound_watcher"]
     assert FAKE_TOKEN not in capsys.readouterr().out
 
 
