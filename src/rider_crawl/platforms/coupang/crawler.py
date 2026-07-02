@@ -271,10 +271,13 @@ def _coupang_center_from_heading(heading: str) -> str:
     # allowlist 없이도 센터명을 복원한다. 시프트 라벨은 "…피크/…논피크/아침"으로 끝나고
     # 센터명은 그렇게 끝나지 않으므로, 이 절단이 다른 센터를 잘못 통과시키지 않는다
     # (센터명 자체는 그대로 남아 이후 exact 비교가 막는다).
-    time_range = re.search(r"\(\d{2}:\d{2}~\d{2}:\d{2}\)", text)
+    # 센터 전환 직후(시프트 정보 로딩 전)에는 시프트가 "--(--:--~--:--)" 플레이스홀더로
+    # 뜬다(실측: 안양서부 3센터 전환 직후). 각 자리에 숫자 대신 대시도 허용해 같은
+    # 앵커로 떼어낸다 — 전환 직후 정상 화면을 '센터 불일치'로 오발하지 않게.
+    time_range = re.search(r"\((?:\d{2}|-+):(?:\d{2}|-+)~(?:\d{2}|-+):(?:\d{2}|-+)\)", text)
     if time_range:
         before = text[: time_range.start()].rstrip()
-        center = re.sub(r"(?:\s+\S*(?:피크|아침))+$", "", before).strip()
+        center = re.sub(r"(?:\s+(?:\S*(?:피크|아침)|-+))+$", "", before).strip()
         return center or text
     return text
 
@@ -479,6 +482,46 @@ def _select_coupang_center(page: Any, config: AppConfig, *, timeout_errors: tupl
     except timeout_errors:
         pass
     return True
+
+
+# 여러 센터 계정이 아직 어떤 센터도 고르지 않은 통합 화면 제목: "<회사명> 협력사 N개"
+# (실측: 안양서부 3센터 계정). 이 화면에는 센터 슬라이드 탭만 뜨고 대상 페이지 준비
+# 텍스트("피크타임별 현황" 등)가 없다.
+_COUPANG_AGGREGATE_TITLE_RE = re.compile(r"협력사\s*\d+\s*개")
+
+
+def _html_looks_like_coupang_multi_center_aggregate(html: str) -> bool:
+    text = re.sub(r"\s+", " ", html or "")
+    if "slide-tab" not in text:
+        return False
+    return bool(_COUPANG_AGGREGATE_TITLE_RE.search(text))
+
+
+def _page_looks_like_coupang_multi_center_aggregate(page: Any) -> bool:
+    try:
+        html = str(page.content())
+    except Exception:
+        return False
+    return _html_looks_like_coupang_multi_center_aggregate(html)
+
+
+def _select_coupang_center_on_aggregate(
+    page: Any, config: AppConfig, *, timeout_errors: tuple[type[BaseException], ...]
+) -> bool:
+    """여러 센터 통합('협력사 N개') 화면이면 설정 센터 탭을 눌러 전환한다.
+
+    통합 화면에는 대상 페이지 준비 텍스트가 없어 ``_wait_for_target_page_ready`` 가
+    상한까지 헛대기한다 — 센터 탭 클릭(``_select_coupang_center``)이 준비 대기 '뒤'에
+    있어 도달 불가였다(다중 센터 계정 CRAWL_TIMEOUT 고착의 실제 원인). 그래서 준비
+    대기 전/타임아웃 후에 이 감지를 거쳐 센터를 먼저 고른다. 통합 화면이 아니면 아무
+    것도 하지 않는다(단일 센터 무회귀). 전환은 기존 ``_select_coupang_center`` 를 그대로
+    재사용하고, 잘못된 센터는 이후 ``_validate_coupang_center*`` exact 검증이 기존대로
+    막는다. 실제로 탭을 눌러 전환했을 때만 ``True``.
+    """
+
+    if not _page_looks_like_coupang_multi_center_aggregate(page):
+        return False
+    return _select_coupang_center(page, config, timeout_errors=timeout_errors)
 
 
 def fetch_page_html(
@@ -1288,11 +1331,25 @@ def _wait_for_target_page_ready(
         load_timeout_errors=timeout_errors,
     )
 
+    # 여러 센터 계정의 통합('협력사 N개') 화면에는 준비 텍스트가 아예 없으므로,
+    # 대기 전에 설정 센터 탭을 먼저 눌러 전환한다(전환 후 아래 대기가 실제 준비를 본다).
+    _select_coupang_center_on_aggregate(page, config, timeout_errors=timeout_errors)
+
     try:
         page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
     except timeout_errors as exc:
         if _page_looks_like_coupang_login_required(page):
             raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from exc
+        # 준비 대기 시작 시점엔 로딩 전이라 통합 화면 감지가 안 됐다가, 대기 중에
+        # 통합 화면으로 로드가 끝난 경우 — 한 번 더 감지해 센터 탭을 누르고 재대기한다.
+        if _select_coupang_center_on_aggregate(page, config, timeout_errors=timeout_errors):
+            try:
+                page.get_by_text(required_text).wait_for(timeout=config.page_timeout_seconds)
+                return
+            except timeout_errors as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(_coupang_login_required_message(target_url)) from retry_exc
+                exc = retry_exc
         retried_chrome_error = False
         try:
             retried_chrome_error = _recover_chrome_error_page_once(

@@ -426,6 +426,11 @@ def test_coupang_crawl_performance_snapshot_accepts_peak_heading_with_spaced_shi
         ("제이앤에이치플러스 의정부남부 새벽논피크(02:00~06:00)", "제이앤에이치플러스 의정부남부"),
         ("제이앤에이치플러스 의정부남부 새벽논피크(02:00~06:00) 할당량 소진 중", "제이앤에이치플러스 의정부남부"),
         ("제이앤에이치플러스 의정부남부 아침(06:00~09:00)", "제이앤에이치플러스 의정부남부"),
+        # 센터 전환 직후(시프트 정보 로딩 전)에는 시프트가 플레이스홀더("--(--:--~--:--)")로
+        # 뜬다(실측: 안양서부 3센터 전환 직후). 이때도 시간 범위 자리를 앵커로 시프트를
+        # 떼어내 센터명만 남긴다 — 전환 직후 정상 화면을 '센터 불일치'로 오발하던 회귀 방지.
+        ("안양서부 --(--:--~--:--) 할당량 소진 중", "안양서부"),
+        ("안양서부 --(--:--~--:--)", "안양서부"),
         # 안전성: 상위문자열(2호점) 센터는 시프트만 떼고 그대로 남아 이후 exact 비교가 막는다.
         ("제이앤에이치플러스 의정부남부2호점 저녁피크(16:55~20:00)", "제이앤에이치플러스 의정부남부2호점"),
     ],
@@ -1947,3 +1952,124 @@ class _FakeContext:
         self.pages.append(page)
         self.opened_pages.append(page)
         return page
+
+
+# ── 여러 센터 통합('협력사 N개') 화면 처리 (실측: 안양서부 3센터 계정) ──────────────
+
+# 여러 센터 계정이 로그인 직후 아직 어떤 센터도 고르지 않은 통합 화면. 상단에 센터
+# 슬라이드 탭(.slide-tab)이 뜨고 제목은 "<회사명> 협력사 N개"이며, 대상 페이지 준비
+# 텍스트("피크타임별 현황")가 없다.
+_MULTI_CENTER_AGGREGATE_PEAK_HTML = """
+<main>
+  <div class="slide-tab">군포중앙</div>
+  <div class="slide-tab">안양서부</div>
+  <div class="slide-tab">안양중앙2</div>
+  <div class="align-center dashboard-page-title-content flex">고고안양지사 협력사 3개</div>
+  <p>대시보드</p>
+  <p>협력사</p>
+</main>
+"""
+
+_ANYANG_CENTER_TABS = [
+    {"text": "군포중앙", "selected": False},
+    {"text": "안양서부", "selected": False},
+    {"text": "안양중앙2", "selected": False},
+]
+
+
+class _AggregatePeakThenReadyPage(_FakePage):
+    """통합 화면: 준비 텍스트가 없다가, 설정 센터 탭 클릭 후에만 준비된다."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(
+            url,
+            html=_MULTI_CENTER_AGGREGATE_PEAK_HTML,
+            center_tabs=list(_ANYANG_CENTER_TABS),
+        )
+
+    def wait_for(self, **_kwargs):
+        if self.clicked_tab_labels:
+            return None
+        raise FakeTimeout("locator timeout")
+
+    def content(self) -> str:
+        if self.clicked_tab_labels:
+            return _PEAK_DASHBOARD_HTML
+        return self.html
+
+
+class _LateAggregatePeakPage(_FakePage):
+    """준비 대기 시작 시점엔 로딩 중이라 통합 화면 감지가 안 되고, 첫 대기 타임아웃
+    후에야 통합 화면이 되는 페이지(로드 지연 케이스)."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(
+            url,
+            html="<html>loading</html>",
+            center_tabs=list(_ANYANG_CENTER_TABS),
+        )
+
+    def wait_for(self, **_kwargs):
+        if self.clicked_tab_labels:
+            return None
+        self.html = _MULTI_CENTER_AGGREGATE_PEAK_HTML
+        raise FakeTimeout("locator timeout")
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        # 실측 통합 화면: 센터 슬라이드 탭 + "협력사 N개" 제목.
+        (_MULTI_CENTER_AGGREGATE_PEAK_HTML, True),
+        # 센터가 선택된 정상 peak 화면은 통합 화면이 아니다.
+        (_PEAK_DASHBOARD_HTML_WITH_TITLE_CENTER, False),
+        # "협력사 N개" 텍스트만으로는 통합 화면이 아니다(슬라이드 탭 필요).
+        ("<main><p>협력사 3개</p></main>", False),
+        # 슬라이드 탭만으로는 통합 화면이 아니다("협력사 N개" 제목 필요).
+        ('<main><div class="slide-tab">양주중앙</div></main>', False),
+        ("", False),
+    ],
+)
+def test_html_looks_like_coupang_multi_center_aggregate(html, expected):
+    assert crawler._html_looks_like_coupang_multi_center_aggregate(html) is expected
+
+
+def test_wait_for_target_page_ready_selects_center_on_multi_center_aggregate(tmp_path):
+    # 통합 화면에는 준비 텍스트("피크타임별 현황")가 없다. 준비 대기 '전에' 통합 화면을
+    # 감지해 설정 센터 탭을 눌러 전환해야 한다 — 탭 클릭이 준비 대기 뒤에만 있으면
+    # 상한까지 헛대기 후 CRAWL_TIMEOUT 으로 고착된다(실측: 안양서부 3센터, snapshots 0).
+    config = _config(tmp_path, baemin_center_name="안양서부")
+    page = _AggregatePeakThenReadyPage(config.peak_dashboard_url)
+
+    crawler._wait_for_target_page_ready(
+        page, config, target_url=config.peak_dashboard_url, timeout_errors=(FakeTimeout,)
+    )
+
+    assert page.clicked_tab_labels == ["안양서부"]
+
+
+def test_wait_for_target_page_ready_selects_center_when_aggregate_settles_during_wait(tmp_path):
+    # 준비 대기 시작 시점엔 로딩 전이라 감지가 안 됐다가 대기 중 통합 화면으로 로드가
+    # 끝난 경우 — 타임아웃 분기에서 한 번 더 감지해 센터 탭을 누르고 재대기해야 한다.
+    config = _config(tmp_path, baemin_center_name="안양서부")
+    page = _LateAggregatePeakPage(config.peak_dashboard_url)
+
+    crawler._wait_for_target_page_ready(
+        page, config, target_url=config.peak_dashboard_url, timeout_errors=(FakeTimeout,)
+    )
+
+    assert page.clicked_tab_labels == ["안양서부"]
+
+
+def test_wait_for_target_page_ready_still_times_out_when_aggregate_has_no_matching_tab(tmp_path):
+    # 통합 화면이라도 설정 센터와 일치하는 탭이 없으면(센터명 오설정 등) 탭을 누르지
+    # 않고 기존 준비-타임아웃 오류를 그대로 낸다(fail-closed 무회귀).
+    config = _config(tmp_path, baemin_center_name="여기없는센터")
+    page = _AggregatePeakThenReadyPage(config.peak_dashboard_url)
+
+    with pytest.raises(RuntimeError, match="준비되지 않았습니다"):
+        crawler._wait_for_target_page_ready(
+            page, config, target_url=config.peak_dashboard_url, timeout_errors=(FakeTimeout,)
+        )
+
+    assert page.clicked_tab_labels == []
