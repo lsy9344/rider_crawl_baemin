@@ -32,9 +32,9 @@ def _message() -> Message:
         id="msg-1",
         snapshot_id="snap-1",
         template_version=_TEMPLATE_VERSION,
-        text="[실시간 실적봇]\n오후논피크 : 41.8건",
+        text="[택트런 실적봇]\n오후논피크 : 41.8건",
         text_hash=_MESSAGE_HASH,
-        text_redacted_preview="[실시간 실적봇]\n오후논피크 : 41.8건",
+        text_redacted_preview="[택트런 실적봇]\n오후논피크 : 41.8건",
     )
 
 

@@ -493,7 +493,7 @@ def test_dispatch_worker_claimed_delivery_uses_full_message_text_not_preview() -
         id=uuid.UUID("55555555-5555-5555-5555-555555555555"),
         template_version="baemin.realtime.v1",
         text_hash="a" * 64,
-        text="[실시간 실적봇]\n원문 전송 본문",
+        text="[택트런 실적봇]\n원문 전송 본문",
         text_redacted_preview="[미리보기] 원문 아님",
     )
     snapshot = SimpleNamespace(
@@ -512,7 +512,7 @@ def test_dispatch_worker_claimed_delivery_uses_full_message_text_not_preview() -
 
     delivery = TelegramDispatchWorker._delivery_from_rows(log, message, snapshot, channel)
 
-    assert delivery.message_text == "[실시간 실적봇]\n원문 전송 본문"
+    assert delivery.message_text == "[택트런 실적봇]\n원문 전송 본문"
 
 
 def test_snapshot_repository_no_longer_owns_post_commit_telegram_delivery() -> None:

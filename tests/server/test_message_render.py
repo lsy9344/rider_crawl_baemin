@@ -155,7 +155,7 @@ def test_render_message_baemin_fields_and_golden_text():
     # 배민 골든(now 무관): test_message.py 와 동일 텍스트(source_label 없는 형태).
     assert render_current_screen_message(raw) == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "⏰{5월21일} 14:02 기준",
             "",
             "오전오후피크 : 60.6건",
@@ -184,7 +184,7 @@ def test_render_message_coupang_fields_and_equivalence():
     # 아닌 실제 포맷 변경을 식별한다(배민 inline 골든과 동형 — _WEEKDAY 라 주중 시간표).
     assert msg.text == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[크롤링2]",
             "⏰ 20:38 기준",
             "",

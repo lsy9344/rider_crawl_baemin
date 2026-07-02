@@ -1335,7 +1335,7 @@ def _has_bot_message_markers(normalized_value: str, normalized_message: str) -> 
     compact_value = _compact_for_marker_match(normalized_value)
     compact_message = _compact_for_marker_match(normalized_message)
     required_markers = [
-        "[실시간실적봇]",
+        "[택트런실적봇]",
         "[크롤링",
         "기준",
     ]

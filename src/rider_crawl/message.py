@@ -56,7 +56,7 @@ def render_current_screen_message(
 def _render_baemin_current_screen_message(snapshot: CurrentScreenSnapshot, *, source_label: str = "") -> str:
     timestamp = _format_baemin_timestamp(snapshot.date_label, snapshot.updated_at)
     lines = [
-        "[실시간 실적봇]",
+        "[택트런 실적봇]",
     ]
     if source_label.strip():
         lines.append(f"[{source_label.strip()}]")
@@ -99,7 +99,7 @@ def _render_performance_message(
     dashboard = snapshot.peak_dashboard
     times = _peak_times(now=now)
     lines = [
-        "[실시간 실적봇]",
+        "[택트런 실적봇]",
     ]
     if source_label.strip():
         lines.append(f"[{source_label.strip()}]")

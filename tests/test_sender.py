@@ -478,7 +478,7 @@ def test_send_kakao_text_accepts_long_pasted_value_prefix(monkeypatch, tmp_path)
     config = _config(tmp_path, chat_name="실적봇_A")
     message = "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[크롤링2]",
             "⏰ 19:20 기준",
             "",
@@ -506,7 +506,7 @@ def test_send_kakao_text_accepts_long_pasted_value_with_ui_read_variation(monkey
     config = _config(tmp_path, chat_name="실적봇_A")
     message = "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[크롤링2]",
             "⏰ 19:24 기준",
             "",
@@ -521,7 +521,7 @@ def test_send_kakao_text_accepts_long_pasted_value_with_ui_read_variation(monkey
     # the value is neither exact nor a clean prefix even though the message is in
     # KakaoTalk. It still has enough ordered content to prove paste landed there.
     ui_value = (
-        "[실시간 실적봇]\r\n"
+        "[택트런 실적봇]\r\n"
         "[크롤링2]\r\n"
         "⏰ 19:24 기준\r\n"
         "아침 : 1건/9건\r\n"
@@ -544,7 +544,7 @@ def test_send_kakao_text_accepts_pasted_bot_header_when_rich_edit_read_is_partia
     config = _config(tmp_path, chat_name="실적봇_A")
     message = "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[크롤링2]",
             "⏰ 19:27 기준",
             "",
@@ -562,7 +562,7 @@ def test_send_kakao_text_accepts_pasted_bot_header_when_rich_edit_read_is_partia
     # On the real Kakao RichEdit control, UIA may repeatedly expose only a partial
     # preview. Once clear/focus already succeeded, seeing our message headers in
     # the target input is enough to press Enter.
-    ui_value = "[실시간 실적봇] [크롤링2] ⏰ 19:27 기준 아침 : 1건/9건 점심 피크 :"
+    ui_value = "[택트런 실적봇] [크롤링2] ⏰ 19:27 기준 아침 : 1건/9건 점심 피크 :"
     message_input = _ScriptedMessageInput(["", ui_value, "메시지 입력"])
     _patch_kakao_send_window(monkeypatch, message_input)
     pyautogui = _RecordingPyAutoGui()
@@ -582,7 +582,7 @@ def test_send_kakao_text_sends_when_richedit_name_echoes_pasted_body(monkeypatch
     config = _config(tmp_path, chat_name="실적봇_A")
     message = "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[크롤링2]",
             "⏰ 19:46 기준",
             "",

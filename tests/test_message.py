@@ -29,7 +29,7 @@ def test_render_current_screen_message_matches_spec_order():
 
     assert render_current_screen_message(snapshot) == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "⏰{5월21일} 14:02 기준",
             "",
             "오전오후피크 : 60.6건",
@@ -170,7 +170,7 @@ def test_render_current_screen_message_includes_achievement_goals_when_available
 
     assert render_current_screen_message(snapshot, source_label="표준서울마포B이츠앤홀딩스3") == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "[표준서울마포B이츠앤홀딩스3]",
             "⏰{6월10일} 00:37 기준",
             "",

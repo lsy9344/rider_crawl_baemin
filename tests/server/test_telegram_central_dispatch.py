@@ -54,7 +54,7 @@ _TEMPLATE_VERSION = "baemin.realtime.v1"
 _MESSAGE_HASH = "a" * 64  # sha256 형태(가짜 — 실제 secret 아님)
 _COLLECTED_AT = datetime(2026, 1, 1, 9, 30, 0)
 _SENT_AT = datetime(2026, 1, 1, 9, 30, 5)
-_TEXT = "[실시간 실적봇]\n오후논피크 : 41.8건"
+_TEXT = "[택트런 실적봇]\n오후논피크 : 41.8건"
 
 
 def _channel(

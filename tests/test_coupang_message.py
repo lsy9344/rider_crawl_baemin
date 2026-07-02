@@ -31,7 +31,7 @@ def test_render_coupang_performance_message_matches_original_format():
 
     assert render_current_screen_message(snapshot, now=WEEKDAY) == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
@@ -74,7 +74,7 @@ def test_render_coupang_performance_message_omits_active_riders_when_current_scr
 
     assert render_current_screen_message(snapshot, now=WEEKDAY) == "\n".join(
         [
-            "[실시간 실적봇]",
+            "[택트런 실적봇]",
             "⏰ 20:38 기준",
             "",
             "아침 : 완료 (06:00~10:54)",
@@ -159,7 +159,7 @@ def test_render_coupang_performance_message_keeps_current_tab_label_when_present
 
     message = render_current_screen_message(snapshot, source_label="크롤링2", now=WEEKDAY)
 
-    assert message.splitlines()[0:2] == ["[실시간 실적봇]", "[크롤링2]"]
+    assert message.splitlines()[0:2] == ["[택트런 실적봇]", "[크롤링2]"]
     assert "점심 논피크 : 완료 (13:00~16:54)" in message
 
 

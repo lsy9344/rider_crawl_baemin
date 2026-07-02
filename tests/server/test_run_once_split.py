@@ -141,7 +141,7 @@ def test_crawl_service_returns_injected_snapshot(tmp_path):
 def test_render_service_reuses_existing_renderer(tmp_path):
     message = MessageRenderService.render(_snapshot(), source_label="센터")
 
-    assert "[실시간 실적봇]" in message
+    assert "[택트런 실적봇]" in message
     assert "[센터]" in message
     assert "오전오후피크 : 60.6건" in message
 
@@ -150,7 +150,7 @@ def test_render_service_default_source_label_is_blank():
     # source_label 미지정 시 라벨 줄이 붙지 않는다(서비스는 config-bound 아님).
     message = MessageRenderService.render(_snapshot())
 
-    assert "[실시간 실적봇]" in message
+    assert "[택트런 실적봇]" in message
     assert "[센터]" not in message
 
 
