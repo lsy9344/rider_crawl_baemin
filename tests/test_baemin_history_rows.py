@@ -72,6 +72,6 @@ def test_rows_feed_shared_matcher_end_to_end():
     assert len(matches) == 1
     stats = matches[0].stats
     assert stats.total_cancel_count == 2
-    assert stats.cancel_rate == 4.0  # 2 / (48 + 0 + 2) * 100
+    assert stats.cancel_rate == 4.0  # (0 + 2) / (48 + 0 + 2) * 100
     reply = render_lookup_reply(command, matches)
-    assert reply == "강민기1234\n취소율 4%, 취소 2개\n위험합니다."
+    assert reply == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:4%"

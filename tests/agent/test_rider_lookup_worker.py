@@ -90,7 +90,7 @@ def test_success_builds_rider_lookup_result():
     assert calls and calls[0].name == "강민기"
     rj = result.result_json
     assert rj["result_type"] == RESULT_TYPE
-    assert rj["reply_text"] == "강민기1234\n취소율 4%, 취소 2개\n위험합니다."
+    assert rj["reply_text"] == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:4%"
     assert rj["reply_channel_id"] == "ch1"
     assert rj["reply_kakao_room_name"] == "운영방"
     assert rj["origin_event_key"] == "sha256:abc"
@@ -123,7 +123,7 @@ def test_coupang_platform_uses_fetcher_and_builds_reply():
 
     assert result.status == JOB_STATUS_SUCCESS
     assert calls and calls[0].platform == "coupang"
-    assert result.result_json["reply_text"] == "강민기1234\n취소율 4%, 취소 2개\n위험합니다."
+    assert result.result_json["reply_text"] == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:4%"
 
 
 def test_unknown_platform_fails_closed_without_fetch():
@@ -180,6 +180,52 @@ def test_timeout_is_classified():
         raise TimeoutError()
 
     assert _worker(fetch).execute(_job()).error_code == ERROR_LOOKUP_TIMEOUT
+
+
+def test_lookup_failure_logs_safe_outcome_metadata():
+    logs = []
+
+    def fetch(job, payload):
+        raise TimeoutError()
+
+    worker = RiderLookupWorker(
+        fetch_rider_rows=fetch,
+        now=lambda: datetime(2026, 7, 1, 0, 30, tzinfo=timezone.utc),
+        log=logs.append,
+    )
+
+    worker.execute(_job())
+
+    assert len(logs) == 1
+    assert "RIDER_LOOKUP_COMPLETE" in logs[0]
+    assert "'status': 'failed'" in logs[0]
+    assert "'error_code': 'LOOKUP_TIMEOUT'" in logs[0]
+    assert "'job_id': 'j1'" in logs[0]
+    assert "'target_id': 'tg1'" in logs[0]
+    assert "'platform': 'baemin'" in logs[0]
+    assert "row_count" not in logs[0]
+    assert "1234" not in logs[0]
+    assert "reply_text" not in logs[0]
+
+
+def test_lookup_success_logs_safe_row_count():
+    logs = []
+    worker = RiderLookupWorker(
+        fetch_rider_rows=lambda job, payload: _rows_with_match(),
+        now=lambda: datetime(2026, 7, 1, 0, 30, tzinfo=timezone.utc),
+        log=logs.append,
+    )
+
+    result = worker.execute(_job())
+
+    assert result.status == JOB_STATUS_SUCCESS
+    assert len(logs) == 1
+    assert "RIDER_LOOKUP_COMPLETE" in logs[0]
+    assert "'status': 'success'" in logs[0]
+    assert "'error_code': None" in logs[0]
+    assert "'row_count': 2" in logs[0]
+    assert "1234" not in logs[0]
+    assert "reply_text" not in logs[0]
 
 
 def test_parser_missing_data_is_classified():
@@ -342,3 +388,35 @@ def test_fetcher_default_dispatches_to_coupang_row_fetch(monkeypatch):
 
     assert rows == _rows_with_match()
     assert calls and calls[0].platform_name == "coupang"
+
+
+def test_coupang_lookup_fetches_rider_performance_when_primary_url_is_peak_dashboard(monkeypatch):
+    import types
+
+    from rider_agent.workers import rider_lookup as rider_lookup_worker
+    from rider_crawl.config import DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+    from rider_crawl.platforms.coupang import crawler as coupang_crawler
+    from rider_crawl.platforms.coupang import parser as coupang_parser
+
+    calls = []
+
+    def fake_fetch(config, *, target_url=None):
+        calls.append(target_url)
+        return "<html>rider rows</html>"
+
+    def fake_parse(html):
+        assert html == "<html>rider rows</html>"
+        return [{"name": "ok"}]
+
+    monkeypatch.setattr(coupang_crawler, "fetch_page_html", fake_fetch)
+    monkeypatch.setattr(coupang_parser, "parse_coupang_rider_performance_rows", fake_parse)
+
+    rows = rider_lookup_worker._fetch_coupang_rider_performance_rows(
+        types.SimpleNamespace(
+            platform_name="coupang",
+            coupang_eats_url="https://partner.coupangeats.com/page/peak-dashboard",
+        )
+    )
+
+    assert rows == [{"name": "ok"}]
+    assert calls == [DEFAULT_COUPANG_RIDER_PERFORMANCE_URL]

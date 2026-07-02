@@ -78,7 +78,11 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_config(tmp_pa
     assert handled is True
     assert fetched == ["크롤링2"]
     assert sent[0] == ("-100222", "조회 중입니다.", None)
-    assert sent[1] == ("-100222", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.", None)
+    assert sent[1] == (
+        "-100222",
+        "홍길동1234님\n거절:0개/취소:2개\n거절/취소율:3.8%",
+        None,
+    )
 
 
 def test_telegram_command_logs_do_not_include_raw_text_for_rider_lookup(tmp_path):
@@ -173,7 +177,11 @@ def test_telegram_command_processor_routes_lookup_to_matching_chat_thread(tmp_pa
     assert handled is True
     assert fetched == ["크롤링2"]
     assert sent[0] == ("크롤링2", "조회 중입니다.", 88)
-    assert sent[1] == ("크롤링2", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.", 88)
+    assert sent[1] == (
+        "크롤링2",
+        "홍길동1234님\n거절:0개/취소:2개\n거절/취소율:3.8%",
+        88,
+    )
 
 
 def test_telegram_command_processor_normalizes_configured_thread_id(tmp_path):
@@ -702,7 +710,10 @@ def test_telegram_command_processor_routes_lookup_for_coupang(tmp_path):
     handled = processor.handle_text("-100123", "!!홍길동1234")
 
     assert handled is True
-    assert sent == ["조회 중입니다.", "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."]
+    assert sent == [
+        "조회 중입니다.",
+        "홍길동1234님\n거절:1개/취소:2개\n거절/취소율:5.7%",
+    ]
 
 
 def _config(
@@ -969,7 +980,7 @@ def test_lookup_command_still_takes_precedence_over_keyword(tmp_path):
     assert handled is True
     # 라이더 조회 경로를 탔으므로 키워드 자동 메시지는 나가지 않는다.
     assert "KW!" not in sent
-    assert any("홍길동1234" in message for message in sent)
+    assert "홍길동1234님\n거절:0개/취소:2개\n거절/취소율:3.8%" in sent
 
 
 def test_processor_ignores_legacy_single_bang_command(tmp_path):

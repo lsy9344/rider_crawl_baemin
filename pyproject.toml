@@ -18,6 +18,10 @@ dev = [
   "pytest>=8.3.0",
   "httpx>=0.27.0",
 ]
+kakao = [
+  # Optional Windows Agent dependency for reading local KakaoTalk SQLCipher DBs.
+  "sqlcipher3>=0.6.2",
+]
 # Cloud 백엔드(rider_server, Epic 5) 전용 의존성. rider_agent 의 7-dep stdlib-only
 # 배포 표면을 보호하기 위해 [project].dependencies 와 분리한다(절대 본 deps 에 넣지 말 것).
 server = [

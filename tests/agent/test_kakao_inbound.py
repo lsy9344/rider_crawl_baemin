@@ -664,6 +664,7 @@ def test_load_local_settings_parses_json(tmp_path):
         "chat_logs_dir": "C:/k",
         "use_chat_logs": True,
         "latest_messages_limit": 20,
+        "accepted_chat_types": ["DirectChat", "MultiChat", "OM"],
         "rooms": [{"room_name": "운영방", "chat_id": "111"}, {"chat_id": "no-name"}],
     }), encoding="utf-8")
 
@@ -672,6 +673,7 @@ def test_load_local_settings_parses_json(tmp_path):
     assert settings.enabled is True
     assert settings.chat_list_db_path == "C:/k/chatListInfo.edb"
     assert settings.use_chat_logs is True
+    assert settings.accepted_chat_types == ("DirectChat", "MultiChat", "OM")
     # rooms without a room_name are dropped
     assert settings.fallback_rooms == (KakaoRoomConfig(room_name="운영방", chat_id="111"),)
 
@@ -741,6 +743,19 @@ def test_from_sources_builds_watcher_with_digest_and_server_rooms():
     # only the digest of the raw user hash reaches config
     assert watcher._config.user_hash_digest == user_hash_digest("rawhash")
     assert watcher._config.rooms == (KakaoRoomConfig("서버방", "1"),)
+
+
+def test_from_sources_passes_local_accepted_chat_types_to_watcher():
+    watcher, reason = _from_sources(
+        settings=LocalKakaoInboundSettings(
+            enabled=True,
+            chat_list_db_path="a.edb",
+            accepted_chat_types=("DirectChat", "MultiChat", "OM"),
+        )
+    )
+
+    assert reason == REASON_OK
+    assert watcher._config.accepted_chat_types == ("DirectChat", "MultiChat", "OM")
 
 
 def test_from_sources_uses_local_fallback_when_no_server_watchlist():

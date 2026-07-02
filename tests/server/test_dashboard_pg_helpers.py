@@ -17,6 +17,7 @@ fake 값만 — 실제 토큰/전화/이메일/chat_id 형태 없음. 평면 ``t
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -156,6 +157,29 @@ def test_display_failure_code_keeps_real_crawl_timeout() -> None:
 
 
 # ── 정책 상수: 정본 어휘 드리프트 차단 ────────────────────────────────────────
+
+def test_target_health_failure_job_types_exclude_lookup_jobs() -> None:
+    assert set(pg_repo._TARGET_HEALTH_FAILURE_JOB_TYPES) == {
+        "CRAWL_BAEMIN",
+        "CRAWL_COUPANG",
+        "AUTH_CHECK",
+        "OPEN_AUTH_BROWSER",
+        "AUTH_COUPANG_2FA",
+    }
+    assert "RIDER_LOOKUP" not in pg_repo._TARGET_HEALTH_FAILURE_JOB_TYPES
+
+
+def test_target_failure_job_stmt_filters_target_health_job_types() -> None:
+    stmt = pg_repo._target_failure_job_stmt(
+        [uuid.UUID("00000000-0000-0000-0000-000000000001")]
+    )
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+    assert "jobs.type IN" in compiled
+    for job_type in pg_repo._TARGET_HEALTH_FAILURE_JOB_TYPES:
+        assert repr(job_type) in compiled
+    assert "RIDER_LOOKUP" not in compiled
+
 
 def test_auth_session_pending_states_cover_both_pending_vocab() -> None:
     # 인증대기 = AUTH_REQUIRED + USER_ACTION_PENDING(둘 다 누락 시 인증 필요 누출).

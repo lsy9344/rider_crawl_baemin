@@ -707,6 +707,7 @@ class LocalKakaoInboundSettings:
     chat_logs_dir: str = ""
     use_chat_logs: bool = True
     latest_messages_limit: int = 20
+    accepted_chat_types: tuple[str, ...] = DEFAULT_ACCEPTED_CHAT_TYPES
     fallback_rooms: tuple[KakaoRoomConfig, ...] = ()
 
 
@@ -739,12 +740,19 @@ def load_local_kakao_inbound_settings(path: Path | str) -> LocalKakaoInboundSett
         limit = int(data.get("latest_messages_limit", 20) or 20)
     except (TypeError, ValueError):
         limit = 20
+    accepted_raw = data.get("accepted_chat_types")
+    accepted_chat_types = tuple(
+        str(item).strip()
+        for item in (accepted_raw if isinstance(accepted_raw, list) else [])
+        if str(item).strip()
+    ) or DEFAULT_ACCEPTED_CHAT_TYPES
     return LocalKakaoInboundSettings(
         enabled=bool(data.get("enabled")),
         chat_list_db_path=str(data.get("chat_list_db_path") or ""),
         chat_logs_dir=str(data.get("chat_logs_dir") or ""),
         use_chat_logs=bool(data.get("use_chat_logs", True)),
         latest_messages_limit=limit,
+        accepted_chat_types=accepted_chat_types,
         fallback_rooms=fallback_rooms,
     )
 
@@ -832,6 +840,7 @@ def build_kakao_inbound_watcher_from_sources(
     config = KakaoInboundConfig(
         enabled=True,
         rooms=effective_rooms,
+        accepted_chat_types=settings.accepted_chat_types,
         user_hash_digest=user_hash_digest(user_hash or ""),
         latest_messages_limit=settings.latest_messages_limit,
     )

@@ -6,6 +6,8 @@ without any secrets.
 """
 
 import sqlite3
+import sys
+import types
 
 import pytest
 
@@ -17,6 +19,7 @@ from rider_crawl.kakao_db import (
     ChatRoomListReader,
     KakaoDbDependencyMissing,
     KakaoRoomRef,
+    _copy_locked_db,
     chat_type_accepted,
     sqlcipher_available,
 )
@@ -218,6 +221,88 @@ def test_close_is_idempotent():
     reader.list_rooms()
     reader.close()
     reader.close()  # no error
+
+
+def test_copy_locked_db_copies_sqlite_sidecars(tmp_path):
+    db_path = tmp_path / "chatListInfo.edb"
+    db_path.write_bytes(b"main")
+    (tmp_path / "chatListInfo.edb-wal").write_bytes(b"wal")
+    (tmp_path / "chatListInfo.edb-shm").write_bytes(b"shm")
+
+    copy_path = _copy_locked_db(db_path)
+
+    try:
+        assert copy_path.read_bytes() == b"main"
+        assert copy_path.with_name(copy_path.name + "-wal").read_bytes() == b"wal"
+        assert copy_path.with_name(copy_path.name + "-shm").read_bytes() == b"shm"
+    finally:
+        copy_path.unlink(missing_ok=True)
+        copy_path.with_name(copy_path.name + "-wal").unlink(missing_ok=True)
+        copy_path.with_name(copy_path.name + "-shm").unlink(missing_ok=True)
+
+
+def test_chat_room_list_close_removes_temp_db_sidecars(tmp_path):
+    temp_copy = tmp_path / "copy.edb"
+    temp_copy.write_bytes(b"main")
+    temp_copy.with_name(temp_copy.name + "-wal").write_bytes(b"wal")
+    temp_copy.with_name(temp_copy.name + "-shm").write_bytes(b"shm")
+    reader = ChatRoomListReader(connect=_seeded_connect([]))
+    reader._temp_copy = temp_copy
+
+    reader.close()
+
+    assert not temp_copy.exists()
+    assert not temp_copy.with_name(temp_copy.name + "-wal").exists()
+    assert not temp_copy.with_name(temp_copy.name + "-shm").exists()
+
+
+def test_chat_logs_close_removes_temp_db_sidecars(tmp_path):
+    temp_copy = tmp_path / "copy.edb"
+    temp_copy.write_bytes(b"main")
+    temp_copy.with_name(temp_copy.name + "-wal").write_bytes(b"wal")
+    temp_copy.with_name(temp_copy.name + "-shm").write_bytes(b"shm")
+    reader = ChatLogsReader(rooms_reader=ChatRoomListReader(connect=_seeded_connect([])))
+    reader._temp_copies.append(temp_copy)
+
+    reader.close()
+
+    assert not temp_copy.exists()
+    assert not temp_copy.with_name(temp_copy.name + "-wal").exists()
+    assert not temp_copy.with_name(temp_copy.name + "-shm").exists()
+
+
+def test_default_open_accepts_sqlcipher_extension_submodule(monkeypatch, tmp_path):
+    top_level = types.ModuleType("sqlcipher3")
+    extension = types.ModuleType("sqlcipher3._sqlite3")
+    calls: list[tuple[str, str]] = []
+
+    class FakeConnection:
+        def execute(self, statement):
+            calls.append(("execute", statement))
+
+    def connect(path):
+        calls.append(("connect", str(path)))
+        return FakeConnection()
+
+    extension.connect = connect
+    monkeypatch.setitem(sys.modules, "sqlcipher3", top_level)
+    monkeypatch.setitem(sys.modules, "sqlcipher3._sqlite3", extension)
+
+    db_path = tmp_path / "chatListInfo.edb"
+    db_path.write_bytes(b"db")
+    reader = ChatRoomListReader(
+        db_path=db_path,
+        db_key="deadbeef",
+        copy_locked_db=lambda path: path,
+    )
+
+    reader._open()
+
+    assert calls[0] == ("connect", str(db_path))
+    assert calls[1:] == [
+        ("execute", "PRAGMA cipher_compatibility = 4"),
+        ("execute", 'PRAGMA key = "x\'deadbeef\'"'),
+    ]
 
 
 def test_default_open_requires_dependency_when_sqlcipher_missing():

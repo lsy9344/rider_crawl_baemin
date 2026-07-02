@@ -149,9 +149,13 @@ def test_find_matches_uses_rows_from_html_parser():
 
 # --- Cancel-rate calculation ----------------------------------------------
 
-def test_calculate_cancel_rate_threshold_is_four_percent():
-    # 5 / (100 + 20 + 5) = 4.0% -> exactly at the risky threshold.
-    assert calculate_cancel_rate(completed=100, rejected=20, total_cancelled=5) == 4.0
+def test_calculate_cancel_rate_includes_rejected_and_cancelled_in_numerator():
+    # (20 + 5) / (600 + 20 + 5) = 4.0%.
+    assert calculate_cancel_rate(completed=600, rejected=20, total_cancelled=5) == 4.0
+
+
+def test_risk_threshold_is_nine_percent():
+    assert RiderLookupCommandService().risk_cancel_rate_percent == 9.0
 
 
 def test_calculate_cancel_rate_zero_denominator_is_zero():
@@ -159,18 +163,18 @@ def test_calculate_cancel_rate_zero_denominator_is_zero():
 
 
 def test_calculate_cancel_rate_rounds_to_one_decimal():
-    # 2 / (50 + 0 + 2) = 3.846... -> 3.8
-    assert calculate_cancel_rate(completed=50, rejected=0, total_cancelled=2) == 3.8
+    # (1 + 1) / (50 + 1 + 1) = 3.846... -> 3.8
+    assert calculate_cancel_rate(completed=50, rejected=1, total_cancelled=1) == 3.8
 
 
 # --- Reply rendering ------------------------------------------------------
 
-def _stats(cancel_rate: float, total_cancel: int) -> RiderCancelStats:
+def _stats(cancel_rate: float, total_cancel: int, *, rejected: int = 0) -> RiderCancelStats:
     return RiderCancelStats(
         name="강민기",
         phone_last4="1234",
         completed_count=0,
-        rejected_count=0,
+        rejected_count=rejected,
         dispatch_cancel_count=0,
         rider_fault_cancel_count=0,
         total_cancel_count=total_cancel,
@@ -178,16 +182,20 @@ def _stats(cancel_rate: float, total_cancel: int) -> RiderCancelStats:
     )
 
 
-def test_render_single_match_normal_range():
+def test_render_single_match_omits_status_when_under_threshold():
     reply = render_rider_cancel_reply(_stats(3.8, 2))
 
-    assert reply == "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+    assert reply == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%"
+    assert "정상" not in reply
+    assert "위험" not in reply
 
 
-def test_render_single_match_risky_at_threshold():
-    reply = render_rider_cancel_reply(_stats(4.0, 5))
+def test_render_single_match_omits_status_when_over_threshold():
+    reply = render_rider_cancel_reply(_stats(9.0, 5, rejected=20))
 
-    assert reply == "강민기1234\n취소율 4%, 취소 5개\n위험합니다."
+    assert reply == "강민기1234님\n거절:20개/취소:5개\n거절/취소율:9%"
+    assert "정상" not in reply
+    assert "위험" not in reply
 
 
 def test_render_no_match_reply():
@@ -217,7 +225,7 @@ def test_render_single_match_via_lookup_reply():
 
     reply = render_lookup_reply(command, matches)
 
-    assert reply == "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+    assert reply == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%"
 
 
 def test_render_unsupported_platform_reply():
@@ -234,7 +242,7 @@ def test_service_end_to_end_baemin_rows():
     rows = [_row("강민기", "010-1111-1234", completed="50", rejected="0", dispatch="1", rider_fault="1")]
     matches = service.find_matches(rows, command=command, source_label="남구센터")
 
-    assert service.render_reply(command, matches) == "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+    assert service.render_reply(command, matches) == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%"
 
 
 def test_service_render_reply_no_match():

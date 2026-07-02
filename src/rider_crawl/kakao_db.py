@@ -23,6 +23,7 @@ Security:
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import tempfile
@@ -43,6 +44,7 @@ CANDIDATE_LIKE = "%!!%"
 # The fallback reader sees only the single latest message per room.
 LATEST_ONE_WINDOW_SIZE = 1
 LATEST_TWENTY_WINDOW_SIZE = 20
+_SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 
 
 class KakaoDbError(RuntimeError):
@@ -89,19 +91,46 @@ ChatLogsKeyResolver = Callable[[KakaoRoomRef], str | None]
 
 
 def sqlcipher_available() -> bool:
-    """Return whether the optional ``sqlcipher3`` dependency can be imported."""
+    """Return whether a usable optional ``sqlcipher3`` DB-API is available."""
 
     try:
-        import sqlcipher3  # noqa: F401
-    except Exception:
+        _sqlcipher_dbapi()
+    except KakaoDbDependencyMissing:
         return False
     return True
+
+
+def _sqlcipher_dbapi() -> Any:
+    """Return the installed SQLCipher DB-API module.
+
+    Some Windows wheels expose ``connect`` from ``sqlcipher3._sqlite3`` without
+    a top-level ``sqlcipher3.connect`` shim.
+    """
+
+    try:
+        module = importlib.import_module("sqlcipher3")
+    except Exception as exc:  # noqa: BLE001 - optional dependency
+        raise KakaoDbDependencyMissing("sqlcipher3 is not installed") from exc
+
+    if callable(getattr(module, "connect", None)):
+        return module
+
+    try:
+        module = importlib.import_module("sqlcipher3._sqlite3")
+    except Exception as exc:  # noqa: BLE001 - incomplete/broken install
+        raise KakaoDbDependencyMissing("sqlcipher3 is not usable") from exc
+
+    if callable(getattr(module, "connect", None)):
+        return module
+    raise KakaoDbDependencyMissing("sqlcipher3 is not usable")
 
 
 def _copy_locked_db(db_path: Path) -> Path:
     """Copy the (possibly locked) DB to a temp file, mirroring the research flow.
 
     KakaoTalk holds the live DB open, so we read a copy rather than the original.
+    SQLite may keep recent committed rows in sidecar files until a checkpoint,
+    so copy those next to the temp DB using SQLite's expected naming convention.
     """
 
     db_path = Path(db_path)
@@ -109,7 +138,35 @@ def _copy_locked_db(db_path: Path) -> Path:
     os.close(fd)
     tmp_path = Path(tmp_name)
     shutil.copy2(db_path, tmp_path)
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        sidecar = _sqlite_sidecar_path(db_path, suffix)
+        if not sidecar.exists():
+            continue
+        try:
+            shutil.copy2(sidecar, _sqlite_sidecar_path(tmp_path, suffix))
+        except FileNotFoundError:
+            # The live DB may checkpoint and remove a sidecar between exists()
+            # and copy2(); in that case the main DB copy is still usable.
+            pass
     return tmp_path
+
+
+def _sqlite_sidecar_path(db_path: Path, suffix: str) -> Path:
+    return Path(str(db_path) + suffix)
+
+
+def _unlink_temp_db_copy(db_path: Path | None) -> None:
+    if db_path is None:
+        return
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        try:
+            _sqlite_sidecar_path(db_path, suffix).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - temp cleanup is best-effort
+            pass
+    try:
+        db_path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class ChatRoomListReader:
@@ -150,10 +207,7 @@ class ChatRoomListReader:
             return self._connect_factory()
         if self._db_path is None or not self._db_key:
             raise KakaoDbError("kakao db path/key is not configured")
-        try:
-            import sqlcipher3
-        except Exception as exc:  # noqa: BLE001 — optional dep → degraded, not crash
-            raise KakaoDbDependencyMissing("sqlcipher3 is not installed") from exc
+        sqlcipher3 = _sqlcipher_dbapi()
 
         copy_path = self._copy_locked_db(self._db_path)
         self._temp_copy = copy_path
@@ -175,10 +229,7 @@ class ChatRoomListReader:
                 pass
             self._conn = None
         if self._temp_copy is not None:
-            try:
-                self._temp_copy.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+            _unlink_temp_db_copy(self._temp_copy)
             self._temp_copy = None
 
     def __enter__(self) -> "ChatRoomListReader":
@@ -292,10 +343,7 @@ class ChatLogsReader:
         if callable(close):
             close()
         for path in self._temp_copies:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+            _unlink_temp_db_copy(path)
         self._temp_copies = []
 
     def __enter__(self) -> "ChatLogsReader":
@@ -340,10 +388,7 @@ class ChatLogsReader:
         db_path = self._chat_logs_dir / f"chatLogs_{room.chat_id}.edb"
         if not db_path.exists():
             raise KakaoDbError("kakao chatlogs db is not available")
-        try:
-            import sqlcipher3
-        except Exception as exc:  # noqa: BLE001
-            raise KakaoDbDependencyMissing("sqlcipher3 is not installed") from exc
+        sqlcipher3 = _sqlcipher_dbapi()
 
         copy_path = self._copy_locked_db(db_path)
         self._temp_copies.append(copy_path)

@@ -26,7 +26,7 @@ def _success_result(**overrides):
         "reply_channel_id": "ch1",
         "reply_kakao_room_name": "운영방",
         "origin_event_key": "sha256:abc",
-        "reply_text": "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.",
+        "reply_text": "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%",
     }
     result.update(overrides)
     return result
@@ -51,10 +51,10 @@ def test_success_reply_uses_rendered_text():
         sending_enabled=True, channel_active=True,
     )
     assert reply is not None
-    assert reply.message == "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+    assert reply.message == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%"
     assert reply.to_payload() == {
         "kakao_room_name": "운영방",
-        "message": "강민기1234\n취소율 3.8%, 취소 2개\n정상 범위입니다.",
+        "message": "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%",
         "origin": "kakao_inbound",
         "origin_event_key": "sha256:abc",
     }
@@ -149,7 +149,7 @@ def test_dispatcher_enqueues_kakao_send_on_success():
     assert job_type == JOB_TYPE_KAKAO_SEND
     assert target_id is None
     assert payload["kakao_room_name"] == "운영방"
-    assert payload["message"].startswith("강민기1234")
+    assert payload["message"] == "강민기1234님\n거절:0개/취소:2개\n거절/취소율:3.8%"
     assert payload["origin_event_key"] == "sha256:abc"
 
 

@@ -20,6 +20,7 @@ seed 후 검증). agents 는 tenant 소유가 아닌 fleet 전역 자원이라 s
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Sequence
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -54,8 +55,12 @@ from rider_server.queue.states import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RETRY,
     JOB_STATUS_RUNNING,
+    JOB_TYPE_AUTH_CHECK,
     JOB_TYPE_AUTH_COUPANG_2FA,
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
     JOB_TYPE_KAKAO_SEND,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
     RESULT_REASON_STALE_CRAWL_SKIPPED,
 )
 
@@ -82,6 +87,14 @@ _ACTIVE_JOB_STATUSES = (JOB_STATUS_CLAIMED, JOB_STATUS_RUNNING)
 
 #: 큐에 남아 있는(아직 안 끝난) job status — 실시간 큐 뷰 스코프. enqueue_manual_job 의
 #: 중복 차단(admin_action_repository)과 같은 집합이라, 큐 뷰가 "왜 막혔는지"를 그대로 보여준다.
+_TARGET_HEALTH_FAILURE_JOB_TYPES = (
+    JOB_TYPE_CRAWL_BAEMIN,
+    JOB_TYPE_CRAWL_COUPANG,
+    JOB_TYPE_AUTH_CHECK,
+    JOB_TYPE_OPEN_AUTH_BROWSER,
+    JOB_TYPE_AUTH_COUPANG_2FA,
+)
+
 _QUEUE_JOB_STATUSES = (
     JOB_STATUS_PENDING,
     JOB_STATUS_CLAIMED,
@@ -490,15 +503,7 @@ class PostgresDashboardRepository(DashboardRepository):
     ) -> dict[str, tuple[str, datetime | None, str | None, str | None]]:
         if not target_ids:
             return {}
-        job_stmt = (
-            select(
-                Job.target_id,
-                Job.error_code,
-                func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
-                Job.result_json,
-            )
-            .where(Job.target_id.in_(target_ids), Job.error_code.is_not(None))
-        )
+        job_stmt = _target_failure_job_stmt(target_ids)
         # 실패 delivery_log 는 sent_at 이 NULL 이다 — 실패 시각은 last_failed_at(없으면
         # send_attempted_at)에 있다. sent_at 만 보면 실패 행 ts 가 NULL 이라 최신 비교에서 항상
         # 져, 더 오래된 job 실패 코드가 잘못 이긴다. coalesce 로 실패 시각을 ts 로 쓴다.
@@ -616,11 +621,7 @@ class PostgresDashboardRepository(DashboardRepository):
         # jobs 는 실패 발생 시각(last_failed_at)을 우선한다. retry backoff(run_after)는
         # 미래 재실행 예약시각이라 실패 발생 시각으로 쓰지 않는다.
         job_stmt = (
-            select(
-                Job.error_code,
-                func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
-            )
-            .where(Job.target_id == target_id, Job.error_code.is_not(None))
+            _target_failure_job_stmt([target_id])
             .order_by(
                 func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at)
                 .desc()
@@ -1026,6 +1027,22 @@ def _display_failure_code(error_code: object, result_json: object) -> str | None
     ):
         return _DISPLAY_CODE_STALE_CRAWL_SKIPPED
     return code
+
+
+def _target_failure_job_stmt(target_ids: Sequence[object]):
+    return (
+        select(
+            Job.target_id,
+            Job.error_code,
+            func.coalesce(Job.last_failed_at, Job.completed_at, Job.claimed_at).label("ts"),
+            Job.result_json,
+        )
+        .where(
+            Job.target_id.in_(target_ids),
+            Job.error_code.is_not(None),
+            Job.type.in_(_TARGET_HEALTH_FAILURE_JOB_TYPES),
+        )
+    )
 
 
 def _pick_latest_code(job_row, delivery_row) -> str | None:

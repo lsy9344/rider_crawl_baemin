@@ -404,7 +404,11 @@ def test_coupang_rider_performance_rows_feed_shared_cancel_rate_lookup():
         source_label="해운대플러스 수영중앙",
     )
 
-    assert render_lookup_reply(command, matches) == "홍길동1234\n취소율 3.8%, 취소 2개\n정상 범위입니다."
+    stats = matches[0].stats
+    assert stats.rejected_count == 1
+    assert stats.total_cancel_count == 2
+    assert stats.cancel_rate == 5.7
+    assert render_lookup_reply(command, matches) == "홍길동1234님\n거절:1개/취소:2개\n거절/취소율:5.7%"
 
 
 def test_parse_coupang_rider_performance_rows_raises_when_required_headers_are_missing():

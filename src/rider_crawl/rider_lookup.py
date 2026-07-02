@@ -29,8 +29,8 @@ from typing import Iterable, Mapping
 
 from .parser import parse_count
 
-# A cancel rate at or above this percentage is reported as risky.
-RISK_CANCEL_RATE_PERCENT = 4.0
+# A reject/cancel rate at or above this percentage is reported as risky.
+RISK_CANCEL_RATE_PERCENT = 9.0
 
 # The only command type implemented in phase 1.
 COMMAND_TYPE_RIDER_CANCEL_RATE_LOOKUP = "RIDER_CANCEL_RATE_LOOKUP"
@@ -47,8 +47,6 @@ COMMAND_TOKEN_RE = re.compile(
 NO_MATCH_REPLY = "해당 라이더를 찾지 못했습니다."
 AMBIGUOUS_REPLY_PREFIX = "동명이인 또는 중복 후보가 있어 조회할 수 없습니다: "
 UNSUPPORTED_PLATFORM_REPLY = "라이더 조회 명령은 배민/쿠팡 탭에서만 지원합니다."
-RISK_REPLY = "위험합니다."
-NORMAL_REPLY = "정상 범위입니다."
 
 # Phone columns that may carry the rider's number, in preference order. Column
 # matching also falls back to a whitespace-insensitive compare (see ``_cell``).
@@ -180,17 +178,16 @@ def calculate_cancel_rate(
     denominator = completed + rejected + total_cancelled
     if denominator == 0:
         return 0
-    return round((total_cancelled / denominator) * 100, 1)
+    return round(((rejected + total_cancelled) / denominator) * 100, 1)
 
 
 def render_rider_cancel_reply(stats: RiderCancelStats) -> str:
     """Render the three-line reply for a single matched rider."""
 
-    risk_text = RISK_REPLY if stats.cancel_rate >= RISK_CANCEL_RATE_PERCENT else NORMAL_REPLY
     return (
-        f"{stats.name}{stats.phone_last4}\n"
-        f"취소율 {_format_number(stats.cancel_rate)}%, 취소 {_format_number(stats.total_cancel_count)}개\n"
-        f"{risk_text}"
+        f"{stats.name}{stats.phone_last4}님\n"
+        f"거절:{_format_number(stats.rejected_count)}개/취소:{_format_number(stats.total_cancel_count)}개\n"
+        f"거절/취소율:{_format_number(stats.cancel_rate)}%"
     )
 
 

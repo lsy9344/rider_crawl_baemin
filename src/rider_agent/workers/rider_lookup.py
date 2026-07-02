@@ -129,17 +129,28 @@ class RiderLookupWorker:
             return default_execute_job(job)
 
         payload = rider_lookup_payload_from_job(job)
+
+        def finish(result: JobResult, *, row_count: int | None = None) -> JobResult:
+            self._log_outcome(job, payload, result, row_count=row_count)
+            return result
+
         # Defense-in-depth: fail fast on a stale payload before opening a browser.
         if _payload_expired(payload.expires_at, now=self._now()):
-            return _failure(
-                ERROR_PAYLOAD_EXPIRED,
-                "rider lookup payload expired before fetch",
-                payload,
-                reason=REASON_PAYLOAD_EXPIRED,
+            return finish(
+                _failure(
+                    ERROR_PAYLOAD_EXPIRED,
+                    "rider lookup payload expired before fetch",
+                    payload,
+                    reason=REASON_PAYLOAD_EXPIRED,
+                )
             )
         if payload.platform not in SUPPORTED_LOOKUP_PLATFORMS:
-            return _failure(
-                ERROR_UNSUPPORTED_PLATFORM, "rider lookup platform is unsupported", payload
+            return finish(
+                _failure(
+                    ERROR_UNSUPPORTED_PLATFORM,
+                    "rider lookup platform is unsupported",
+                    payload,
+                )
             )
 
         command = RiderLookupCommand(
@@ -150,26 +161,60 @@ class RiderLookupWorker:
         try:
             rows = self._fetch_rider_rows(job, payload)
         except BrowserActionRequiredError:
-            return _failure(
-                ERROR_AUTH_REQUIRED, "rider lookup auth required", payload,
-                auth_state=AUTH_STATE_AUTH_REQUIRED,
+            return finish(
+                _failure(
+                    ERROR_AUTH_REQUIRED, "rider lookup auth required", payload,
+                    auth_state=AUTH_STATE_AUTH_REQUIRED,
+                )
             )
         except CdpUnavailableError:
-            return _failure(ERROR_CDP_UNREACHABLE, "CDP endpoint unavailable", payload)
+            return finish(_failure(ERROR_CDP_UNREACHABLE, "CDP endpoint unavailable", payload))
         except BrowserLaunchError:
-            return _failure(ERROR_PROFILE_UNAVAILABLE, "browser profile unavailable", payload)
+            return finish(_failure(ERROR_PROFILE_UNAVAILABLE, "browser profile unavailable", payload))
         except TimeoutError:
-            return _failure(ERROR_LOOKUP_TIMEOUT, "rider lookup timed out", payload)
+            return finish(_failure(ERROR_LOOKUP_TIMEOUT, "rider lookup timed out", payload))
         except Exception as exc:  # noqa: BLE001 - classify parser miss, fail closed otherwise.
             if exc.__class__.__name__ == "MissingPerformanceDataError":
-                return _failure(ERROR_PARSER_MISSING_DATA, "required lookup data missing", payload)
-            return _failure(ERROR_LOOKUP_FAILURE, "rider lookup failed", payload, error=exc)
+                return finish(
+                    _failure(ERROR_PARSER_MISSING_DATA, "required lookup data missing", payload)
+                )
+            return finish(
+                _failure(ERROR_LOOKUP_FAILURE, "rider lookup failed", payload, error=exc)
+            )
 
         matches = find_rider_cancel_matches(
             rows, command=command, source_label=payload.expected_display_name or DEFAULT_SOURCE_LABEL
         )
         reply_text = render_lookup_reply(command, matches)
-        return make_success_result(result_json=_success_result(payload, reply_text))
+        return finish(
+            make_success_result(result_json=_success_result(payload, reply_text)),
+            row_count=len(rows),
+        )
+
+    def _log_outcome(
+        self,
+        job: ClaimedJob,
+        payload: RiderLookupJobPayload,
+        result: JobResult,
+        *,
+        row_count: int | None = None,
+    ) -> None:
+        if self._log is None:
+            return
+        event: dict[str, Any] = {
+            "code": "RIDER_LOOKUP_COMPLETE",
+            "job_id": job.job_id,
+            "target_id": payload.target_id,
+            "platform": payload.platform,
+            "status": result.status,
+            "error_code": result.error_code,
+        }
+        if row_count is not None:
+            event["row_count"] = row_count
+        try:
+            self._log(f"rider lookup complete {event}")
+        except Exception:
+            pass
 
 
 def build_execute_job(
@@ -251,13 +296,30 @@ def _fetch_coupang_rider_performance_rows(config: Any) -> list[dict[str, str]]:
     from rider_crawl.platforms.coupang.crawler import fetch_page_html
     from rider_crawl.platforms.coupang.parser import parse_coupang_rider_performance_rows
 
-    target_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
-    html = (
-        fetch_page_html(config, target_url=target_url)
-        if target_url
-        else fetch_page_html(config)
-    )
+    target_url = _coupang_rider_performance_lookup_url(config)
+    html = fetch_page_html(config, target_url=target_url)
     return parse_coupang_rider_performance_rows(html)
+
+
+def _coupang_rider_performance_lookup_url(config: Any) -> str:
+    from urllib.parse import urlsplit
+
+    from rider_crawl.config import DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+
+    configured_url = str(getattr(config, "coupang_eats_url", "") or "").strip()
+    if not configured_url:
+        return DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+
+    try:
+        path = urlsplit(configured_url).path.rstrip("/")
+    except ValueError:
+        return DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
+
+    # Coupang monitoring targets use peak-dashboard as the primary crawl page,
+    # but rider lookup needs the row-level rider-performance table.
+    if path == "/page/rider-performance":
+        return configured_url
+    return DEFAULT_COUPANG_RIDER_PERFORMANCE_URL
 
 
 def _reply_scope(payload: RiderLookupJobPayload) -> dict[str, Any]:
