@@ -21,7 +21,6 @@ from rider_server.services.kakao_inbound_event_service import (
     REASON_CHANNEL_INACTIVE,
     REASON_COMMAND_DISABLED,
     REASON_INVALID_EVENT,
-    REASON_LOOKUP_IN_FLIGHT,
     REASON_RATE_LIMITED,
     REASON_SENDING_DISABLED,
     REASON_TARGET_UNMAPPED,
@@ -208,10 +207,11 @@ def test_rate_limited_rejected():
     assert decision.reason == REASON_RATE_LIMITED
 
 
-def test_lookup_in_flight_rejected():
+def test_lookup_in_flight_does_not_drop_distinct_command():
     decision = decide_inbound_event(_event(chat_id=""), _ctx([_channel()], in_flight_target_ids=["tg1"]))
-    assert decision.action == ACTION_REJECT
-    assert decision.reason == REASON_LOOKUP_IN_FLIGHT
+    assert decision.action == ACTION_ENQUEUE_LOOKUP
+    assert decision.reason == ""
+    assert decision.target_id == "tg1"
 
 
 # --- dedupe + enqueue -----------------------------------------------------
@@ -220,6 +220,18 @@ def test_duplicate_event_is_idempotent_accept():
     event = _event(chat_id="")
     key = origin_event_key(event)
     decision = decide_inbound_event(event, _ctx([_channel()], existing_event_keys=[key]))
+    assert decision.action == ACTION_DUPLICATE
+    assert decision.accepted is True
+    assert decision.duplicate is True
+
+
+def test_duplicate_event_remains_idempotent_while_lookup_in_flight():
+    event = _event(chat_id="")
+    key = origin_event_key(event)
+    decision = decide_inbound_event(
+        event,
+        _ctx([_channel()], existing_event_keys=[key], in_flight_target_ids=["tg1"]),
+    )
     assert decision.action == ACTION_DUPLICATE
     assert decision.accepted is True
     assert decision.duplicate is True
@@ -493,12 +505,35 @@ def test_handle_rate_limited_rejects_without_enqueue():
     assert calls["enqueued"] == []
 
 
-def test_handle_in_flight_rejects():
+def test_handle_in_flight_enqueues_distinct_event():
     service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(),)}, in_flight=True)
     result = asyncio.run(service.handle(_event(chat_id="111")))
 
-    assert result["reason"] == REASON_LOOKUP_IN_FLIGHT
-    assert calls["enqueued"] == []
+    assert result == {"accepted": True, "duplicate": False, "job_id": "job-123"}
+    assert len(calls["enqueued"]) == 1
+    assert calls["enqueued"][0][0] == JOB_TYPE_RIDER_LOOKUP
+
+
+def test_handle_burst_enqueues_each_distinct_lookup_for_same_target():
+    service, calls = _service([_channel(chat_id="111")], {"ch1": (_target(),)}, in_flight=True)
+
+    results = [
+        asyncio.run(service.handle(_event(chat_id="111", log_id="1002", name="홍길동", phone="1234"))),
+        asyncio.run(service.handle(_event(chat_id="111", log_id="1003", name="아무개", phone="4444"))),
+        asyncio.run(service.handle(_event(chat_id="111", log_id="1004", name="심청이", phone="2222"))),
+    ]
+
+    assert results == [
+        {"accepted": True, "duplicate": False, "job_id": "job-123"},
+        {"accepted": True, "duplicate": False, "job_id": "job-123"},
+        {"accepted": True, "duplicate": False, "job_id": "job-123"},
+    ]
+    assert [item[0] for item in calls["enqueued"]] == [
+        JOB_TYPE_RIDER_LOOKUP,
+        JOB_TYPE_RIDER_LOOKUP,
+        JOB_TYPE_RIDER_LOOKUP,
+    ]
+    assert len({item[2]["origin_event_key"] for item in calls["enqueued"]}) == 3
 
 
 def test_production_wiring_connects_tenant_and_rate_gate_seams():

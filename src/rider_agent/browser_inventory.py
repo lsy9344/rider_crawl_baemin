@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,8 @@ def scan_agent_chrome_inventory(profiles_root: Path) -> BrowserInventorySnapshot
     port, and no ``--type`` option.
     """
 
-    try:
-        import psutil
-    except Exception:
+    psutil = _psutil_module()
+    if psutil is None:
         return BrowserInventorySnapshot()
 
     root = Path(profiles_root)
@@ -58,6 +58,13 @@ def scan_agent_chrome_inventory(profiles_root: Path) -> BrowserInventorySnapshot
         orphan_count=orphan_count,
         ram_used_percent=_system_ram_used_percent(psutil),
     )
+
+
+def _psutil_module() -> Any | None:
+    try:
+        return importlib.import_module("psutil")
+    except Exception:
+        return None
 
 
 def _cmdline_user_data_dir(cmdline: list[str]) -> Path | None:

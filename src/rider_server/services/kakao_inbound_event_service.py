@@ -277,12 +277,8 @@ def decide_inbound_event(
             action=ACTION_REJECT, reason=REASON_RATE_LIMITED,
             channel_id=channel.channel_id, tenant_id=channel.tenant_id, target_id=target.target_id,
         )
-    if target.target_id in context.in_flight_target_ids:
-        return InboundDecision(
-            action=ACTION_REJECT, reason=REASON_LOOKUP_IN_FLIGHT,
-            channel_id=channel.channel_id, tenant_id=channel.tenant_id, target_id=target.target_id,
-        )
-
+    # Distinct commands for the same target must queue; only the event key
+    # suppresses true resubmissions of the same Kakao message.
     if key in context.existing_event_keys:
         return InboundDecision(
             action=ACTION_DUPLICATE,
@@ -482,7 +478,6 @@ class KakaoInboundEventService:
         channels = tuple(await _maybe_await(self._load_channels()))
         targets_by_channel: dict[str, tuple[TargetView, ...]] = {}
         existing_keys: set[str] = set()
-        in_flight_ids: set[str] = set()
         inactive_tenants: set[str] = set()
         rate_limited_ids: set[str] = set()
 
@@ -499,19 +494,15 @@ class KakaoInboundEventService:
                 inactive_tenants.add(channel.tenant_id)
             active_targets = [t for t in targets if t.status == TARGET_STATE_ACTIVE]
             if len(active_targets) == 1:
-                target = active_targets[0]
                 key = origin_event_key(event)
                 if self._is_duplicate is not None and await _maybe_await(self._is_duplicate(key)):
                     existing_keys.add(key)
-                if self._in_flight is not None and await _maybe_await(self._in_flight(target.target_id)):
-                    in_flight_ids.add(target.target_id)
 
         return InboundContext(
             channels=channels,
             targets_by_channel=targets_by_channel,
             sending_enabled=sending_enabled,
             existing_event_keys=frozenset(existing_keys),
-            in_flight_target_ids=frozenset(in_flight_ids),
             inactive_tenant_ids=frozenset(inactive_tenants),
             rate_limited_channel_ids=frozenset(rate_limited_ids),
         )
