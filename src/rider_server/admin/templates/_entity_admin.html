@@ -186,9 +186,9 @@
         <label>텔레그램 채팅 ID <input type="text" name="telegram_chat_id" data-channel-messenger="TELEGRAM"></label>
         <label>텔레그램 토픽 ID <input type="text" name="thread_id" data-channel-messenger="TELEGRAM"></label>
         <label>카카오톡 방 이름 <input type="text" name="kakao_room_name" data-channel-messenger="KAKAO"></label>
-        {# 카카오 인바운드 라이더 조회(유료) 활성 플래그. 카카오 선택 시에만 활성(그 외엔 자동 잠김).
-           기본 미체크=비활성(fail-closed). 생성 후 아래 '라이더 조회 활성화' 카드에서 언제든 토글 가능. #}
-        <label>라이더 조회 활성화(유료) <input type="checkbox" name="command_trigger_enabled" value="true" data-channel-messenger="KAKAO"></label>
+        {# 라이더 조회(유료) 활성화는 아래 '카카오 인바운드 라이더 조회' 전용 카드로 일원화했다. 생성 시엔
+           항상 비활성(fail-closed)으로 만들고(command_trigger_enabled 미전송 → 서버 _bool=False), 켜려면
+           채널 생성·활성(ACTIVE) 후 그 카드에서 토글한다. 진입점을 하나로 모아 중복/오조작을 없앤다. #}
         <label>등록 코드 <input type="text" name="registration_code" data-channel-messenger="TELEGRAM"></label>
         <button type="submit" class="create">채널 생성</button><span class="inline-action-status" aria-live="polite"></span>
       </form>
@@ -202,9 +202,10 @@
         <label>텔레그램 채팅 ID <input type="text" id="ch-edit-chat"></label>
         <label>텔레그램 토픽 ID <input type="text" id="ch-edit-thread"></label>
         <label>카카오톡 방 이름 <input type="text" id="ch-edit-kakao"></label>
-        <label>Inbound command <input type="checkbox" id="ch-edit-command-trigger"></label>
+        {# 라이더 조회(command_trigger_enabled) 토글은 여기서 다루지 않는다 — 전용 카드로 일원화. 라우팅만
+           편집하고 command_trigger_enabled 는 미전송(서버 3-state None=유지)해 기존 활성값을 보존한다. #}
         <div style="flex-basis:100%; display:flex; flex-wrap:wrap; align-items:flex-end; gap:0 0.4rem; padding-top:0.45rem">
-          <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao'), command_trigger_enabled: cbool('ch-edit-command-trigger')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
+          <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '', filledValues({telegram_chat_id: cval('ch-edit-chat'), thread_id: cval('ch-edit-thread'), kakao_room_name: cval('ch-edit-kakao')}))">편집</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/activate', {}, '선택한 채널을 수동 활성화할까요? 라우팅 정보를 확인했나요?')">수동 활성화</button><span class="inline-action-status" aria-live="polite"></span>
           <button type="button" class="danger" data-requires="ch-edit-id" onclick="crudButton(this, '/admin/messenger-channels/', 'ch-edit-id', '/deactivate', {}, '선택한 채널을 비활성화할까요?')">비활성화</button><span class="inline-action-status" aria-live="polite"></span>
         </div>
@@ -425,7 +426,6 @@
   var CRUD_TENANT = "{{ tenant_id | urlencode }}";
   function cval(id) { var el = document.getElementById(id); return el ? el.value : ""; }
   function cchecked(id) { var el = document.getElementById(id); return el && el.checked ? "true" : ""; }
-  function cbool(id) { var el = document.getElementById(id); return el && el.checked ? "true" : "false"; }
   function filledValues(values) {
     var out = {};
     Object.keys(values).forEach(function(key) {
@@ -479,7 +479,7 @@
     document.getElementById('ch-edit-chat').value = option.dataset.chat || '';
     document.getElementById('ch-edit-thread').value = option.dataset.thread || '';
     document.getElementById('ch-edit-kakao').value = option.dataset.kakao || '';
-    document.getElementById('ch-edit-command-trigger').checked = option.dataset.commandTriggerEnabled === 'true';
+    // 라이더 조회(command_trigger_enabled) 는 편집행에서 다루지 않는다 — 전용 카드로 일원화.
     var row = select.closest('.edit-row');
     if (row) {
       row.querySelectorAll('.inline-action-status').forEach(function(s) {

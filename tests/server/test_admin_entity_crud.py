@@ -1215,13 +1215,13 @@ def test_entity_admin_channel_form_toggles_fields_by_messenger() -> None:
     assert 'onchange="syncChannelCreateFields()"' in channel_form
     assert 'data-channel-messenger="TELEGRAM"' in channel_form
     assert 'data-channel-messenger="KAKAO"' in channel_form
-    assert 'name="command_trigger_enabled"' in channel_form
-    assert 'id="ch-edit-command-trigger"' in template
     assert "function syncChannelCreateFields()" in template
     assert "field.disabled = field.dataset.channelMessenger !== messenger;" in template
     assert "document.addEventListener('DOMContentLoaded', syncChannelCreateFields);" in template
-    assert "function cbool" in template
-    assert "command_trigger_enabled: cbool('ch-edit-command-trigger')" in template
+    # 라이더 조회(command_trigger_enabled) 활성화는 전용 카드로 일원화 — 생성 폼/편집행에는 없어야 한다.
+    assert 'name="command_trigger_enabled"' not in channel_form
+    assert 'id="ch-edit-command-trigger"' not in template
+    assert "cbool('ch-edit-command-trigger')" not in template
 
 
 def test_route_platform_account_plaintext_password_stored() -> None:
@@ -1415,8 +1415,6 @@ def test_messenger_channel_options_expose_state_for_quick_connect() -> None:
 
     assert 'data-state="ACTIVE"' in body
     assert 'data-state="PENDING"' in body
-    assert 'data-command-trigger-enabled="true"' in body
-    assert 'data-command-trigger-enabled="false"' in body
 
 
 def test_route_list_targets_summary_includes_active_send_window() -> None:
@@ -3171,7 +3169,8 @@ def test_entity_admin_channel_autofill_contract_stays_in_place() -> None:
     assert "option.dataset.chat" in template
     assert "option.dataset.thread" in template
     assert "option.dataset.kakao" in template
-    assert "option.dataset.commandTriggerEnabled" in template
+    # 라이더 조회(command_trigger_enabled) autofill 은 편집행에서 제거 — 전용 카드로 일원화.
+    assert "option.dataset.commandTriggerEnabled" not in template
 
 
 def test_entity_admin_edit_state_failure_uses_inline_status() -> None:
@@ -3636,5 +3635,6 @@ def test_entity_admin_exposes_kakao_rider_lookup_activation_card() -> None:
     assert "function saveKakaoLookup(" in template
     assert "function populateKakaoLookupState(" in template
     assert "crudButton(button, '/admin/messenger-channels/', 'kakao-lookup-ch-id'" in template
-    # 채널 생성 폼의 카카오 전용 활성화 체크박스(생성 시점 활성화).
-    assert 'name="command_trigger_enabled" value="true" data-channel-messenger="KAKAO"' in template
+    # 라이더 조회 활성화는 이 카드로 일원화한다 — 채널 생성 폼/편집행의 중복 체크박스는 제거됐다.
+    assert 'name="command_trigger_enabled"' not in template
+    assert 'id="ch-edit-command-trigger"' not in template
