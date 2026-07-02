@@ -201,6 +201,189 @@ def test_heartbeat_updates_agent_capacity_and_status_without_echoing_token() -> 
     assert saved.capacity_json["browser_profiles"][0]["id"] == "profile-1"
 
 
+def test_heartbeat_accepts_top_level_browser_slots_and_stores_sanitized_capacity() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {"cpu_percent": 12.5},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_slots": {
+                "max": 4,
+                "used": 2,
+                "available": 2,
+                "manual_auth_used": 1,
+                "orphan_count": 0,
+                "registry_profiles": 3,
+                "ram_used_percent": 72.5,
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    saved = registry.agent(_AGENT_ID)
+    assert saved is not None
+    assert saved.capacity_json["browser_slots"] == {
+        "max": 4,
+        "used": 2,
+        "available": 2,
+        "manual_auth_used": 1,
+        "orphan_count": 0,
+        "registry_profiles": 3,
+        "ram_used_percent": 72.5,
+    }
+    assert "browser_slots" not in saved.capacity_json["metrics"]
+
+
+def test_heartbeat_browser_slots_only_stores_allowlisted_aggregate_keys() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_slots": {
+                "max": 4,
+                "used": 2,
+                "available": 2,
+                "manual_auth_used": 1,
+                "orphan_count": 0,
+                "registry_profiles": 3,
+                "ram_used_percent": 70,
+                "free": 99,
+                "current_url": "https://store.example.com/login?token=raw",
+                "page_title": "raw page title",
+                "profile_path": "C:\\Users\\KimYS\\ChromeProfile",
+                "raw_cmdline": "--user-data-dir=C:\\Users\\KimYS\\ChromeProfile",
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    capacity = registry.agent(_AGENT_ID).capacity_json
+    assert set(capacity["browser_slots"]) == {
+        "max",
+        "used",
+        "available",
+        "manual_auth_used",
+        "orphan_count",
+        "registry_profiles",
+        "ram_used_percent",
+    }
+    saved_text = str(capacity)
+    assert "store.example.com" not in saved_text
+    assert "raw page title" not in saved_text
+    assert "ChromeProfile" not in saved_text
+    assert "--user-data-dir" not in saved_text
+
+
+def test_heartbeat_browser_slots_rejects_invalid_count_and_ram_values() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_slots": {
+                "max": True,
+                "used": -1,
+                "available": "2",
+                "manual_auth_used": False,
+                "orphan_count": "-1",
+                "registry_profiles": 3.5,
+                "ram_used_percent": "72.5",
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert registry.agent(_AGENT_ID).capacity_json["browser_slots"] == {}
+
+    valid_response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_slots": {
+                "max": 0,
+                "used": 1,
+                "available": 0,
+                "manual_auth_used": 0,
+                "orphan_count": 2,
+                "registry_profiles": 3,
+                "ram_used_percent": 100,
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert valid_response.status_code == HTTPStatus.OK
+    assert registry.agent(_AGENT_ID).capacity_json["browser_slots"] == {
+        "max": 0,
+        "used": 1,
+        "available": 0,
+        "manual_auth_used": 0,
+        "orphan_count": 2,
+        "registry_profiles": 3,
+        "ram_used_percent": 100,
+    }
+
+    out_of_range_response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["CRAWL_BAEMIN"],
+            "browser_slots": {"ram_used_percent": 100.1},
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert out_of_range_response.status_code == HTTPStatus.OK
+    assert registry.agent(_AGENT_ID).capacity_json["browser_slots"] == {}
+
+
+def test_heartbeat_without_browser_slots_stores_empty_browser_slots() -> None:
+    registry = InMemoryAgentRegistry()
+    registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)
+    client = _client(registry)
+    token = _register(client)["agent_token"]
+
+    response = client.post(
+        "/v1/agents/heartbeat",
+        json={
+            "agent_id": _AGENT_ID,
+            "metrics": {},
+            "capabilities": ["CRAWL_BAEMIN"],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    saved = registry.agent(_AGENT_ID)
+    assert saved is not None
+    assert saved.capacity_json["browser_slots"] == {}
+
+
 def test_heartbeat_preserves_kakao_worker_operational_status() -> None:
     registry = InMemoryAgentRegistry()
     registry.seed_registration_code(_CODE, agent_id=_AGENT_ID)

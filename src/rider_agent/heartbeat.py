@@ -3,7 +3,8 @@
 이 모듈이 책임지는 것(범위 — primitive 만):
 
 * :func:`build_heartbeat_payload` — ``POST /v1/agents/heartbeat`` 요청 본문을 합성한다.
-  5필드(``metrics``/``capabilities``/``active_jobs``/``kakao_status``/``browser_profiles``)
+  6필드(``metrics``/``capabilities``/``active_jobs``/``kakao_status``/``browser_profiles``/
+  ``browser_slots``)
   + ``agent_id`` + 버전 drift 입력용 ``agent_version``(``rider_agent.__version__``). **token 은
   본문에 넣지 않는다**(인증은 헤더 — :func:`send_heartbeat`).
 * :func:`send_heartbeat` — Task 1 payload 로 단발 POST 를 보내고 응답
@@ -124,6 +125,18 @@ DEFAULT_KAKAO_STATUS: dict[str, Any] = {"state": "disabled", "queue_depth": 0}
 # heartbeat 전송 transport 의 operation 라벨(HttpTransport(op_label=...) 로 운영 로그 구분).
 HEARTBEAT_OP_LABEL = "agent heartbeat"
 
+_BROWSER_SLOT_COUNT_KEYS = frozenset(
+    {
+        "max",
+        "used",
+        "available",
+        "manual_auth_used",
+        "orphan_count",
+        "registry_profiles",
+    }
+)
+_BROWSER_SLOT_PERCENT_KEYS = frozenset({"ram_used_percent"})
+
 def _resolve(provider: Any) -> Any:
     """provider 가 callable 이면 호출해 값을 얻고, 아니면 그대로 값으로 쓴다.
 
@@ -140,6 +153,39 @@ def _normalize_kakao_status(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         return {"state": value}
     return {"state": str(value)}
+
+
+def _sanitize_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _sanitize_percent(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float) and 0 <= value <= 100:
+        return value
+    return None
+
+
+def _normalize_browser_slots(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)
+        if key in _BROWSER_SLOT_COUNT_KEYS:
+            number = _sanitize_nonnegative_int(raw_value)
+            if number is not None:
+                cleaned[key] = number
+        elif key in _BROWSER_SLOT_PERCENT_KEYS:
+            percent = _sanitize_percent(raw_value)
+            if percent is not None:
+                cleaned[key] = percent
+    return cleaned
 
 
 def default_metrics() -> dict[str, Any]:
@@ -163,10 +209,12 @@ def build_heartbeat_payload(
     active_jobs_provider: Any = None,
     kakao_status_provider: Any = None,
     browser_profiles_provider: Any = None,
+    browser_slots_provider: Any = None,
 ) -> dict[str, Any]:
     """``POST /v1/agents/heartbeat`` 요청 본문을 합성한다(token 은 본문에 넣지 않는다).
 
-    5필드(``metrics``/``capabilities``/``active_jobs``/``kakao_status``/``browser_profiles``)
+    6필드(``metrics``/``capabilities``/``active_jobs``/``kakao_status``/``browser_profiles``/
+    ``browser_slots``)
     + ``agent_id`` + ``agent_version``(버전 drift 입력). 각 provider 는 값 또는 callable 이며,
     미주입 시 안전 기본값(빈 리스트/disabled 상태 dict/stdlib metrics/6종 capabilities)을 쓴다.
     [Source: data-api-contract.md(67-69), architecture-contract.md(120-129)]
@@ -189,6 +237,9 @@ def build_heartbeat_payload(
         if browser_profiles_provider is not None
         else []
     )
+    browser_slots = (
+        _resolve(browser_slots_provider) if browser_slots_provider is not None else {}
+    )
 
     return {
         "agent_id": identity.agent_id,
@@ -198,6 +249,7 @@ def build_heartbeat_payload(
         "active_jobs": list(active_jobs),
         "kakao_status": _normalize_kakao_status(kakao_status),
         "browser_profiles": list(browser_profiles),
+        "browser_slots": _normalize_browser_slots(browser_slots),
     }
 
 
@@ -244,6 +296,7 @@ def send_heartbeat(
     active_jobs_provider: Any = None,
     kakao_status_provider: Any = None,
     browser_profiles_provider: Any = None,
+    browser_slots_provider: Any = None,
 ) -> HeartbeatResult:
     """단발 heartbeat 를 보내고 응답을 :class:`HeartbeatResult` 로 파싱한다.
 
@@ -260,6 +313,7 @@ def send_heartbeat(
         active_jobs_provider=active_jobs_provider,
         kakao_status_provider=kakao_status_provider,
         browser_profiles_provider=browser_profiles_provider,
+        browser_slots_provider=browser_slots_provider,
     )
     response = transport.post_json(
         _heartbeat_url(base_url),
@@ -312,6 +366,7 @@ class HeartbeatReporter:
         active_jobs_provider: Any = None,
         kakao_status_provider: Any = None,
         browser_profiles_provider: Any = None,
+        browser_slots_provider: Any = None,
         on_status: Callable[[str], None] | None = None,
         log: Callable[[str], None] | None = None,
         jitter_ratio: float = DEFAULT_HEARTBEAT_JITTER_RATIO,
@@ -330,6 +385,7 @@ class HeartbeatReporter:
         self._active_jobs_provider = active_jobs_provider
         self._kakao_status_provider = kakao_status_provider
         self._browser_profiles_provider = browser_profiles_provider
+        self._browser_slots_provider = browser_slots_provider
         self._on_status = on_status
         self._log = log
         #: 현재 surfacing 상태(4.2 의 ``TOKEN_STATUS_*`` 어휘 재사용 — 새 ad-hoc 플래그 금지).
@@ -383,6 +439,7 @@ class HeartbeatReporter:
                 active_jobs_provider=self._active_jobs_provider,
                 kakao_status_provider=self._kakao_status_provider,
                 browser_profiles_provider=self._browser_profiles_provider,
+                browser_slots_provider=self._browser_slots_provider,
             )
         except TransportError as exc:
             self._handle_transport_error(exc)

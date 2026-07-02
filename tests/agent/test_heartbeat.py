@@ -53,7 +53,7 @@ CANNED_RESPONSE = {
     "commands": [{"type": "noop"}],
 }
 
-_SEVEN_KEYS = {
+_EIGHT_KEYS = {
     "agent_id",
     "agent_version",
     "metrics",
@@ -61,6 +61,7 @@ _SEVEN_KEYS = {
     "active_jobs",
     "kakao_status",
     "browser_profiles",
+    "browser_slots",
 }
 
 _SIX_JOB_TYPES = {
@@ -130,19 +131,20 @@ class _FakeHttpResponse:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# AC1 — payload: 5필드 + agent_id + agent_version + provider 반영
+# AC1 — payload: 상태 필드 + agent_id + agent_version + provider 반영
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_build_payload_has_seven_keys_and_version():
+def test_build_payload_has_eight_keys_and_version():
     payload = build_heartbeat_payload(_IDENTITY)
 
-    assert set(payload) == _SEVEN_KEYS
+    assert set(payload) == _EIGHT_KEYS
     assert payload["agent_id"] == "agent-fake-1"
     assert payload["agent_version"] == __version__
     # 기본 provider → 안전 빈/idle 값(실제 소스는 후속 스토리가 주입).
     assert payload["active_jobs"] == []
     assert payload["browser_profiles"] == []
+    assert payload["browser_slots"] == {}
     assert payload["kakao_status"] == {"state": "disabled", "queue_depth": 0}
     assert isinstance(payload["metrics"], dict)
     # token 본문 미포함(인증은 헤더).
@@ -158,6 +160,15 @@ def test_build_payload_reflects_injected_providers():
         active_jobs_provider=lambda: ["job-1"],
         kakao_status_provider="idle",
         browser_profiles_provider=lambda: [{"profile_id": "p1", "cdp_port": 9222}],
+        browser_slots_provider=lambda: {
+            "max": 2,
+            "used": 1,
+            "available": 1,
+            "manual_auth_used": 0,
+            "orphan_count": 1,
+            "registry_profiles": 1,
+            "ram_used_percent": 72.5,
+        },
     )
 
     assert payload["capabilities"] == ["CRAWL_BAEMIN"]
@@ -165,9 +176,47 @@ def test_build_payload_reflects_injected_providers():
     assert payload["active_jobs"] == ["job-1"]
     assert payload["kakao_status"] == {"state": "idle"}
     assert payload["browser_profiles"] == [{"profile_id": "p1", "cdp_port": 9222}]
+    assert payload["browser_slots"]["used"] == 1
+    assert payload["browser_slots"]["ram_used_percent"] == 72.5
 
 
-def test_send_heartbeat_posts_to_path_with_seven_field_body():
+def test_build_payload_sanitizes_browser_slots_provider_output():
+    payload = build_heartbeat_payload(
+        _IDENTITY,
+        browser_slots_provider=lambda: {
+            "max": 2,
+            "used": 1,
+            "available": 1,
+            "manual_auth_used": 0,
+            "orphan_count": 1,
+            "registry_profiles": 1,
+            "ram_used_percent": 72.5,
+            "profile_path": "C:\\Users\\KimYS\\ChromeProfile",
+            "current_url": "https://store.example.com/login?token=raw",
+            "page_title": "raw title",
+            "raw_cmdline": "--user-data-dir=C:\\Users\\KimYS\\ChromeProfile",
+            "invalid_bool": True,
+            "negative_count": -1,
+        },
+    )
+
+    assert payload["browser_slots"] == {
+        "max": 2,
+        "used": 1,
+        "available": 1,
+        "manual_auth_used": 0,
+        "orphan_count": 1,
+        "registry_profiles": 1,
+        "ram_used_percent": 72.5,
+    }
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert "ChromeProfile" not in blob
+    assert "store.example.com" not in blob
+    assert "raw title" not in blob
+    assert "--user-data-dir" not in blob
+
+
+def test_send_heartbeat_posts_to_path_with_eight_field_body():
     transport = FakeTransport()
 
     send_heartbeat(_IDENTITY, transport=transport, base_url="https://srv.test")
@@ -175,7 +224,7 @@ def test_send_heartbeat_posts_to_path_with_seven_field_body():
     assert len(transport.calls) == 1
     url, body, _headers = transport.calls[0]
     assert url == "https://srv.test" + HEARTBEAT_PATH
-    assert set(body) == _SEVEN_KEYS
+    assert set(body) == _EIGHT_KEYS
     assert body["agent_id"] == "agent-fake-1"
     assert body["agent_version"] == __version__
 

@@ -271,6 +271,8 @@ def find_existing_chrome_debug_endpoint(
             continue
         if not _cmdline_uses_profile(cmdline, target):
             continue
+        if not is_chrome_browser_root_cmdline(cmdline):
+            continue
         cdp_url = _cmdline_cdp_url(cmdline)
         if cdp_url is None:
             continue
@@ -338,6 +340,19 @@ def _process_has_live_local_cdp(cmdline: list[str], *, probe: CdpProbe) -> bool:
     return True
 
 
+def is_chrome_browser_root_cmdline(cmdline: list[str]) -> bool:
+    """Return True only for a browser-root Chrome command line with a CDP port.
+
+    Renderer/GPU/utility children can also carry ``--remote-debugging-port`` in
+    this environment. They are not valid adoption or lease roots, so any
+    ``--type`` option excludes the process from root selection.
+    """
+
+    return _cmdline_cdp_url(cmdline) is not None and not _cmdline_has_option(
+        cmdline, "--type"
+    )
+
+
 def _terminate_process(process: Any, *, wait_timeout_seconds: float) -> bool:
     terminate = getattr(process, "terminate", None)
     if not callable(terminate):
@@ -402,7 +417,7 @@ def _cmdline_cdp_url(cmdline: list[str]) -> str | None:
 
 def _cmdline_option_value(cmdline: list[str], option: str) -> str | None:
     for arg in cmdline:
-        if not arg.startswith(option):
+        if not arg.startswith(option + "="):
             continue
         _, sep, value = arg.partition("=")
         if sep:
@@ -411,6 +426,13 @@ def _cmdline_option_value(cmdline: list[str], option: str) -> str | None:
         if arg == option:
             return cmdline[index + 1].strip().strip('"')
     return None
+
+
+def _cmdline_has_option(cmdline: list[str], option: str) -> bool:
+    for arg in cmdline:
+        if arg == option or arg.startswith(option + "="):
+            return True
+    return False
 
 
 def _profile_dir_key(path: Path) -> str:

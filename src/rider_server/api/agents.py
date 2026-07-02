@@ -75,8 +75,9 @@ class HeartbeatRequest(BaseModel):
     active_jobs: list[Any] = Field(default_factory=list, max_length=MAX_ACTIVE_JOBS)
     kakao_status: dict[str, Any] = Field(default_factory=dict)
     browser_profiles: list[Any] = Field(default_factory=list, max_length=MAX_BROWSER_PROFILES)
+    browser_slots: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("metrics", "active_jobs", "kakao_status", "browser_profiles")
+    @field_validator("metrics", "active_jobs", "kakao_status", "browser_profiles", "browser_slots")
     @classmethod
     def _bounded_payload(cls, value: Any) -> Any:
         return _validate_bounded_json(value)
@@ -160,6 +161,7 @@ async def heartbeat(request: Request, body: HeartbeatRequest) -> dict:
                 active_jobs=body.active_jobs,
                 kakao_status=body.kakao_status,
                 browser_profiles=body.browser_profiles,
+                browser_slots=body.browser_slots,
             ),
             bearer_token=token,
             now=now,

@@ -170,6 +170,106 @@ def test_find_existing_chrome_debug_endpoint_for_profile_reuses_live_local_cdp(
     assert calls == ["http://127.0.0.1:9555"]
 
 
+def test_find_existing_chrome_debug_endpoint_ignores_typed_child_with_cdp_port(
+    tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "browser"
+    calls = []
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def __init__(self, kind, port, extra=None):
+            self.kind = kind
+            self._port = port
+            self._extra = list(extra or [])
+
+        def cmdline(self):
+            return [
+                "chrome.exe",
+                *self._extra,
+                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={self._port}",
+                f"--user-data-dir={profile_dir}",
+            ]
+
+    child = FakeProcess("child", 9555, extra=["--type=renderer"])
+    root = FakeProcess("root", 9666)
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [child, root]
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    endpoint = browser_launcher.find_existing_chrome_debug_endpoint(
+        profile_dir, cdp_probe=lambda cdp_url: calls.append(cdp_url)
+    )
+
+    assert endpoint is not None
+    assert endpoint.cdp_port == 9666
+    assert endpoint.process is root
+    assert calls == ["http://127.0.0.1:9666"]
+
+
+def test_find_existing_chrome_debug_endpoint_requires_exact_cdp_port_option(
+    tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "browser"
+    calls = []
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def __init__(self, cmdline):
+            self._cmdline = list(cmdline)
+
+        def cmdline(self):
+            return list(self._cmdline)
+
+    similar_option = FakeProcess(
+        [
+            "chrome.exe",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-portable=9555",
+            f"--user-data-dir={profile_dir}",
+        ]
+    )
+    valid_root = FakeProcess(
+        [
+            "chrome.exe",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=9666",
+            f"--user-data-dir={profile_dir}",
+        ]
+    )
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [similar_option, valid_root]
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    endpoint = browser_launcher.find_existing_chrome_debug_endpoint(
+        profile_dir, cdp_probe=lambda cdp_url: calls.append(cdp_url)
+    )
+
+    assert endpoint is not None
+    assert endpoint.cdp_port == 9666
+    assert endpoint.process is valid_root
+    assert calls == ["http://127.0.0.1:9666"]
+
+
 def test_close_stale_chrome_processes_for_profile_terminates_profile_without_live_cdp(
     tmp_path, monkeypatch
 ):

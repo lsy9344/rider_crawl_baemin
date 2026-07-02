@@ -86,6 +86,7 @@ class HeartbeatInput:
     active_jobs: list[Any]
     kakao_status: dict[str, Any]
     browser_profiles: list[Any]
+    browser_slots: dict[str, Any] = field(default_factory=dict)
     agent_version: str = ""
 
 
@@ -153,6 +154,17 @@ _BROWSER_PROFILE_STRING_MAX_LENGTH = 120
 #: 유효한 CDP 디버깅 포트 범위(0/음수/65535 초과/non-int 는 저장하지 않는다).
 _CDP_PORT_MIN = 1
 _CDP_PORT_MAX = 65535
+_BROWSER_SLOT_COUNT_KEYS = frozenset(
+    {
+        "max",
+        "used",
+        "available",
+        "manual_auth_used",
+        "orphan_count",
+        "registry_profiles",
+    }
+)
+_BROWSER_SLOT_PERCENT_KEYS = frozenset({"ram_used_percent"})
 _KAKAO_STATUS_KEYS = frozenset(
     {
         "queue_depth",
@@ -186,6 +198,7 @@ def heartbeat_capacity(request: HeartbeatInput) -> dict[str, Any]:
         # browser_profiles 는 item 단위로 타입/길이/cdp_port 범위까지 검증한다(generic
         # _sanitize_list 가 아니라 전용 sanitizer — agent_registry 가 저장 경계의 정본).
         "browser_profiles": _sanitize_browser_profiles(request.browser_profiles),
+        "browser_slots": _sanitize_browser_slots(request.browser_slots),
     }
 
 
@@ -276,6 +289,46 @@ def _sanitize_cdp_port(value: Any) -> int | None:
     if isinstance(value, int) and _CDP_PORT_MIN <= value <= _CDP_PORT_MAX:
         return value
     return None
+
+
+def _sanitize_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _sanitize_percent(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float) and 0 <= value <= 100:
+        return value
+    return None
+
+
+def _sanitize_browser_slots(value: Any) -> dict[str, Any]:
+    """Sanitize top-level heartbeat browser slot aggregates.
+
+    This is a positive allowlist for numeric aggregate fields only. Raw profile
+    paths, URLs, titles, command lines, email identifiers, and secret-like keys
+    are intentionally not representable here.
+    """
+
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)
+        if key in _BROWSER_SLOT_COUNT_KEYS:
+            number = _sanitize_nonnegative_int(raw_value)
+            if number is not None:
+                cleaned[key] = number
+        elif key in _BROWSER_SLOT_PERCENT_KEYS:
+            percent = _sanitize_percent(raw_value)
+            if percent is not None:
+                cleaned[key] = percent
+    return cleaned
 
 
 def _sanitize_browser_profiles(values: list[Any]) -> list[dict[str, Any]]:

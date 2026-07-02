@@ -44,8 +44,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from rider_crawl.config import app_state_root
 from rider_crawl.redaction import redact, redact_mapping, redacted_error_event
 
+from rider_agent.browser_inventory import scan_agent_chrome_inventory
 from rider_agent.heartbeat import (
     DEFAULT_CAPABILITIES,
     DEFAULT_KAKAO_STATUS,
@@ -1226,6 +1228,7 @@ def build_agent_components(
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
+    browser_slots_provider: Any = None,
     kakao_status_provider: Any = None,
     complete_outbox_path: Any | None = None,
 ) -> tuple[JobRunner, HeartbeatReporter]:
@@ -1255,6 +1258,22 @@ def build_agent_components(
         metrics["max_in_flight"] = effective_max_jobs
         return metrics
 
+    def _default_browser_slots() -> dict[str, Any]:
+        snapshot = scan_agent_chrome_inventory(
+            app_state_root() / "runtime" / "agent-browser-profiles"
+        )
+        slots: dict[str, Any] = {
+            "max": effective_max_jobs,
+            "used": int(snapshot.root_count),
+            "available": max(0, effective_max_jobs - int(snapshot.root_count)),
+            "manual_auth_used": 0,
+            "orphan_count": int(snapshot.orphan_count),
+            "registry_profiles": 0,
+        }
+        if snapshot.ram_used_percent is not None:
+            slots["ram_used_percent"] = snapshot.ram_used_percent
+        return slots
+
     runner = JobRunner(
         identity,
         transport=transport,
@@ -1282,6 +1301,11 @@ def build_agent_components(
         metrics_provider=_metrics_with_capacity,
         active_jobs_provider=runner.active_jobs,
         browser_profiles_provider=browser_profiles_provider,
+        browser_slots_provider=(
+            browser_slots_provider
+            if browser_slots_provider is not None
+            else _default_browser_slots
+        ),
         kakao_status_provider=kakao_status_provider,
         on_status=on_status,
         log=log,
@@ -1325,6 +1349,7 @@ def run_agent(
     on_status: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
     browser_profiles_provider: Any = None,
+    browser_slots_provider: Any = None,
     kakao_status_provider: Any = None,
     start_auth_worker: bool = False,
     auth_login_probe: Callable[[ClaimedJob], str] | None = None,
@@ -1432,6 +1457,16 @@ def run_agent(
         composition.kakao_status_provider,
         kakao_inbound_watcher,
     )
+    effective_browser_slots_provider = browser_slots_provider
+    if (
+        effective_browser_slots_provider is None
+        and composition.crawl_worker is not None
+        and getattr(composition.crawl_worker, "_profile_manager", None) is not None
+    ):
+        manager = composition.crawl_worker._profile_manager
+        provider = getattr(manager, "browser_slots", None)
+        if callable(provider):
+            effective_browser_slots_provider = provider
 
     runner, reporter = build_agent_components(
         identity,
@@ -1450,6 +1485,7 @@ def run_agent(
         on_status=on_status,
         log=log,
         browser_profiles_provider=composition.browser_profiles_provider,
+        browser_slots_provider=effective_browser_slots_provider,
         kakao_status_provider=effective_kakao_status_provider,
         complete_outbox_path=complete_outbox_path,
     )

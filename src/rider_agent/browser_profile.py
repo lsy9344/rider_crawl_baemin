@@ -42,6 +42,7 @@ from typing import Any, Callable
 
 from rider_crawl.redaction import redact
 
+from rider_agent.browser_inventory import scan_agent_chrome_inventory
 from rider_agent.reuse import (
     BrowserActionRequiredError,
     BrowserLaunchError,
@@ -575,6 +576,34 @@ class BrowserProfileManager:
                     profile["last_probe_at"] = assignment.last_probe_at
                 profiles.append(profile)
             return profiles
+
+    def browser_slots(self) -> dict[str, Any]:
+        """Return aggregate browser slot counts for heartbeat.
+
+        This Phase 1 provider is read-only. It reports counts only and never
+        exposes raw profile paths, URLs, titles, command lines, or process ids.
+        """
+
+        snapshot = scan_agent_chrome_inventory(self._profiles_root)
+        with self._lock:
+            registry_profiles = len(self._registry)
+        has_configured_limit = self._max_profiles is not None
+        maximum = int(self._max_profiles) if has_configured_limit else 0
+        slots: dict[str, Any] = {
+            "max": maximum,
+            "used": int(snapshot.root_count),
+            "available": (
+                max(0, maximum - int(snapshot.root_count))
+                if has_configured_limit
+                else 0
+            ),
+            "manual_auth_used": 0,
+            "orphan_count": int(snapshot.orphan_count),
+            "registry_profiles": registry_profiles,
+        }
+        if snapshot.ram_used_percent is not None:
+            slots["ram_used_percent"] = snapshot.ram_used_percent
+        return slots
 
     def record_profile_diagnostic(
         self,

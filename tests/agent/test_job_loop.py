@@ -1297,6 +1297,112 @@ def test_build_components_reports_max_jobs_capacity_in_heartbeat_metrics():
     assert payload["metrics"]["max_in_flight"] == 4
 
 
+def test_build_components_wires_browser_slots_into_reporter():
+    browser_slots = {
+        "max": 2,
+        "used": 1,
+        "available": 1,
+        "manual_auth_used": 0,
+        "orphan_count": 1,
+        "registry_profiles": 1,
+        "ram_used_percent": 72.5,
+    }
+    _runner_obj, reporter = build_agent_components(
+        _IDENTITY,
+        transport=FakeTransport(),
+        browser_slots_provider=lambda: browser_slots,
+    )
+
+    payload = build_heartbeat_payload(
+        _IDENTITY,
+        browser_slots_provider=reporter._browser_slots_provider,
+    )
+
+    assert payload["browser_slots"] == browser_slots
+
+
+def test_build_components_preserves_explicit_empty_browser_slots_provider(
+    tmp_path, monkeypatch
+):
+    from rider_agent import job_loop
+
+    class FakeSnapshot:
+        root_count = 1
+        orphan_count = 1
+        ram_used_percent = 80.0
+
+    monkeypatch.setattr(
+        job_loop,
+        "app_state_root",
+        lambda: tmp_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        job_loop,
+        "scan_agent_chrome_inventory",
+        lambda profiles_root: FakeSnapshot(),
+        raising=False,
+    )
+
+    _runner_obj, reporter = build_agent_components(
+        _IDENTITY,
+        transport=FakeTransport(),
+        browser_slots_provider={},
+    )
+
+    payload = build_heartbeat_payload(
+        _IDENTITY,
+        browser_slots_provider=reporter._browser_slots_provider,
+    )
+
+    assert payload["browser_slots"] == {}
+
+
+def test_build_components_uses_default_browser_slots_provider_without_crawl_worker(
+    tmp_path, monkeypatch
+):
+    from rider_agent import job_loop
+
+    class FakeSnapshot:
+        root_count = 1
+        orphan_count = 1
+        ram_used_percent = 80.0
+
+    monkeypatch.setattr(
+        job_loop,
+        "app_state_root",
+        lambda: tmp_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        job_loop,
+        "scan_agent_chrome_inventory",
+        lambda profiles_root: FakeSnapshot(),
+        raising=False,
+    )
+
+    _runner_obj, reporter = build_agent_components(
+        _IDENTITY,
+        transport=FakeTransport(),
+        max_jobs=2,
+    )
+
+    payload = build_heartbeat_payload(
+        _IDENTITY,
+        browser_slots_provider=reporter._browser_slots_provider,
+    )
+
+    assert payload["browser_slots"] == {
+        "max": 2,
+        "used": 1,
+        "available": 1,
+        "manual_auth_used": 0,
+        "orphan_count": 1,
+        "registry_profiles": 0,
+        "ram_used_percent": 80.0,
+    }
+
+
 def test_start_heartbeat_thread_runs_then_stops():
     stop = threading.Event()
     sleep = StoppingSleep(stop, stop_after=2)

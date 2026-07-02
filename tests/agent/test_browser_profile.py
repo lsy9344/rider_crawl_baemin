@@ -959,6 +959,132 @@ def test_browser_profiles_projection_excludes_raw_path(tmp_path):
     assert str(assignment.profile_dir) not in blob
 
 
+def test_browser_slots_inventory_counts_roots_without_raw_process_details(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path, max_profiles=2)
+    profiles_root = tmp_path / "profiles"
+    live_profile = profiles_root / "t1" / "alpha"
+    wrong_profile = tmp_path / "other" / "profile"
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def __init__(self, cmdline, *, parent=None):
+            self._cmdline = cmdline
+            self._parent = parent
+
+        def cmdline(self):
+            return list(self._cmdline)
+
+        def parent(self):
+            return self._parent
+
+    root = FakeProcess(
+        [
+            "chrome.exe",
+            "--remote-debugging-port=9555",
+            f"--user-data-dir={live_profile}",
+        ],
+        parent=None,
+    )
+    child_with_port = FakeProcess(
+        [
+            "chrome.exe",
+            "--type=renderer",
+            "--remote-debugging-port=9555",
+            f"--user-data-dir={live_profile}",
+        ],
+        parent=root,
+    )
+    wrong_root = FakeProcess(
+        [
+            "chrome.exe",
+            "--remote-debugging-port=9666",
+            f"--user-data-dir={wrong_profile}",
+        ],
+        parent=None,
+    )
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [child_with_port, root, wrong_root]
+
+        @staticmethod
+        def virtual_memory():
+            return type("Memory", (), {"percent": 72.5})()
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    slots = manager.browser_slots()
+
+    assert slots == {
+        "max": 2,
+        "used": 1,
+        "available": 1,
+        "manual_auth_used": 0,
+        "orphan_count": 1,
+        "registry_profiles": 0,
+        "ram_used_percent": 72.5,
+    }
+    blob = json.dumps(slots, ensure_ascii=False)
+    assert str(live_profile) not in blob
+    assert "remote-debugging-port" not in blob
+    assert "renderer" not in blob
+
+
+def test_browser_slots_reports_zero_max_when_profile_limit_is_unbounded(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path, max_profiles=None)
+    live_profile = tmp_path / "profiles" / "t1" / "alpha"
+
+    class FakeProcess:
+        info = {"name": "chrome.exe"}
+
+        def cmdline(self):
+            return [
+                "chrome.exe",
+                "--remote-debugging-port=9555",
+                f"--user-data-dir={live_profile}",
+            ]
+
+        def parent(self):
+            return None
+
+    class FakePsutil:
+        NoSuchProcess = RuntimeError
+        AccessDenied = PermissionError
+        ZombieProcess = RuntimeError
+
+        @staticmethod
+        def process_iter(_attrs):
+            return [FakeProcess()]
+
+        @staticmethod
+        def virtual_memory():
+            return type("Memory", (), {"percent": 61.0})()
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+
+    slots = manager.browser_slots()
+
+    assert slots == {
+        "max": 0,
+        "used": 1,
+        "available": 0,
+        "manual_auth_used": 0,
+        "orphan_count": 1,
+        "registry_profiles": 0,
+        "ram_used_percent": 61.0,
+    }
+
+
 def test_record_profile_diagnostic_noop_when_profile_absent(tmp_path):
     # registry 에 row 가 없으면 placeholder 를 만들지 않고 조용히 반환한다.
     manager = _manager(tmp_path)
