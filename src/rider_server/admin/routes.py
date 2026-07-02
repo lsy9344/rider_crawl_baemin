@@ -34,6 +34,7 @@ from . import severity as severity_policy
 from .severity import (
     SEVERITY_AUTH_REQUIRED,
     SEVERITY_CRITICAL,
+    SEVERITY_CRAWL_DATA_MISSING,
     SEVERITY_KAKAO_MISDELIVERY_RISK,
     SEVERITY_NORMAL,
     SEVERITY_OPERATOR_STOPPED,
@@ -61,6 +62,7 @@ _SEVERITY_LABELS: dict[str, str] = {
     SEVERITY_TARGET_VALIDATION_FAILURE: "대상 검증 실패",
     SEVERITY_KAKAO_MISDELIVERY_RISK: "위험",
     SEVERITY_OPERATOR_STOPPED: "운영자 중지",
+    SEVERITY_CRAWL_DATA_MISSING: "크롤링 데이터 누락",
 }
 _SEVERITY_CLASSES: dict[str, str] = {
     SEVERITY_NORMAL: "sev-normal",
@@ -71,6 +73,7 @@ _SEVERITY_CLASSES: dict[str, str] = {
     SEVERITY_TARGET_VALIDATION_FAILURE: "sev-stopped",
     SEVERITY_KAKAO_MISDELIVERY_RISK: "sev-critical",
     SEVERITY_OPERATOR_STOPPED: "sev-stopped",
+    SEVERITY_CRAWL_DATA_MISSING: "sev-warning",
 }
 
 
@@ -108,7 +111,7 @@ _REASON_TEXT: dict[str, str] = {
     "CDP_UNREACHABLE": "브라우저 연결 실패 — Agent/Chrome 확인 필요",
     "CRAWL_TIMEOUT": "수집 작업이 제한 시간 안에 완료되지 않음 — Agent/Chrome/페이지 로딩 확인(로그인 실패 아님)",
     "STALE_CRAWL_SKIPPED": "큐 대기 만료로 이번 수집을 건너뜀 — Agent 처리량/수집 주기 확인",
-    "PARSER_MISSING_DATA": "수집 데이터 누락 — 쿠팡 로그인 화면 또는 대시보드가 아닌 화면일 수 있음",
+    "PARSER_MISSING_DATA": "쿠팡 화면 형태는 열렸지만 실제 수집 데이터가 비어 있음 — 자동 새로고침 후 재수집 확인 필요",
     "RENDER_FAILURE": "메시지 생성 실패",
     "TELEGRAM_FAILURE": "텔레그램 전송 오류",
     "KAKAO_FAILURE": "카카오톡 전송 오류",
@@ -356,7 +359,21 @@ def _target_row_for_display(facts, now: datetime):
 
 
 def _display_severity(code: str, facts) -> str:
+    last_success_at = getattr(facts, "last_success_at", None)
+    last_failure_at = getattr(facts, "last_failure_at", None)
+    last_failure_code = getattr(facts, "last_failure_code", None)
+    failure_is_stale = (
+        last_success_at is not None
+        and last_failure_at is not None
+        and last_failure_at <= last_success_at
+    )
+    parser_missing_active = (
+        last_failure_code == "PARSER_MISSING_DATA"
+        and not failure_is_stale
+    )
     if code != SEVERITY_STOPPED:
+        if parser_missing_active:
+            return SEVERITY_CRAWL_DATA_MISSING
         return code
     if (
         getattr(facts, "kakao_delivery_enabled", False)
@@ -377,6 +394,8 @@ def _display_severity(code: str, facts) -> str:
         return SEVERITY_TARGET_VALIDATION_FAILURE
     if signals.kakao_misdelivery_risk:
         return SEVERITY_CRITICAL
+    if parser_missing_active:
+        return SEVERITY_CRAWL_DATA_MISSING
     return SEVERITY_OPERATOR_STOPPED
 
 

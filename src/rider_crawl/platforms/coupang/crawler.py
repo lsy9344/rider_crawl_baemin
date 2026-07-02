@@ -720,8 +720,8 @@ def _content_with_post_load_recovery(
     post_load_validate: Callable[[str], None] | None,
     recovery_attempted: bool,
 ) -> str:
-    """page content 를 반환하되, ``post_load_validate`` 가 데이터 누락을 알리고 화면이 로그인
-    만료로 보이면 같은 턴에서 1회 자동복구 후 재시도한다.
+    """page content 를 반환하되, ``post_load_validate`` 가 데이터 누락을 알리면 한 번만
+    회복 가능한 경로를 탄 뒤 재시도한다.
 
     세션이 만료됐는데도 화면이 로그인으로 분류되지 않아 readiness 는 통과하고 파싱만 실패하는
     경우(수집데이터누락 고착)를 닫는다. **로그인 게이트가 필수**다: 진짜로 인증됐지만 데이터가
@@ -729,7 +729,7 @@ def _content_with_post_load_recovery(
     가 참일 때만 복구한다. 복구 불가/재시도도 빈값이면, 화면이 로그인으로 보이는 한
     ``BrowserActionRequiredError`` 로 올려 워커가 AUTH_REQUIRED 로 표면화하게 한다(missing-data
     로 끝나 계정이 ACTIVE 로 굳고 다음 tick 의 인증 복구가 안 깨우던 데드락 방지). 로그인으로
-    보이지 않으면 원래 ``MissingPerformanceDataError`` 를 그대로 전파한다(비인증 케이스 무변화).
+    보이지 않으면 OTP 복구 대신 target URL 을 한 번 reload 한 뒤 재파싱한다.
     """
 
     content = page.content()
@@ -761,6 +761,37 @@ def _content_with_post_load_recovery(
         return content
     except MissingPerformanceDataError as exc:
         looks_login = _page_looks_like_coupang_login_required(page)
+        if not looks_login:
+            _reload_target_page(
+                page,
+                config,
+                target_url=target_url,
+                load_timeout_errors=load_timeout_errors,
+            )
+            _wait_for_target_page_ready(
+                page,
+                config,
+                target_url=target_url,
+                timeout_errors=load_timeout_errors,
+            )
+            if _select_coupang_center(page, config, timeout_errors=load_timeout_errors):
+                _wait_for_target_page_ready(
+                    page,
+                    config,
+                    target_url=target_url,
+                    timeout_errors=load_timeout_errors,
+                )
+            content = page.content()
+            try:
+                post_load_validate(content)
+            except MissingPerformanceDataError as retry_exc:
+                if _page_looks_like_coupang_login_required(page):
+                    raise BrowserActionRequiredError(
+                        _coupang_login_required_message(target_url)
+                    ) from retry_exc
+                raise
+            return content
+
         if not (
             not recovery_attempted
             and looks_login

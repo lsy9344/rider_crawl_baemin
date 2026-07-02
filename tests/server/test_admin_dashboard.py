@@ -14,11 +14,15 @@ fake 값만 — 실제 토큰/전화/이메일/chat_id 형태 없음. 평면 ``t
 from __future__ import annotations
 
 import asyncio
-import tomllib
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 local venv.
+    import tomli as tomllib
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -93,6 +97,7 @@ def _target(
     target_id: str,
     tenant_id: str = _TENANT,
     name: str = "가게",
+    platform: str = "BAEMIN",
     interval_minutes: int = 10,
     last_success_at: datetime | None = None,
     last_failure_code: str | None = None,
@@ -108,7 +113,7 @@ def _target(
         tenant_id=tenant_id,
         name=name,
         center_name="센터",
-        platform="BAEMIN",
+        platform=platform,
         interval_minutes=interval_minutes,
         last_success_at=last_success_at,
         last_delivery_at=None,
@@ -1597,11 +1602,38 @@ def test_stale_crawl_skipped_reason_is_operator_readable() -> None:
     )
 
 
-def test_coupang_parser_missing_data_reason_points_to_login_or_wrong_page() -> None:
+def test_coupang_parser_missing_data_reason_explains_empty_dashboard_shell() -> None:
     assert (
         admin_routes._reason_text("PARSER_MISSING_DATA")
-        == "수집 데이터 누락 — 쿠팡 로그인 화면 또는 대시보드가 아닌 화면일 수 있음"
+        == "쿠팡 화면 형태는 열렸지만 실제 수집 데이터가 비어 있음 — 자동 새로고침 후 재수집 확인 필요"
     )
+
+
+def test_coupang_parser_missing_data_displays_separate_from_collection_stale() -> None:
+    facts = _target(
+        target_id="t-coupang-missing-data",
+        name="해운대이로움 남구중앙",
+        platform="COUPANG",
+        interval_minutes=60,
+        last_success_at=_NOW - timedelta(hours=2, minutes=1),
+        last_failure_code="PARSER_MISSING_DATA",
+        last_failure_at=_NOW,
+        account_auth_state="ACTIVE",
+    )
+
+    row = admin_routes._target_row_for_display(facts, _NOW)
+    html = admin_routes.templates.env.get_template("_targets.html").render(
+        targets=[row],
+        tenant_id=_TENANT,
+    )
+
+    assert row.severity == "CRAWL_DATA_MISSING"
+    assert admin_routes._severity_label("CRAWL_DATA_MISSING") == "크롤링 데이터 누락"
+    assert admin_routes._severity_class("CRAWL_DATA_MISSING") == "sev-warning"
+    assert 'data-severity="CRAWL_DATA_MISSING"' in html
+    assert 'data-severity-label="크롤링 데이터 누락"' in html
+    assert 'data-primary-action="test-crawl"' in html
+    assert "쿠팡 화면 형태는 열렸지만 실제 수집 데이터가 비어 있음" in html
 
 
 def test_target_chip_opens_drawer_and_carries_drawer_data() -> None:

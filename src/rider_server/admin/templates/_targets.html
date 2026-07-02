@@ -42,7 +42,7 @@
     {% set primary_action = 'activate' %}
     {% set primary_label = '활성화' %}
     {% set primary_style = '' %}
-  {% elif t.severity in ('WARNING', 'CRITICAL', 'KAKAO_MISDELIVERY_RISK') %}
+  {% elif t.severity in ('WARNING', 'CRITICAL', 'KAKAO_MISDELIVERY_RISK', 'CRAWL_DATA_MISSING') %}
     {% set primary_action = 'test-crawl' %}
     {% set primary_label = '지금 수집' %}
     {% set primary_style = 'primary' if t.severity == 'CRITICAL' else '' %}

@@ -1335,7 +1335,7 @@ class _MissingDataPeakPage:
         return []
 
     def content(self) -> str:
-        if self._recovered and self.reopened:
+        if self.reopened and (self._recovered or not self._login_looking):
             return self._ready_html
         return (
             _PEAK_MISSING_DATA_LOGIN_HTML
@@ -1397,14 +1397,40 @@ def test_coupang_missing_data_on_login_page_escalates_to_auth_required_when_reco
         )
 
 
-def test_coupang_missing_data_on_authed_page_does_not_recover_or_escalate(tmp_path):
-    # 데이터는 비었지만 화면이 로그인으로 보이지 않음(정상 인증, 영업외 등) → 복구하지 않고
-    # (OTP 낭비 금지) MissingPerformanceDataError 를 그대로 전파한다.
+def test_coupang_missing_data_on_authed_page_refreshes_once_without_recovery(tmp_path):
+    # 데이터는 비었지만 화면이 로그인으로 보이지 않음(정상 인증 빈 shell) → OTP 복구는 하지 않고
+    # target URL 을 한 번 reload 한 뒤 재파싱한다. reload 후 실제 데이터가 채워지면 성공한다.
     config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
     page = _MissingDataPeakPage(
         config.peak_dashboard_url,
         login_looking=False,
         ready_html=_PEAK_DASHBOARD_HTML_WITH_CENTER,
+    )
+    browser = _FakeBrowser([page])
+    recover_calls: list[object] = []
+
+    html = crawler._fetch_target_page_content(
+        browser,
+        config,
+        target_url=config.peak_dashboard_url,
+        load_timeout_errors=(FakeTimeout,),
+        recover_session=lambda p, _c: recover_calls.append(p) or True,
+        post_load_validate=crawler.parse_peak_dashboard_html,
+    )
+
+    assert recover_calls == []
+    assert page.reopened is True
+    assert html == _PEAK_DASHBOARD_HTML_WITH_CENTER
+
+
+def test_coupang_missing_data_on_authed_page_still_fails_after_one_refresh(tmp_path):
+    # reload 후에도 인증된 빈 shell 이 계속되면 기존처럼 MissingPerformanceDataError 로 끝난다.
+    # 단, 실패 전 target URL reload 는 정확히 한 번 수행되어야 한다.
+    config = _config(tmp_path, coupang_auto_email_2fa_enabled=True)
+    page = _MissingDataPeakPage(
+        config.peak_dashboard_url,
+        login_looking=False,
+        ready_html=_PEAK_MISSING_DATA_AUTHED_HTML,
     )
     browser = _FakeBrowser([page])
     recover_calls: list[object] = []
@@ -1420,6 +1446,7 @@ def test_coupang_missing_data_on_authed_page_does_not_recover_or_escalate(tmp_pa
         )
 
     assert recover_calls == []
+    assert page.reopened is True
 
 
 def test_coupang_current_screen_rejects_placeholder_record_table_shell():
