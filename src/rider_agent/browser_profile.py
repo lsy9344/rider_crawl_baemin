@@ -379,11 +379,10 @@ class BrowserProfileManager:
             self._registry[key] = assignment
             self._ports[port] = key
             self._profile_keys[profile_key] = key
-            process = (
-                getattr(adopted_endpoint, "process", None)
-                if adopted_endpoint is not None
-                else (launched_processes[-1] if launched_processes else None)
-            )
+            # Phase 1 may adopt an already-running live CDP Chrome for reuse, but
+            # that process is not owned by this manager. Only track processes that
+            # this manager launched through the injected run_command path.
+            process = launched_processes[-1] if launched_processes else None
             if process is not None:
                 self._processes[key] = process
             reservation.set()

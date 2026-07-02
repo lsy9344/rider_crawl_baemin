@@ -462,7 +462,7 @@ def test_agent_restart_adopts_existing_profile_chrome_with_live_cdp(
     ]
 
     manager.release("t1", "alpha")
-    assert adopted_process.terminated is True
+    assert adopted_process.terminated is False
 
 
 def test_agent_restart_closes_stale_profile_chrome_without_live_cdp_before_launch(
