@@ -553,7 +553,7 @@
       </div>
     </details>
     <details class="aux">
-      <summary>Kakao inbound <span class="tag">{{ (kakao_inbound | default([])) | list | length }} events - 5s</span></summary>
+      <summary>카카오 조회 요청 <span class="tag">최근 표시 {{ (kakao_inbound | default([])) | list | length }}건 · 5초마다 갱신</span></summary>
       <div class="aux-body">
         <div id="kakao-inbound" hx-get="/admin/kakao-inbound?tenant={{ tenant_id | urlencode }}" hx-trigger="admin-action-refresh from:body, every 5s" hx-swap="innerHTML swap:0.15s">{% include "_kakao_inbound.html" %}</div>
       </div>

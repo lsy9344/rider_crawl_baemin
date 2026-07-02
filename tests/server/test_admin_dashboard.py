@@ -632,9 +632,51 @@ def test_kakao_inbound_fragment_renders_pre_enqueue_rejections() -> None:
 
     body = _client(repo).get(f"/admin/kakao-inbound?tenant={_TENANT}").text
 
-    assert "unknown_room" in body
-    assert "sha256:reject" in body
+    assert "요청 거절" in body
+    assert "등록되지 않은 방" in body
+    assert "이벤트 지문 보관" in body
+    assert "unknown_room" not in body
+    assert "sha256:reject" not in body
     assert "agent-pc-1" in body
+
+
+def test_kakao_inbound_fragment_uses_operator_summary_and_short_ids() -> None:
+    repo = InMemoryDashboardRepository()
+    full_job_id = "12345678-1234-1234-1234-123456789abc"
+    full_target_id = "87654321-4321-4321-4321-cba987654321"
+    repo.seed_kakao_inbound_decision(
+        _decision(
+            event_fingerprint="sha256:enqueue",
+            action="enqueue_lookup",
+            reason=None,
+            accepted=True,
+            target_id=full_target_id,
+            job_id=full_job_id,
+        )
+    )
+    repo.seed_kakao_inbound_decision(
+        _decision(
+            event_fingerprint="sha256:busy",
+            action="reject",
+            reason="lookup_in_flight",
+            accepted=False,
+            target_id=full_target_id,
+        )
+    )
+
+    body = _client(repo).get(f"/admin/kakao-inbound?tenant={_TENANT}").text
+
+    assert "표시 중 2건" in body
+    assert "조회 작업 생성 1건" in body
+    assert "이미 조회 중 1건" in body
+    assert "조회 작업 생성" in body
+    assert "이미 조회 중" in body
+    assert "enqueue_lookup" not in body
+    assert "lookup_in_flight" not in body
+    assert full_job_id not in body
+    assert full_target_id not in body
+    assert "12345678..." in body
+    assert "87654321..." in body
 
 
 def test_kakao_inbound_fragment_does_not_render_raw_room_or_command() -> None:
@@ -645,7 +687,8 @@ def test_kakao_inbound_fragment_does_not_render_raw_room_or_command() -> None:
 
     body = _client(repo).get(f"/admin/kakao-inbound?tenant={_TENANT}").text
 
-    assert "target_unmapped" in body
+    assert "대상 연결 없음" in body
+    assert "target_unmapped" not in body
     for raw in ("raw-room", "!!hong1234", "Hong", "1234"):
         assert raw not in body
 
@@ -898,7 +941,9 @@ def test_dashboard_full_page_includes_kakao_inbound_observability_card() -> None
 
     assert "/admin/kakao-inbound?tenant=" in body
     assert "kakao-inbound" in body
-    assert "unknown_room" in body
+    assert "카카오 조회 요청" in body
+    assert "최근 표시 1건 · 5초마다 갱신" in body
+    assert "등록되지 않은 방" in body
 
 
 # ── 시스템 전체 판정 배너 + "지금 조치" 묶음(레이아웃 개선) ─────────────────

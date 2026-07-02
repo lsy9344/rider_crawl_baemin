@@ -1,15 +1,52 @@
 {# Sanitized Kakao inbound command decisions. Raw room/chat/message/name/phone are intentionally absent. #}
 {% set rows = (kakao_inbound | default([])) | list %}
+{% set action_labels = {
+  "enqueue_lookup": "조회 작업 생성",
+  "duplicate": "이미 처리됨",
+  "reply": "안내 답장 생성",
+  "reject": "요청 거절",
+} %}
+{% set reason_labels = {
+  "invalid_event": "잘못된 요청",
+  "unknown_room": "등록되지 않은 방",
+  "channel_inactive": "비활성 채널",
+  "command_disabled": "명령 꺼짐",
+  "target_unmapped": "대상 연결 없음",
+  "unsupported_platform": "미지원 플랫폼",
+  "tenant_disabled": "고객 비활성",
+  "sending_disabled": "발송 중지",
+  "rate_limited": "요청 제한",
+  "lookup_in_flight": "이미 조회 중",
+} %}
+{% set command_labels = {
+  "RIDER_CANCEL_RATE_LOOKUP": "라이더 취소율 조회",
+} %}
+{% set summary = namespace(enqueued=0, in_flight=0, rejected=0) %}
+{% for row in rows %}
+  {% if row.action == "enqueue_lookup" %}{% set summary.enqueued = summary.enqueued + 1 %}{% endif %}
+  {% if row.reason == "lookup_in_flight" %}{% set summary.in_flight = summary.in_flight + 1 %}{% endif %}
+  {% if not row.accepted %}{% set summary.rejected = summary.rejected + 1 %}{% endif %}
+{% endfor %}
+{% macro short_id(value) -%}
+  {%- set text = value | string -%}
+  {%- if text | length > 12 -%}{{ text[:8] }}...{%- else -%}{{ text }}{%- endif -%}
+{%- endmacro %}
 <div class="table-wrap" data-kakao-inbound-total="{{ rows | length }}">
+<p class="muted">
+  <span class="tag">표시 중 {{ rows | length }}건</span>
+  <span class="tag">조회 작업 생성 {{ summary.enqueued }}건</span>
+  {% if summary.in_flight %}<span class="tag">이미 조회 중 {{ summary.in_flight }}건</span>{% endif %}
+  {% if summary.rejected > summary.in_flight %}<span class="tag">확인 필요 {{ summary.rejected - summary.in_flight }}건</span>{% endif %}
+</p>
 <table>
   <thead>
     <tr>
-      <th>Time</th>
-      <th>Decision</th>
-      <th>Reason</th>
+      <th>시간</th>
+      <th>결정</th>
+      <th>사유</th>
       <th>Agent</th>
-      <th>Scope</th>
-      <th>Event</th>
+      <th>범위</th>
+      <th>이벤트</th>
     </tr>
   </thead>
   <tbody>
@@ -17,21 +54,21 @@
     <tr>
       <td>{{ row.created_at | relative_time }}</td>
       <td>
-        {% if row.accepted %}<span class="sev-normal">{{ row.action }}</span>{% else %}<span class="sev-warning">{{ row.action }}</span>{% endif %}
-        {% if row.duplicate %}<span class="muted">duplicate</span>{% endif %}
+        {% if row.accepted %}<span class="sev-normal">{{ action_labels.get(row.action, row.action) }}</span>{% else %}<span class="sev-warning">{{ action_labels.get(row.action, row.action) }}</span>{% endif %}
+        {% if row.duplicate %}<span class="muted">중복 처리</span>{% endif %}
       </td>
-      <td>{% if row.reason %}{{ row.reason }}{% else %}<span class="muted">-</span>{% endif %}</td>
-      <td>{% if row.agent_id %}{{ row.agent_id }}{% else %}<span class="muted">unknown</span>{% endif %}</td>
+      <td>{% if row.reason %}{{ reason_labels.get(row.reason, row.reason) }}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if row.agent_id %}{{ short_id(row.agent_id) }}{% else %}<span class="muted">unknown</span>{% endif %}</td>
       <td>
-        {% if row.tenant_id %}<span class="muted">tenant {{ row.tenant_id }}</span>{% endif %}
-        {% if row.channel_id %}<span class="muted">channel {{ row.channel_id }}</span>{% endif %}
-        {% if row.target_id %}<span class="muted">target {{ row.target_id }}</span>{% endif %}
-        {% if row.job_id %}<span class="muted">job {{ row.job_id }}</span>{% endif %}
+        {% if row.tenant_id %}<span class="muted">tenant {{ short_id(row.tenant_id) }}</span>{% endif %}
+        {% if row.channel_id %}<span class="muted">channel {{ short_id(row.channel_id) }}</span>{% endif %}
+        {% if row.target_id %}<span class="muted">target {{ short_id(row.target_id) }}</span>{% endif %}
+        {% if row.job_id %}<span class="muted">job {{ short_id(row.job_id) }}</span>{% endif %}
       </td>
-      <td><span class="muted">{{ row.command_type }}</span><br><code>{{ row.event_fingerprint }}</code></td>
+      <td><span class="muted">{{ command_labels.get(row.command_type, row.command_type) }}</span><br><span class="muted">이벤트 지문 보관</span></td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">No Kakao inbound decisions in the recent window.</td></tr>
+    <tr><td colspan="6" class="muted">최근 표시할 카카오 조회 요청이 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>
