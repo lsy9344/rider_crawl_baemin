@@ -1,4 +1,4 @@
-# Kakao Inbound Health Alerting Hardening
+# done_Kakao Inbound Health Alerting Hardening
 
 Date: 2026-07-02
 Status: 보강 설계 문서

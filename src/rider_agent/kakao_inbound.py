@@ -106,7 +106,7 @@ class KakaoInboundConfig:
     accepted_chat_types: tuple[str, ...] = DEFAULT_ACCEPTED_CHAT_TYPES
     # Digest sent to the server (use :func:`user_hash_digest` to derive it).
     user_hash_digest: str = ""
-    latest_messages_limit: int = 20
+    latest_messages_limit: int = 100
 
 
 @dataclass(frozen=True)
@@ -751,7 +751,7 @@ class LocalKakaoInboundSettings:
     chat_list_db_path: str = ""
     chat_logs_dir: str = ""
     use_chat_logs: bool = True
-    latest_messages_limit: int = 20
+    latest_messages_limit: int = 100
     accepted_chat_types: tuple[str, ...] = DEFAULT_ACCEPTED_CHAT_TYPES
     fallback_rooms: tuple[KakaoRoomConfig, ...] = ()
 
@@ -782,9 +782,9 @@ def load_local_kakao_inbound_settings(path: Path | str) -> LocalKakaoInboundSett
         if isinstance(item, dict) and item.get("room_name")
     )
     try:
-        limit = int(data.get("latest_messages_limit", 20) or 20)
+        limit = int(data.get("latest_messages_limit", 100) or 100)
     except (TypeError, ValueError):
-        limit = 20
+        limit = 100
     accepted_raw = data.get("accepted_chat_types")
     accepted_chat_types = tuple(
         str(item).strip()
@@ -823,7 +823,9 @@ def make_kakao_reader_factory(
                 chat_list_db_path=chat_list_db_path,
                 chat_list_db_key=chat_list_db_key,
                 chat_logs_dir=chat_logs_dir,
-                chat_logs_db_key=chat_list_db_key,
+                chat_logs_db_key=(
+                    chat_list_db_key if chat_logs_key_resolver is None else None
+                ),
                 chat_logs_key_resolver=chat_logs_key_resolver,
             )
         return ChatRoomListReader(db_path=chat_list_db_path, db_key=chat_list_db_key)
@@ -834,6 +836,35 @@ def make_kakao_reader_factory(
 # Secure-store refs for Agent-local Kakao secrets (never sent to/from the server).
 KAKAO_DB_KEY_REF = "kakao_inbound:db_key"
 KAKAO_USER_HASH_REF = "kakao_inbound:user_hash"
+KAKAO_CHATLOGS_COMMON_KEY_REF = "kakao_inbound:chatlogs_key"
+KAKAO_CHATLOGS_KEY_REF_PREFIX = "kakao_inbound:chatlogs_key:"
+_LEGACY_CHATLOGS_KEY_REF_PREFIX = "chatlogs_key:"
+
+
+def _make_chat_logs_key_resolver(
+    secret_resolver: Callable[[str], str | None] | None,
+) -> Callable[[Any], str | None] | None:
+    if secret_resolver is None:
+        return None
+
+    def resolve(room: Any) -> str | None:
+        chat_id = str(getattr(room, "chat_id", "") or "")
+        refs: list[str] = []
+        if chat_id:
+            refs.extend(
+                (
+                    f"{KAKAO_CHATLOGS_KEY_REF_PREFIX}{chat_id}",
+                    f"{_LEGACY_CHATLOGS_KEY_REF_PREFIX}{chat_id}",
+                )
+            )
+        refs.append(KAKAO_CHATLOGS_COMMON_KEY_REF)
+        for ref in refs:
+            value = secret_resolver(ref)
+            if value:
+                return value
+        return None
+
+    return resolve
 
 
 def build_kakao_inbound_watcher_from_sources(
@@ -893,6 +924,7 @@ def build_kakao_inbound_watcher_from_sources(
         chat_list_db_path=settings.chat_list_db_path,
         chat_list_db_key=db_key or "",
         chat_logs_dir=settings.chat_logs_dir or None,
+        chat_logs_key_resolver=_make_chat_logs_key_resolver(secret_resolver),
         use_chat_logs=settings.use_chat_logs,
     )
     watcher = build_kakao_inbound_watcher(

@@ -37,6 +37,8 @@ from rider_agent.kakao_inbound import (
     KakaoInboundWatcher,
     RefreshingKakaoInboundWatcher,
     KakaoRoomConfig,
+    KAKAO_CHATLOGS_COMMON_KEY_REF,
+    KAKAO_CHATLOGS_KEY_REF_PREFIX,
     KAKAO_DB_KEY_REF,
     KAKAO_USER_HASH_REF,
     KakaoWatchlist,
@@ -48,6 +50,7 @@ from rider_agent.kakao_inbound import (
     build_kakao_inbound_watcher_from_sources,
     load_local_kakao_inbound_settings,
     make_kakao_reader_factory,
+    _make_chat_logs_key_resolver,
     static_kakao_inbound_health,
     user_hash_digest,
 )
@@ -714,12 +717,42 @@ def test_make_reader_factory_selects_chatlogs_or_latest_one():
     chatlogs = make_kakao_reader_factory(
         chat_list_db_path="a.edb", chat_list_db_key="KEY", chat_logs_dir="d", use_chat_logs=True
     )()
-    assert chatlogs.latest_window_size == 20  # ChatLogsReader (latest-N)
+    assert chatlogs.latest_window_size == 100  # ChatLogsReader (latest-N)
 
     latest_one = make_kakao_reader_factory(
         chat_list_db_path="a.edb", chat_list_db_key="KEY", use_chat_logs=False
     )()
     assert latest_one.latest_window_size == 1  # ChatRoomListReader (latest-one)
+
+
+def test_make_reader_factory_disables_list_key_fallback_when_resolver_is_supplied():
+    chatlogs = make_kakao_reader_factory(
+        chat_list_db_path="a.edb",
+        chat_list_db_key="LISTKEY",
+        chat_logs_dir="d",
+        chat_logs_key_resolver=lambda _room: None,
+        use_chat_logs=True,
+    )()
+
+    assert chatlogs._chat_logs_db_key is None
+
+
+def test_chat_logs_key_resolver_reads_per_room_then_common_refs():
+    resolver = _make_chat_logs_key_resolver(
+        lambda ref: {
+            f"{KAKAO_CHATLOGS_KEY_REF_PREFIX}111": "ROOMKEY",
+            KAKAO_CHATLOGS_COMMON_KEY_REF: "COMMONKEY",
+        }.get(ref)
+    )
+
+    assert resolver(KakaoRoomConfig("room-a", "111")) == "ROOMKEY"
+    assert resolver(KakaoRoomConfig("room-b", "222")) == "COMMONKEY"
+
+
+def test_chat_logs_key_resolver_reads_legacy_per_room_ref():
+    resolver = _make_chat_logs_key_resolver(lambda ref: {"chatlogs_key:111": "OLDKEY"}.get(ref))
+
+    assert resolver(KakaoRoomConfig("room-a", "111")) == "OLDKEY"
 
 
 # --- gate + build integration (build_kakao_inbound_watcher_from_sources) ---

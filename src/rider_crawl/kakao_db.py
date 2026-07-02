@@ -43,7 +43,7 @@ CANDIDATE_LIKE = "%!!%"
 
 # The fallback reader sees only the single latest message per room.
 LATEST_ONE_WINDOW_SIZE = 1
-LATEST_TWENTY_WINDOW_SIZE = 20
+CHAT_LOGS_DEFAULT_WINDOW_SIZE = 100
 _SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 
 
@@ -324,7 +324,7 @@ class ChatLogsReader:
     def latest_window_size(self) -> int:
         if self._degraded:
             return LATEST_ONE_WINDOW_SIZE
-        return LATEST_TWENTY_WINDOW_SIZE
+        return CHAT_LOGS_DEFAULT_WINDOW_SIZE
 
     def list_rooms(self) -> list[KakaoRoomRef]:
         return self._rooms_reader.list_rooms()
@@ -333,7 +333,7 @@ class ChatLogsReader:
         if limit <= 0:
             return []
         try:
-            return self._latest_chatlog_messages(room, min(limit, LATEST_TWENTY_WINDOW_SIZE))
+            return self._latest_chatlog_messages(room, min(limit, CHAT_LOGS_DEFAULT_WINDOW_SIZE))
         except Exception:  # noqa: BLE001 - one room log failure degrades to fallback.
             self._degraded = True
             return self._fallback_reader.latest_messages(room, limit)

@@ -14,7 +14,7 @@ import pytest
 from rider_crawl.kakao_db import (
     DEFAULT_ACCEPTED_CHAT_TYPES,
     LATEST_ONE_WINDOW_SIZE,
-    LATEST_TWENTY_WINDOW_SIZE,
+    CHAT_LOGS_DEFAULT_WINDOW_SIZE,
     ChatLogsReader,
     ChatRoomListReader,
     KakaoDbDependencyMissing,
@@ -157,7 +157,7 @@ def test_chat_logs_reader_returns_latest_candidates_from_room_log_oldest_first()
 
     messages = reader.latest_messages(room, limit=20)
 
-    assert reader.latest_window_size == LATEST_TWENTY_WINDOW_SIZE
+    assert reader.latest_window_size == CHAT_LOGS_DEFAULT_WINDOW_SIZE
     assert [m.log_id for m in messages] == ["1001", "1003"]
     assert [m.chat_id for m in messages] == ["111", "111"]
     assert [m.room_name for m in messages] == ["운영방", "운영방"]
@@ -165,24 +165,24 @@ def test_chat_logs_reader_returns_latest_candidates_from_room_log_oldest_first()
     assert messages[1].text == "확인 !!이순신5678"
 
 
-def test_chat_logs_reader_caps_to_latest_twenty_candidates():
+def test_chat_logs_reader_caps_to_default_window_candidates():
     room_list = ChatRoomListReader(
         connect=_seeded_connect(
             [(111, "운영방", "latest", 2000, 90, "MultiChat")]
         )
     )
-    rows = [(log_id, 1, log_id, f"!!강민기{log_id % 10000:04d}", 0) for log_id in range(1, 26)]
+    rows = [(log_id, 1, log_id, f"!!강민기{log_id % 10000:04d}", 0) for log_id in range(1, 126)]
     reader = ChatLogsReader(
         rooms_reader=room_list,
         chat_logs_connect=_seeded_chatlogs_connect(rows),
     )
     room = KakaoRoomRef(chat_id="111", room_name="운영방", chat_type="MultiChat")
 
-    messages = reader.latest_messages(room, limit=25)
+    messages = reader.latest_messages(room, limit=125)
 
-    assert len(messages) == 20
-    assert [m.log_id for m in messages[:2]] == ["6", "7"]
-    assert messages[-1].log_id == "25"
+    assert len(messages) == CHAT_LOGS_DEFAULT_WINDOW_SIZE
+    assert [m.log_id for m in messages[:2]] == ["26", "27"]
+    assert messages[-1].log_id == "125"
 
 
 def test_chat_logs_reader_falls_back_to_chat_room_list_and_degrades():
